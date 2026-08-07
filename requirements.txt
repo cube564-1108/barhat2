@@ -6,3 +6,6 @@ flask==3.0.3
 
 # Environment variables
 python-dotenv==1.0.1
+
+# WSGI server for production
+gunicorn==23.0.0
