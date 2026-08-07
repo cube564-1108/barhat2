@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>БАРХАТ — операционная платформа</title>
+    <!-- Бренд-токены Бархат -->
+    <link rel="stylesheet" href="../../brand/tokens.css">
+    <link rel="stylesheet" href="../../brand/brand.css">
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Левое боковое меню -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon">
+                        <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="20" cy="20" r="18" fill="#E8B4B8"/>
+                            <path d="M20 8C20 8 12 16 12 22C12 26.4183 15.5817 30 20 30C24.4183 30 28 26.4183 28 22C28 16 20 8 20 8Z" fill="#C77D82"/>
+                            <path d="M20 12C20 12 15 17 15 21C15 23.7614 17.2386 26 20 26C22.7614 26 25 23.7614 25 21C25 17 20 12 20 12Z" fill="#F5D5D8" opacity="0.6"/>
+                        </svg>
+                    </div>
+                    <span class="logo-text" style="font-family: var(--font-heading); text-transform: uppercase; letter-spacing: 0.1em;">БАРХАТ</span>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <!-- Основное -->
+                <div class="nav-section">
+                    <div class="nav-section-title">ОСНОВНОЕ</div>
+                    <a href="#dashboard" class="nav-item active" data-page="dashboard">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                            <polyline points="9 22 9 12 15 12 15 22"/>
+                        </svg>
+                        <span>Дашборд</span>
+                    </a>
+                    <a href="#calculator" class="nav-item" data-page="calculator">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="4" y="2" width="16" height="20" rx="2"/>
+                            <line x1="8" y1="6" x2="16" y2="6"/>
+                            <line x1="8" y1="10" x2="16" y2="10"/>
+                            <line x1="8" y1="14" x2="16" y2="14"/>
+                            <line x1="8" y1="18" x2="12" y2="18"/>
+                        </svg>
+                        <span>Калькулятор букетов</span>
+                    </a>
+                </div>
+
+                <!-- Качество -->
+                <div class="nav-section">
+                    <div class="nav-section-title">КАЧЕСТВО</div>
+                    <a href="#quality" class="nav-item" data-page="quality">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                            <path d="M12 2l3 7-7-1 4 5-3 7"/>
+                        </svg>
+                        <span>Качество сборки</span>
+                    </a>
+                </div>
+            </nav>
+        </aside>
+
+        <!-- Основной контент -->
+        <main class="main-content">
+            <!-- Шапка -->
+            <header class="content-header">
+                <div>
+                    <h1 class="page-title">БАРХАТ</h1>
+                    <p class="page-subtitle">операционная платформа</p>
+                </div>
+            </header>
+
+            <!-- Динамический контент -->
+            <div id="page-content">
+                <!-- Страница Дашборд (по умолчанию) -->
+                <div class="page active" data-page="dashboard">
+                    <!-- Сводка -->
+                    <section class="section">
+                        <h2 class="section-title">СВОДКА</h2>
+                        <div class="summary-placeholder">
+                            <p>Здесь будет главная сводка по сети</p>
+                        </div>
+                    </section>
+
+                    <!-- Показатели бизнеса -->
+                    <section class="section">
+                        <h2 class="section-title">ПОКАЗАТЕЛИ БИЗНЕСА</h2>
+                        <p class="section-description">Живая сводка по сети — продажи и отзывы</p>
+
+                        <div class="metrics-grid">
+                            <!-- Продажи и заказы -->
+                            <div class="metric-card">
+                                <div class="metric-icon">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <line x1="12" y1="1" x2="12" y2="23"/>
+                                        <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+                                    </svg>
+                                </div>
+                                <h3 class="metric-title">Продажи и заказы</h3>
+                                <p class="metric-description">Пульс выручки: главный KPI сети — рост к аналогичному периоду прошлого года</p>
+                                <div class="metric-value">—</div>
+                                <p class="metric-source">источник: RetailCRM + yml</p>
+                            </div>
+
+                            <!-- Выручка vs прошлый год -->
+                            <div class="metric-card">
+                                <div class="metric-icon">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                                    </svg>
+                                </div>
+                                <h3 class="metric-title">Выручка vs прошлый год</h3>
+                                <p class="metric-description">Главный показатель: рост к аналогичному периоду ПГ</p>
+                                <div class="metric-value">—</div>
+                                <p class="metric-source">источник: RetailCRM</p>
+                            </div>
+
+                            <!-- Прогресс к цели -->
+                            <div class="metric-card">
+                                <div class="metric-icon">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <line x1="18" y1="20" x2="18" y2="10"/>
+                                        <line x1="12" y1="20" x2="12" y2="4"/>
+                                        <line x1="6" y1="20" x2="6" y2="14"/>
+                                    </svg>
+                                </div>
+                                <h3 class="metric-title">Прогресс к цели +50%</h3>
+                                <p class="metric-description">Где мы относительно договорной цели по выручке</p>
+                                <div class="metric-value">—</div>
+                                <p class="metric-source">источник: RetailCRM + План</p>
+                            </div>
+
+                            <!-- Средний чек -->
+                            <div class="metric-card">
+                                <div class="metric-icon">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/>
+                                        <line x1="3" y1="6" x2="21" y2="6"/>
+                                        <path d="M16 10a4 4 0 0 1-8 0"/>
+                                    </svg>
+                                </div>
+                                <h3 class="metric-title">Средний чек (AOV)</h3>
+                                <p class="metric-description">Средняя сумма заказа, динамика</p>
+                                <div class="metric-value">— ₽</div>
+                                <p class="metric-source">источник: RetailCRM</p>
+                            </div>
+
+                            <!-- Конверсия сайта -->
+                            <div class="metric-card">
+                                <div class="metric-icon">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <circle cx="12" cy="12" r="10"/>
+                                        <line x1="2" y1="12" x2="22" y2="12"/>
+                                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                                    </svg>
+                                </div>
+                                <h3 class="metric-title">Конверсия сайта</h3>
+                                <p class="metric-description">Доля визитов, ставших заказом</p>
+                                <div class="metric-value">— %</div>
+                                <p class="metric-source">источник: Метрика + RetailCRM</p>
+                            </div>
+
+                            <!-- Брошенные корзины -->
+                            <div class="metric-card">
+                                <div class="metric-icon">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <circle cx="9" cy="21" r="1"/>
+                                        <circle cx="20" cy="21" r="1"/>
+                                        <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
+                                    </svg>
+                                </div>
+                                <h3 class="metric-title">Брошенные корзины</h3>
+                                <p class="metric-description">Брошено / восстановлено и сумма возврата</p>
+                                <div class="metric-value">— / —</div>
+                                <p class="metric-source">источник: RetailCRM</p>
+                            </div>
+
+                            <!-- Позиции в чеке -->
+                            <div class="metric-card">
+                                <div class="metric-icon">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                        <polyline points="14 2 14 8 20 8"/>
+                                        <line x1="16" y1="13" x2="8" y2="13"/>
+                                        <line x1="16" y1="17" x2="8" y2="17"/>
+                                        <polyline points="10 9 9 9 8 9"/>
+                                    </svg>
+                                </div>
+                                <h3 class="metric-title">Позиции в чеке (UPT)</h3>
+                                <p class="metric-description">Среднее число товаров в заказе — апселл</p>
+                                <div class="metric-value">—</div>
+                                <p class="metric-source">источник: RetailCRM</p>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- Другие страницы (заглушки) -->
+                <div class="page" data-page="crm">
+                    <section class="section">
+                        <h2 class="section-title">CRM АНАЛИТИКА</h2>
+                        <div class="summary-placeholder">
+                            <p>CRM аналитика — скоро будет</p>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="page" data-page="systems">
+                    <section class="section">
+                        <h2 class="section-title">СТАТУС СИСТЕМ</h2>
+                        <div class="summary-placeholder">
+                            <p>Статус систем — скоро будет</p>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- Калькулятор букетов -->
+                <div class="page" data-page="calculator">
+                    <section class="section">
+                        <h2 class="section-title">КАЛЬКУЛЯТОР БУКЕТОВ</h2>
+                        <p class="section-description">Расчёт себестоимости и отпускной цены букета</p>
+
+                        <div class="calculator-container">
+                            <!-- Левая колонка: селектор товаров -->
+                            <div class="calculator-left">
+                                <div class="card calculator-card">
+                                    <h3 class="card-title">Добавить товар</h3>
+
+                                    <!-- Выбор категории -->
+                                    <div class="form-group">
+                                        <label class="form-label">Категория</label>
+                                        <select id="category-select" class="form-select">
+                                            <option value="">-- Выберите категорию --</option>
+                                            <option value="flowers">Цветы</option>
+                                            <option value="dried">Сушеные элементы</option>
+                                            <option value="strawberry">Клубника (по граммам)</option>
+                                            <option value="chocolate">Шоколад (по граммам)</option>
+                                            <option value="sprinkles">Посыпки (по граммам)</option>
+                                            <option value="banana">Бананы (по граммам)</option>
+                                            <option value="packaging">Упаковка</option>
+                                        </select>
+                                    </div>
+
+                                    <!-- Выбор товара -->
+                                    <div class="form-group" id="product-group" style="display: none;">
+                                        <label class="form-label" id="product-label">Товар</label>
+                                        <select id="product-select" class="form-select">
+                                            <!-- Заполняется динамически -->
+                                        </select>
+                                        <div class="price-hint" id="price-hint"></div>
+                                    </div>
+
+                                    <!-- Количество -->
+                                    <div class="form-group" id="quantity-group" style="display: none;">
+                                        <label class="form-label" id="quantity-label">Количество</label>
+                                        <div class="quantity-input-wrapper">
+                                            <input type="number" id="quantity-input" class="form-input" min="1" value="1" step="1">
+                                            <span class="quantity-unit" id="quantity-unit">шт</span>
+                                        </div>
+                                        <div class="quantity-info" id="quantity-info"></div>
+                                    </div>
+
+                                    <!-- Кнопка добавления -->
+                                    <button id="add-item-btn" class="btn btn-primary" style="display: none;">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <line x1="12" y1="5" x2="12" y2="19"/>
+                                            <line x1="5" y1="12" x2="19" y2="12"/>
+                                        </svg>
+                                        Добавить в букет
+                                    </button>
+                                </div>
+
+                                <!-- Сохранённые рецепты -->
+                                <div class="card calculator-card">
+                                    <h3 class="card-title">Сохранённые рецепты</h3>
+                                    <div id="saved-recipes" class="saved-recipes-list">
+                                        <p class="empty-state">Нет сохранённых рецептов</p>
+                                    </div>
+                                    <div style="display: flex; gap: 8px;">
+                                        <button id="export-recipes-btn" class="btn btn-secondary btn-sm" style="flex: 1;">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                                <polyline points="7 10 12 15 17 10"/>
+                                                <line x1="12" y1="15" x2="12" y2="3"/>
+                                            </svg>
+                                            Экспорт
+                                        </button>
+                                        <label class="btn btn-secondary btn-sm" style="flex: 1; display: inline-flex; align-items: center; gap: 8px; justify-content: center;">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                                <polyline points="17 8 12 3 7 8"/>
+                                                <line x1="12" y1="3" x2="12" y2="15"/>
+                                            </svg>
+                                            Импорт
+                                            <input type="file" id="import-recipes-input" accept=".json" style="display: none;">
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Правая колонка: состав букета и итог -->
+                            <div class="calculator-right">
+                                <!-- Состав букета -->
+                                <div class="card calculator-card">
+                                    <div class="card-header">
+                                        <h3 class="card-title">Состав букета</h3>
+                                        <button id="clear-all-btn" class="btn btn-link btn-sm">Очистить всё</button>
+                                    </div>
+
+                                    <div id="bouquet-items" class="bouquet-items">
+                                        <p class="empty-state">Букет пуст. Добавьте товары из левой панели.</p>
+                                    </div>
+
+                                    <!-- Итого по категориям -->
+                                    <div class="bouquet-summary" id="bouquet-summary" style="display: none;">
+                                        <div class="summary-row">
+                                            <span>Цветы и элементы:</span>
+                                            <span id="summary-materials">0 ₽</span>
+                                        </div>
+                                        <div class="summary-row">
+                                            <span>Упаковка:</span>
+                                            <span id="summary-packaging">0 ₽</span>
+                                        </div>
+                                        <div class="summary-divider"></div>
+                                        <div class="summary-row summary-total">
+                                            <span>Итого:</span>
+                                            <span id="summary-total">0 ₽</span>
+                                        </div>
+                                        <div class="summary-note">
+                                            * цена округлена по формуле ОКРУГЛВВЕРХ(×100)-10
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Сохранение рецепта -->
+                                <div class="card calculator-card">
+                                    <h3 class="card-title">Сохранить рецепт</h3>
+                                    <div class="form-group">
+                                        <input type="text" id="recipe-name-input" class="form-input" placeholder="Название рецепта">
+                                    </div>
+                                    <button id="save-recipe-btn" class="btn btn-success">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                                            <polyline points="17 21 17 13 7 13 7 21"/>
+                                            <polyline points="7 3 7 8 15 8"/>
+                                        </svg>
+                                        Сохранить
+                                    </button>
+                                </div>
+
+                                <!-- Админка прайс-листа -->
+                                <div class="card calculator-card admin-card">
+                                    <div class="card-header">
+                                        <h3 class="card-title">Управление прайс-листом</h3>
+                                    </div>
+                                    <p class="admin-note">Редактирование цен и компонентов</p>
+                                    <button id="open-admin-btn" class="btn btn-secondary">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                                        </svg>
+                                        Редактировать цены
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Модальное окно админки -->
+                    <div id="admin-modal" class="modal">
+                        <div class="modal-overlay" id="admin-modal-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h2 class="modal-title">Редактирование прайс-листа</h2>
+                                <button id="close-admin-modal-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+
+                            <div class="modal-body">
+                                <!-- Категории -->
+                                <div class="admin-tabs" id="admin-categories">
+                                    <button class="admin-tab active" data-category="flowers">Цветы</button>
+                                    <button class="admin-tab" data-category="dried">Сушеные</button>
+                                    <button class="admin-tab" data-category="strawberry">Клубника</button>
+                                    <button class="admin-tab" data-category="chocolate">Шоколад</button>
+                                    <button class="admin-tab" data-category="sprinkles">Посыпки</button>
+                                    <button class="admin-tab" data-category="banana">Бананы</button>
+                                    <button class="admin-tab" data-category="packaging">Упаковка</button>
+                                </div>
+
+                                <!-- Список товаров категории -->
+                                <div class="admin-items-list" id="admin-items-list">
+                                    <!-- Заполняется динамически -->
+                                </div>
+
+                                <!-- Добавление нового товара -->
+                                <div class="admin-add-item">
+                                    <h4 class="admin-add-title">Добавить новый товар</h4>
+                                    <div class="admin-add-form">
+                                        <input type="text" id="new-item-name" class="form-input" placeholder="Название">
+                                        <input type="number" id="new-item-price" class="form-input" placeholder="Цена" step="0.01">
+                                        <button id="add-new-item-btn" class="btn btn-primary btn-sm">Добавить</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="modal-footer">
+                                <button id="export-pricelist-btn" class="btn btn-secondary">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                    Экспорт прайс-листа
+                                </button>
+                                <label class="btn btn-secondary">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="17 8 12 3 7 8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                    Импорт прайс-листа
+                                    <input type="file" id="import-pricelist-input" accept=".json" style="display: none;">
+                                </label>
+                                <button id="reset-pricelist-btn" class="btn btn-danger" title="Сбросить к исходным ценам">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                        <path d="M3 3v5h5"/>
+                                    </svg>
+                                    Сброс
+                                </button>
+                                <button id="save-pricelist-btn" class="btn btn-success">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2-2z"/>
+                                        <polyline points="17 21 17 13 7 13 7 21"/>
+                                        <polyline points="7 3 7 8 15 8"/>
+                                    </svg>
+                                    Сохранить и закрыть
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    </section>
+                </div>
+
+                <!-- Качество сборки букетов -->
+                <div class="page" data-page="quality">
+                    <section class="section">
+                        <h2 class="section-title">КАЧЕСТВО СБОРКИ БУКЕТОВ</h2>
+                        <p class="section-description">Отчет по оценке качества сборки — данные из Pyrus</p>
+
+                        <!-- Фильтры по периоду -->
+                        <div class="quality-filters" style="display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; align-items: flex-end;">
+                            <div class="filter-group">
+                                <label class="form-label">Период с:</label>
+                                <input type="date" id="qualityDateFrom" class="form-input" style="width: 150px;">
+                            </div>
+                            <div class="filter-group">
+                                <label class="form-label">по:</label>
+                                <input type="date" id="qualityDateTo" class="form-input" style="width: 150px;">
+                            </div>
+                            <button id="applyQualityFilters" class="btn btn-primary">Применить</button>
+                            <button id="resetQualityFilters" class="btn btn-secondary">Сбросить</button>
+                            <button id="updatePyrusData" class="btn btn-accent">
+                                <span class="btn-text">🔄 Обновить данные</span>
+                                <span class="btn-spinner hidden" style="margin-left: 8px;">⏳</span>
+                            </button>
+                            <div id="updateStatus" class="update-status hidden"></div>
+                        </div>
+
+                        <!-- KPI плитки -->
+                        <div class="bx-kpi" style="margin: 24px 0;">
+                            <div class="card">
+                                <div class="label">Всего оценок</div>
+                                <div class="value" id="qualityTotalTasks">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Средний балл</div>
+                                <div class="value" id="qualityOverallAvg">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Качество (14 баллов)</div>
+                                <div class="value" id="qualityCat14Avg">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Качество (18 баллов)</div>
+                                <div class="value" id="qualityCat18Avg">-</div>
+                            </div>
+                        </div>
+
+                        <!-- Таблица по салонам -->
+                        <div class="card calculator-card">
+                            <h3 class="card-title">Качество по салонам</h3>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Салон</th>
+                                            <th>Качество (14 баллов)</th>
+                                            <th>Качество (18 баллов)</th>
+                                            <th>Всего оценок</th>
+                                            <th></th>
+                                            <th></th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="qualitySalonsTable">
+                                        <tr>
+                                            <td colspan="5" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Модальное окно динамики салона -->
+                        <div id="salonHistoryModal" class="modal">
+                            <div class="modal-overlay" id="salonModalOverlay"></div>
+                            <div class="modal-content" style="max-width: 700px;">
+                                <div class="modal-header">
+                                    <h2 class="modal-title" id="salonModalTitle">Динамика салона</h2>
+                                    <button id="closeSalonModalBtn" class="modal-close-btn">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <line x1="18" y1="6" x2="6" y2="18"/>
+                                            <line x1="6" y1="6" x2="18" y2="18"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div class="modal-body">
+                                    <div class="chart-container" style="height: 300px; position: relative;">
+                                        <canvas id="salonHistoryChart"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Модальное окно видов заказа -->
+                        <div id="salonOrderTypesModal" class="modal">
+                            <div class="modal-overlay" id="orderTypesModalOverlay"></div>
+                            <div class="modal-content" style="max-width: 600px;">
+                                <div class="modal-header">
+                                    <h2 class="modal-title" id="orderTypesModalTitle">Качество по видам заказа</h2>
+                                    <button id="closeOrderTypesModalBtn" class="modal-close-btn">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <line x1="18" y1="6" x2="6" y2="18"/>
+                                            <line x1="6" y1="6" x2="18" y2="18"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div class="modal-body">
+                                    <div style="overflow-x: auto;">
+                                        <table style="width: 100%;">
+                                            <thead>
+                                                <tr>
+                                                    <th>Вид заказа</th>
+                                                    <th>Средний балл</th>
+                                                    <th>Макс. балл</th>
+                                                    <th>Кол-во</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="orderTypesTableBody">
+                                                <tr>
+                                                    <td colspan="4" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                        Загрузка данных...
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Модальное окно флористов -->
+                        <div id="salonFloristsModal" class="modal">
+                            <div class="modal-overlay" id="floristsModalOverlay"></div>
+                            <div class="modal-content" style="max-width: 600px;">
+                                <div class="modal-header">
+                                    <h2 class="modal-title" id="floristsModalTitle">Качество по флористам</h2>
+                                    <button id="closeFloristsModalBtn" class="modal-close-btn">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <line x1="18" y1="6" x2="6" y2="18"/>
+                                            <line x1="6" y1="6" x2="18" y2="18"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div class="modal-body">
+                                    <div style="overflow-x: auto;">
+                                        <table style="width: 100%;">
+                                            <thead>
+                                                <tr>
+                                                    <th>Флорист</th>
+                                                    <th>14 баллов</th>
+                                                    <th>18 баллов</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="floristsTableBody">
+                                                <tr>
+                                                    <td colspan="3" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                        Загрузка данных...
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- Остальные страницы будут добавлены по мере необходимости -->
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+    <script src="bouquet-calculator.js"></script>
+    <script src="quality-report.js"></script>
+</body>
+</html>

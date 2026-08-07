@@ -1,0 +1,117 @@
+/**
+ * Базовые стили Бархат
+ * Используются во всех отчётах и дашбордах
+ * Специфичные стили отчёта добавляются в отдельный <style> с var(--barkhat-*)
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Vollkorn:wght@500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
+/* === Базовые стили === */
+
+body {
+  font-family: var(--font-body);
+  color: var(--barkhat-gray-dark);
+  background: var(--barkhat-white);
+  font-weight: 300;
+  line-height: 1.5;
+  margin: 0;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  color: var(--barkhat-wine);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+a {
+  color: var(--barkhat-pink-deep);
+}
+
+/* === Шапка отчёта === */
+
+.bx-header {
+  background: var(--barkhat-wine);
+  color: var(--barkhat-white);
+  padding: 20px 28px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.bx-header h1 {
+  color: var(--barkhat-white);
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.04em;
+}
+
+.bx-header .bx-descr {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
+/* === Кнопка на фирменном градиенте === */
+
+.bx-btn {
+  background: var(--barkhat-gradient);
+  color: var(--barkhat-white);
+  border: none;
+  border-radius: 10px;
+  padding: 9px 16px;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* === KPI-плитки === */
+
+.bx-kpi {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.bx-kpi .card {
+  background: var(--barkhat-white);
+  border: 1px solid var(--barkhat-pink-light);
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+
+.bx-kpi .card .value {
+  font-family: var(--font-heading);
+  font-size: 28px;
+  color: var(--barkhat-wine);
+}
+
+.bx-kpi .card .label {
+  color: var(--barkhat-gray);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* === Таблицы === */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th {
+  background: var(--barkhat-pink-light);
+  color: var(--barkhat-wine);
+  font-family: var(--font-heading);
+  font-weight: 600;
+  text-align: left;
+  padding: 10px 12px;
+}
+
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #eee;
+}
+
+tr:hover td {
+  background: rgba(228, 194, 221, 0.18);
+}

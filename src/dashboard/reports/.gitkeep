@@ -1,0 +1,40 @@
+# Папка для отчётов
+
+Сюда будут добавляться HTML-файлы отдельных отчётов.
+
+## Структура файла отчёта
+
+```html
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>[Название] — Бархат</title>
+    <link rel="stylesheet" href="/brand/tokens.css">
+    <link rel="stylesheet" href="/brand/brand.css">
+    <link rel="stylesheet" href="[имя].css">
+</head>
+<body>
+    <header class="bx-header">
+        <h1>[Название отчёта]</h1>
+        <span class="bx-descr">[Описание]</span>
+    </header>
+
+    <main>
+        <!-- Контент отчёта -->
+    </main>
+
+    <script src="[имя].js"></script>
+</body>
+</html>
+```
+
+## Планируемые отчёты
+
+1. `sales.html` — Продажи
+2. `marketing.html` — Маркетинг
+3. `inventory.html` — Склад
+4. `operations.html` — Операции
+5. `assortment.html` — Ассортимент
+6. `customers.html` — Клиенты

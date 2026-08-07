@@ -1,0 +1,979 @@
+"""
+Pyrus API Server
+Простой HTTP сервер для отдачи данных Pyrus в JSON формате
+"""
+
+import os
+import sys
+import logging
+from datetime import datetime
+from typing import Optional
+from flask import Flask, jsonify, request, send_from_directory
+from dotenv import load_dotenv
+
+# ОТЛАДКА: показываем откуда запущен
+print("=" * 60)
+print("SERVER STARTUP DEBUG")
+print("=" * 60)
+print(f"Current directory: {os.getcwd()}")
+print(f"Script file: {__file__}")
+print(f"sys.path[0]: {sys.path[0]}")
+print("=" * 60)
+
+from .storage import get_storage
+from .client import get_client
+
+# Импортируем модуль отчета о качестве
+import sys
+import os
+scripts_path = os.path.join(os.path.dirname(__file__), '../../scripts')
+sys.path.insert(0, scripts_path)
+
+# ИСПОЛЬЗУЕМ НОВУЮ ВЕРСИЮ (без кэша)
+import quality_report_v2 as quality_report
+print(f"Using quality_report_v2 (cache-free version)")
+
+load_dotenv()
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Для Amvera: создаём директорию /data если её нет
+DATA_DIR = os.path.dirname(os.getenv('PYRUS_DB_PATH', 'data/pyrus.db'))
+if DATA_DIR and not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    logger.info(f"Создана директория: {DATA_DIR}")
+
+# Создаём Flask приложение
+app = Flask(__name__)
+
+# Конфигурация
+app.config['JSON_AS_ASCII'] = False  # Поддержка кириллицы
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True  # Красивый JSON
+
+
+# CORS middleware — добавляет заголовки CORS ко всем ответам
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
+
+
+# Инициализация хранилища
+db_path = os.getenv('PYRUS_DB_PATH', 'data/pyrus.db')
+storage = get_storage(db_path)
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Проверка здоровья сервера"""
+    return jsonify({
+        'status': 'ok',
+        'timestamp': datetime.now().isoformat(),
+        'database': db_path
+    })
+
+
+# === Dashboard Routes ===
+
+# Get project root directory
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DASHBOARD_DIR = os.path.join(PROJECT_ROOT, 'src', 'dashboard')
+
+
+@app.route('/')
+def index():
+    """Главная страница — дашборд"""
+    try:
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки index.html: {e}")
+        return f"Ошибка загрузки дашборда: {e}", 500
+
+
+@app.route('/<path:path>')
+def serve_static(path):
+    """
+    Обслуживание статических файлов дашборда
+
+    Поддерживает:
+    - src/dashboard/*
+    - brand/*
+    - scripts/*
+    """
+    # Сначала пробуем dashboard директорию
+    try:
+        return send_from_directory(DASHBOARD_DIR, path)
+    except Exception:
+        pass
+
+    # Потом пробуем другие директории проекта
+    for static_dir in ['brand', 'scripts', 'src/dashboard']:
+        static_path = os.path.join(PROJECT_ROOT, static_dir)
+        file_path = os.path.join(static_path, path)
+        if os.path.exists(file_path):
+            return send_from_directory(static_path, path)
+
+    # Если ничего не найдено
+    logger.warning(f"Файл не найден: {path}")
+    return f"Файл не найден: {path}", 404
+
+
+@app.route('/debug/module', methods=['GET'])
+def debug_module():
+    """Отладка: какой модуль quality_report загружен"""
+    return jsonify({
+        'module_file': quality_report.__file__,
+        'module_name': quality_report.__name__,
+        'get_all_tasks_doc': quality_report.get_all_tasks.__doc__,
+        'test_call': len(quality_report.get_all_tasks())
+    })
+
+
+@app.route('/debug/report', methods=['GET'])
+def debug_report():
+    """Отладка: прямой вызов generate_report"""
+    report = quality_report.generate_report()
+    return jsonify({
+        'module_file': quality_report.__file__,
+        'total_tasks': report['total_tasks'],
+        'salons_count': len(report['salons'])
+    })
+
+
+@app.route('/debug/report-v2', methods=['GET'])
+def debug_report_v2():
+    """Отладка: использование НОВОЙ версии модуля"""
+    import importlib
+    import sys
+    import os
+
+    # Принудительно перезагружаем модуль
+    scripts_path = os.path.join(os.path.dirname(__file__), '../../scripts')
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+
+    # Импортируем новую версию
+    import quality_report_v2
+
+    report = quality_report_v2.generate_report()
+    return jsonify({
+        'module': 'quality_report_v2 (NEW)',
+        'module_file': quality_report_v2.__file__,
+        'total_tasks': report['total_tasks'],
+        'salons_count': len(report['salons']),
+        'expected': 232,
+        'match': report['total_tasks'] == 232
+    })
+
+
+@app.route('/api/pyrus/forms', methods=['GET'])
+def get_forms():
+    """
+    Получить список всех форм
+
+    Query params:
+        - format: 'full' или 'simple' (default)
+    """
+    try:
+        format_type = request.args.get('format', 'simple')
+        forms = storage.get_forms()
+
+        if format_type == 'simple':
+            # Только базовые поля
+            result = [{'id': f['id'], 'title': f['title']} for f in forms]
+        else:
+            result = forms
+
+        return jsonify({
+            'success': True,
+            'count': len(result),
+            'data': result
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/pyrus/forms: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/pyrus/tasks', methods=['GET'])
+def get_tasks():
+    """
+    Получить актуальные задачи
+
+    Query params:
+        - form_id: ID формы (опционально)
+        - limit: Максимум задач (default 1000)
+        - status: Фильтр по статусу (active, finished, archived)
+        - date_from: Начало периода (ISO datetime)
+        - date_to: Конец периода (ISO datetime)
+    """
+    try:
+        form_id = request.args.get('form_id', type=int)
+        limit = request.args.get('limit', 1000, type=int)
+        status = request.args.get('status')
+        date_from_str = request.args.get('date_from')
+        date_to_str = request.args.get('date_to')
+
+        # Парсим даты если указаны
+        date_from = None
+        date_to = None
+        if date_from_str:
+            try:
+                date_from = datetime.fromisoformat(date_from_str)
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid date_from format'}), 400
+
+        if date_to_str:
+            try:
+                date_to = datetime.fromisoformat(date_to_str)
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid date_to format'}), 400
+
+        # Получаем задачи
+        if date_from or date_to:
+            # Исторические данные
+            tasks = storage.get_tasks_history(
+                form_id=form_id,
+                date_from=date_from,
+                date_to=date_to
+            )
+        else:
+            # Актуальные данные
+            tasks = storage.get_latest_tasks(form_id=form_id, limit=limit)
+
+        # Фильтр по статусу
+        if status:
+            tasks = [t for t in tasks if t.get('status') == status]
+
+        # Парсим raw_data если нужен полный JSON
+        include_raw = request.args.get('include_raw', 'false').lower() == 'true'
+
+        result = []
+        for task in tasks:
+            if include_raw and task.get('raw_data'):
+                try:
+                    import json
+                    result.append(json.loads(task['raw_data']))
+                except:
+                    result.append(task)
+            else:
+                # Убираем raw_data для компактности
+                task_copy = task.copy()
+                task_copy.pop('raw_data', None)
+                result.append(task_copy)
+
+        return jsonify({
+            'success': True,
+            'count': len(result),
+            'params': {
+                'form_id': form_id,
+                'limit': limit,
+                'status': status,
+                'date_from': date_from_str,
+                'date_to': date_to_str,
+                'include_raw': include_raw
+            },
+            'data': result
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/pyrus/tasks: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/pyrus/stats', methods=['GET'])
+def get_stats():
+    """Получить статистику БД"""
+    try:
+        stats = storage.get_stats()
+
+        return jsonify({
+            'success': True,
+            'data': stats
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/pyrus/stats: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/quality', methods=['GET'])
+def get_quality_report():
+    """
+    Получить отчет о качестве сборки букетов
+
+    Query params:
+        - date_from: Начало периода (YYYY-MM-DD)
+        - date_to: Конец периода (YYYY-MM-DD)
+        - format: 'full' или 'simple' (default)
+    """
+    try:
+        date_from = request.args.get('date_from')
+        date_to = request.args.get('date_to')
+        format_type = request.args.get('format', 'simple')
+
+        report = quality_report.generate_report(date_from, date_to)
+
+        if format_type == 'simple':
+            # Только основные метрики
+            result = {
+                'period': report['period'],
+                'total_tasks': report['total_tasks'],
+                'overall_avg': report['overall_avg'],
+                'salons': report['salons'],
+                'florists': report['florists']
+            }
+        else:
+            result = report
+
+        return jsonify({
+            'success': True,
+            'data': result
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/quality: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/quality/history', methods=['GET'])
+def get_quality_history():
+    """
+    Получить историю качества по месяцам
+
+    Query params:
+        - months: Количество месяцев (default 6)
+    """
+    try:
+        months = request.args.get('months', 6, type=int)
+        history = quality_report.get_monthly_history(months)
+
+        return jsonify({
+            'success': True,
+            'data': history
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/quality/history: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/quality/salon-history', methods=['GET'])
+def get_salon_history():
+    """
+    Получить историю качества по салону
+
+    Query params:
+        - salon: Название салона (обязательно)
+        - months: Количество месяцев (default 6)
+    """
+    try:
+        salon = request.args.get('salon')
+        if not salon:
+            return jsonify({
+                'success': False,
+                'error': 'salon parameter is required'
+            }), 400
+
+        months = request.args.get('months', 6, type=int)
+        history = quality_report.get_salon_history(salon, months)
+
+        return jsonify({
+            'success': True,
+            'data': history
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/quality/salon-history: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/quality/salon-order-types', methods=['GET'])
+def get_salon_order_types():
+    """
+    Получить разбивку по видам заказа для салона
+
+    Query params:
+        - salon: Название салона (обязательно)
+        - date_from: Начальная дата (YYYY-MM-DD)
+        - date_to: Конечная дата (YYYY-MM-DD)
+    """
+    try:
+        salon = request.args.get('salon')
+        if not salon:
+            return jsonify({
+                'success': False,
+                'error': 'salon parameter is required'
+            }), 400
+
+        date_from = request.args.get('date_from')
+        date_to = request.args.get('date_to')
+
+        order_types = quality_report.get_salon_order_types(salon, date_from, date_to)
+
+        return jsonify({
+            'success': True,
+            'data': order_types
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/quality/salon-order-types: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/quality/salon-florists', methods=['GET'])
+def get_salon_florists():
+    """
+    Получить статистику по флористам салона
+
+    Query params:
+        - salon: Название салона (обязательно)
+        - date_from: Начальная дата (YYYY-MM-DD)
+        - date_to: Конечная дата (YYYY-MM-DD)
+    """
+    try:
+        salon = request.args.get('salon')
+        if not salon:
+            return jsonify({
+                'success': False,
+                'error': 'salon parameter is required'
+            }), 400
+
+        date_from = request.args.get('date_from')
+        date_to = request.args.get('date_to')
+
+        florists = quality_report.get_salon_florists(salon, date_from, date_to)
+
+        return jsonify({
+            'success': True,
+            'data': florists
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/quality/salon-florists: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/quality/data-coverage', methods=['GET'])
+def get_data_coverage():
+    """
+    Получить информацию о полноте данных по датам
+
+    Query params:
+        - date_from: Начальная дата (YYYY-MM-DD)
+        - date_to: Конечная дата (YYYY-MM-DD)
+        - granularity: 'day' (default) или 'month'
+
+    Возвращает количество задач за каждый период
+    """
+    try:
+        import sqlite3
+        import json
+        from collections import defaultdict
+
+        date_from = request.args.get('date_from')
+        date_to = request.args.get('date_to')
+        granularity = request.args.get('granularity', 'day')
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Получаем все уникальные задачи
+        cursor.execute('''
+            SELECT raw_data
+            FROM tasks t1
+            WHERE form_id = 1327961
+              AND snapshot_at = (
+                SELECT MAX(snapshot_at)
+                FROM tasks t2
+                WHERE t2.form_id = t1.form_id AND t2.task_id = t1.task_id
+              )
+        ''')
+
+        # Считаем задачи по датам
+        date_counts = defaultdict(int)
+
+        for row in cursor.fetchall():
+            try:
+                data = json.loads(row['raw_data'])
+                for field in data.get('fields', []):
+                    if field.get('id') == 1:
+                        date_val = field.get('value')
+                        if date_val:
+                            key = date_val[:7] if granularity == 'month' else date_val
+                            date_counts[key] += 1
+                        break
+            except:
+                pass
+
+        conn.close()
+
+        # Фильтрация по датам если указаны
+        filtered = {}
+        for date, count in sorted(date_counts.items()):
+            if date_from and date < date_from:
+                continue
+            if date_to and date > date_to:
+                continue
+            filtered[date] = count
+
+        # Статистика
+        total_tasks = sum(filtered.values())
+        date_range = {
+            'from': min(filtered.keys()) if filtered else None,
+            'to': max(filtered.keys()) if filtered else None
+        }
+
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_tasks': total_tasks,
+                'date_range': date_range,
+                'days_with_data': len(filtered),
+                'coverage': filtered
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/quality/data-coverage: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# Глобальная переменная для статуса обновления
+update_status = {
+    'running': False,
+    'progress': 0,
+    'total': 0,
+    'message': '',
+    'last_update': None,
+    'error': None
+}
+
+
+@app.route('/api/pyrus/update', methods=['POST'])
+def trigger_update():
+    """
+    Запустить обновление данных из Pyrus
+
+    Body params:
+        - days: Количество последних дней для обновления (default: 7)
+    """
+    global update_status
+
+    if update_status['running']:
+        return jsonify({
+            'success': False,
+            'error': 'Обновление уже запущено',
+            'status': update_status
+        })
+
+    try:
+        import threading
+        from datetime import datetime, timedelta
+
+        data = request.get_json() or {}
+        days = data.get('days', 7)
+
+        # Функция обновления в фоновом потоке
+        def update_in_background():
+            global update_status
+            try:
+                update_status['running'] = True
+                update_status['message'] = 'Запуск обновления...'
+                update_status['error'] = None
+
+                # Используем уже импортированные модули
+                client = get_client()
+                storage_obj = get_storage()
+
+                if not client.authenticate():
+                    raise Exception('Ошибка авторизации')
+
+                # Вычисляем даты
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=days)
+
+                start_iso = start_date.strftime('%Y-%m-%dT00:00:00Z')
+                end_iso = end_date.strftime('%Y-%m-%dT23:59:59Z')
+
+                # Получаем задачи
+                response = client.session.get(
+                    f'{client.api_url}forms/1327961/register',
+                    headers={'Authorization': f'Bearer {client.access_token}'},
+                    params={
+                        'include_archived': 'y',
+                        'item_count': 20000,
+                        'created_after': start_iso,
+                        'created_before': end_iso
+                    }
+                )
+
+                if response.status_code != 200:
+                    raise Exception(f'Ошибка API: {response.status_code}')
+
+                tasks_data = response.json()
+                tasks = tasks_data.get('tasks', [])
+
+                update_status['total'] = len(tasks)
+                update_status['message'] = f'Получено {len(tasks)} задач'
+
+                # Сохраняем
+                count = storage.save_tasks(1327961, tasks)
+                update_status['progress'] = count
+
+                # Обновляем статистику
+                stats = storage.get_stats()
+
+                update_status['message'] = f'Обновлено {count} задач'
+                update_status['last_update'] = datetime.now().isoformat()
+
+            except Exception as e:
+                update_status['error'] = str(e)
+                update_status['message'] = f'Ошибка: {str(e)}'
+                logger.error(f"Ошибка фонового обновления: {e}")
+            finally:
+                update_status['running'] = False
+
+        # Запускаем в фоновом потоке
+        thread = threading.Thread(target=update_in_background)
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({
+            'success': True,
+            'message': 'Обновление запущено',
+            'status': update_status
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка запуска обновления: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/pyrus/update-status', methods=['GET'])
+def get_update_status():
+    """Получить статус обновления"""
+    return jsonify({
+        'success': True,
+        'status': update_status
+    })
+
+
+@app.route('/dashboard', methods=['GET'])
+def dashboard():
+    """Простой дашборд с кнопкой обновления"""
+    return '''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Качество сборки - Бархат</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { margin-bottom: 20px; }
+        h2 { font-size: 18px; margin-bottom: 15px; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
+        .stat-box { background: #f8f9fa; padding: 15px; border-radius: 6px; text-align: center; }
+        .stat-value { font-size: 32px; font-weight: bold; color: #2c3e50; }
+        .stat-label { color: #6c757d; font-size: 14px; margin-top: 5px; }
+        .btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: #0056b3; }
+        .btn:disabled { background: #6c757d; cursor: not-allowed; }
+        .status { margin-top: 15px; padding: 10px; border-radius: 6px; }
+        .status.success { background: #d4edda; color: #155724; }
+        .status.error { background: #f8d7da; color: #721c24; }
+        .status.info { background: #d1ecf1; color: #0c5460; }
+        .hidden { display: none; }
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .last-update { color: #6c757d; font-size: 14px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🌸 Качество сборки - Бархат</h1>
+
+            <div class="stats" id="stats">
+                <div class="stat-box">
+                    <div class="stat-value" id="totalTasks">-</div>
+                    <div class="stat-label">Всего задач</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="totalSalons">-</div>
+                    <div class="stat-label">Салонов</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="totalFlorists">-</div>
+                    <div class="stat-label">Флористов</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="avgScore">-</div>
+                    <div class="stat-label">Средний балл</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔄 Обновление данных</h2>
+            <button class="btn" id="updateBtn" onclick="startUpdate()">
+                Обновить данные
+            </button>
+            <span id="spinner" class="spinner hidden"></span>
+            <div id="statusMessage" class="status hidden"></div>
+            <div class="last-update" id="lastUpdate"></div>
+        </div>
+
+        <div class="card">
+            <h2>📊 Фильтр по датам</h2>
+            <input type="date" id="dateFrom" placeholder="С">
+            <input type="date" id="dateTo" placeholder="По">
+            <button class="btn" onclick="applyFilter()">Применить</button>
+            <button class="btn" onclick="resetFilter()" style="background: #6c757d;">Сбросить</button>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        function showStatus(message, type = 'info') {
+            const el = document.getElementById('statusMessage');
+            el.textContent = message;
+            el.className = 'status ' + type;
+            el.classList.remove('hidden');
+        }
+
+        function hideStatus() {
+            document.getElementById('statusMessage').classList.add('hidden');
+        }
+
+        async function loadStats() {
+            try {
+                const res = await fetch(API_BASE + '/api/quality');
+                const data = await res.json();
+
+                if (data.success) {
+                    document.getElementById('totalTasks').textContent = data.data.total_tasks;
+                    document.getElementById('totalSalons').textContent = Object.keys(data.data.salons).length;
+                    document.getElementById('totalFlorists').textContent = Object.keys(data.data.florists).length;
+                    document.getElementById('avgScore').textContent = data.data.overall_avg.toFixed(1);
+                }
+            } catch (e) {
+                console.error('Ошибка загрузки статистики:', e);
+            }
+        }
+
+        async function checkUpdateStatus() {
+            try {
+                const res = await fetch(API_BASE + '/api/pyrus/update-status');
+                const data = await res.json();
+
+                if (data.success) {
+                    const status = data.status;
+                    const btn = document.getElementById('updateBtn');
+                    const spinner = document.getElementById('spinner');
+
+                    if (status.running) {
+                        btn.disabled = true;
+                        spinner.classList.remove('hidden');
+                        showStatus(status.message || 'Обновление...', 'info');
+                    } else {
+                        btn.disabled = false;
+                        spinner.classList.add('hidden');
+
+                        if (status.error) {
+                            showStatus('Ошибка: ' + status.error, 'error');
+                        } else if (status.message) {
+                            showStatus(status.message, 'success');
+                        }
+
+                        if (status.last_update) {
+                            document.getElementById('lastUpdate').textContent =
+                                'Последнее обновление: ' + new Date(status.last_update).toLocaleString('ru-RU');
+                        }
+
+                        // Перезагружаем статистику если обновление завершено
+                        if (status.message && !status.error) {
+                            loadStats();
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Ошибка проверки статуса:', e);
+            }
+        }
+
+        async function startUpdate() {
+            try {
+                const res = await fetch(API_BASE + '/api/pyrus/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ days: 7 })
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    showStatus('Обновление запущено...', 'info');
+                    // Проверяем статус каждые 2 секунды
+                    setInterval(checkUpdateStatus, 2000);
+                } else {
+                    showStatus('Ошибка: ' + data.error, 'error');
+                }
+            } catch (e) {
+                showStatus('Ошибка запуска обновления', 'error');
+            }
+        }
+
+        async function applyFilter() {
+            const from = document.getElementById('dateFrom').value;
+            const to = document.getElementById('dateTo').value;
+
+            try {
+                const url = new URL(API_BASE + '/api/quality');
+                if (from) url.searchParams.set('date_from', from);
+                if (to) url.searchParams.set('date_to', to);
+
+                const res = await fetch(url);
+                const data = await res.json();
+
+                if (data.success) {
+                    const report = data.data;
+                    document.getElementById('totalTasks').textContent = report.total_tasks;
+                    document.getElementById('totalSalons').textContent = Object.keys(report.salons).length;
+                    document.getElementById('totalFlorists').textContent = Object.keys(report.florists).length;
+                    document.getElementById('avgScore').textContent = report.overall_avg.toFixed(1);
+                    showStatus(`Отчёт за период: ${from || 'начала'} - ${to || 'конец'}`, 'success');
+                }
+            } catch (e) {
+                showStatus('Ошибка применения фильтра', 'error');
+            }
+        }
+
+        function resetFilter() {
+            document.getElementById('dateFrom').value = '';
+            document.getElementById('dateTo').value = '';
+            loadStats();
+            hideStatus();
+        }
+
+        // Initial load
+        loadStats();
+        checkUpdateStatus();
+    </script>
+</body>
+</html>
+    '''
+
+
+@app.errorhandler(404)
+def not_found(error):
+    """Обработка 404"""
+    return jsonify({
+        'success': False,
+        'error': 'Endpoint not found'
+    }), 404
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Обработка 500"""
+    return jsonify({
+        'success': False,
+        'error': 'Internal server error'
+    }), 500
+
+
+def run_server(host: str = '0.0.0.0', port: int = 5000, debug: bool = False):
+    """
+    Запустить сервер
+
+    Args:
+        host: Хост для прослушивания (0.0.0.0 для prod, 127.0.0.1 для local)
+        port: Порт
+        debug: Режим отладки
+    """
+    logger.info(f"Запуск сервера на http://{host}:{port}")
+    logger.info(f"БД: {db_path}")
+
+    app.run(host=host, port=port, debug=debug)
+
+
+if __name__ == '__main__':
+    # Запуск из командной строки
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Pyrus API Server')
+    parser.add_argument('--host', default='127.0.0.1', help='Host')
+    parser.add_argument('--port', type=int, default=5000, help='Port')
+    parser.add_argument('--debug', action='store_true', help='Debug mode')
+
+    args = parser.parse_args()
+
+    run_server(host=args.host, port=args.port, debug=args.debug)

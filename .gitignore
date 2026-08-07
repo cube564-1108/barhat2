@@ -1,0 +1,14 @@
+.env
+.env.*
+.business/
+*.pyc
+__pycache__/
+node_modules/
+.next/
+.DS_Store
+*.log
+venv/
+.venv/
+*.db
+*.json
+*.csv

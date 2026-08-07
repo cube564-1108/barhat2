@@ -1,0 +1,24 @@
+/**
+ * Бренд-токены Бархат
+ * Единственный источник истины для цветов, градиентов и шрифтов
+ * НЕ ИЗМЕНЯТЬ без смены бренда
+ */
+
+:root {
+  /* Фирменные цвета */
+  --barkhat-wine:        #411330;  /* фирменный тёмный (винный «бархат») — фон/акцент */
+  --barkhat-pink:        #D19CC2;  /* основной розовый */
+  --barkhat-pink-bright: #E1A4C9;  /* яркий розовый */
+  --barkhat-pink-light:  #E4C2DD;  /* светлый розовый */
+  --barkhat-pink-deep:   #B26FA1;  /* тёмный конец градиента */
+  --barkhat-gray-dark:   #3C3C3C;  /* текст/знак */
+  --barkhat-gray:        #6F6F6F;  /* вторичный серый */
+  --barkhat-white:       #FFFFFF;
+
+  /* Градиент */
+  --barkhat-gradient: linear-gradient(135deg, #E1A4C9 0%, #B26FA1 100%);
+
+  /* Шрифты */
+  --font-heading: 'Vollkorn', Georgia, serif;                          /* заголовки, с засечками */
+  --font-body:    'Inter', 'PT Sans', system-ui, -apple-system, sans-serif; /* текст (фолбэк MaximaEF-Light) */
+}

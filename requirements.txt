@@ -1,0 +1,8 @@
+# HTTP client для Pyrus API
+requests==2.32.3
+
+# HTTP server (для JSON endpoint)
+flask==3.0.3
+
+# Environment variables
+python-dotenv==1.0.1
