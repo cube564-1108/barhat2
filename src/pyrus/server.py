@@ -82,9 +82,19 @@ def health_check():
 
 # === Dashboard Routes ===
 
-# Get project root directory
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DASHBOARD_DIR = os.path.join(PROJECT_ROOT, 'src', 'dashboard')
+# Get directories relative to server.py
+SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SERVER_DIR))
+DASHBOARD_DIR = os.path.join(SERVER_DIR, '..', 'dashboard')
+BRAND_DIR = os.path.join(PROJECT_ROOT, 'brand')
+
+# Debug: print paths
+print(f"SERVER_DIR: {SERVER_DIR}")
+print(f"PROJECT_ROOT: {PROJECT_ROOT}")
+print(f"DASHBOARD_DIR: {DASHBOARD_DIR}")
+print(f"DASHBOARD exists: {os.path.exists(DASHBOARD_DIR)}")
+print(f"BRAND_DIR: {BRAND_DIR}")
+print(f"BRAND exists: {os.path.exists(BRAND_DIR)}")
 
 
 @app.route('/')
