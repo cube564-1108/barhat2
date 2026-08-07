@@ -85,8 +85,8 @@ def health_check():
 # Get directories relative to server.py
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(SERVER_DIR))
-DASHBOARD_DIR = os.path.join(SERVER_DIR, '..', 'dashboard')
-BRAND_DIR = os.path.join(PROJECT_ROOT, 'brand')
+DASHBOARD_DIR = os.path.abspath(os.path.join(SERVER_DIR, '..', 'dashboard'))
+BRAND_DIR = os.path.abspath(os.path.join(PROJECT_ROOT, 'brand'))
 
 # Debug: print paths
 print(f"SERVER_DIR: {SERVER_DIR}")
@@ -107,32 +107,32 @@ def index():
         return f"Ошибка загрузки дашборда: {e}", 500
 
 
-@app.route('/<path:path>')
-def serve_static(path):
-    """
-    Обслуживание статических файлов дашборда
+# === Static File Routes ===
 
-    Поддерживает:
-    - src/dashboard/*
-    - brand/*
-    - scripts/*
-    """
-    # Сначала пробуем dashboard директорию
-    try:
-        return send_from_directory(DASHBOARD_DIR, path)
-    except Exception:
-        pass
+@app.route('/styles.css')
+def serve_styles():
+    """Отдаёт стили дашборда"""
+    return send_from_directory(DASHBOARD_DIR, 'styles.css')
 
-    # Потом пробуем другие директории проекта
-    for static_dir in ['brand', 'scripts', 'src/dashboard']:
-        static_path = os.path.join(PROJECT_ROOT, static_dir)
-        file_path = os.path.join(static_path, path)
-        if os.path.exists(file_path):
-            return send_from_directory(static_path, path)
+@app.route('/script.js')
+def serve_script():
+    """Отдаёт основной скрипт дашборда"""
+    return send_from_directory(DASHBOARD_DIR, 'script.js')
 
-    # Если ничего не найдено
-    logger.warning(f"Файл не найден: {path}")
-    return f"Файл не найден: {path}", 404
+@app.route('/bouquet-calculator.js')
+def serve_calculator():
+    """Отдаёт скрипт калькулятора"""
+    return send_from_directory(DASHBOARD_DIR, 'bouquet-calculator.js')
+
+@app.route('/quality-report.js')
+def serve_quality():
+    """Отдаёт скрипт отчёта по качеству"""
+    return send_from_directory(DASHBOARD_DIR, 'quality-report.js')
+
+@app.route('/brand/<path:filename>')
+def serve_brand(filename):
+    """Отдаёт файлы из директории brand"""
+    return send_from_directory(BRAND_DIR, filename)
 
 
 @app.route('/debug/module', methods=['GET'])
