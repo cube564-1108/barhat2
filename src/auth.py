@@ -63,6 +63,7 @@ def migrate_users_from_old_db():
 
     # Проверяем, что новая база пустая
     conn_new = sqlite3.connect(new_db)
+    conn_new.row_factory = sqlite3.Row
     try:
         count_new = conn_new.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
     except sqlite3.OperationalError:
@@ -82,6 +83,7 @@ def migrate_users_from_old_db():
 
         try:
             conn_old = sqlite3.connect(old_db)
+            conn_old.row_factory = sqlite3.Row
             count_old = conn_old.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
 
             if count_old == 0:
@@ -98,6 +100,7 @@ def migrate_users_from_old_db():
 
             # Вставляем в новую базу
             conn_new = sqlite3.connect(new_db)
+            conn_new.row_factory = sqlite3.Row
             for user in users:
                 try:
                     conn_new.execute(
