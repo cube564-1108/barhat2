@@ -420,7 +420,7 @@
         const fullName = elements.userFullname.value.trim();
         const password = elements.userPassword.value;
         const role = elements.userRole.value;
-        const permissions = getSelectedModules();
+        const permissions = getSelectedModules(); // Берём из чекбоксов (пользователь может переопределить роль)
 
         // Валидация
         if (!editingUsername && !username) {
