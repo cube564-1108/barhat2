@@ -170,6 +170,11 @@ def serve_quality():
     """Отдаёт скрипт отчёта по качеству"""
     return send_from_directory(DASHBOARD_DIR, 'quality-report.js')
 
+@app.route('/users.js')
+def serve_users():
+    """Отдаёт скрипт управления пользователями"""
+    return send_from_directory(DASHBOARD_DIR, 'users.js')
+
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):
     """Отдаёт файлы из директории brand"""

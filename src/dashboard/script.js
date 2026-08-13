@@ -43,6 +43,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     };
     document.getElementById('userRole').textContent = roleNames[currentUser.role] || currentUser.role;
 
+    // Отправляем событие о роли пользователя для других модулей
+    document.dispatchEvent(new CustomEvent('userRoleChanged', { detail: currentUser }));
+
     // Обработчик кнопки выхода
     document.getElementById('logoutBtn').addEventListener('click', async () => {
         if (confirm('Вы уверены, что хотите выйти?')) {
@@ -90,6 +93,11 @@ document.addEventListener('DOMContentLoaded', async function() {
 
             // Обновляем URL без перезагрузки
             history.pushState({ page: pageName }, '', `#${pageName}`);
+
+            // Загружаем данные для страницы пользователей
+            if (pageName === 'users' && window.BarhatUsers) {
+                window.BarhatUsers.loadUsers();
+            }
         } else {
             // Если страницы нет, показываем заглушку
             const targetNav = document.querySelector(`.nav-item[data-page="${pageName}"]`);

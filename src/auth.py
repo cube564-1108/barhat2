@@ -222,6 +222,102 @@ def deactivate_user(username):
     return jsonify({"ok": True})
 
 
+@auth_bp.route("/api/auth/users/<username>/activate", methods=["POST"])
+@role_required("admin")
+def activate_user(username):
+    """Активировать деактивированного пользователя"""
+    conn = get_db()
+    conn.execute("UPDATE users SET is_active = 1 WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+    log_action(current_user.username, "activate_user", username)
+    return jsonify({"ok": True})
+
+
+@auth_bp.route("/api/auth/users", methods=["GET"])
+@role_required("admin")
+def list_users():
+    """Получить список всех пользователей (только для admin)"""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, username, role, is_active, created_at FROM users ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return jsonify({"users": [dict(row) for row in rows]})
+
+
+@auth_bp.route("/api/auth/users/<username>", methods=["PUT", "PATCH"])
+@role_required("admin")
+def update_user(username):
+    """Обновить пользователя (пароль или роль)"""
+    data = request.get_json(silent=True) or {}
+
+    # Проверяем, что пользователь существует
+    conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+
+    if not row:
+        conn.close()
+        return jsonify({"error": "Пользователь не найден"}), 404
+
+    updates = []
+    params = []
+    log_details = []
+
+    # Обновление пароля
+    if data.get("password"):
+        password = data.get("password", "")
+        if len(password) < 8:
+            conn.close()
+            return jsonify({"error": "Пароль минимум 8 символов"}), 400
+        updates.append("password_hash = ?")
+        params.append(generate_password_hash(password))
+        log_details.append("password")
+
+    # Обновление роли
+    if data.get("role"):
+        role = data.get("role")
+        if role not in ROLE_SECTIONS:
+            conn.close()
+            return jsonify({"error": f"Неизвестная роль. Доступны: {list(ROLE_SECTIONS)}"}), 400
+        updates.append("role = ?")
+        params.append(role)
+        log_details.append(f"role={role}")
+
+    if not updates:
+        conn.close()
+        return jsonify({"error": "Нечего обновлять"}), 400
+
+    # Добавляем username в конец params для WHERE
+    params.append(username)
+
+    conn.execute(
+        f"UPDATE users SET {', '.join(updates)} WHERE username = ?",
+        params
+    )
+    conn.commit()
+    conn.close()
+
+    log_action(current_user.username, "update_user", f"{username}: {', '.join(log_details)}")
+    return jsonify({"ok": True, "username": username})
+
+
+@auth_bp.route("/api/auth/users/<username>", methods=["DELETE"])
+@role_required("admin")
+def delete_user(username):
+    """Удалить пользователя (безопасное удаление - деактивация)"""
+    # Нельзя удалить самого себя
+    if current_user.username == username:
+        return jsonify({"error": "Нельзя удалить самого себя"}), 400
+
+    conn = get_db()
+    conn.execute("DELETE FROM users WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+    log_action(current_user.username, "delete_user", username)
+    return jsonify({"ok": True})
+
+
 # ---------- Одноразовый endpoint для создания первого админа ----------
 # Использовать ТОЛЬКО если нет доступа к консоли сервера
 
