@@ -48,6 +48,85 @@ def get_db():
     return conn
 
 
+def migrate_users_from_old_db():
+    """
+    Миграция пользователей из старой локальной базы в новую persistent базу.
+    Вызывается при первом запуске после смены BARHAT_DB_PATH.
+    """
+    # Пути к базам
+    new_db = DB_PATH
+    old_db_candidates = [
+        "barhat.db",  # Локальная база в рабочей директории
+        "/app/barhat.db",  # Старый путь в контейнере
+        os.path.join(os.path.dirname(__file__), "../barhat.db"),  # Относительно src/
+    ]
+
+    # Проверяем, что новая база пустая
+    conn_new = sqlite3.connect(new_db)
+    try:
+        count_new = conn_new.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
+    except sqlite3.OperationalError:
+        # Таблицы ещё нет
+        count_new = 0
+    conn_new.close()
+
+    if count_new > 0:
+        # В новой базе уже есть пользователи — не мигрируем
+        logger.info(f"Migration: new DB already has {count_new} users, skipping")
+        return
+
+    # Ищем старую базу с пользователями
+    for old_db in old_db_candidates:
+        if not os.path.exists(old_db):
+            continue
+
+        try:
+            conn_old = sqlite3.connect(old_db)
+            count_old = conn_old.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
+
+            if count_old == 0:
+                conn_old.close()
+                continue
+
+            # Нашли базу с пользователями — мигрируем
+            logger.info(f"Migration: found {count_old} users in {old_db}, migrating to {new_db}")
+
+            # Получаем всех пользователей
+            users = conn_old.execute(
+                "SELECT username, password_hash, role, is_active, created_at FROM users"
+            ).fetchall()
+
+            # Вставляем в новую базу
+            conn_new = sqlite3.connect(new_db)
+            for user in users:
+                try:
+                    conn_new.execute(
+                        "INSERT INTO users (username, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?)",
+                        (user["username"], user["password_hash"], user["role"], user["is_active"], user["created_at"])
+                    )
+                except sqlite3.IntegrityError:
+                    # Пользователь уже существует (дубликат)
+                    pass
+
+            conn_new.commit()
+            conn_new.close()
+            conn_old.close()
+
+            logger.info(f"Migration: successfully migrated {len(users)} users")
+            return
+
+        except (sqlite3.OperationalError, sqlite3.Error) as e:
+            # База существует, но нет таблиц users или другая ошибка
+            logger.debug(f"Migration: {old_db} not suitable for migration: {e}")
+            try:
+                conn_old.close()
+            except:
+                pass
+            continue
+
+    logger.info("Migration: no suitable old DB found, starting fresh")
+
+
 def init_auth_tables():
     """Вызвать один раз при старте приложения (создаёт таблицы, если их нет)."""
     conn = get_db()
@@ -71,6 +150,11 @@ def init_auth_tables():
             created_at TEXT NOT NULL
         )
     """)
+    conn.commit()
+    conn.close()
+
+    # Попытка миграции из старой базы
+    migrate_users_from_old_db()
     conn.commit()
     conn.close()
 
