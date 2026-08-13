@@ -297,7 +297,11 @@ class User(UserMixin):
     def __init__(self, row):
         self.id = row["id"]
         self.username = row["username"]
-        self.full_name = row.get("full_name", row["username"])  # Фоллбэк на старые данные
+        # Фоллбэк на username если full_name отсутствует
+        try:
+            self.full_name = row["full_name"] if row["full_name"] else row["username"]
+        except (KeyError, IndexError):
+            self.full_name = row["username"]
         self.role = row["role"]
         self.is_active_flag = row["is_active"]
 
