@@ -65,7 +65,8 @@ def migrate_users_from_old_db():
     conn_new = sqlite3.connect(new_db)
     conn_new.row_factory = sqlite3.Row
     try:
-        count_new = conn_new.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
+        result = conn_new.execute("SELECT COUNT(*) FROM users").fetchone()
+        count_new = result[0] if result else 0
     except sqlite3.OperationalError:
         # Таблицы ещё нет
         count_new = 0
@@ -84,7 +85,8 @@ def migrate_users_from_old_db():
         try:
             conn_old = sqlite3.connect(old_db)
             conn_old.row_factory = sqlite3.Row
-            count_old = conn_old.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
+            result = conn_old.execute("SELECT COUNT(*) FROM users").fetchone()
+            count_old = result[0] if result else 0
 
             if count_old == 0:
                 conn_old.close()
