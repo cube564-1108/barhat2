@@ -71,8 +71,33 @@ document.addEventListener('DOMContentLoaded', async function() {
     const navItems = document.querySelectorAll('.nav-item');
     const pages = document.querySelectorAll('.page');
 
+    // Сохраняем permissions пользователя
+    const userPermissions = currentUser.sections || [];
+
+    // Скрываем пункты меню к которым нет доступа
+    navItems.forEach(item => {
+        const pageName = item.getAttribute('data-page');
+        // users_manage проверяется отдельно через роль
+        if (pageName === 'users') return;
+
+        // Скрываем модуль если его нет в permissions
+        if (pageName && !userPermissions.includes(pageName)) {
+            item.style.display = 'none';
+        }
+    });
+
     // Функция для переключения страницы
     function navigateToPage(pageName) {
+        // Проверяем permissions
+        // users_manage проверяется отдельно через роль admin
+        if (pageName !== 'users' && !userPermissions.includes(pageName)) {
+            console.warn('Нет доступа к модулю:', pageName);
+            // Редирект на первую доступную страницу
+            const firstAllowed = userPermissions[0] || 'dashboard';
+            navigateToPage(firstAllowed);
+            return;
+        }
+
         // Убираем активный класс у всех пунктов меню
         navItems.forEach(item => {
             item.classList.remove('active');
@@ -168,7 +193,16 @@ document.addEventListener('DOMContentLoaded', async function() {
     function handleHashChange() {
         const hash = window.location.hash.slice(1); // Убираем #
         if (hash) {
-            navigateToPage(hash);
+            // Проверяем есть ли доступ к запрошенной странице
+            if (hash === 'users' || userPermissions.includes(hash)) {
+                navigateToPage(hash);
+            } else {
+                // Нет доступа - редирект на первую доступную страницу
+                navigateToPage(userPermissions[0] || 'dashboard');
+            }
+        } else {
+            // Нет хеша - открываем первую доступную страницу
+            navigateToPage(userPermissions[0] || 'dashboard');
         }
     }
 
