@@ -3,7 +3,7 @@
  * Навигация между страницами
  */
 
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
 
     // === Проверка авторизации ===
 
