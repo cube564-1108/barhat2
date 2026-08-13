@@ -220,3 +220,60 @@ def deactivate_user(username):
     conn.close()
     log_action(current_user.username, "deactivate_user", username)
     return jsonify({"ok": True})
+
+
+# ---------- Одноразовый endpoint для создания первого админа ----------
+# Использовать ТОЛЬКО если нет доступа к консоли сервера
+
+@auth_bp.route("/api/auth/setup-first-admin", methods=["POST"])
+def setup_first_admin():
+    """
+    Одноразовый endpoint для создания первого админа.
+    Работает только если:
+    1. В БД нет пользователей
+    2. Предоставлен правильный SETUP_KEY из env
+
+    После создания первого админа использовать нельзя.
+    """
+    # Проверка секретного ключа для setup
+    setup_key = request.headers.get("X-Setup-Key")
+    expected_key = os.environ.get("FIRST_ADMIN_SETUP_KEY")
+
+    if not expected_key or setup_key != expected_key:
+        logger.warning("Попытка создания админа без правильного ключа")
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+
+    if not username or len(password) < 8:
+        return jsonify({"error": "Логин обязателен, пароль минимум 8 символов"}), 400
+
+    conn = get_db()
+    try:
+        # Проверяем, есть ли уже пользователи
+        existing_count = conn.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
+
+        if existing_count > 0:
+            logger.warning("Попытка создать первого админа, когда пользователи уже есть")
+            return jsonify({"error": "Setup уже был выполнен"}), 403
+
+        # Создаём первого админа
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?)",
+            (username, generate_password_hash(password), "admin", 1, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+
+        logger.info(f"Создан первый админ: {username}")
+        return jsonify({
+            "ok": True,
+            "message": "Первый администратор создан",
+            "username": username
+        }), 201
+
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "Такой логин уже существует"}), 409
+    finally:
+        conn.close()
