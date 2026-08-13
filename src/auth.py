@@ -160,8 +160,6 @@ def init_auth_tables():
 
     # Попытка миграции из старой базы
     migrate_users_from_old_db()
-    conn.commit()
-    conn.close()
 
 
 class User(UserMixin):
