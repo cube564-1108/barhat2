@@ -95,20 +95,37 @@ def migrate_users_from_old_db():
             # Нашли базу с пользователями — мигрируем
             logger.info(f"Migration: found {count_old} users in {old_db}, migrating to {new_db}")
 
+            # Проверяем наличие колонки full_name в старой базе
+            cursor = conn_old.execute("PRAGMA table_info(users)")
+            old_columns = [row[1] for row in cursor.fetchall()]
+            has_full_name = 'full_name' in old_columns
+
             # Получаем всех пользователей
-            users = conn_old.execute(
-                "SELECT username, password_hash, role, is_active, created_at FROM users"
-            ).fetchall()
+            if has_full_name:
+                users = conn_old.execute(
+                    "SELECT username, full_name, password_hash, role, is_active, created_at FROM users"
+                ).fetchall()
+            else:
+                users = conn_old.execute(
+                    "SELECT username, password_hash, role, is_active, created_at FROM users"
+                ).fetchall()
 
             # Вставляем в новую базу
             conn_new = sqlite3.connect(new_db)
             conn_new.row_factory = sqlite3.Row
             for user in users:
                 try:
-                    conn_new.execute(
-                        "INSERT INTO users (username, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?)",
-                        (user["username"], user["password_hash"], user["role"], user["is_active"], user["created_at"])
-                    )
+                    if has_full_name:
+                        conn_new.execute(
+                            "INSERT INTO users (username, full_name, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?,?)",
+                            (user["username"], user["full_name"], user["password_hash"], user["role"], user["is_active"], user["created_at"])
+                        )
+                    else:
+                        # Используем username как full_name
+                        conn_new.execute(
+                            "INSERT INTO users (username, full_name, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?,?)",
+                            (user["username"], user["username"], user["password_hash"], user["role"], user["is_active"], user["created_at"])
+                        )
                 except sqlite3.IntegrityError:
                     # Пользователь уже существует (дубликат)
                     pass
@@ -132,19 +149,129 @@ def migrate_users_from_old_db():
     logger.info("Migration: no suitable old DB found, starting fresh")
 
 
+def migrate_permissions_for_existing_users():
+    """
+    Миграция permissions для существующих пользователей на основе ролей.
+    Вызывается при старте, если у пользователя нет permissions.
+    """
+    conn = get_db()
+
+    try:
+        # Получаем всех пользователей без permissions
+        users_without_perms = conn.execute("""
+            SELECT username, role FROM users
+            WHERE username NOT IN (SELECT DISTINCT username FROM permissions)
+        """).fetchall()
+
+        if not users_without_perms:
+            conn.close()
+            return
+
+        logger.info(f"Migration: adding permissions for {len(users_without_perms)} existing users")
+
+        for user in users_without_perms:
+            username = user["username"]
+            role = user["role"]
+
+            # Получаем модули для роли из ROLE_SECTIONS
+            modules = ROLE_SECTIONS.get(role, set())
+
+            # Вставляем permissions
+            for module in modules:
+                try:
+                    conn.execute(
+                        "INSERT INTO permissions (username, module_name, can_view) VALUES (?, ?, 1)",
+                        (username, module)
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # Уже существует
+
+        conn.commit()
+        logger.info("Migration: permissions added for existing users")
+
+    except Exception as e:
+        logger.error(f"Migration error for permissions: {e}")
+    finally:
+        conn.close()
+
+
+# Все модули системы
+ALL_MODULES = [
+    'dashboard',      # Дашборд
+    'calculator',     # Калькулятор букетов
+    'quality',        # Качество сборки
+    'users_manage',   # Управление пользователями
+]
+
+
 def init_auth_tables():
     """Вызвать один раз при старте приложения (создаёт таблицы, если их нет)."""
     conn = get_db()
+
+    # Создаём users с full_name если не существует
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
+            full_name TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         )
     """)
+
+    # Миграция: добавляем full_name если таблица старая
+    try:
+        cursor = conn.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+
+        if 'full_name' not in columns:
+            logger.info("Migration: adding full_name column to users")
+            # Добавляем колонку full_name (временно NULL для миграции)
+            conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+            conn.commit()
+
+            # Заполняем username как full_name для существующих
+            conn.execute("UPDATE users SET full_name = username WHERE full_name IS NULL")
+            conn.commit()
+
+            # Теперь делаем NOT NULL через пересоздание таблицы
+            conn.execute("""
+                CREATE TABLE users_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    full_name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO users_new (id, username, full_name, password_hash, role, is_active, created_at)
+                SELECT id, username, full_name, password_hash, role, is_active, created_at FROM users
+            """)
+            conn.execute("DROP TABLE users")
+            conn.execute("ALTER TABLE users_new RENAME TO users")
+            conn.commit()
+            logger.info("Migration: full_name column added and populated")
+    except Exception as e:
+        logger.error(f"Migration error for full_name: {e}")
+
+    # Таблица permissions
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            module_name TEXT NOT NULL,
+            can_view INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(username, module_name),
+            FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+        )
+    """)
+
+    # Таблица audit_log
     conn.execute("""
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,23 +282,50 @@ def init_auth_tables():
             created_at TEXT NOT NULL
         )
     """)
+
     conn.commit()
     conn.close()
 
     # Попытка миграции из старой базы
     migrate_users_from_old_db()
 
+    # Миграция permissions для существующих пользователей
+    migrate_permissions_for_existing_users()
+
 
 class User(UserMixin):
     def __init__(self, row):
         self.id = row["id"]
         self.username = row["username"]
+        self.full_name = row.get("full_name", row["username"])  # Фоллбэк на старые данные
         self.role = row["role"]
         self.is_active_flag = row["is_active"]
 
     @property
     def is_active(self):
         return bool(self.is_active_flag)
+
+    @property
+    def display_name(self):
+        """Отображаемое имя - ФИО или username"""
+        return self.full_name if self.full_name else self.username
+
+    @property
+    def permissions(self):
+        """Получить список разрешённых модулей"""
+        if not hasattr(self, '_permissions'):
+            conn = get_db()
+            rows = conn.execute(
+                "SELECT module_name FROM permissions WHERE username = ? AND can_view = 1",
+                (self.username,)
+            ).fetchall()
+            conn.close()
+            self._permissions = {row["module_name"] for row in rows}
+        return self._permissions
+
+    def has_module_access(self, module_name):
+        """Проверить доступ к модулю"""
+        return module_name in self.permissions
 
 
 @login_manager.user_loader
@@ -207,17 +361,23 @@ def role_required(*allowed_roles):
 
 
 def section_required(section_name):
-    """Декоратор по названию раздела дашборда, а не по конкретной роли —
-    удобно, если ролей станет больше."""
+    """Декоратор по названию раздела дашборда.
+    Проверяет permissions в БД, с фоллбэком на ROLE_SECTIONS для обратной совместимости."""
     def decorator(fn):
         @wraps(fn)
         @login_required
         def wrapper(*args, **kwargs):
+            # Сначала проверяем по permissions (новая система)
+            if current_user.has_module_access(section_name):
+                return fn(*args, **kwargs)
+
+            # Фоллбэк на ROLE_SECTIONS для обратной совместимости
             allowed = ROLE_SECTIONS.get(current_user.role, set())
-            if section_name not in allowed:
-                log_action(current_user.username, "access_denied", section_name)
-                return jsonify({"error": "Недостаточно прав"}), 403
-            return fn(*args, **kwargs)
+            if section_name in allowed:
+                return fn(*args, **kwargs)
+
+            log_action(current_user.username, "access_denied", section_name)
+            return jsonify({"error": "Недостаточно прав"}), 403
         return wrapper
     return decorator
 
@@ -260,42 +420,72 @@ def logout():
 def me():
     return jsonify({
         "username": current_user.username,
+        "full_name": current_user.full_name,
         "role": current_user.role,
-        "sections": sorted(ROLE_SECTIONS.get(current_user.role, [])),
+        "display_name": current_user.display_name,
+        "sections": sorted(current_user.permissions),
+        "all_modules": ALL_MODULES,
     })
 
 
 # ---------- Управление пользователями (только admin) ----------
 
+@auth_bp.route("/api/auth/modules", methods=["GET"])
+@role_required("admin")
+def get_modules():
+    """Получить список всех модулей системы"""
+    return jsonify({"modules": ALL_MODULES})
+
 @auth_bp.route("/api/auth/users", methods=["POST"])
 @role_required("admin")
 def create_user():
-    """Создать сотрудника. Пароль генерируется/задаётся один раз,
-    сотрудник может сменить его после первого входа (реализуйте отдельно при желании)."""
+    """Создать сотрудника. Пароль генерируется/задаётся один раз."""
     data = request.get_json(silent=True) or {}
     username = data.get("username", "").strip()
+    full_name = data.get("full_name", "").strip()
     password = data.get("password", "")
     role = data.get("role", "")
+    permissions = data.get("permissions", [])  # Список модулей
 
     if role not in ROLE_SECTIONS:
         return jsonify({"error": f"Неизвестная роль. Доступны: {list(ROLE_SECTIONS)}"}), 400
-    if not username or len(password) < 8:
-        return jsonify({"error": "Логин обязателен, пароль минимум 8 символов"}), 400
+    if not username:
+        return jsonify({"error": "Логин обязателен"}), 400
+    if not full_name:
+        return jsonify({"error": "ФИО обязательно"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Пароль минимум 8 символов"}), 400
+
+    # Валидация permissions
+    if not isinstance(permissions, list):
+        return jsonify({"error": "permissions должен быть списком"}), 400
+    invalid_modules = set(permissions) - set(ALL_MODULES)
+    if invalid_modules:
+        return jsonify({"error": f"Неизвестные модули: {list(invalid_modules)}"}), 400
 
     conn = get_db()
     try:
+        # Создаём пользователя
         conn.execute(
-            "INSERT INTO users (username, password_hash, role, is_active, created_at) VALUES (?,?,?,1,?)",
-            (username, generate_password_hash(password), role, datetime.utcnow().isoformat()),
+            "INSERT INTO users (username, full_name, password_hash, role, is_active, created_at) VALUES (?,?,?,?,1,?)",
+            (username, full_name, generate_password_hash(password), role, datetime.utcnow().isoformat()),
         )
+
+        # Добавляем permissions
+        for module in permissions:
+            conn.execute(
+                "INSERT INTO permissions (username, module_name, can_view) VALUES (?, ?, 1)",
+                (username, module)
+            )
+
         conn.commit()
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as e:
         return jsonify({"error": "Такой логин уже существует"}), 409
     finally:
         conn.close()
 
-    log_action(current_user.username, "create_user", username)
-    return jsonify({"ok": True, "username": username, "role": role}), 201
+    log_action(current_user.username, "create_user", f"{username} ({full_name})")
+    return jsonify({"ok": True, "username": username, "full_name": full_name, "role": role}), 201
 
 
 @auth_bp.route("/api/auth/users/<username>/deactivate", methods=["POST"])
@@ -327,16 +517,29 @@ def list_users():
     """Получить список всех пользователей (только для admin)"""
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, username, role, is_active, created_at FROM users ORDER BY created_at DESC"
+        "SELECT id, username, full_name, role, is_active, created_at FROM users ORDER BY created_at DESC"
     ).fetchall()
+
+    # Получаем permissions для каждого пользователя
+    users = []
+    for row in rows:
+        user = dict(row)
+        username = user["username"]
+        perms = conn.execute(
+            "SELECT module_name FROM permissions WHERE username = ? AND can_view = 1",
+            (username,)
+        ).fetchall()
+        user["permissions"] = [p["module_name"] for p in perms]
+        users.append(user)
+
     conn.close()
-    return jsonify({"users": [dict(row) for row in rows]})
+    return jsonify({"users": users, "all_modules": ALL_MODULES})
 
 
 @auth_bp.route("/api/auth/users/<username>", methods=["PUT", "PATCH"])
 @role_required("admin")
 def update_user(username):
-    """Обновить пользователя (пароль или роль)"""
+    """Обновить пользователя (full_name, пароль, роль, permissions)"""
     data = request.get_json(silent=True) or {}
 
     # Проверяем, что пользователь существует
@@ -350,6 +553,16 @@ def update_user(username):
     updates = []
     params = []
     log_details = []
+
+    # Обновление ФИО
+    if data.get("full_name") is not None:
+        full_name = data.get("full_name", "").strip()
+        if not full_name:
+            conn.close()
+            return jsonify({"error": "ФИО не может быть пустым"}), 400
+        updates.append("full_name = ?")
+        params.append(full_name)
+        log_details.append(f"full_name={full_name}")
 
     # Обновление пароля
     if data.get("password"):
@@ -371,17 +584,43 @@ def update_user(username):
         params.append(role)
         log_details.append(f"role={role}")
 
-    if not updates:
+    # Обновление permissions
+    if "permissions" in data:
+        permissions = data.get("permissions", [])
+
+        if not isinstance(permissions, list):
+            conn.close()
+            return jsonify({"error": "permissions должен быть списком"}), 400
+
+        invalid_modules = set(permissions) - set(ALL_MODULES)
+        if invalid_modules:
+            conn.close()
+            return jsonify({"error": f"Неизвестные модули: {list(invalid_modules)}"}), 400
+
+        # Удаляем старые permissions
+        conn.execute("DELETE FROM permissions WHERE username = ?", (username,))
+
+        # Добавляем новые
+        for module in permissions:
+            conn.execute(
+                "INSERT INTO permissions (username, module_name, can_view) VALUES (?, ?, 1)",
+                (username, module)
+            )
+
+        log_details.append(f"permissions={permissions}")
+
+    if not updates and "permissions" not in data:
         conn.close()
         return jsonify({"error": "Нечего обновлять"}), 400
 
-    # Добавляем username в конец params для WHERE
-    params.append(username)
+    # Выполняем обновление полей users
+    if updates:
+        params.append(username)
+        conn.execute(
+            f"UPDATE users SET {', '.join(updates)} WHERE username = ?",
+            params
+        )
 
-    conn.execute(
-        f"UPDATE users SET {', '.join(updates)} WHERE username = ?",
-        params
-    )
     conn.commit()
     conn.close()
 
@@ -428,10 +667,15 @@ def setup_first_admin():
 
     data = request.get_json(silent=True) or {}
     username = data.get("username", "").strip()
+    full_name = data.get("full_name", "").strip()
     password = data.get("password", "")
 
-    if not username or len(password) < 8:
-        return jsonify({"error": "Логин обязателен, пароль минимум 8 символов"}), 400
+    if not username:
+        return jsonify({"error": "Логин обязателен"}), 400
+    if not full_name:
+        return jsonify({"error": "ФИО обязательно"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Пароль минимум 8 символов"}), 400
 
     conn = get_db()
     try:
@@ -444,16 +688,25 @@ def setup_first_admin():
 
         # Создаём первого админа
         conn.execute(
-            "INSERT INTO users (username, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?)",
-            (username, generate_password_hash(password), "admin", 1, datetime.utcnow().isoformat())
+            "INSERT INTO users (username, full_name, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?,?)",
+            (username, full_name, generate_password_hash(password), "admin", 1, datetime.utcnow().isoformat())
         )
+
+        # Даём все permissions админу
+        for module in ALL_MODULES:
+            conn.execute(
+                "INSERT INTO permissions (username, module_name, can_view) VALUES (?, ?, 1)",
+                (username, module)
+            )
+
         conn.commit()
 
-        logger.info(f"Создан первый админ: {username}")
+        logger.info(f"Создан первый админ: {username} ({full_name})")
         return jsonify({
             "ok": True,
             "message": "Первый администратор создан",
-            "username": username
+            "username": username,
+            "full_name": full_name
         }), 201
 
     except sqlite3.IntegrityError:

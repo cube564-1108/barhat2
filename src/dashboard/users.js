@@ -13,6 +13,21 @@
         'florist_analyst': 'Только раздел качества сборки'
     };
 
+    // === Названия модулей для отображения ===
+    const MODULE_NAMES = {
+        'dashboard': 'Дашборд',
+        'calculator': 'Калькулятор букетов',
+        'quality': 'Качество сборки',
+        'users_manage': 'Управление пользователями'
+    };
+
+    // === Пресеты permissions для ролей ===
+    const ROLE_PERMISSIONS = {
+        'admin': ['dashboard', 'calculator', 'quality', 'users_manage'],
+        'manager': ['dashboard', 'calculator', 'quality'],
+        'florist_analyst': ['quality']
+    };
+
     // === Текущее состояние ===
     let usersList = [];
     let currentUserData = null;
@@ -32,9 +47,11 @@
         saveUserBtn: null,
         userForm: null,
         userUsername: null,
+        userFullname: null,
         userPassword: null,
         userRole: null,
         roleHint: null,
+        modulesCheckboxes: null,
         passwordGroup: null,
         statusGroup: null,
         userStatusBadge: null,
@@ -56,9 +73,11 @@
         elements.saveUserBtn = document.getElementById('save-user-btn');
         elements.userForm = document.getElementById('user-form');
         elements.userUsername = document.getElementById('user-username');
+        elements.userFullname = document.getElementById('user-fullname');
         elements.userPassword = document.getElementById('user-password');
         elements.userRole = document.getElementById('user-role');
         elements.roleHint = document.getElementById('role-hint');
+        elements.modulesCheckboxes = document.getElementById('modules-checkboxes');
         elements.passwordGroup = document.getElementById('password-group');
         elements.statusGroup = document.getElementById('status-group');
         elements.userStatusBadge = document.getElementById('user-status-badge');
@@ -69,8 +88,11 @@
 
         // Обновление подсказки роли при изменении
         if (elements.userRole) {
-            elements.userRole.addEventListener('change', updateRoleHint);
+            elements.userRole.addEventListener('change', onRoleChange);
         }
+
+        // Инициализация чекбоксов модулей
+        initModulesCheckboxes();
 
         console.log('[Users] Модуль инициализирован');
     }
@@ -188,6 +210,14 @@
         const statusText = isActive ? 'Активен' : 'Деактивирован';
         const createdDate = new Date(user.created_at).toLocaleDateString('ru-RU');
 
+        // Отображаемое имя (ФИО или username)
+        const displayName = user.full_name || user.username;
+
+        // Формируем строку permissions
+        const permissionsList = (user.permissions || [])
+            .map(p => MODULE_NAMES[p] || p)
+            .join(', ');
+
         // Нельзя удалить себя
         const isCurrentUser = currentUserData && currentUserData.username === user.username;
 
@@ -202,11 +232,22 @@
                             </svg>
                         </div>
                         <div>
-                            <div class="user-card-name">${escapeHtml(user.username)}</div>
+                            <div class="user-card-name">${escapeHtml(displayName)}</div>
                             <div class="user-card-meta">
                                 <span class="role-badge">${getRoleName(user.role)}</span>
                                 <span class="status-badge status-${statusClass}">${statusText}</span>
                             </div>
+                            ${permissionsList ? `
+                                <div class="user-card-permissions" title="${escapeHtml(permissionsList)}">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                                        <circle cx="9" cy="7" r="4"/>
+                                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                                        <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                                    </svg>
+                                    <span>${escapeHtml(permissionsList)}</span>
+                                </div>
+                            ` : ''}
                         </div>
                     </div>
                     <div class="user-card-actions">
@@ -263,11 +304,15 @@
             elements.userUsername.value = user.username;
             elements.userUsername.readOnly = true;
             elements.userUsername.disabled = true;
+            elements.userFullname.value = user.full_name || '';
             elements.userRole.value = user.role;
             elements.userPassword.value = '';
             elements.userPassword.required = false;
             elements.passwordGroup.querySelector('label').textContent = 'Новый пароль (не меняйте, если не нужно)';
             elements.passwordGroup.querySelector('.form-hint').textContent = 'Оставьте пустым, чтобы не менять пароль';
+
+            // Устанавливаем permissions
+            setSelectedModules(user.permissions || []);
 
             // Показываем статус
             elements.statusGroup.style.display = 'block';
@@ -279,17 +324,21 @@
             elements.userUsername.value = '';
             elements.userUsername.readOnly = false;
             elements.userUsername.disabled = false;
+            elements.userFullname.value = '';
             elements.userRole.value = '';
             elements.userPassword.value = '';
             elements.userPassword.required = true;
             elements.passwordGroup.querySelector('label').textContent = 'Пароль';
             elements.passwordGroup.querySelector('.form-hint').textContent = 'Минимум 8 символов';
 
+            // Сбрасываем permissions
+            setSelectedModules([]);
+
             // Скрываем статус
             elements.statusGroup.style.display = 'none';
         }
 
-        updateRoleHint();
+        onRoleChange();
         elements.userModal.classList.add('active');
         elements.userUsername.focus();
     }
@@ -299,6 +348,48 @@
         elements.userModal.classList.remove('active');
         elements.userForm.reset();
         editingUsername = null;
+    }
+
+    // === Инициализация чекбоксов модулей ===
+    function initModulesCheckboxes() {
+        if (!elements.modulesCheckboxes) return;
+
+        const modules = Object.keys(MODULE_NAMES);
+        elements.modulesCheckboxes.innerHTML = modules.map(module => `
+            <label class="module-checkbox">
+                <input type="checkbox" value="${module}" data-module="${module}">
+                <span>${MODULE_NAMES[module]}</span>
+            </label>
+        `).join('');
+    }
+
+    // === Обработчик изменения роли ===
+    function onRoleChange() {
+        updateRoleHint();
+        // При выборе роли можно автоматически проставить permissions
+        const role = elements.userRole.value;
+        if (ROLE_PERMISSIONS[role]) {
+            const checkboxes = elements.modulesCheckboxes.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(cb => {
+                cb.checked = ROLE_PERMISSIONS[role].includes(cb.value);
+            });
+        }
+    }
+
+    // === Получить выбранные модули ===
+    function getSelectedModules() {
+        if (!elements.modulesCheckboxes) return [];
+        const checkboxes = elements.modulesCheckboxes.querySelectorAll('input[type="checkbox"]:checked');
+        return Array.from(checkboxes).map(cb => cb.value);
+    }
+
+    // === Установить выбранные модули ===
+    function setSelectedModules(modules) {
+        if (!elements.modulesCheckboxes) return;
+        const checkboxes = elements.modulesCheckboxes.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(cb => {
+            cb.checked = modules.includes(cb.value);
+        });
     }
 
     // === Обновление подсказки роли ===
@@ -326,8 +417,10 @@
     // === Сохранение пользователя ===
     async function saveUser() {
         const username = elements.userUsername.value.trim();
+        const fullName = elements.userFullname.value.trim();
         const password = elements.userPassword.value;
         const role = elements.userRole.value;
+        const permissions = getSelectedModules();
 
         // Валидация
         if (!editingUsername && !username) {
@@ -335,8 +428,18 @@
             return;
         }
 
+        if (!fullName) {
+            alert('Введите ФИО');
+            return;
+        }
+
         if (!role) {
             alert('Выберите роль');
+            return;
+        }
+
+        if (permissions.length === 0) {
+            alert('Выберите хотя бы один модуль для доступа');
             return;
         }
 
@@ -358,7 +461,11 @@
 
             if (editingUsername) {
                 // Обновление существующего пользователя
-                const data = { role };
+                const data = {
+                    full_name: fullName,
+                    role,
+                    permissions
+                };
                 if (password) {
                     data.password = password;
                 }
@@ -375,7 +482,7 @@
                 response = await fetch('/api/auth/users', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, role }),
+                    body: JSON.stringify({ username, full_name: fullName, password, role, permissions }),
                     credentials: 'include'
                 });
             }
