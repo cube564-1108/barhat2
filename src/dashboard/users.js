@@ -338,7 +338,11 @@
             elements.statusGroup.style.display = 'none';
         }
 
-        onRoleChange();
+        // В режиме редактирования НЕ вызываем onRoleChange() чтобы не перезаписать
+        // фактические permissions пользователя дефолтными значениями роли
+        if (!editingUsername) {
+            onRoleChange();
+        }
         elements.userModal.classList.add('active');
         elements.userUsername.focus();
     }
