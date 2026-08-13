@@ -9,7 +9,15 @@ import logging
 from datetime import datetime
 from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
 from dotenv import load_dotenv
+
+# Импорт авторизации
+import sys
+import os
+auth_path = os.path.join(os.path.dirname(__file__), '../')
+sys.path.insert(0, auth_path)
+from auth import auth_bp, login_manager, init_auth_tables, section_required, role_required
 
 # ОТЛАДКА: показываем откуда запущен
 print("=" * 60)
@@ -55,14 +63,33 @@ app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # Поддержка кириллицы
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True  # Красивый JSON
 
+# Секретный ключ для сессий из env
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
 
-# CORS middleware — добавляет заголовки CORS ко всем ответам
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+# Безопасные cookie для сессий
+app.config.update(
+    SESSION_COOKIE_SECURE=True,      # только HTTPS
+    SESSION_COOKIE_HTTPONLY=True,    # недоступна из JS
+    SESSION_COOKIE_SAMESITE="Lax",   # защита от CSRF
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 8,  # 8 часов
+)
+
+# CORS — ограничиваем доменом
+CORS(app, supports_credentials=True, origins=[
+    "https://barhat2-cube564.amvera.io",
+    "http://localhost:5000",  # для локальной разработки
+])
+
+# Инициализация авторизации
+login_manager.init_app(app)
+login_manager.login_view = None  # SPA сам решает, куда редиректить
+
+# Регистрируем auth blueprint
+app.register_blueprint(auth_bp)
+
+# Инициализация таблиц авторизации
+with app.app_context():
+    init_auth_tables()
 
 
 # Инициализация хранилища
@@ -99,12 +126,26 @@ print(f"BRAND exists: {os.path.exists(BRAND_DIR)}")
 
 @app.route('/')
 def index():
-    """Главная страница — дашборд"""
+    """Главная страница — дашборд (с проверкой авторизации)"""
     try:
+        # Проверяем авторизацию
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return send_from_directory(DASHBOARD_DIR, 'login.html')
         return send_from_directory(DASHBOARD_DIR, 'index.html')
     except Exception as e:
         logger.error(f"Ошибка загрузки index.html: {e}")
         return f"Ошибка загрузки дашборда: {e}", 500
+
+
+@app.route('/login')
+def login_page():
+    """Страница логина"""
+    try:
+        return send_from_directory(DASHBOARD_DIR, 'login.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки login.html: {e}")
+        return f"Ошибка загрузки страницы логина: {e}", 500
 
 
 # === Static File Routes ===
@@ -184,6 +225,7 @@ def debug_report_v2():
 
 
 @app.route('/api/pyrus/forms', methods=['GET'])
+@section_required('dashboard')
 def get_forms():
     """
     Получить список всех форм
@@ -216,6 +258,7 @@ def get_forms():
 
 
 @app.route('/api/pyrus/tasks', methods=['GET'])
+@section_required('dashboard')
 def get_tasks():
     """
     Получить актуальные задачи
@@ -324,6 +367,7 @@ def get_stats():
 
 
 @app.route('/api/quality', methods=['GET'])
+@section_required('quality')
 def get_quality_report():
     """
     Получить отчет о качестве сборки букетов
@@ -368,6 +412,7 @@ def get_quality_report():
 
 
 @app.route('/api/quality/history', methods=['GET'])
+@section_required('quality')
 def get_quality_history():
     """
     Получить историю качества по месяцам
@@ -604,6 +649,7 @@ update_status = {
 
 
 @app.route('/api/pyrus/update', methods=['POST'])
+@role_required('admin')
 def trigger_update():
     """
     Запустить обновление данных из Pyrus

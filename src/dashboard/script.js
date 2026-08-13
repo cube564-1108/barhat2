@@ -5,6 +5,64 @@
 
 document.addEventListener('DOMContentLoaded', function() {
 
+    // === Проверка авторизации ===
+
+    async function checkAuth() {
+        try {
+            const response = await fetch('/api/auth/me', {
+                credentials: 'include'  // Важно для cookie сессии
+            });
+
+            if (!response.ok) {
+                // Не авторизован — редирект на логин
+                window.location.href = '/login';
+                return false;
+            }
+
+            const userData = await response.json();
+            console.log('Авторизован как:', userData.username, 'Роль:', userData.role);
+            return userData;
+        } catch (error) {
+            console.error('Ошибка проверки авторизации:', error);
+            // При ошибке тоже редиректим на логин
+            window.location.href = '/login';
+            return false;
+        }
+    }
+
+    // Проверяем авторизацию при загрузке
+    const currentUser = await checkAuth();
+    if (!currentUser) return;  // Редирект уже произошёл
+
+    // Отображаем информацию о пользователе
+    document.getElementById('userName').textContent = currentUser.username;
+    const roleNames = {
+        'admin': 'Администратор',
+        'manager': 'Менеджер',
+        'florist_analyst': 'Аналитик качества'
+    };
+    document.getElementById('userRole').textContent = roleNames[currentUser.role] || currentUser.role;
+
+    // Обработчик кнопки выхода
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+        if (confirm('Вы уверены, что хотите выйти?')) {
+            try {
+                const response = await fetch('/api/auth/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+
+                if (response.ok) {
+                    window.location.href = '/login';
+                }
+            } catch (error) {
+                console.error('Logout error:', error);
+                // При ошибке всё равно редиректим
+                window.location.href = '/login';
+            }
+        }
+    });
+
     // === Навигация ===
 
     const navItems = document.querySelectorAll('.nav-item');

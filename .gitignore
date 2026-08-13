@@ -12,3 +12,4 @@ venv/
 *.db
 *.json
 *.csv
+scripts/create_admin.py
