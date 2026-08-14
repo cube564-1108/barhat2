@@ -97,7 +97,12 @@ class RetailCRMClient:
         all_orders = []
         while True:
             data = self._get("api/v5/orders", params=params)
-            orders = data.get("success", False) and data.get("orders", [])
+
+            # Проверяем success флаг
+            if not data.get("success", False):
+                break
+
+            orders = data.get("orders", [])
 
             if not orders:
                 break
