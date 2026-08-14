@@ -81,10 +81,10 @@ class RetailCRMClient:
             params["filter[site]"] = store_code
 
         if datetime_start:
-            params["createdAtFrom"] = datetime_start.strftime("%Y-%m-%d %H:%M:%S")
+            params["filter[createdAtFrom]"] = datetime_start.strftime("%Y-%m-%d %H:%M:%S")
 
         if datetime_end:
-            params["createdAtTo"] = datetime_end.strftime("%Y-%m-%d %H:%M:%S")
+            params["filter[createdAtTo]"] = datetime_end.strftime("%Y-%m-%d %H:%M:%S")
 
         # Добавляем пагинацию для получения всех заказов
         params["page"] = 1
