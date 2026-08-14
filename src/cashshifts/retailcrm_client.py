@@ -114,6 +114,14 @@ class RetailCRMClient:
             if not orders:
                 break
 
+            # Защита от неожиданного формата (например, orders вернулся строкой)
+            if not isinstance(orders, list) or (orders and not isinstance(orders[0], dict)):
+                logger.error(
+                    f"RetailCRM вернул orders в неожиданном формате "
+                    f"(type={type(orders).__name__}): {str(orders)[:1000]}"
+                )
+                raise ValueError(f"Неожиданный формат поля orders: {type(orders).__name__}")
+
             all_orders.extend(orders)
 
             # Проверяем, есть ли ещё страницы
