@@ -83,7 +83,7 @@ class RetailCRMClient:
         params = {"limit": limit}
 
         if store_code:
-            params["filter[site]"] = store_code
+            params["filter[sites][]"] = [store_code]
 
         if datetime_start:
             params["filter[createdAtFrom]"] = datetime_start.strftime("%Y-%m-%d %H:%M:%S")
