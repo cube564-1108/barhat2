@@ -8,7 +8,7 @@ import sys
 import logging
 from datetime import datetime
 from typing import Optional
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, redirect
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -146,6 +146,60 @@ def login_page():
     except Exception as e:
         logger.error(f"Ошибка загрузки login.html: {e}")
         return f"Ошибка загрузки страницы логина: {e}", 500
+
+
+# === SPA Routes (все отдают index.html для History API) ===
+
+@app.route('/dashboard')
+def dashboard_page():
+    """Страница дашборда"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /dashboard: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
+@app.route('/calculator')
+def calculator_page():
+    """Страница калькулятора букетов"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /calculator: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
+@app.route('/quality')
+def quality_page():
+    """Страница качества сборки"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /quality: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
+@app.route('/users')
+def users_page():
+    """Страница управления пользователями"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /users: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
 
 
 # === Static File Routes ===
@@ -764,13 +818,6 @@ def get_update_status():
         'success': True,
         'status': update_status
     })
-
-
-@app.route('/dashboard', methods=['GET'])
-def dashboard():
-    """Редирект на новый дашборд"""
-    from flask import redirect
-    return redirect('/')
 
 
 @app.errorhandler(404)

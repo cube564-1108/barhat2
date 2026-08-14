@@ -117,7 +117,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             targetPage.classList.add('active');
 
             // Обновляем URL без перезагрузки
-            history.pushState({ page: pageName }, '', `#${pageName}`);
+            history.pushState({ page: pageName }, '', `/${pageName}`);
 
             // Загружаем данные для страницы пользователей
             if (pageName === 'users' && window.BarhatUsers) {
@@ -189,33 +189,33 @@ document.addEventListener('DOMContentLoaded', async function() {
         });
     });
 
-    // Обработка навигации при загрузке (по хешу URL)
-    function handleHashChange() {
-        const hash = window.location.hash.slice(1); // Убираем #
-        if (hash) {
+    // Обработка навигации при загрузке (по пути URL)
+    function handlePathChange() {
+        const path = window.location.pathname.slice(1); // Убираем первый /
+        if (path) {
             // Проверяем есть ли доступ к запрошенной странице
-            if (hash === 'users' || userPermissions.includes(hash)) {
-                navigateToPage(hash);
+            if (path === 'users' || userPermissions.includes(path)) {
+                navigateToPage(path);
             } else {
                 // Нет доступа - редирект на первую доступную страницу
                 navigateToPage(userPermissions[0] || 'dashboard');
             }
         } else {
-            // Нет хеша - открываем первую доступную страницу
+            // Нет пути - открываем первую доступную страницу
             navigateToPage(userPermissions[0] || 'dashboard');
         }
     }
 
-    // Проверяем хеш при загрузке
-    handleHashChange();
-
-    // Слушаем изменения хеша
-    window.addEventListener('hashchange', handleHashChange);
+    // Проверяем путь при загрузке
+    handlePathChange();
 
     // Обработка кнопок назад/вперёд
     window.addEventListener('popstate', function(e) {
-        if (e.state && e.state.page) {
-            navigateToPage(e.state.page);
+        const path = window.location.pathname.slice(1); // Убираем первый /
+        if (path) {
+            navigateToPage(path);
+        } else {
+            navigateToPage(userPermissions[0] || 'dashboard');
         }
     });
 

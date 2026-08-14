@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>БАРХАТ — операционная платформа</title>
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">
     <!-- Бренд-токены Бархат -->
     <link rel="stylesheet" href="/brand/tokens.css">
     <link rel="stylesheet" href="/brand/brand.css">
@@ -17,11 +19,7 @@
             <div class="sidebar-header">
                 <div class="logo">
                     <div class="logo-icon">
-                        <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <circle cx="20" cy="20" r="18" fill="#E8B4B8"/>
-                            <path d="M20 8C20 8 12 16 12 22C12 26.4183 15.5817 30 20 30C24.4183 30 28 26.4183 28 22C28 16 20 8 20 8Z" fill="#C77D82"/>
-                            <path d="M20 12C20 12 15 17 15 21C15 23.7614 17.2386 26 20 26C22.7614 26 25 23.7614 25 21C25 17 20 12 20 12Z" fill="#F5D5D8" opacity="0.6"/>
-                        </svg>
+                        <img src="/brand/logo.svg" alt="Бархат" style="width: 40px; height: 40px;">
                     </div>
                     <span class="logo-text" style="font-family: var(--font-heading); text-transform: uppercase; letter-spacing: 0.1em;">БАРХАТ</span>
                 </div>
@@ -31,14 +29,14 @@
                 <!-- Основное -->
                 <div class="nav-section">
                     <div class="nav-section-title">ОСНОВНОЕ</div>
-                    <a href="#dashboard" class="nav-item active" data-page="dashboard">
+                    <a href="/dashboard" class="nav-item active" data-page="dashboard">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
                             <polyline points="9 22 9 12 15 12 15 22"/>
                         </svg>
                         <span>Дашборд</span>
                     </a>
-                    <a href="#calculator" class="nav-item" data-page="calculator">
+                    <a href="/calculator" class="nav-item" data-page="calculator">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <rect x="4" y="2" width="16" height="20" rx="2"/>
                             <line x1="8" y1="6" x2="16" y2="6"/>
@@ -53,7 +51,7 @@
                 <!-- Качество -->
                 <div class="nav-section">
                     <div class="nav-section-title">КАЧЕСТВО</div>
-                    <a href="#quality" class="nav-item" data-page="quality">
+                    <a href="/quality" class="nav-item" data-page="quality">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
                             <path d="M12 2l3 7-7-1 4 5-3 7"/>
@@ -65,7 +63,7 @@
                 <!-- Администрирование (только для admin) -->
                 <div class="nav-section" id="admin-section" style="display: none;">
                     <div class="nav-section-title">АДМИНИСТРИРОВАНИЕ</div>
-                    <a href="#users" class="nav-item" data-page="users">
+                    <a href="/users" class="nav-item" data-page="users">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
                             <circle cx="9" cy="7" r="4"/>
