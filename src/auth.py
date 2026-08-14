@@ -36,8 +36,9 @@ login_manager = LoginManager()
 # Роли и какие разделы им доступны.
 # Меняйте под свои реальные разделы дашборда.
 ROLE_SECTIONS = {
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage"},
-    "manager": {"dashboard", "quality", "calculator"},
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts"},
+    "florist": {"cash_shifts"},  # Флорист работает только с кассой
     "florist_analyst": {"quality"},
 }
 
@@ -422,6 +423,17 @@ def logout():
 @auth_bp.route("/api/auth/me", methods=["GET"])
 @login_required
 def me():
+    # Для флориста добавляем store_id
+    store_id = None
+    if current_user.role == "florist":
+        try:
+            from cashshifts.storage import get_user_stores
+            user_stores = get_user_stores(current_user.username)
+            if user_stores:
+                store_id = user_stores[0]
+        except ImportError:
+            pass
+
     return jsonify({
         "username": current_user.username,
         "full_name": current_user.full_name,
@@ -429,6 +441,7 @@ def me():
         "display_name": current_user.display_name,
         "sections": sorted(current_user.permissions),
         "all_modules": ALL_MODULES,
+        "store_id": store_id,
     })
 
 

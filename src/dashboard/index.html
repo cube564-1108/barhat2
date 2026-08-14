@@ -48,6 +48,20 @@
                     </a>
                 </div>
 
+                <!-- Касса -->
+                <div class="nav-section">
+                    <div class="nav-section-title">КАССА</div>
+                    <a href="/cash-shifts" class="nav-item" data-page="cash-shifts" id="cash-shifts-nav" style="display: none;">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M9 14l-4-4 4-4"/>
+                            <path d="M5 10h14"/>
+                            <circle cx="12" cy="12" r="9"/>
+                            <path d="M12 8v8"/>
+                        </svg>
+                        <span>Кассовые смены</span>
+                    </a>
+                </div>
+
                 <!-- Качество -->
                 <div class="nav-section">
                     <div class="nav-section-title">КАЧЕСТВО</div>
@@ -745,6 +759,247 @@
                     </div>
                 </div>
 
+                <!-- Кассовые смены -->
+                <div class="page" data-page="cash-shifts">
+                    <section class="section">
+                        <h2 class="section-title">КАССОВЫЕ СМЕНЫ</h2>
+                        <p class="section-description">Учёт наличных в кассах салонов БАРХАТ</p>
+
+                        <!-- KPI плитки -->
+                        <div class="bx-kpi" style="margin: 24px 0;">
+                            <div class="card">
+                                <div class="label">Текущая смена</div>
+                                <div class="value" id="current-shift-status">—</div>
+                                <div class="sub-label" id="current-shift-time"></div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Продажи наличными</div>
+                                <div class="value" id="current-shift-sales">— ₽</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Инкассации</div>
+                                <div class="value" id="current-shift-collections">— ₽</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Ожидаемый остаток</div>
+                                <div class="value" id="current-shift-expected">— ₽</div>
+                            </div>
+                        </div>
+
+                        <!-- Управление сменой -->
+                        <div class="card calculator-card">
+                            <div class="card-header">
+                                <h3 class="card-title">Текущая смена</h3>
+                                <div id="shift-actions" style="display: flex; gap: 12px;">
+                                    <!-- Кнопки добавляются динамически -->
+                                </div>
+                            </div>
+
+                            <!-- Информация о текущей смене -->
+                            <div id="current-shift-info" style="display: none;">
+                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
+                                    <div>
+                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Салон</div>
+                                        <div style="font-weight: 500; font-size: 16px;" id="shift-store-name">—</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Начало смены</div>
+                                        <div style="font-weight: 500; font-size: 16px;" id="shift-start-time">—</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Начальный остаток</div>
+                                        <div style="font-weight: 500; font-size: 16px;" id="shift-start-balance">— ₽</div>
+                                    </div>
+                                </div>
+
+                                <!-- Таблица инкассаций -->
+                                <div style="margin-top: 24px;">
+                                    <h4 style="margin-bottom: 12px; font-size: 16px;">Инкассации</h4>
+                                    <div id="collections-table" style="overflow-x: auto;">
+                                        <table style="width: 100%;">
+                                            <thead>
+                                                <tr>
+                                                    <th>Время</th>
+                                                    <th>Категория</th>
+                                                    <th>Сумма</th>
+                                                    <th>Комментарий</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="collections-tbody">
+                                                <tr>
+                                                    <td colspan="4" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                        Нет инкассаций
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Нет открытой смены -->
+                            <div id="no-shift-info">
+                                <p style="color: var(--barkhat-gray); padding: 40px 0; text-align: center;">
+                                    Нет открытой смены. Откройте смену для начала работы.
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- История смен -->
+                        <div class="card calculator-card">
+                            <div class="card-header">
+                                <h3 class="card-title">История смен</h3>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <input type="date" id="shift-date-filter" class="form-input" style="width: 150px;">
+                                    <button id="apply-date-filter" class="btn btn-secondary btn-sm">Применить</button>
+                                </div>
+                            </div>
+                            <div id="shifts-history" style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Дата</th>
+                                            <th>Салон</th>
+                                            <th>Начало</th>
+                                            <th>Конец</th>
+                                            <th>Продажи</th>
+                                            <th>Инкассации</th>
+                                            <th>Расхождение</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="shifts-tbody">
+                                        <tr>
+                                            <td colspan="7" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Модальное окно открытия смены -->
+                    <div id="open-shift-modal" class="modal">
+                        <div class="modal-overlay" id="open-shift-overlay"></div>
+                        <div class="modal-content" style="max-width: 500px;">
+                            <div class="modal-header">
+                                <h2 class="modal-title">Открыть кассовую смену</h2>
+                                <button id="close-open-shift-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="modal-body">
+                                <form id="open-shift-form">
+                                    <div class="form-group">
+                                        <label class="form-label">Салон</label>
+                                        <select id="open-shift-store" class="form-select" required>
+                                            <!-- Заполняется динамически -->
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Начальный остаток в кассе (₽)</label>
+                                        <input type="number" id="open-shift-balance" class="form-input" min="0" step="0.01" required>
+                                        <p class="form-hint">Сколько наличных сейчас в кассе</p>
+                                    </div>
+                                </form>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="cancel-open-shift-btn" class="btn btn-secondary">Отмена</button>
+                                <button id="confirm-open-shift-btn" class="btn btn-success">Открыть смену</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модальное окно закрытия смены -->
+                    <div id="close-shift-modal" class="modal">
+                        <div class="modal-overlay" id="close-shift-overlay"></div>
+                        <div class="modal-content" style="max-width: 600px;">
+                            <div class="modal-header">
+                                <h2 class="modal-title">Закрыть кассовую смену</h2>
+                                <button id="close-close-shift-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="modal-body">
+                                <form id="close-shift-form">
+                                    <div class="form-group">
+                                        <label class="form-label">Фактический остаток в кассе (₽)</label>
+                                        <input type="number" id="close-shift-balance" class="form-input" min="0" step="0.01" required>
+                                        <p class="form-hint">Сколько наличных реально в кассе сейчас</p>
+                                    </div>
+
+                                    <!-- Расчёт расхождений -->
+                                    <div id="discrepancy-calc" style="display: none; margin-top: 20px; padding: 16px; background: var(--barkhat-bg); border-radius: 8px;">
+                                        <h4 style="margin-bottom: 12px;">Расчёт расхождения</h4>
+                                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                                            <div>
+                                                <div style="color: var(--barkhat-gray); font-size: 14px;">Ожидаемый остаток</div>
+                                                <div style="font-weight: 500;" id="expected-balance">— ₽</div>
+                                            </div>
+                                            <div>
+                                                <div style="color: var(--barkhat-gray); font-size: 14px;">Фактический остаток</div>
+                                                <div style="font-weight: 500;" id="actual-balance">— ₽</div>
+                                            </div>
+                                        </div>
+                                        <div style="padding: 12px; border-radius: 6px; text-align: center;" id="discrepancy-result">
+                                            <!-- Результат расчёта -->
+                                        </div>
+                                    </div>
+                                </form>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="cancel-close-shift-btn" class="btn btn-secondary">Отмена</button>
+                                <button id="confirm-close-shift-btn" class="btn btn-success">Закрыть смену</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модальное окно добавления инкассации -->
+                    <div id="add-collection-modal" class="modal">
+                        <div class="modal-overlay" id="add-collection-overlay"></div>
+                        <div class="modal-content" style="max-width: 500px;">
+                            <div class="modal-header">
+                                <h2 class="modal-title">Добавить инкассацию</h2>
+                                <button id="close-add-collection-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="modal-body">
+                                <form id="add-collection-form">
+                                    <div class="form-group">
+                                        <label class="form-label">Категория</label>
+                                        <select id="collection-category" class="form-select" required>
+                                            <!-- Заполняется динамически -->
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Сумма (₽)</label>
+                                        <input type="number" id="collection-amount" class="form-input" min="0" step="0.01" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Комментарий</label>
+                                        <input type="text" id="collection-comment" class="form-input" placeholder="Необязательно">
+                                    </div>
+                                </form>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="cancel-add-collection-btn" class="btn btn-secondary">Отмена</button>
+                                <button id="confirm-add-collection-btn" class="btn btn-success">Добавить</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Остальные страницы будут добавлены по мере необходимости -->
             </div>
         </main>
@@ -754,5 +1009,6 @@
     <script src="/bouquet-calculator.js"></script>
     <script src="/quality-report.js"></script>
     <script src="/users.js"></script>
+    <script src="/cash-shifts.js"></script>
 </body>
 </html>

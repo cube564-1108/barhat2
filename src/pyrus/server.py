@@ -87,9 +87,29 @@ login_manager.login_view = None  # SPA сам решает, куда редир�
 # Регистрируем auth blueprint
 app.register_blueprint(auth_bp)
 
+# Регистрируем blueprint кассовых смен
+try:
+    from cashshifts.server import cashshifts_bp
+    app.register_blueprint(cashshifts_bp)
+    logger.info("Blueprint кассовых смен зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint кассовых смен: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint кассовых смен: {e}")
+
 # Инициализация таблиц авторизации
 with app.app_context():
     init_auth_tables()
+
+    # Инициализация таблиц кассовых смен
+    try:
+        from cashshifts.storage import init_cashshifts_tables
+        init_cashshifts_tables()
+        logger.info("Таблицы кассовых смен инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль кассовых смен: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц кассовых смен: {e}")
 
 
 # Инициализация хранилища
@@ -202,6 +222,19 @@ def users_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/cash-shifts')
+def cash_shifts_page():
+    """Страница кассовых смен"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /cash-shifts: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 # === Static File Routes ===
 
 @app.route('/styles.css')
@@ -228,6 +261,12 @@ def serve_quality():
 def serve_users():
     """Отдаёт скрипт управления пользователями"""
     return send_from_directory(DASHBOARD_DIR, 'users.js')
+
+
+@app.route('/cash-shifts.js')
+def serve_cash_shifts():
+    """Отдаёт скрипт кассовых смен"""
+    return send_from_directory(DASHBOARD_DIR, 'cash-shifts.js')
 
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):

@@ -123,6 +123,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (pageName === 'users' && window.BarhatUsers) {
                 window.BarhatUsers.loadUsers();
             }
+
+            // Активируем модуль кассовых смен
+            if (pageName === 'cash-shifts' && window.CashShiftsModule) {
+                window.CashShiftsModule.onPageActivated(currentUser);
+            }
         } else {
             // Если страницы нет, показываем заглушку
             const targetNav = document.querySelector(`.nav-item[data-page="${pageName}"]`);
@@ -174,6 +179,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'tasks': 'ЗАДАЧНИК',
             'calculator': 'КАЛЬКУЛЯТОР БУКЕТОВ',
             'quality': 'КАЧЕСТВО СБОРКИ БУКЕТОВ',
+            'cash-shifts': 'КАССОВЫЕ СМЕНЫ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'
         };

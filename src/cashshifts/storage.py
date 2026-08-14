@@ -1,0 +1,745 @@
+"""
+Модуль работы с SQLite для кассовых смен БАРХАТ.
+
+Создаёт таблицы, заполняет seed-данными, предоставляет функции доступа.
+"""
+
+import os
+import sqlite3
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+
+from .seed_data import (
+    STORES,
+    EXPENSE_CATEGORIES,
+    get_insert_stores_sql,
+    get_insert_categories_sql,
+)
+
+# Путь к БД из переменной окружения или дефолт
+DB_PATH = os.environ.get("BARHAT_DB_PATH", "barhat.db")
+
+
+def get_db():
+    """Получить соединение с БД."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_cashshifts_tables():
+    """Инициализация таблиц кассовых смен (вызывается при старте приложения)."""
+
+    conn = get_db()
+
+    # ========================================================================
+    # 1. Точки продаж (stores)
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Индекс для быстрого поиска активных точек
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_stores_active
+        ON stores(is_active) WHERE is_active = 1
+    """)
+
+    # ========================================================================
+    # 2. Статьи расхода (expense_categories)
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS expense_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Индекс для быстрого поиска активных категорий
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_categories_active
+        ON expense_categories(is_active) WHERE is_active = 1
+    """)
+
+    # ========================================================================
+    # 3. Кассовые смены (cash_shifts)
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cash_shifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_id INTEGER NOT NULL REFERENCES stores(id),
+            shift_type TEXT NOT NULL CHECK (shift_type IN ('day', 'night')),
+            datetime_start TEXT NOT NULL,
+            datetime_end TEXT,
+            florist_id INTEGER,
+            florist_username TEXT,
+            opening_balance REAL NOT NULL DEFAULT 0,
+            cash_orders_total REAL,
+            collections_total REAL,
+            expected_balance REAL,
+            actual_balance REAL,
+            discrepancy REAL,
+            status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            closed_at TEXT
+        )
+    """)
+
+    # Индексы для фильтров и поиска
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_shifts_store
+        ON cash_shifts(store_id)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_shifts_status
+        ON cash_shifts(status)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_shifts_datetime
+        ON cash_shifts(datetime_start)
+    """)
+
+    # Композитный индекс для истории смен по точке и дате
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_shifts_store_datetime
+        ON cash_shifts(store_id, datetime_start DESC)
+    """)
+
+    # ========================================================================
+    # 4. Инкассации (cash_collections)
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cash_collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shift_id INTEGER NOT NULL REFERENCES cash_shifts(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            expense_category_id INTEGER NOT NULL REFERENCES expense_categories(id),
+            custom_comment TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Индекс для быстрого поиска инкассаций по смене
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_collections_shift
+        ON cash_collections(shift_id)
+    """)
+
+    # ========================================================================
+    # 5. Кэш заказов из CRM (cash_orders_cache)
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cash_orders_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shift_id INTEGER NOT NULL REFERENCES cash_shifts(id) ON DELETE CASCADE,
+            retailcrm_order_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            paid_at TEXT NOT NULL,
+            order_data TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Индекс для поиска по смене и ID заказа
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_orders_cache_shift
+        ON cash_orders_cache(shift_id)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_orders_cache_order_id
+        ON cash_orders_cache(retailcrm_order_id)
+    """)
+
+    # ========================================================================
+    # 6. Связь пользователей с точками (user_stores)
+    # ========================================================================
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_stores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+            UNIQUE(username, store_id)
+        )
+    """)
+
+    # Индекс для быстрого поиска точек пользователя
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_user_stores_username
+        ON user_stores(username)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_user_stores_store
+        ON user_stores(store_id)
+    """)
+
+    conn.commit()
+
+    # ========================================================================
+    # ЗАПОЛНЕНИЕ SEED-ДАННЫМИ (однократно)
+    # ========================================================================
+    _seed_stores_if_empty(conn)
+    _seed_categories_if_empty(conn)
+
+    conn.close()
+
+
+def _seed_stores_if_empty(conn: sqlite3.Connection):
+    """Заполнить таблицу stores если она пуста."""
+
+    result = conn.execute("SELECT COUNT(*) as count FROM stores").fetchone()
+
+    if result["count"] == 0:
+        print("[CashShifts] Заполнение таблицы stores seed-данными...")
+
+        for store in STORES:
+            conn.execute(
+                "INSERT INTO stores (name, is_active) VALUES (?, 1)",
+                (store["name"],)
+            )
+
+        conn.commit()
+        print(f"[CashShifts] Добавлено {len(STORES)} точек продаж")
+
+    else:
+        print(f"[CashShifts] Таблица stores уже содержит {result['count']} записей")
+
+
+def _seed_categories_if_empty(conn: sqlite3.Connection):
+    """Заполнить таблицу expense_categories если она пуста."""
+
+    result = conn.execute("SELECT COUNT(*) as count FROM expense_categories").fetchone()
+
+    if result["count"] == 0:
+        print("[CashShifts] Заполнение таблицы expense_categories seed-данными...")
+
+        for cat in EXPENSE_CATEGORIES:
+            conn.execute(
+                "INSERT INTO expense_categories (name, is_active) VALUES (?, 1)",
+                (cat["name"],)
+            )
+
+        conn.commit()
+        print(f"[CashShifts] Добавлено {len(EXPENSE_CATEGORIES)} категорий расходов")
+
+    else:
+        print(f"[CashShifts] Таблица expense_categories уже содержит {result['count']} записей")
+
+
+# =============================================================================
+# ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ
+# =============================================================================
+
+def get_all_stores() -> List[Dict[str, Any]]:
+    """Получить список всех активных точек продаж."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM stores WHERE is_active = 1 ORDER BY name"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_store_by_id(store_id: int) -> Optional[Dict[str, Any]]:
+    """Получить точку по ID."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM stores WHERE id = ? AND is_active = 1",
+        (store_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_all_categories() -> List[Dict[str, Any]]:
+    """Получить список всех активных категорий расходов."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM expense_categories WHERE is_active = 1 ORDER BY name"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_category_by_id(category_id: int) -> Optional[Dict[str, Any]]:
+    """Получить категорию по ID."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM expense_categories WHERE id = ? AND is_active = 1",
+        (category_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_user_stores(username: str) -> List[int]:
+    """Получить список ID точек пользователя."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT store_id FROM user_stores WHERE username = ?",
+        (username,)
+    ).fetchall()
+    conn.close()
+    return [row["store_id"] for row in rows]
+
+
+def check_store_access(username: str, store_id: int, user_role: str) -> bool:
+    """
+    Проверить доступ пользователя к точке.
+
+    Args:
+        username: Имя пользователя
+        store_id: ID точки
+        user_role: Роль пользователя
+
+    Returns:
+        True если есть доступ, False если нет
+    """
+    # Админ имеет доступ ко всем точкам
+    if user_role == "admin":
+        return True
+
+    # Проверяем привязку к точке
+    user_store_ids = get_user_stores(username)
+    return store_id in user_store_ids
+
+
+# =============================================================================
+# ОРМ-ПОДОБНЫЕ ФУНКЦИИ ДЛЯ КАССОВЫХ СМЕН
+# =============================================================================
+
+def create_cash_shift(
+    store_id: int,
+    shift_type: str,
+    datetime_start: str,
+    opening_balance: float,
+    florist_username: Optional[str] = None
+) -> int:
+    """Создать новую кассовую смену. Возвращает ID созданной смены."""
+    conn = get_db()
+
+    cursor = conn.execute(
+        """
+        INSERT INTO cash_shifts (
+            store_id, shift_type, datetime_start,
+            opening_balance, florist_username, status
+        ) VALUES (?, ?, ?, ?, ?, 'open')
+        """,
+        (store_id, shift_type, datetime_start, opening_balance, florist_username)
+    )
+
+    shift_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return shift_id
+
+
+def get_open_shift(store_id: int) -> Optional[Dict[str, Any]]:
+    """Получить открытую смену для точки."""
+    conn = get_db()
+    row = conn.execute(
+        """
+        SELECT * FROM cash_shifts
+        WHERE store_id = ? AND status = 'open'
+        ORDER BY datetime_start DESC
+        LIMIT 1
+        """,
+        (store_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_last_closed_shift(store_id: int) -> Optional[Dict[str, Any]]:
+    """Получить последнюю закрытую смену для точки (для opening_balance)."""
+    conn = get_db()
+    row = conn.execute(
+        """
+        SELECT * FROM cash_shifts
+        WHERE store_id = ? AND status = 'closed'
+        ORDER BY datetime_end DESC
+        LIMIT 1
+        """,
+        (store_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_cash_shift_by_id(shift_id: int) -> Optional[Dict[str, Any]]:
+    """Получить смену по ID."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM cash_shifts WHERE id = ?",
+        (shift_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_cash_shifts(
+    store_id: Optional[int] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """Получить список смен с фильтрами."""
+
+    query = "SELECT * FROM cash_shifts WHERE 1=1"
+    params = []
+
+    if store_id:
+        query += " AND store_id = ?"
+        params.append(store_id)
+
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+
+    if date_from:
+        query += " AND datetime_start >= ?"
+        params.append(date_from)
+
+    if date_to:
+        query += " AND datetime_start <= ?"
+        params.append(date_to)
+
+    query += " ORDER BY datetime_start DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    conn = get_db()
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def update_cash_shift(
+    shift_id: int,
+    actual_balance: Optional[float] = None,
+    cash_orders_total: Optional[float] = None,
+    collections_total: Optional[float] = None,
+    expected_balance: Optional[float] = None,
+    discrepancy: Optional[float] = None,
+    status: Optional[str] = None,
+    datetime_end: Optional[str] = None,
+    closed_at: Optional[str] = None
+) -> bool:
+    """Обновить поля смены."""
+
+    updates = []
+    params = []
+
+    if actual_balance is not None:
+        updates.append("actual_balance = ?")
+        params.append(actual_balance)
+
+    if cash_orders_total is not None:
+        updates.append("cash_orders_total = ?")
+        params.append(cash_orders_total)
+
+    if collections_total is not None:
+        updates.append("collections_total = ?")
+        params.append(collections_total)
+
+    if expected_balance is not None:
+        updates.append("expected_balance = ?")
+        params.append(expected_balance)
+
+    if discrepancy is not None:
+        updates.append("discrepancy = ?")
+        params.append(discrepancy)
+
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status)
+
+    if datetime_end is not None:
+        updates.append("datetime_end = ?")
+        params.append(datetime_end)
+
+    if closed_at is not None:
+        updates.append("closed_at = ?")
+        params.append(closed_at)
+
+    if not updates:
+        return True
+
+    params.append(shift_id)
+
+    conn = get_db()
+    conn.execute(
+        f"UPDATE cash_shifts SET {', '.join(updates)} WHERE id = ?",
+        params
+    )
+    conn.commit()
+    conn.close()
+
+    return True
+
+
+# =============================================================================
+# ИНКАССАЦИИ
+# =============================================================================
+
+def create_collection(
+    shift_id: int,
+    amount: float,
+    expense_category_id: int,
+    date: str,
+    custom_comment: Optional[str] = None,
+    created_by: Optional[str] = None
+) -> int:
+    """Создать инкассацию. Возвращает ID."""
+    conn = get_db()
+
+    cursor = conn.execute(
+        """
+        INSERT INTO cash_collections (
+            shift_id, amount, expense_category_id, date,
+            custom_comment, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (shift_id, amount, expense_category_id, date, custom_comment, created_by)
+    )
+
+    collection_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return collection_id
+
+
+def get_shift_collections(shift_id: int) -> List[Dict[str, Any]]:
+    """Получить все инкассации смены."""
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT cc.*, ec.name as category_name
+        FROM cash_collections cc
+        LEFT JOIN expense_categories ec ON cc.expense_category_id = ec.id
+        WHERE cc.shift_id = ?
+        ORDER BY cc.date
+        """,
+        (shift_id,)
+    ).fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def get_collections_total(shift_id: int) -> float:
+    """Получить сумму инкассаций смены."""
+    conn = get_db()
+    result = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) as total FROM cash_collections WHERE shift_id = ?",
+        (shift_id,)
+    ).fetchone()
+    conn.close()
+
+    return result["total"] if result else 0.0
+
+
+def update_collection(collection_id: int, amount: float) -> bool:
+    """Обновить сумму инкассации."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE cash_collections SET amount = ? WHERE id = ?",
+        (amount, collection_id)
+    )
+    conn.commit()
+    conn.close()
+
+    return True
+
+
+# =============================================================================
+# КЭШ ЗАКАЗОВ
+# =============================================================================
+
+def cache_cash_orders(
+    shift_id: int,
+    orders: List[Dict[str, Any]]
+) -> None:
+    """
+    Сохранить информацию о наличных заказах в кэш.
+
+    Args:
+        shift_id: ID смены
+        orders: Список словарей {retailcrm_order_id, amount, paid_at, order_data?}
+    """
+    conn = get_db()
+
+    for order in orders:
+        conn.execute(
+            """
+            INSERT INTO cash_orders_cache (
+                shift_id, retailcrm_order_id, amount, paid_at, order_data
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                shift_id,
+                order["retailcrm_order_id"],
+                order["amount"],
+                order["paid_at"],
+                order.get("order_data")
+            )
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def get_shift_cash_orders(shift_id: int) -> List[Dict[str, Any]]:
+    """Получить кэшированные наличные заказы смены."""
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT * FROM cash_orders_cache
+        WHERE shift_id = ?
+        ORDER BY paid_at
+        """,
+        (shift_id,)
+    ).fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def clear_shift_cache(shift_id: int) -> None:
+    """Очистить кэш заказов смены."""
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM cash_orders_cache WHERE shift_id = ?",
+        (shift_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+# =============================================================================
+# УПРАВЛЕНИЕ ДОСТУПОМ ПОЛЬЗОВАТЕЛЕЙ К ТОЧКАМ
+# =============================================================================
+
+def set_user_stores(username: str, store_ids: List[int]) -> None:
+    """
+    Установить привязку пользователя к точкам.
+
+    Заменяет существующие связи на новые.
+    """
+    conn = get_db()
+
+    # Удаляем старые связи
+    conn.execute(
+        "DELETE FROM user_stores WHERE username = ?",
+        (username,)
+    )
+
+    # Добавляем новые
+    for store_id in store_ids:
+        conn.execute(
+            "INSERT INTO user_stores (username, store_id) VALUES (?, ?)",
+            (username, store_id)
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def get_user_stores_with_details(username: str) -> List[Dict[str, Any]]:
+    """
+    Получить точки пользователя с деталями (названия и т.д.).
+    """
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT s.* FROM stores s
+        JOIN user_stores us ON s.id = us.store_id
+        WHERE us.username = ? AND s.is_active = 1
+        ORDER BY s.name
+        """,
+        (username,)
+    ).fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def delete_user_store(username: str, store_id: int) -> bool:
+    """Удалить привязку пользователя к точке."""
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM user_stores WHERE username = ? AND store_id = ?",
+        (username, store_id)
+    )
+    conn.commit()
+    conn.close()
+
+    return True
+
+
+# =============================================================================
+# КАТЕГОРИИ РАСХОДОВ - CRUD
+# =============================================================================
+
+def create_category(name: str) -> int:
+    """Создать категорию расхода. Возвращает ID."""
+    conn = get_db()
+
+    cursor = conn.execute(
+        "INSERT INTO expense_categories (name, is_active) VALUES (?, 1)",
+        (name,)
+    )
+
+    category_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return category_id
+
+
+def update_category(category_id: int, name: str) -> bool:
+    """Обновить название категории."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE expense_categories SET name = ? WHERE id = ?",
+        (name, category_id)
+    )
+    conn.commit()
+    conn.close()
+
+    return True
+
+
+def delete_category(category_id: int) -> bool:
+    """
+    Деактивировать категорию (не удалять).
+
+    Помечает is_active = 0 вместо удаления.
+    """
+    conn = get_db()
+    conn.execute(
+        "UPDATE expense_categories SET is_active = 0 WHERE id = ?",
+        (category_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    return True
