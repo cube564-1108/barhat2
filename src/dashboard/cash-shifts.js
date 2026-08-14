@@ -78,7 +78,15 @@
         editShiftNewComment: null,
         addEditShiftCollectionBtn: null,
         balancesCard: null,
-        balancesTbody: null
+        balancesTbody: null,
+        shiftJournalModal: null,
+        shiftJournalOverlay: null,
+        closeShiftJournalBtn: null,
+        closeShiftJournalFooterBtn: null,
+        journalOpenedBy: null,
+        journalClosedBy: null,
+        journalOrdersTbody: null,
+        journalCollectionsTbody: null
     };
 
     // === Инициализация ===
@@ -149,6 +157,15 @@
 
         elements.balancesCard = document.getElementById('balances-card');
         elements.balancesTbody = document.getElementById('balances-tbody');
+
+        elements.shiftJournalModal = document.getElementById('shift-journal-modal');
+        elements.shiftJournalOverlay = document.getElementById('shift-journal-overlay');
+        elements.closeShiftJournalBtn = document.getElementById('close-shift-journal-btn');
+        elements.closeShiftJournalFooterBtn = document.getElementById('close-shift-journal-footer-btn');
+        elements.journalOpenedBy = document.getElementById('journal-opened-by');
+        elements.journalClosedBy = document.getElementById('journal-closed-by');
+        elements.journalOrdersTbody = document.getElementById('journal-orders-tbody');
+        elements.journalCollectionsTbody = document.getElementById('journal-collections-tbody');
 
         // Привязка событий
         bindEvents();
@@ -230,12 +247,28 @@
             elements.addEditShiftCollectionBtn.addEventListener('click', onAddEditShiftCollection);
         }
 
-        // Делегирование клика по кнопке "Исправить" в истории смен
+        // Журнал смены
+        if (elements.closeShiftJournalBtn) {
+            elements.closeShiftJournalBtn.addEventListener('click', closeShiftJournalModal);
+        }
+        if (elements.closeShiftJournalFooterBtn) {
+            elements.closeShiftJournalFooterBtn.addEventListener('click', closeShiftJournalModal);
+        }
+        if (elements.shiftJournalOverlay) {
+            elements.shiftJournalOverlay.addEventListener('click', closeShiftJournalModal);
+        }
+
+        // Делегирование клика по кнопкам "Исправить"/"Журнал" в истории смен
         if (elements.shiftsTbody) {
             elements.shiftsTbody.addEventListener('click', (e) => {
-                const btn = e.target.closest('[data-edit-shift-id]');
-                if (btn) {
-                    openEditShiftModal(parseInt(btn.dataset.editShiftId, 10));
+                const editBtn = e.target.closest('[data-edit-shift-id]');
+                if (editBtn) {
+                    openEditShiftModal(parseInt(editBtn.dataset.editShiftId, 10));
+                    return;
+                }
+                const journalBtn = e.target.closest('[data-journal-shift-id]');
+                if (journalBtn) {
+                    openShiftJournalModal(parseInt(journalBtn.dataset.journalShiftId, 10));
                 }
             });
         }
@@ -662,9 +695,15 @@
             // Флорист может исправить только самую свежую закрытую смену своей точки
             // (список уже отфильтрован по store_id и отсортирован DESC бэкендом)
             const canEdit = role === 'admin' || (role === 'florist' && index === 0);
-            const actionsCell = canEdit
+            const editBtnHtml = canEdit
                 ? `<button class="btn btn-sm btn-secondary" data-edit-shift-id="${shift.id}">Исправить</button>`
-                : '—';
+                : '';
+            const actionsCell = `
+                <div style="display: flex; gap: 6px;">
+                    <button class="btn btn-sm btn-secondary" data-journal-shift-id="${shift.id}">Журнал</button>
+                    ${editBtnHtml}
+                </div>
+            `;
 
             return `
                 <tr>
@@ -983,6 +1022,72 @@
         } catch (error) {
             console.error('[CashShifts] Ошибка добавления инкассации в смену:', error);
         }
+    }
+
+    // === Открытие журнала смены ===
+    async function openShiftJournalModal(shiftId) {
+        if (!elements.shiftJournalModal) return;
+
+        elements.shiftJournalModal.classList.add('active');
+
+        if (elements.journalOpenedBy) elements.journalOpenedBy.textContent = 'Загрузка...';
+        if (elements.journalClosedBy) elements.journalClosedBy.textContent = 'Загрузка...';
+
+        try {
+            const result = await apiRequest(`/api/cash-shifts/${shiftId}`);
+            const shift = result.shift;
+            const collections = result.collections || [];
+            const cashOrders = result.cash_orders || [];
+
+            if (elements.journalOpenedBy) {
+                elements.journalOpenedBy.textContent = shift.opened_by_full_name || shift.florist_username || '—';
+            }
+            if (elements.journalClosedBy) {
+                elements.journalClosedBy.textContent = shift.closed_by_full_name || shift.closed_by_username || '—';
+            }
+
+            if (elements.journalOrdersTbody) {
+                if (cashOrders.length === 0) {
+                    elements.journalOrdersTbody.innerHTML = `
+                        <tr><td colspan="3" style="text-align: center; color: var(--barkhat-gray); padding: 12px;">Нет наличных заказов</td></tr>
+                    `;
+                } else {
+                    elements.journalOrdersTbody.innerHTML = cashOrders.map(o => `
+                        <tr>
+                            <td>${o.retailcrm_order_id}</td>
+                            <td>${formatMoney(o.amount)}</td>
+                            <td>${formatDateTime(o.paid_at)}</td>
+                        </tr>
+                    `).join('');
+                }
+            }
+
+            if (elements.journalCollectionsTbody) {
+                if (collections.length === 0) {
+                    elements.journalCollectionsTbody.innerHTML = `
+                        <tr><td colspan="5" style="text-align: center; color: var(--barkhat-gray); padding: 12px;">Нет инкассаций</td></tr>
+                    `;
+                } else {
+                    elements.journalCollectionsTbody.innerHTML = collections.map(c => `
+                        <tr>
+                            <td>${formatDateTime(c.date)}</td>
+                            <td>${c.category_name || '—'}</td>
+                            <td>${formatMoney(c.amount)}</td>
+                            <td>${c.created_by_full_name || c.created_by || '—'}</td>
+                            <td>${c.custom_comment || '—'}</td>
+                        </tr>
+                    `).join('');
+                }
+            }
+        } catch (error) {
+            console.error('[CashShifts] Ошибка загрузки журнала смены:', error);
+        }
+    }
+
+    // === Закрытие журнала смены ===
+    function closeShiftJournalModal() {
+        if (!elements.shiftJournalModal) return;
+        elements.shiftJournalModal.classList.remove('active');
     }
 
     // === Сохранение исправлений смены ===

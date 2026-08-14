@@ -1100,6 +1100,75 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Модальное окно журнала смены -->
+                    <div id="shift-journal-modal" class="modal">
+                        <div class="modal-overlay" id="shift-journal-overlay"></div>
+                        <div class="modal-content" style="max-width: 640px;">
+                            <div class="modal-header">
+                                <h2 class="modal-title">Журнал смены</h2>
+                                <button id="close-shift-journal-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="modal-body">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;">
+                                    <div>
+                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Открыл смену</div>
+                                        <div style="font-weight: 500;" id="journal-opened-by">—</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Закрыл смену</div>
+                                        <div style="font-weight: 500;" id="journal-closed-by">—</div>
+                                    </div>
+                                </div>
+
+                                <h4 style="margin-bottom: 8px; font-size: 16px;">Наличные заказы</h4>
+                                <div style="overflow-x: auto; margin-bottom: 20px;">
+                                    <table style="width: 100%;">
+                                        <thead>
+                                            <tr>
+                                                <th>№ заказа</th>
+                                                <th>Сумма</th>
+                                                <th>Время оплаты</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="journal-orders-tbody">
+                                            <tr>
+                                                <td colspan="3" style="text-align: center; color: var(--barkhat-gray); padding: 12px;">Загрузка...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <h4 style="margin-bottom: 8px; font-size: 16px;">Инкассации</h4>
+                                <div style="overflow-x: auto;">
+                                    <table style="width: 100%;">
+                                        <thead>
+                                            <tr>
+                                                <th>Время</th>
+                                                <th>Статья</th>
+                                                <th>Сумма</th>
+                                                <th>Кто добавил</th>
+                                                <th>Комментарий</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="journal-collections-tbody">
+                                            <tr>
+                                                <td colspan="5" style="text-align: center; color: var(--barkhat-gray); padding: 12px;">Загрузка...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="close-shift-journal-footer-btn" class="btn btn-secondary">Закрыть</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Остальные страницы будут добавлены по мере необходимости -->

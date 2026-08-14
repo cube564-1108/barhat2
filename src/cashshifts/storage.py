@@ -92,6 +92,13 @@ def init_cashshifts_tables():
         )
     """)
 
+    # Миграция: добавляем closed_by_username если таблица старая (для журнала смены)
+    cursor = conn.execute("PRAGMA table_info(cash_shifts)")
+    shift_columns = [row[1] for row in cursor.fetchall()]
+    if 'closed_by_username' not in shift_columns:
+        conn.execute("ALTER TABLE cash_shifts ADD COLUMN closed_by_username TEXT")
+        conn.commit()
+
     # Индексы для фильтров и поиска
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_shifts_store
@@ -318,6 +325,30 @@ def check_store_access(username: str, store_id: int, user_role: str) -> bool:
     return store_id in user_store_ids
 
 
+def get_users_full_names(usernames: List[str]) -> Dict[str, str]:
+    """
+    Получить ФИО пользователей по списку username (для журнала смены).
+
+    Таблица users принадлежит модулю авторизации (auth.py), но живёт в той
+    же БД (BARHAT_DB_PATH), поэтому читаем её напрямую без импорта auth.
+    """
+    if not usernames:
+        return {}
+
+    conn = get_db()
+    try:
+        placeholders = ",".join("?" * len(usernames))
+        rows = conn.execute(
+            f"SELECT username, full_name FROM users WHERE username IN ({placeholders})",
+            usernames
+        ).fetchall()
+        return {row["username"]: row["full_name"] for row in rows}
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+
+
 # =============================================================================
 # ОРМ-ПОДОБНЫЕ ФУНКЦИИ ДЛЯ КАССОВЫХ СМЕН
 # =============================================================================
@@ -440,7 +471,8 @@ def update_cash_shift(
     discrepancy: Optional[float] = None,
     status: Optional[str] = None,
     datetime_end: Optional[str] = None,
-    closed_at: Optional[str] = None
+    closed_at: Optional[str] = None,
+    closed_by_username: Optional[str] = None
 ) -> bool:
     """Обновить поля смены."""
 
@@ -478,6 +510,10 @@ def update_cash_shift(
     if closed_at is not None:
         updates.append("closed_at = ?")
         params.append(closed_at)
+
+    if closed_by_username is not None:
+        updates.append("closed_by_username = ?")
+        params.append(closed_by_username)
 
     if not updates:
         return True

@@ -29,6 +29,7 @@ from .storage import (
     get_category_by_id,
     get_user_stores,
     check_store_access,
+    get_users_full_names,
     # Смены
     create_cash_shift,
     get_open_shift,
@@ -539,7 +540,8 @@ def close_shift(shift_id: int):
             discrepancy=discrepancy,
             status="closed",
             datetime_end=datetime_end_str,
-            closed_at=closed_at
+            closed_at=closed_at,
+            closed_by_username=get_current_username()
         )
 
         # Получаем обновлённую смену
@@ -785,10 +787,26 @@ def get_shift_details(shift_id: int):
         collections = get_shift_collections(shift_id)
         cash_orders = get_shift_cash_orders(shift_id)
 
+        # ФИО сотрудников (для журнала смены) — открывший, закрывший, авторы инкассаций
+        usernames = {shift.get("florist_username"), shift.get("closed_by_username")}
+        usernames.update(c.get("created_by") for c in collections)
+        usernames.discard(None)
+        full_names = get_users_full_names(list(usernames))
+
+        shift_with_names = dict(shift)
+        shift_with_names["opened_by_full_name"] = full_names.get(shift.get("florist_username"))
+        shift_with_names["closed_by_full_name"] = full_names.get(shift.get("closed_by_username"))
+
+        collections_with_names = []
+        for c in collections:
+            c_copy = dict(c)
+            c_copy["created_by_full_name"] = full_names.get(c.get("created_by"))
+            collections_with_names.append(c_copy)
+
         return jsonify(success_response({
-            "shift": shift,
+            "shift": shift_with_names,
             "store": store,
-            "collections": collections,
+            "collections": collections_with_names,
             "cash_orders": cash_orders,
             "collections_total": get_collections_total(shift_id),
             "cash_orders_count": len(cash_orders)
