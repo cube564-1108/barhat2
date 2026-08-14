@@ -149,7 +149,7 @@ class RetailCRMClient:
         store_code: Optional[str] = None,
         datetime_start: Optional[datetime] = None,
         datetime_end: Optional[datetime] = None,
-        limit: int = 250
+        limit: int = 100
     ) -> List[Dict[str, Any]]:
         """
         Получить все наличные заказы за период.
