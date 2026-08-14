@@ -211,7 +211,7 @@
     async function loadStores() {
         try {
             const result = await apiRequest('/api/cash-shifts/stores');
-            storeList = result.data || [];
+            storeList = result.stores || [];
 
             // Заполняем селектор
             if (elements.openShiftStore) {
@@ -242,7 +242,7 @@
     async function loadCategories() {
         try {
             const result = await apiRequest('/api/cash-shifts/categories');
-            categoryList = result.data || [];
+            categoryList = result.categories || [];
 
             // Заполняем селектор
             if (elements.collectionCategory) {
@@ -277,7 +277,7 @@
             });
 
             const result = await apiRequest(`/api/cash-shifts?${params}`);
-            const shifts = result.data || [];
+            const shifts = result.shifts || [];
 
             if (shifts.length > 0) {
                 currentShift = shifts[0];
@@ -313,7 +313,7 @@
             params.append('limit', '50');
 
             const result = await apiRequest(`/api/cash-shifts?${params}`);
-            shiftsHistory = result.data || [];
+            shiftsHistory = result.shifts || [];
             renderShiftsHistory();
 
             console.log('[CashShifts] История смен загружена:', shiftsHistory.length);
