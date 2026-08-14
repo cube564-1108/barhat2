@@ -33,7 +33,8 @@ class RetailCRMClient:
     """Клиент для работы с RetailCRM API."""
 
     def __init__(self, api_url: str = None, api_key: str = None):
-        self.api_url = (api_url or RETAILCRM_URL).rstrip("/")
+        base_url = (api_url or RETAILCRM_URL).rstrip("/")
+        self.api_url = f"{base_url}/api/v5"  # RetailCRM API v5
         self.api_key = api_key or RETAILCRM_API_KEY
         self.session = requests.Session()
         self.session.headers.update({
