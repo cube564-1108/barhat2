@@ -200,7 +200,8 @@
 
             if (!response.ok) {
                 const error = await response.json();
-                throw new Error(error.error || 'Ошибка запроса');
+                const method = options.method || 'GET';
+                throw new Error(`${error.error || 'Ошибка запроса'} (${method} ${url})`);
             }
 
             return await response.json();
@@ -276,7 +277,7 @@
 
             const params = new URLSearchParams({
                 store_id: storeId || '',
-                is_open: 'true',
+                status: 'open',
                 limit: '1'
             });
 
@@ -313,7 +314,7 @@
                 params.append('date', dateFilter);
             }
 
-            params.append('is_open', 'false');
+            params.append('status', 'closed');
             params.append('limit', '50');
 
             const result = await apiRequest(`/api/cash-shifts?${params}`);
