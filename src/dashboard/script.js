@@ -125,7 +125,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
 
             // Активируем модуль кассовых смен
-            if (pageName === 'cash-shifts' && window.CashShiftsModule) {
+            if (pageName === 'cash_shifts' && window.CashShiftsModule) {
                 window.CashShiftsModule.onPageActivated(currentUser);
             }
         } else {
@@ -179,7 +179,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'tasks': 'ЗАДАЧНИК',
             'calculator': 'КАЛЬКУЛЯТОР БУКЕТОВ',
             'quality': 'КАЧЕСТВО СБОРКИ БУКЕТОВ',
-            'cash-shifts': 'КАССОВЫЕ СМЕНЫ',
+            'cash_shifts': 'КАССОВЫЕ СМЕНЫ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'
         };

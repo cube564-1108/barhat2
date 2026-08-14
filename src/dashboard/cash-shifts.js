@@ -65,7 +65,7 @@
     function init() {
         // Получаем элементы DOM
         elements.cashShiftsNav = document.getElementById('cash-shifts-nav');
-        elements.cashShiftsPage = document.querySelector('.page[data-page="cash-shifts"]');
+        elements.cashShiftsPage = document.querySelector('.page[data-page="cash_shifts"]');
         elements.shiftActions = document.getElementById('shift-actions');
         elements.currentShiftInfo = document.getElementById('current-shift-info');
         elements.noShiftInfo = document.getElementById('no-shift-info');
@@ -174,11 +174,6 @@
     function onPageActivated(userData) {
         console.log('[CashShifts] Страница активирована', userData);
         currentUserData = userData;
-
-        // Показываем пункт меню если есть доступ
-        if (elements.cashShiftsNav && userData.permissions && userData.permissions.includes('cash_shifts')) {
-            elements.cashShiftsNav.style.display = '';
-        }
 
         // Загружаем данные
         loadStores();
