@@ -27,6 +27,7 @@
         currentShiftCollections: null,
         currentShiftExpected: null,
         shiftStoreName: null,
+        shiftType: null,
         shiftStartTime: null,
         shiftStartBalance: null,
         collectionsTbody: null,
@@ -40,6 +41,7 @@
         cancelOpenShiftBtn: null,
         confirmOpenShiftBtn: null,
         openShiftStore: null,
+        openShiftType: null,
         openShiftBalance: null,
         closeShiftModal: null,
         closeShiftOverlay: null,
@@ -75,6 +77,7 @@
         elements.currentShiftCollections = document.getElementById('current-shift-collections');
         elements.currentShiftExpected = document.getElementById('current-shift-expected');
         elements.shiftStoreName = document.getElementById('shift-store-name');
+        elements.shiftType = document.getElementById('shift-type');
         elements.shiftStartTime = document.getElementById('shift-start-time');
         elements.shiftStartBalance = document.getElementById('shift-start-balance');
         elements.collectionsTbody = document.getElementById('collections-tbody');
@@ -89,6 +92,7 @@
         elements.cancelOpenShiftBtn = document.getElementById('cancel-open-shift-btn');
         elements.confirmOpenShiftBtn = document.getElementById('confirm-open-shift-btn');
         elements.openShiftStore = document.getElementById('open-shift-store');
+        elements.openShiftType = document.getElementById('open-shift-type');
         elements.openShiftBalance = document.getElementById('open-shift-balance');
 
         elements.closeShiftModal = document.getElementById('close-shift-modal');
@@ -366,6 +370,10 @@
             const store = storeList.find(s => s.id === currentShift.store_id);
             elements.shiftStoreName.textContent = store ? store.name : '—';
         }
+        if (elements.shiftType) {
+            const shiftTypeLabel = currentShift.shift_type === 'day' ? 'Дневная' : 'Ночная';
+            elements.shiftType.textContent = shiftTypeLabel;
+        }
         if (elements.shiftStartTime) {
             elements.shiftStartTime.textContent = formatDateTime(currentShift.opened_at);
         }
@@ -494,7 +502,7 @@
         if (shiftsHistory.length === 0) {
             elements.shiftsTbody.innerHTML = `
                 <tr>
-                    <td colspan="7" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                    <td colspan="8" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                         Нет закрытых смен
                     </td>
                 </tr>
@@ -509,10 +517,13 @@
                                       discrepancy < -10 ? 'color: var(--barkhat-warning);' :
                                       'color: var(--barkhat-success);';
 
+            const shiftTypeLabel = shift.shift_type === 'day' ? 'Дневная' : 'Ночная';
+
             return `
                 <tr>
                     <td>${formatDate(shift.closed_at)}</td>
                     <td>${store ? store.name : '—'}</td>
+                    <td>${shiftTypeLabel}</td>
                     <td>${formatTime(shift.opened_at)}</td>
                     <td>${formatTime(shift.closed_at)}</td>
                     <td>${formatMoney(shift.cash_sales)}</td>
@@ -530,6 +541,9 @@
         // Сброс формы
         if (elements.openShiftBalance) {
             elements.openShiftBalance.value = '';
+        }
+        if (elements.openShiftType) {
+            elements.openShiftType.value = 'day';  // По умолчанию дневная
         }
 
         // Для флориста уже выбрана его точка
@@ -549,9 +563,10 @@
     // === Обработка открытия смены ===
     async function onOpenShift() {
         const storeId = elements.openShiftStore?.value;
+        const shiftType = elements.openShiftType?.value || 'day';
         const balance = parseFloat(elements.openShiftBalance?.value);
 
-        if (!storeId || isNaN(balance)) {
+        if (!storeId || !shiftType || isNaN(balance)) {
             showNotification('Заполните все поля', 'error');
             return;
         }
@@ -561,6 +576,7 @@
                 method: 'POST',
                 body: JSON.stringify({
                     store_id: parseInt(storeId),
+                    shift_type: shiftType,
                     starting_balance: balance
                 })
             });

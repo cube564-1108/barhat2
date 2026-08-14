@@ -797,10 +797,14 @@
 
                             <!-- Информация о текущей смене -->
                             <div id="current-shift-info" style="display: none;">
-                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
+                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 24px;">
                                     <div>
                                         <div style="color: var(--barkhat-gray); font-size: 14px;">Салон</div>
                                         <div style="font-weight: 500; font-size: 16px;" id="shift-store-name">—</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Тип смены</div>
+                                        <div style="font-weight: 500; font-size: 16px;" id="shift-type">—</div>
                                     </div>
                                     <div>
                                         <div style="color: var(--barkhat-gray); font-size: 14px;">Начало смены</div>
@@ -860,6 +864,7 @@
                                         <tr>
                                             <th>Дата</th>
                                             <th>Салон</th>
+                                            <th>Тип</th>
                                             <th>Начало</th>
                                             <th>Конец</th>
                                             <th>Продажи</th>
@@ -869,7 +874,7 @@
                                     </thead>
                                     <tbody id="shifts-tbody">
                                         <tr>
-                                            <td colspan="7" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                            <td colspan="8" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                                                 Загрузка данных...
                                             </td>
                                         </tr>
@@ -898,6 +903,13 @@
                                         <label class="form-label">Салон</label>
                                         <select id="open-shift-store" class="form-select" required>
                                             <!-- Заполняется динамически -->
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Тип смены</label>
+                                        <select id="open-shift-type" class="form-select" required>
+                                            <option value="day">Дневная</option>
+                                            <option value="night">Ночная</option>
                                         </select>
                                     </div>
                                     <div class="form-group">
