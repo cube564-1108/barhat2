@@ -235,7 +235,7 @@ def get_store_code_from_name(store_name: str) -> str:
     """
     Преобразовать название точки в код магазина RetailCRM.
 
-    Маппинг основан на правилах именования в CRM.
+    Маппинг названий точек БАРХАТ на коды в RetailCRM.
 
     Args:
         store_name: Название точки (например, "НСК Восход, 3")
@@ -243,14 +243,31 @@ def get_store_code_from_name(store_name: str) -> str:
     Returns:
         Код магазина (например, "nsk-voskhod-3")
     """
-    # TODO: настроить маппинг по реальным кодам из CRM
-    # Сейчас делаем простую трансформацию: lowercase + replace spaces
-    code = (
-        store_name.lower()
-        .replace(" ", "-")
-        .replace(",", "")
-        .replace("ё", "е")
-    )
+    # Маппинг названий на реальные коды в RetailCRM
+    STORE_CODE_MAPPING = {
+        "Барнаул Лазурная": "barkhat-barnaul2",
+        "Барнаул Советская": "barkhat-barnaul",
+        "ЕКБ Бажова": "barkhat-ekb",
+        "НСК Блюхера, 61": "barkhat-nsk-levyi",
+        "НСК Восход, 3": "nsk-voskhod-3",
+        "НСК Железнодорожная, 15/1": "nsk-zheleznodorozhnaia-15-1",
+        "Томск Дальне-Ключевская, 16а": "barkhat-tomsk",
+        "Челябинск Цвиллинга, 59": "cheliabinsk-tsvillinga-59",
+        "Челябинск пр-кт Свердловский, д 23": "cheliabinsk-sverdl-pr-23",
+    }
+
+    code = STORE_CODE_MAPPING.get(store_name)
+
+    if not code:
+        logger.warning(f"Не найден код CRM для точки '{store_name}', используется fallback")
+        # Fallback: простая трансформация для неизвестных точек
+        code = (
+            store_name.lower()
+            .replace(" ", "-")
+            .replace(",", "")
+            .replace("ё", "е")
+        )
+
     return code
 
 
