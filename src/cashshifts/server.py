@@ -411,8 +411,19 @@ def close_shift(shift_id: int):
                 datetime_end=datetime_end
             )
         except Exception as e:
-            logger.error(f"Ошибка запроса к RetailCRM: {e}")
-            return error_response(f"Ошибка получения заказов из CRM: {e}", 503)
+            logger.error(f"Ошибка запроса к RetailCRM с фильтром по магазину: {e}")
+            # Fallback: пробуем без фильтра по магазину
+            try:
+                logger.warning("Пробуем запрос без фильтра по магазину...")
+                cash_orders = client.get_cash_orders(
+                    store_code=None,
+                    datetime_start=datetime_start,
+                    datetime_end=datetime_end
+                )
+                logger.info(f"Успешно получено {len(cash_orders)} заказов без фильтра по магазину")
+            except Exception as e2:
+                logger.error(f"Ошибка запроса к RetailCRM (даже без фильтра): {e2}")
+                return error_response(f"Ошибка получения заказов из CRM: {e2}", 503)
 
         # Кэшируем заказы (перезаписываем старые)
         clear_shift_cache(shift_id)

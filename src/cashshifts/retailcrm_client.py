@@ -49,7 +49,11 @@ class RetailCRMClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
+            # Логируем детали запроса для отладки
             logger.error(f"RetailCRM API error: {e}")
+            logger.error(f"Request URL: {url}")
+            logger.error(f"Request params: {params}")
+            logger.error(f"API Key configured: {bool(self.api_key)}")
             raise
 
     def get_orders(
