@@ -725,9 +725,9 @@
             const result = await apiRequest(`/api/cash-shifts/${currentShift.id}/collections`, {
                 method: 'POST',
                 body: JSON.stringify({
-                    category_id: parseInt(categoryId),
+                    expense_category_id: parseInt(categoryId),
                     amount: amount,
-                    comment: comment
+                    custom_comment: comment
                 })
             });
 
