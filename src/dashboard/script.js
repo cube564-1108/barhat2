@@ -68,6 +68,16 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     // === Навигация ===
 
+    // URL использует дефисы (/cash-shifts), внутренние id страниц — подчёркивания (cash_shifts,
+    // как в data-page и правах доступа). Конвертируем между ними при работе с History API.
+    function pageNameToUrlSlug(pageName) {
+        return pageName.replace(/_/g, '-');
+    }
+
+    function urlSlugToPageName(slug) {
+        return slug.replace(/-/g, '_');
+    }
+
     const navItems = document.querySelectorAll('.nav-item');
     const pages = document.querySelectorAll('.page');
 
@@ -117,7 +127,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             targetPage.classList.add('active');
 
             // Обновляем URL без перезагрузки
-            history.pushState({ page: pageName }, '', `/${pageName}`);
+            history.pushState({ page: pageName }, '', `/${pageNameToUrlSlug(pageName)}`);
 
             // Загружаем данные для страницы пользователей
             if (pageName === 'users' && window.BarhatUsers) {
@@ -197,7 +207,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     // Обработка навигации при загрузке (по пути URL)
     function handlePathChange() {
-        const path = window.location.pathname.slice(1); // Убираем первый /
+        const path = urlSlugToPageName(window.location.pathname.slice(1)); // Убираем первый /
         if (path) {
             // Проверяем есть ли доступ к запрошенной странице
             if (path === 'users' || userPermissions.includes(path)) {
@@ -217,7 +227,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     // Обработка кнопок назад/вперёд
     window.addEventListener('popstate', function(e) {
-        const path = window.location.pathname.slice(1); // Убираем первый /
+        const path = urlSlugToPageName(window.location.pathname.slice(1)); // Убираем первый /
         if (path) {
             navigateToPage(path);
         } else {

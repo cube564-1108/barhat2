@@ -223,6 +223,7 @@ def users_page():
 
 
 @app.route('/cash-shifts')
+@app.route('/cash_shifts')  # Алиас: старые вкладки/закладки с URL до фикса подчёркивания в роутере
 def cash_shifts_page():
     """Страница кассовых смен"""
     try:
