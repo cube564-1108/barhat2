@@ -114,37 +114,6 @@ class RetailCRMClient:
             if not orders:
                 break
 
-            # Логируем сырую структуру первого заказа один раз, для диагностики
-            if not all_orders:
-                logger.info(f"RetailCRM raw first order: {str(orders[0])[:1500]}")
-
-            # Защита от неожиданного формата на уровне списка заказов
-            if not isinstance(orders, list) or (orders and not isinstance(orders[0], dict)):
-                logger.error(
-                    f"RetailCRM вернул orders в неожиданном формате "
-                    f"(type={type(orders).__name__}): {str(orders)[:1000]}"
-                )
-                raise ValueError(f"Неожиданный формат поля orders: {type(orders).__name__}")
-
-            # Защита от неожиданного формата поля payments внутри заказа
-            for o in orders:
-                if not isinstance(o, dict):
-                    logger.error(f"RetailCRM: элемент orders не dict (type={type(o).__name__}): {str(o)[:500]}")
-                    raise ValueError(f"Элемент orders имеет неожиданный тип: {type(o).__name__}")
-                payments = o.get("payments", [])
-                if payments and not isinstance(payments, list):
-                    logger.error(
-                        f"RetailCRM: payments заказа {o.get('id')} не список "
-                        f"(type={type(payments).__name__}): {str(payments)[:500]}"
-                    )
-                    raise ValueError(f"Неожиданный формат payments: {type(payments).__name__}")
-                if payments and not isinstance(payments[0], dict):
-                    logger.error(
-                        f"RetailCRM: элемент payments заказа {o.get('id')} не dict "
-                        f"(type={type(payments[0]).__name__}): {str(payments[0])[:500]}"
-                    )
-                    raise ValueError(f"Элемент payments имеет неожиданный тип: {type(payments[0]).__name__}")
-
             all_orders.extend(orders)
 
             # Проверяем, есть ли ещё страницы
@@ -167,6 +136,10 @@ class RetailCRMClient:
         """
         cash_payments = []
         payments = order.get("payments", [])
+
+        # RetailCRM отдаёт payments как объект {payment_id: {...}}, а не массив
+        if isinstance(payments, dict):
+            payments = list(payments.values())
 
         for payment in payments:
             payment_type = payment.get("type", "")
