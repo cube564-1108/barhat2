@@ -394,9 +394,13 @@ def add_collection(shift_id: int):
         # Проверка доступа к точке
         require_store_access(shift["store_id"])
 
-        # Проверка: смена должна быть открыта
+        # Проверка: смена должна быть открыта, либо у пользователя есть право
+        # корректировать эту закрытую смену (админ / флорист на последней своей смене)
         if shift["status"] != "open":
-            return error_response(f"Смена {shift_id} уже закрыта", 409)
+            try:
+                require_shift_edit_access(shift)
+            except ShiftEditForbiddenError:
+                return error_response(f"Смена {shift_id} уже закрыта", 409)
 
         # Проверка существования категории
         category = get_category_by_id(expense_category_id)
@@ -924,6 +928,45 @@ def get_open_shift_by_store(store_id: int):
         return error_response("Нет доступа к этой точке", 403)
     except Exception as e:
         logger.error(f"Ошибка /api/cash-shifts/open/{store_id}: {e}")
+        return error_response(str(e), 500)
+
+
+# =============================================================================
+# ЭНДПОИНТЫ: ОСТАТКИ ПО ТОЧКАМ
+# =============================================================================
+
+@cashshifts_bp.route("/balances", methods=["GET"])
+@role_required("admin")
+def get_store_balances():
+    """
+    Получить фактический остаток денег в кассе по всем точкам (только админ).
+
+    Остаток берётся из actual_balance последней ЗАКРЫТОЙ смены точки — это
+    последняя реально пересчитанная сумма. Если на точке сейчас открыта смена,
+    остаток дополнительно помечается как устаревший (has_open_shift=True),
+    т.к. фактическая сумма в кассе могла измениться и станет известна только
+    после закрытия.
+
+    Returns:
+        - balances: [{store_id, store_name, actual_balance, updated_at, has_open_shift}, ...]
+    """
+    try:
+        stores = get_all_stores()
+
+        balances = []
+        for store in stores:
+            last_closed = get_last_closed_shift(store["id"])
+            balances.append({
+                "store_id": store["id"],
+                "store_name": store["name"],
+                "actual_balance": last_closed["actual_balance"] if last_closed else None,
+                "updated_at": last_closed["closed_at"] if last_closed else None,
+                "has_open_shift": get_open_shift(store["id"]) is not None
+            })
+
+        return jsonify(success_response({"balances": balances}))
+    except Exception as e:
+        logger.error(f"Ошибка /api/cash-shifts/balances: {e}")
         return error_response(str(e), 500)
 
 

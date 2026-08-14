@@ -885,6 +885,8 @@
                                             <th>Тип</th>
                                             <th>Начало</th>
                                             <th>Конец</th>
+                                            <th>Остаток на начало</th>
+                                            <th>Остаток на конец</th>
                                             <th>Продажи</th>
                                             <th>Инкассации</th>
                                             <th>Расхождение</th>
@@ -893,7 +895,33 @@
                                     </thead>
                                     <tbody id="shifts-tbody">
                                         <tr>
-                                            <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                            <td colspan="11" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Остаток денег в кассах по салонам (только админ) -->
+                        <div class="card calculator-card" id="balances-card" style="display: none;">
+                            <div class="card-header">
+                                <h3 class="card-title">Остаток денег в кассах</h3>
+                            </div>
+                            <div id="balances-table" style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Салон</th>
+                                            <th>Фактический остаток</th>
+                                            <th>На момент</th>
+                                            <th>Статус</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="balances-tbody">
+                                        <tr>
+                                            <td colspan="4" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                                                 Загрузка данных...
                                             </td>
                                         </tr>
@@ -1053,6 +1081,14 @@
                                         <label class="form-label">Инкассации</label>
                                         <div id="edit-shift-collections">
                                             <!-- Заполняется динамически -->
+                                        </div>
+                                        <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
+                                            <select id="edit-shift-new-category" class="form-select" style="flex: 1; min-width: 160px;">
+                                                <option value="">-- Категория --</option>
+                                            </select>
+                                            <input type="number" id="edit-shift-new-amount" class="form-input" style="width: 120px;" min="0" step="0.01" placeholder="Сумма">
+                                            <input type="text" id="edit-shift-new-comment" class="form-input" style="flex: 1; min-width: 140px;" placeholder="Комментарий (необязательно)">
+                                            <button type="button" id="add-edit-shift-collection-btn" class="btn btn-secondary btn-sm">Добавить</button>
                                         </div>
                                         <p class="form-hint">После сохранения смена будет пересчитана с учётом актуальных данных RetailCRM.</p>
                                     </div>

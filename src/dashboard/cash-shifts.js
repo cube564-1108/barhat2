@@ -72,7 +72,13 @@
         cancelEditShiftBtn: null,
         confirmEditShiftBtn: null,
         editShiftBalance: null,
-        editShiftCollections: null
+        editShiftCollections: null,
+        editShiftNewCategory: null,
+        editShiftNewAmount: null,
+        editShiftNewComment: null,
+        addEditShiftCollectionBtn: null,
+        balancesCard: null,
+        balancesTbody: null
     };
 
     // === Инициализация ===
@@ -136,6 +142,13 @@
         elements.confirmEditShiftBtn = document.getElementById('confirm-edit-shift-btn');
         elements.editShiftBalance = document.getElementById('edit-shift-balance');
         elements.editShiftCollections = document.getElementById('edit-shift-collections');
+        elements.editShiftNewCategory = document.getElementById('edit-shift-new-category');
+        elements.editShiftNewAmount = document.getElementById('edit-shift-new-amount');
+        elements.editShiftNewComment = document.getElementById('edit-shift-new-comment');
+        elements.addEditShiftCollectionBtn = document.getElementById('add-edit-shift-collection-btn');
+
+        elements.balancesCard = document.getElementById('balances-card');
+        elements.balancesTbody = document.getElementById('balances-tbody');
 
         // Привязка событий
         bindEvents();
@@ -213,6 +226,9 @@
         if (elements.editShiftOverlay) {
             elements.editShiftOverlay.addEventListener('click', closeEditShiftModal);
         }
+        if (elements.addEditShiftCollectionBtn) {
+            elements.addEditShiftCollectionBtn.addEventListener('click', onAddEditShiftCollection);
+        }
 
         // Делегирование клика по кнопке "Исправить" в истории смен
         if (elements.shiftsTbody) {
@@ -235,6 +251,14 @@
         loadCategories();
         loadCurrentShift();
         loadShiftsHistory();
+
+        // Остатки по кассам — только для админа
+        if (elements.balancesCard) {
+            elements.balancesCard.style.display = currentUserData && currentUserData.role === 'admin' ? 'block' : 'none';
+        }
+        if (currentUserData && currentUserData.role === 'admin') {
+            loadBalances();
+        }
     }
 
     // === API запросы ===
@@ -396,6 +420,47 @@
         } catch (error) {
             console.error('[CashShifts] Ошибка загрузки истории:', error);
         }
+    }
+
+    // === Загрузка остатков по точкам ===
+    async function loadBalances() {
+        try {
+            const result = await apiRequest('/api/cash-shifts/balances');
+            renderBalances(result.balances || []);
+        } catch (error) {
+            console.error('[CashShifts] Ошибка загрузки остатков:', error);
+        }
+    }
+
+    // === Рендер остатков по точкам ===
+    function renderBalances(balances) {
+        if (!elements.balancesTbody) return;
+
+        if (balances.length === 0) {
+            elements.balancesTbody.innerHTML = `
+                <tr>
+                    <td colspan="4" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                        Нет данных
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        elements.balancesTbody.innerHTML = balances.map(b => {
+            const statusLabel = b.has_open_shift
+                ? '<span style="color: var(--barkhat-warning);">Смена открыта</span>'
+                : '<span style="color: var(--barkhat-success);">Смена закрыта</span>';
+
+            return `
+                <tr>
+                    <td>${b.store_name}</td>
+                    <td>${b.actual_balance != null ? formatMoney(b.actual_balance) : '—'}</td>
+                    <td>${b.updated_at ? formatDateTime(b.updated_at) : '—'}</td>
+                    <td>${statusLabel}</td>
+                </tr>
+            `;
+        }).join('');
     }
 
     // === Рендер текущей смены ===
@@ -575,7 +640,7 @@
         if (shiftsHistory.length === 0) {
             elements.shiftsTbody.innerHTML = `
                 <tr>
-                    <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                    <td colspan="11" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                         Нет закрытых смен
                     </td>
                 </tr>
@@ -608,6 +673,8 @@
                     <td>${shiftTypeLabel}</td>
                     <td>${formatTime(shift.datetime_start)}</td>
                     <td>${formatTime(shift.closed_at)}</td>
+                    <td>${formatMoney(shift.opening_balance)}</td>
+                    <td>${formatMoney(shift.actual_balance)}</td>
                     <td>${formatMoney(shift.cash_orders_total)}</td>
                     <td>${formatMoney(shift.collections_total)}</td>
                     <td style="${discrepancyClass}">${formatMoney(discrepancy)}</td>
@@ -768,6 +835,9 @@
             currentShift = null;
             loadCurrentShift();
             loadShiftsHistory();
+            if (currentUserData && currentUserData.role === 'admin') {
+                loadBalances();
+            }
 
         } catch (error) {
             console.error('[CashShifts] Ошибка закрытия смены:', error);
@@ -859,6 +929,18 @@
                 }
             }
 
+            // Форма добавления новой инкассации
+            if (elements.editShiftNewCategory) {
+                elements.editShiftNewCategory.innerHTML = '<option value="">-- Категория --</option>' +
+                    categoryList.map(cat => `<option value="${cat.id}">${cat.name}</option>`).join('');
+            }
+            if (elements.editShiftNewAmount) {
+                elements.editShiftNewAmount.value = '';
+            }
+            if (elements.editShiftNewComment) {
+                elements.editShiftNewComment.value = '';
+            }
+
             elements.editShiftModal.classList.add('active');
         } catch (error) {
             console.error('[CashShifts] Ошибка загрузки смены для исправления:', error);
@@ -870,6 +952,37 @@
         if (!elements.editShiftModal) return;
         elements.editShiftModal.classList.remove('active');
         editingShiftId = null;
+    }
+
+    // === Добавление новой инкассации в редактируемую смену ===
+    async function onAddEditShiftCollection() {
+        if (!editingShiftId) return;
+
+        const categoryId = elements.editShiftNewCategory?.value;
+        const amount = parseFloat(elements.editShiftNewAmount?.value);
+        const comment = elements.editShiftNewComment?.value;
+
+        if (!categoryId || isNaN(amount)) {
+            showNotification('Заполните категорию и сумму', 'error');
+            return;
+        }
+
+        try {
+            await apiRequest(`/api/cash-shifts/${editingShiftId}/collections`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    expense_category_id: parseInt(categoryId, 10),
+                    amount: amount,
+                    custom_comment: comment
+                })
+            });
+
+            showNotification('Инкассация добавлена', 'success');
+            await openEditShiftModal(editingShiftId);
+
+        } catch (error) {
+            console.error('[CashShifts] Ошибка добавления инкассации в смену:', error);
+        }
     }
 
     // === Сохранение исправлений смены ===
@@ -908,6 +1021,9 @@
             showNotification('Смена исправлена и пересчитана', 'success');
             closeEditShiftModal();
             loadShiftsHistory();
+            if (currentUserData && currentUserData.role === 'admin') {
+                loadBalances();
+            }
 
         } catch (error) {
             console.error('[CashShifts] Ошибка исправления смены:', error);
