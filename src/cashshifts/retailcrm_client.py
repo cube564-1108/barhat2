@@ -46,6 +46,11 @@ class RetailCRMClient:
 
         try:
             response = self.session.get(url, params=params, timeout=30)
+
+            # Логируем тело ответа при ошибке (ПЕРЕД raise_for_status)
+            if not response.ok:
+                logger.error(f"RetailCRM API error {response.status_code}: {response.text}")
+
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
