@@ -33,8 +33,7 @@ class RetailCRMClient:
     """Клиент для работы с RetailCRM API."""
 
     def __init__(self, api_url: str = None, api_key: str = None):
-        base_url = (api_url or RETAILCRM_URL).rstrip("/")
-        self.api_url = f"{base_url}/api/v5"  # RetailCRM API v5
+        self.api_url = (api_url or RETAILCRM_URL).rstrip("/")
         self.api_key = api_key or RETAILCRM_API_KEY
         self.session = requests.Session()
         self.session.headers.update({
@@ -92,7 +91,7 @@ class RetailCRMClient:
 
         all_orders = []
         while True:
-            data = self._get("api/orders", params=params)
+            data = self._get("api/v5/orders", params=params)
             orders = data.get("success", False) and data.get("orders", [])
 
             if not orders:
