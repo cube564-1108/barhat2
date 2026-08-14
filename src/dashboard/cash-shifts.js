@@ -29,6 +29,8 @@
         currentShiftSales: null,
         currentShiftCollections: null,
         currentShiftExpected: null,
+        shiftStoreSelectorWrap: null,
+        shiftStoreSelector: null,
         shiftStoreName: null,
         shiftType: null,
         shiftStartTime: null,
@@ -86,6 +88,8 @@
         elements.currentShiftSales = document.getElementById('current-shift-sales');
         elements.currentShiftCollections = document.getElementById('current-shift-collections');
         elements.currentShiftExpected = document.getElementById('current-shift-expected');
+        elements.shiftStoreSelectorWrap = document.getElementById('shift-store-selector-wrap');
+        elements.shiftStoreSelector = document.getElementById('shift-store-selector');
         elements.shiftStoreName = document.getElementById('shift-store-name');
         elements.shiftType = document.getElementById('shift-type');
         elements.shiftStartTime = document.getElementById('shift-start-time');
@@ -191,6 +195,11 @@
             elements.applyDateFilterBtn.addEventListener('click', loadShiftsHistory);
         }
 
+        // Выбор точки для просмотра текущей смены (админ/менеджер)
+        if (elements.shiftStoreSelector) {
+            elements.shiftStoreSelector.addEventListener('change', loadCurrentShift);
+        }
+
         // Исправление закрытой смены
         if (elements.closeEditShiftBtn) {
             elements.closeEditShiftBtn.addEventListener('click', closeEditShiftModal);
@@ -279,6 +288,21 @@
                 }
             }
 
+            // Для не-флориста (админ/менеджер) — селектор точки для просмотра текущей смены,
+            // т.к. у них нет единственной "своей" точки
+            if (currentUserData && currentUserData.role !== 'florist' && elements.shiftStoreSelectorWrap) {
+                elements.shiftStoreSelectorWrap.style.display = 'block';
+                if (elements.shiftStoreSelector) {
+                    elements.shiftStoreSelector.innerHTML = '<option value="">-- Выберите точку --</option>';
+                    storeList.forEach(store => {
+                        const option = document.createElement('option');
+                        option.value = store.id;
+                        option.textContent = store.name;
+                        elements.shiftStoreSelector.appendChild(option);
+                    });
+                }
+            }
+
             console.log('[CashShifts] Загружены точки продаж:', storeList.length);
         } catch (error) {
             console.error('[CashShifts] Ошибка загрузки точек:', error);
@@ -311,10 +335,12 @@
     // === Загрузка текущей смены ===
     async function loadCurrentShift() {
         try {
-            // Определяем ID точки
+            // Определяем ID точки: у флориста точка фиксирована, у остальных — выбирается вручную
             let storeId = null;
-            if (currentUserData && currentUserData.store_id) {
+            if (currentUserData && currentUserData.role === 'florist' && currentUserData.store_id) {
                 storeId = currentUserData.store_id;
+            } else if (elements.shiftStoreSelector && elements.shiftStoreSelector.value) {
+                storeId = parseInt(elements.shiftStoreSelector.value, 10);
             }
 
             if (!storeId) {
@@ -640,6 +666,11 @@
 
             showNotification('Смена открыта', 'success');
             closeOpenShiftModal();
+
+            // Синхронизируем селектор точки, чтобы сразу увидеть открытую смену в виджете
+            if (elements.shiftStoreSelector && currentUserData && currentUserData.role !== 'florist') {
+                elements.shiftStoreSelector.value = storeId;
+            }
             loadCurrentShift();
 
         } catch (error) {

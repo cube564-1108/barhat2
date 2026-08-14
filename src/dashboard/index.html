@@ -805,6 +805,14 @@
                                 </div>
                             </div>
 
+                            <!-- Выбор точки (только для админа/менеджера — у флориста точка одна и фиксирована) -->
+                            <div id="shift-store-selector-wrap" style="display: none; margin-bottom: 16px;">
+                                <label class="form-label" for="shift-store-selector">Точка продаж</label>
+                                <select id="shift-store-selector" class="form-select" style="max-width: 320px;">
+                                    <option value="">-- Выберите точку --</option>
+                                </select>
+                            </div>
+
                             <!-- Информация о текущей смене -->
                             <div id="current-shift-info" style="display: none;">
                                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 24px;">
