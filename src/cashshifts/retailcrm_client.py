@@ -52,7 +52,14 @@ class RetailCRMClient:
                 logger.error(f"RetailCRM API error {response.status_code}: {response.text}")
 
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+
+            # Защита от неожиданного формата ответа (например, двойной JSON-энкодинг)
+            if not isinstance(data, dict):
+                logger.error(f"RetailCRM API вернул не словарь (type={type(data).__name__}): {response.text[:1000]}")
+                raise ValueError(f"Неожиданный формат ответа RetailCRM: {type(data).__name__}")
+
+            return data
         except requests.exceptions.RequestException as e:
             # Логируем детали запроса для отладки
             logger.error(f"RetailCRM API error: {e}")
