@@ -201,6 +201,7 @@ ALL_MODULES = [
     'dashboard',      # Дашборд
     'calculator',     # Калькулятор букетов
     'quality',        # Качество сборки
+    'cash_shifts',    # Кассовые смены
     'users_manage',   # Управление пользователями
 ]
 

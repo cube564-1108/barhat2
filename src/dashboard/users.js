@@ -18,13 +18,15 @@
         'dashboard': 'Дашборд',
         'calculator': 'Калькулятор букетов',
         'quality': 'Качество сборки',
+        'cash_shifts': 'Кассовые смены',
         'users_manage': 'Управление пользователями'
     };
 
     // === Пресеты permissions для ролей ===
     const ROLE_PERMISSIONS = {
-        'admin': ['dashboard', 'calculator', 'quality', 'users_manage'],
-        'manager': ['dashboard', 'calculator', 'quality'],
+        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'users_manage'],
+        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts'],
+        'florist': ['cash_shifts'],
         'florist_analyst': ['quality']
     };
 
