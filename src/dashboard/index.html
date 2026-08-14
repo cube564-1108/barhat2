@@ -727,6 +727,7 @@
                                         <option value="">-- Выберите роль --</option>
                                         <option value="admin">Администратор</option>
                                         <option value="manager">Менеджер</option>
+                                        <option value="florist">Флорист</option>
                                         <option value="florist_analyst">Аналитик качества</option>
                                     </select>
                                     <p class="form-hint" id="role-hint"></p>
@@ -739,6 +740,15 @@
                                         <!-- Заполняется динамически -->
                                     </div>
                                     <p class="form-hint">При выборе роли модули проставляются автоматически. Вы можете изменить выбор вручную.</p>
+                                </div>
+
+                                <!-- Привязка к точкам продаж (только florist/manager) -->
+                                <div class="form-group" id="user-stores-group" style="display: none;">
+                                    <label class="form-label">Точки продаж</label>
+                                    <div id="user-stores-checkboxes" class="modules-checkboxes">
+                                        <!-- Заполняется динамически -->
+                                    </div>
+                                    <p class="form-hint" id="user-stores-hint">Флорист привязывается ровно к одной точке. Менеджер может видеть несколько точек.</p>
                                 </div>
 
                                 <!-- Статус (только для редактирования) -->
@@ -870,11 +880,12 @@
                                             <th>Продажи</th>
                                             <th>Инкассации</th>
                                             <th>Расхождение</th>
+                                            <th>Действия</th>
                                         </tr>
                                     </thead>
                                     <tbody id="shifts-tbody">
                                         <tr>
-                                            <td colspan="8" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                            <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                                                 Загрузка данных...
                                             </td>
                                         </tr>
@@ -1007,6 +1018,41 @@
                             <div class="modal-footer">
                                 <button id="cancel-add-collection-btn" class="btn btn-secondary">Отмена</button>
                                 <button id="confirm-add-collection-btn" class="btn btn-success">Добавить</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модальное окно исправления закрытой смены -->
+                    <div id="edit-shift-modal" class="modal">
+                        <div class="modal-overlay" id="edit-shift-overlay"></div>
+                        <div class="modal-content" style="max-width: 500px;">
+                            <div class="modal-header">
+                                <h2 class="modal-title">Исправить смену</h2>
+                                <button id="close-edit-shift-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="modal-body">
+                                <form id="edit-shift-form">
+                                    <div class="form-group">
+                                        <label class="form-label">Фактический остаток в кассе (₽)</label>
+                                        <input type="number" id="edit-shift-balance" class="form-input" min="0" step="0.01" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Инкассации</label>
+                                        <div id="edit-shift-collections">
+                                            <!-- Заполняется динамически -->
+                                        </div>
+                                        <p class="form-hint">После сохранения смена будет пересчитана с учётом актуальных данных RetailCRM.</p>
+                                    </div>
+                                </form>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="cancel-edit-shift-btn" class="btn btn-secondary">Отмена</button>
+                                <button id="confirm-edit-shift-btn" class="btn btn-success">Сохранить и пересчитать</button>
                             </div>
                         </div>
                     </div>

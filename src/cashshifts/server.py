@@ -45,6 +45,10 @@ from .storage import (
     cache_cash_orders,
     get_shift_cash_orders,
     clear_shift_cache,
+    # Категории расходов
+    create_category,
+    update_category,
+    delete_category,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +86,11 @@ class ShiftClosedError(CashShiftError):
     pass
 
 
+class ShiftEditForbiddenError(CashShiftError):
+    """Нет прав на редактирование этой смены."""
+    pass
+
+
 # =============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================================================
@@ -108,6 +117,33 @@ def require_store_access(store_id: int):
 
     if not check_store_access(username, store_id, role):
         raise StoreAccessError(f"Нет доступа к точке {store_id}")
+
+
+def require_shift_edit_access(shift: dict):
+    """
+    Проверить право на редактирование/пересчёт смены (PUT, /reclose).
+
+    Админ — любая закрытая смена. Флорист — только последняя закрытая смена
+    своей точки (не может трогать более старую историю). Остальные роли — запрет.
+
+    Raises:
+        ShiftEditForbiddenError: Если нет прав
+    """
+    role = get_current_user_role()
+    username = get_current_username()
+
+    if role == "admin":
+        return
+
+    if role == "florist":
+        if not check_store_access(username, shift["store_id"], role):
+            raise ShiftEditForbiddenError("Нет доступа к точке этой смены")
+        last_closed = get_last_closed_shift(shift["store_id"])
+        if not last_closed or last_closed["id"] != shift["id"]:
+            raise ShiftEditForbiddenError("Можно редактировать только последнюю закрытую смену своей точки")
+        return
+
+    raise ShiftEditForbiddenError("Роль не имеет прав на редактирование смен")
 
 
 def error_response(message: str, status: int = 400) -> tuple:
@@ -164,6 +200,68 @@ def get_categories():
         }))
     except Exception as e:
         logger.error(f"Ошибка /api/cash-shifts/categories: {e}")
+        return error_response(str(e), 500)
+
+
+@cashshifts_bp.route("/categories", methods=["POST"])
+@role_required("admin")
+def add_category():
+    """Создать категорию расхода (только админ)."""
+    try:
+        data = request.get_json()
+        if not data or not data.get("name"):
+            return error_response("Не указано название категории")
+
+        category_id = create_category(data["name"])
+        category = get_category_by_id(category_id)
+
+        logger.info(f"Категория расхода создана: ID={category_id}, name={data['name']}")
+
+        return jsonify(success_response({"id": category_id, "category": category})), 201
+    except Exception as e:
+        logger.error(f"Ошибка POST /api/cash-shifts/categories: {e}")
+        return error_response(str(e), 500)
+
+
+@cashshifts_bp.route("/categories/<int:category_id>", methods=["PUT"])
+@role_required("admin")
+def edit_category(category_id: int):
+    """Переименовать категорию расхода (только админ)."""
+    try:
+        category = get_category_by_id(category_id)
+        if not category:
+            return error_response(f"Категория {category_id} не найдена", 404)
+
+        data = request.get_json()
+        if not data or not data.get("name"):
+            return error_response("Не указано название категории")
+
+        update_category(category_id, data["name"])
+
+        logger.info(f"Категория расхода обновлена: ID={category_id}, name={data['name']}")
+
+        return jsonify(success_response({"category": get_category_by_id(category_id)}))
+    except Exception as e:
+        logger.error(f"Ошибка PUT /api/cash-shifts/categories/{category_id}: {e}")
+        return error_response(str(e), 500)
+
+
+@cashshifts_bp.route("/categories/<int:category_id>", methods=["DELETE"])
+@role_required("admin")
+def remove_category(category_id: int):
+    """Деактивировать категорию расхода (не удаляет запись, только скрывает; только админ)."""
+    try:
+        category = get_category_by_id(category_id)
+        if not category:
+            return error_response(f"Категория {category_id} не найдена", 404)
+
+        delete_category(category_id)
+
+        logger.info(f"Категория расхода деактивирована: ID={category_id}")
+
+        return jsonify(success_response({"id": category_id}))
+    except Exception as e:
+        logger.error(f"Ошибка DELETE /api/cash-shifts/categories/{category_id}: {e}")
         return error_response(str(e), 500)
 
 
@@ -463,6 +561,192 @@ def close_shift(shift_id: int):
         return error_response("Нет доступа к точке этой смены", 403)
     except Exception as e:
         logger.error(f"Ошибка /api/cash-shifts/{shift_id}/close: {e}")
+        import traceback
+        traceback.print_exc()
+        return error_response(str(e), 500)
+
+
+# =============================================================================
+# ЭНДПОИНТЫ: РЕДАКТИРОВАНИЕ И ПОВТОРНОЕ ЗАКРЫТИЕ (ТОЛЬКО АДМИН)
+# =============================================================================
+
+@cashshifts_bp.route("/<int:shift_id>", methods=["PUT"])
+@login_required
+def edit_shift(shift_id: int):
+    """
+    Отредактировать закрытую смену (админ — любую; флорист — только последнюю
+    закрытую смену своей точки).
+
+    Body:
+        - actual_balance (float, опционально): новый фактический остаток
+        - collections (list, опционально): [{id, amount}, ...] — правки сумм инкассаций
+
+    Discrepancy пересчитывается от уже сохранённого cash_orders_total. Если нужно
+    учесть новые данные из CRM (например, заказ добавили в CRM задним числом) —
+    после этого вызвать POST /<id>/reclose.
+
+    Returns:
+        - shift: Обновлённые данные смены
+    """
+    try:
+        shift = get_cash_shift_by_id(shift_id)
+        if not shift:
+            return error_response(f"Смена {shift_id} не найдена", 404)
+
+        if shift["status"] != "closed":
+            return error_response("Редактирование доступно только для закрытых смен", 409)
+
+        require_shift_edit_access(shift)
+
+        data = request.get_json() or {}
+        actual_balance = data.get("actual_balance")
+        collections = data.get("collections")
+
+        if actual_balance is None and not collections:
+            return error_response("Нечего обновлять: укажите actual_balance и/или collections")
+
+        # Правим суммы инкассаций
+        if collections:
+            existing_ids = {c["id"] for c in get_shift_collections(shift_id)}
+            for item in collections:
+                collection_id = item.get("id")
+                amount = item.get("amount")
+                if collection_id not in existing_ids:
+                    return error_response(f"Инкассация {collection_id} не принадлежит смене {shift_id}", 404)
+                if amount is None:
+                    return error_response(f"Не указана сумма для инкассации {collection_id}")
+                update_collection(collection_id, amount)
+
+        # Пересчитываем итоги
+        collections_total = get_collections_total(shift_id)
+        cash_orders_total = shift["cash_orders_total"] or 0.0
+        expected_balance = shift["opening_balance"] + cash_orders_total - collections_total
+        final_actual_balance = actual_balance if actual_balance is not None else shift["actual_balance"]
+        discrepancy = final_actual_balance - expected_balance
+
+        update_cash_shift(
+            shift_id=shift_id,
+            actual_balance=final_actual_balance,
+            collections_total=collections_total,
+            expected_balance=expected_balance,
+            discrepancy=discrepancy
+        )
+
+        updated_shift = get_cash_shift_by_id(shift_id)
+
+        logger.info(
+            f"Смена отредактирована админом: ID={shift_id}, "
+            f"фактический={final_actual_balance:.2f}, расхождение={discrepancy:.2f}"
+        )
+
+        return jsonify(success_response({"shift": updated_shift}))
+
+    except ShiftEditForbiddenError as e:
+        return error_response(str(e), 403)
+    except Exception as e:
+        logger.error(f"Ошибка PUT /api/cash-shifts/{shift_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return error_response(str(e), 500)
+
+
+@cashshifts_bp.route("/<int:shift_id>/reclose", methods=["POST"])
+@login_required
+def reclose_shift(shift_id: int):
+    """
+    Повторно закрыть смену: перезапросить наличные заказы из CRM и пересчитать
+    expected_balance/discrepancy от текущего actual_balance.
+
+    Используется после того, как админ (или флорист — для последней закрытой
+    смены своей точки) отредактировал смену через PUT и/или добавил
+    недостающий заказ в CRM.
+
+    Returns:
+        - shift: Обновлённые данные смены
+    """
+    try:
+        shift = get_cash_shift_by_id(shift_id)
+        if not shift:
+            return error_response(f"Смена {shift_id} не найдена", 404)
+
+        if shift["status"] != "closed":
+            return error_response(f"Смена {shift_id} ещё не закрыта, используйте /close", 409)
+
+        require_shift_edit_access(shift)
+
+        store = get_store_by_id(shift["store_id"])
+        if not store:
+            return error_response(f"Точка {shift['store_id']} не найдена", 404)
+
+        # Импортируем клиент RetailCRM
+        try:
+            from .retailcrm_client import get_client, get_store_code_from_name
+            client = get_client()
+        except Exception as e:
+            logger.error(f"Не удалось инициализировать RetailCRM клиент: {e}")
+            return error_response("Ошибка интеграции с CRM", 503)
+
+        store_code = get_store_code_from_name(store["name"])
+
+        # Тот же период, что был у смены при закрытии
+        datetime_start = datetime.strptime(shift["datetime_start"], "%Y-%m-%d %H:%M:%S")
+        datetime_end = (
+            datetime.strptime(shift["datetime_end"], "%Y-%m-%d %H:%M:%S")
+            if shift.get("datetime_end") else datetime.now()
+        )
+
+        # Запрашиваем наличные заказы из CRM
+        try:
+            cash_orders = client.get_cash_orders(
+                store_code=store_code,
+                datetime_start=datetime_start,
+                datetime_end=datetime_end
+            )
+        except Exception as e:
+            logger.error(f"Ошибка запроса к RetailCRM: {e}")
+            return error_response(f"Ошибка получения заказов из CRM: {e}", 503)
+
+        # Перезаписываем кэш заказов
+        clear_shift_cache(shift_id)
+        cache_cash_orders(shift_id, cash_orders)
+
+        # Пересчитываем суммы (actual_balance берём текущий — его правят через PUT)
+        cash_orders_total = sum(o["amount"] for o in cash_orders)
+        collections_total = get_collections_total(shift_id)
+        expected_balance = shift["opening_balance"] + cash_orders_total - collections_total
+        actual_balance = shift["actual_balance"]
+        discrepancy = actual_balance - expected_balance
+
+        update_cash_shift(
+            shift_id=shift_id,
+            cash_orders_total=cash_orders_total,
+            collections_total=collections_total,
+            expected_balance=expected_balance,
+            discrepancy=discrepancy
+        )
+
+        updated_shift = get_cash_shift_by_id(shift_id)
+
+        logger.info(
+            f"Смена пересчитана (reclose): ID={shift_id}, "
+            f"заказы={cash_orders_total:.2f}, инкассации={collections_total:.2f}, "
+            f"ожидаемый={expected_balance:.2f}, фактический={actual_balance:.2f}, "
+            f"расхождение={discrepancy:.2f}"
+        )
+
+        return jsonify(success_response({
+            "shift": updated_shift,
+            "cash_orders_count": len(cash_orders),
+            "cash_orders_total": cash_orders_total,
+            "collections_total": collections_total,
+            "expected_balance": expected_balance,
+            "discrepancy": discrepancy
+        }))
+
+    except ShiftEditForbiddenError as e:
+        return error_response(str(e), 403)
+    except Exception as e:
+        logger.error(f"Ошибка /api/cash-shifts/{shift_id}/reclose: {e}")
         import traceback
         traceback.print_exc()
         return error_response(str(e), 500)

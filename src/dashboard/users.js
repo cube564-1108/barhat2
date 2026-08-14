@@ -10,6 +10,7 @@
     const ROLE_DESCRIPTIONS = {
         'admin': 'Полный доступ ко всем разделам, включая управление пользователями',
         'manager': 'Доступ к дашборду, качеству и калькулятору',
+        'florist': 'Работает только со своей точкой продаж (кассовые смены)',
         'florist_analyst': 'Только раздел качества сборки'
     };
 
@@ -32,6 +33,7 @@
 
     // === Текущее состояние ===
     let usersList = [];
+    let storesList = [];
     let currentUserData = null;
     let editingUsername = null;
 
@@ -54,6 +56,9 @@
         userRole: null,
         roleHint: null,
         modulesCheckboxes: null,
+        userStoresGroup: null,
+        userStoresCheckboxes: null,
+        userStoresHint: null,
         passwordGroup: null,
         statusGroup: null,
         userStatusBadge: null,
@@ -80,6 +85,9 @@
         elements.userRole = document.getElementById('user-role');
         elements.roleHint = document.getElementById('role-hint');
         elements.modulesCheckboxes = document.getElementById('modules-checkboxes');
+        elements.userStoresGroup = document.getElementById('user-stores-group');
+        elements.userStoresCheckboxes = document.getElementById('user-stores-checkboxes');
+        elements.userStoresHint = document.getElementById('user-stores-hint');
         elements.passwordGroup = document.getElementById('password-group');
         elements.statusGroup = document.getElementById('status-group');
         elements.userStatusBadge = document.getElementById('user-status-badge');
@@ -95,6 +103,9 @@
 
         // Инициализация чекбоксов модулей
         initModulesCheckboxes();
+
+        // Загрузка точек продаж для привязки флориста/менеджера
+        loadStores();
 
         console.log('[Users] Модуль инициализирован');
     }
@@ -137,6 +148,23 @@
 
         // Слушаем события изменения роли пользователя
         document.addEventListener('userRoleChanged', handleUserRoleChange);
+
+        // Ограничение "1 точка" для флориста при выборе чекбоксов
+        if (elements.userStoresCheckboxes) {
+            elements.userStoresCheckboxes.addEventListener('change', onStoreCheckboxChange);
+        }
+    }
+
+    // === Ограничение выбора точек для флориста (максимум одна) ===
+    function onStoreCheckboxChange(e) {
+        if (e.target.tagName !== 'INPUT') return;
+        const role = elements.userRole.value;
+        if (role === 'florist' && e.target.checked) {
+            const checkboxes = elements.userStoresCheckboxes.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(cb => {
+                if (cb !== e.target) cb.checked = false;
+            });
+        }
     }
 
     // === Обработка изменения роли пользователя ===
@@ -190,6 +218,21 @@
         }
     }
 
+    // === Загрузка точек продаж (для привязки флориста/менеджера) ===
+    async function loadStores() {
+        try {
+            const response = await fetch('/api/cash-shifts/stores', { credentials: 'include' });
+            if (!response.ok) {
+                throw new Error('Не удалось загрузить точки продаж');
+            }
+            const data = await response.json();
+            storesList = data.stores || [];
+            initUserStoresCheckboxes();
+        } catch (error) {
+            console.error('[Users] Ошибка загрузки точек:', error);
+        }
+    }
+
     // === Отрисовка списка пользователей ===
     function renderUsers() {
         if (!elements.usersList) return;
@@ -220,6 +263,10 @@
             .map(p => MODULE_NAMES[p] || p)
             .join(', ');
 
+        const storesListStr = (user.stores || [])
+            .map(s => s.name)
+            .join(', ');
+
         // Нельзя удалить себя
         const isCurrentUser = currentUserData && currentUserData.username === user.username;
 
@@ -248,6 +295,15 @@
                                         <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
                                     </svg>
                                     <span>${escapeHtml(permissionsList)}</span>
+                                </div>
+                            ` : ''}
+                            ${storesListStr ? `
+                                <div class="user-card-permissions" title="${escapeHtml(storesListStr)}">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                                        <polyline points="9 22 9 12 15 12 15 22"/>
+                                    </svg>
+                                    <span>${escapeHtml(storesListStr)}</span>
                                 </div>
                             ` : ''}
                         </div>
@@ -288,6 +344,7 @@
         const names = {
             'admin': 'Администратор',
             'manager': 'Менеджер',
+            'florist': 'Флорист',
             'florist_analyst': 'Аналитик качества'
         };
         return names[role] || role;
@@ -316,6 +373,10 @@
             // Устанавливаем permissions
             setSelectedModules(user.permissions || []);
 
+            // Устанавливаем привязанные точки продаж
+            updateStoresVisibility(user.role);
+            setSelectedStores((user.stores || []).map(s => s.id));
+
             // Показываем статус
             elements.statusGroup.style.display = 'block';
             updateUserStatusBadge(user.is_active);
@@ -335,6 +396,10 @@
 
             // Сбрасываем permissions
             setSelectedModules([]);
+
+            // Сбрасываем привязанные точки продаж
+            updateStoresVisibility('');
+            setSelectedStores([]);
 
             // Скрываем статус
             elements.statusGroup.style.display = 'none';
@@ -380,6 +445,47 @@
                 cb.checked = ROLE_PERMISSIONS[role].includes(cb.value);
             });
         }
+        updateStoresVisibility(role);
+    }
+
+    // === Инициализация чекбоксов точек продаж ===
+    function initUserStoresCheckboxes() {
+        if (!elements.userStoresCheckboxes) return;
+        elements.userStoresCheckboxes.innerHTML = storesList.map(store => `
+            <label class="module-checkbox">
+                <input type="checkbox" value="${store.id}">
+                <span>${escapeHtml(store.name)}</span>
+            </label>
+        `).join('');
+    }
+
+    // === Показать/скрыть блок привязки к точкам в зависимости от роли ===
+    function updateStoresVisibility(role) {
+        if (!elements.userStoresGroup) return;
+        const needsStores = role === 'florist' || role === 'manager';
+        elements.userStoresGroup.style.display = needsStores ? 'block' : 'none';
+        if (elements.userStoresHint) {
+            elements.userStoresHint.textContent = role === 'florist'
+                ? 'Флорист привязывается ровно к одной точке.'
+                : 'Менеджер может видеть несколько точек.';
+        }
+    }
+
+    // === Получить выбранные точки ===
+    function getSelectedStores() {
+        if (!elements.userStoresCheckboxes) return [];
+        const checkboxes = elements.userStoresCheckboxes.querySelectorAll('input[type="checkbox"]:checked');
+        return Array.from(checkboxes).map(cb => parseInt(cb.value, 10));
+    }
+
+    // === Установить выбранные точки ===
+    function setSelectedStores(storeIds) {
+        if (!elements.userStoresCheckboxes) return;
+        const ids = (storeIds || []).map(id => String(id));
+        const checkboxes = elements.userStoresCheckboxes.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(cb => {
+            cb.checked = ids.includes(cb.value);
+        });
     }
 
     // === Получить выбранные модули ===
@@ -449,6 +555,11 @@
             return;
         }
 
+        if (role === 'florist' && getSelectedStores().length !== 1) {
+            alert('Флорист должен быть привязан к ровно одной точке продаж');
+            return;
+        }
+
         if (!editingUsername && password.length < 8) {
             alert('Пароль должен быть минимум 8 символов');
             return;
@@ -496,6 +607,22 @@
             if (!response.ok) {
                 const error = await response.json();
                 throw new Error(error.error || 'Ошибка сохранения');
+            }
+
+            // Привязка к точкам продаж (только для florist/manager)
+            const effectiveUsername = editingUsername || username;
+            if (role === 'florist' || role === 'manager') {
+                const storesResponse = await fetch(`/api/auth/users/${effectiveUsername}/stores`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ store_ids: getSelectedStores() }),
+                    credentials: 'include'
+                });
+
+                if (!storesResponse.ok) {
+                    const error = await storesResponse.json();
+                    throw new Error(error.error || 'Ошибка привязки точек продаж');
+                }
             }
 
             // Успешно сохранено

@@ -539,6 +539,11 @@ def list_users():
     ).fetchall()
 
     # Получаем permissions для каждого пользователя
+    try:
+        from cashshifts.storage import get_user_stores_with_details
+    except ImportError:
+        get_user_stores_with_details = None
+
     users = []
     for row in rows:
         user = dict(row)
@@ -548,6 +553,7 @@ def list_users():
             (username,)
         ).fetchall()
         user["permissions"] = [p["module_name"] for p in perms]
+        user["stores"] = get_user_stores_with_details(username) if get_user_stores_with_details else []
         users.append(user)
 
     conn.close()
@@ -659,6 +665,76 @@ def delete_user(username):
     conn.commit()
     conn.close()
     log_action(current_user.username, "delete_user", username)
+    return jsonify({"ok": True})
+
+
+# ---------- Привязка пользователей к точкам продаж (кассовые смены) ----------
+
+@auth_bp.route("/api/auth/users/<username>/stores", methods=["GET"])
+@role_required("admin")
+def get_user_stores_endpoint(username):
+    """Получить точки продаж, привязанные к пользователю."""
+    try:
+        from cashshifts.storage import get_user_stores_with_details
+    except ImportError:
+        return jsonify({"error": "Модуль кассовых смен недоступен"}), 503
+
+    return jsonify({"stores": get_user_stores_with_details(username)})
+
+
+@auth_bp.route("/api/auth/users/<username>/stores", methods=["POST"])
+@role_required("admin")
+def set_user_stores_endpoint(username):
+    """
+    Привязать пользователя к точкам продаж (заменяет существующие связи).
+
+    Body:
+        - store_ids (list[int]): ID точек продаж
+
+    Для роли florist допускается ровно одна точка.
+    """
+    try:
+        from cashshifts.storage import set_user_stores, get_all_stores, get_user_stores_with_details
+    except ImportError:
+        return jsonify({"error": "Модуль кассовых смен недоступен"}), 503
+
+    conn = get_db()
+    row = conn.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"error": "Пользователь не найден"}), 404
+
+    data = request.get_json(silent=True) or {}
+    store_ids = data.get("store_ids")
+
+    if not isinstance(store_ids, list) or not all(isinstance(sid, int) for sid in store_ids):
+        return jsonify({"error": "store_ids должен быть списком целых чисел"}), 400
+
+    valid_ids = {s["id"] for s in get_all_stores()}
+    invalid_ids = set(store_ids) - valid_ids
+    if invalid_ids:
+        return jsonify({"error": f"Неизвестные точки: {list(invalid_ids)}"}), 400
+
+    if row["role"] == "florist" and len(store_ids) != 1:
+        return jsonify({"error": "Флорист должен быть привязан к ровно одной точке"}), 400
+
+    set_user_stores(username, store_ids)
+    log_action(current_user.username, "set_user_stores", f"{username}: {store_ids}")
+
+    return jsonify({"ok": True, "stores": get_user_stores_with_details(username)})
+
+
+@auth_bp.route("/api/auth/users/<username>/stores/<int:store_id>", methods=["DELETE"])
+@role_required("admin")
+def delete_user_store_endpoint(username, store_id):
+    """Отвязать пользователя от точки продаж."""
+    try:
+        from cashshifts.storage import delete_user_store
+    except ImportError:
+        return jsonify({"error": "Модуль кассовых смен недоступен"}), 503
+
+    delete_user_store(username, store_id)
+    log_action(current_user.username, "delete_user_store", f"{username}: store {store_id}")
     return jsonify({"ok": True})
 
 

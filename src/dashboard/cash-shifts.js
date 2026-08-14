@@ -8,11 +8,14 @@
 
     // === Текущее состояние ===
     let currentShift = null;
+    let currentShiftCollections = [];
+    let currentShiftCollectionsTotal = 0;
     let storeList = [];
     let categoryList = [];
     let shiftsHistory = [];
     let currentUserData = null;
     let expectedBalance = 0;  // Ожидаемый остаток при закрытии
+    let editingShiftId = null;  // Смена, открытая в модалке исправления
 
     // === DOM элементы ===
     const elements = {
@@ -60,7 +63,14 @@
         confirmAddCollectionBtn: null,
         collectionCategory: null,
         collectionAmount: null,
-        collectionComment: null
+        collectionComment: null,
+        editShiftModal: null,
+        editShiftOverlay: null,
+        closeEditShiftBtn: null,
+        cancelEditShiftBtn: null,
+        confirmEditShiftBtn: null,
+        editShiftBalance: null,
+        editShiftCollections: null
     };
 
     // === Инициализация ===
@@ -114,6 +124,14 @@
         elements.collectionCategory = document.getElementById('collection-category');
         elements.collectionAmount = document.getElementById('collection-amount');
         elements.collectionComment = document.getElementById('collection-comment');
+
+        elements.editShiftModal = document.getElementById('edit-shift-modal');
+        elements.editShiftOverlay = document.getElementById('edit-shift-overlay');
+        elements.closeEditShiftBtn = document.getElementById('close-edit-shift-btn');
+        elements.cancelEditShiftBtn = document.getElementById('cancel-edit-shift-btn');
+        elements.confirmEditShiftBtn = document.getElementById('confirm-edit-shift-btn');
+        elements.editShiftBalance = document.getElementById('edit-shift-balance');
+        elements.editShiftCollections = document.getElementById('edit-shift-collections');
 
         // Привязка событий
         bindEvents();
@@ -171,6 +189,30 @@
         // Фильтр по дате
         if (elements.applyDateFilterBtn) {
             elements.applyDateFilterBtn.addEventListener('click', loadShiftsHistory);
+        }
+
+        // Исправление закрытой смены
+        if (elements.closeEditShiftBtn) {
+            elements.closeEditShiftBtn.addEventListener('click', closeEditShiftModal);
+        }
+        if (elements.cancelEditShiftBtn) {
+            elements.cancelEditShiftBtn.addEventListener('click', closeEditShiftModal);
+        }
+        if (elements.confirmEditShiftBtn) {
+            elements.confirmEditShiftBtn.addEventListener('click', onSaveEditShift);
+        }
+        if (elements.editShiftOverlay) {
+            elements.editShiftOverlay.addEventListener('click', closeEditShiftModal);
+        }
+
+        // Делегирование клика по кнопке "Исправить" в истории смен
+        if (elements.shiftsTbody) {
+            elements.shiftsTbody.addEventListener('click', (e) => {
+                const btn = e.target.closest('[data-edit-shift-id]');
+                if (btn) {
+                    openEditShiftModal(parseInt(btn.dataset.editShiftId, 10));
+                }
+            });
         }
     }
 
@@ -275,20 +317,23 @@
                 storeId = currentUserData.store_id;
             }
 
-            const params = new URLSearchParams({
-                store_id: storeId || '',
-                status: 'open',
-                limit: '1'
-            });
+            if (!storeId) {
+                currentShift = null;
+                renderNoShift();
+                return;
+            }
 
-            const result = await apiRequest(`/api/cash-shifts?${params}`);
-            const shifts = result.shifts || [];
+            const result = await apiRequest(`/api/cash-shifts/open/${storeId}`);
 
-            if (shifts.length > 0) {
-                currentShift = shifts[0];
+            if (result.shift) {
+                currentShift = result.shift;
+                currentShiftCollections = result.collections || [];
+                currentShiftCollectionsTotal = result.collections_total || 0;
                 renderCurrentShift();
             } else {
                 currentShift = null;
+                currentShiftCollections = [];
+                currentShiftCollectionsTotal = 0;
                 renderNoShift();
             }
 
@@ -348,13 +393,12 @@
             elements.currentShiftStatus.style.color = 'var(--barkhat-success)';
         }
         if (elements.currentShiftTime) {
-            const startTime = new Date(currentShift.opened_at);
-            elements.currentShiftTime.textContent = formatTime(startTime);
+            elements.currentShiftTime.textContent = formatTime(currentShift.datetime_start);
         }
 
-        const sales = currentShift.cash_sales || 0;
-        const collections = currentShift.total_collections || 0;
-        const expected = (currentShift.starting_balance || 0) + sales - collections;
+        const sales = currentShift.cash_orders_total || 0;
+        const collections = currentShiftCollectionsTotal || 0;
+        const expected = (currentShift.opening_balance || 0) + sales - collections;
 
         if (elements.currentShiftSales) {
             elements.currentShiftSales.textContent = formatMoney(sales);
@@ -376,14 +420,14 @@
             elements.shiftType.textContent = shiftTypeLabel;
         }
         if (elements.shiftStartTime) {
-            elements.shiftStartTime.textContent = formatDateTime(currentShift.opened_at);
+            elements.shiftStartTime.textContent = formatDateTime(currentShift.datetime_start);
         }
         if (elements.shiftStartBalance) {
-            elements.shiftStartBalance.textContent = formatMoney(currentShift.starting_balance);
+            elements.shiftStartBalance.textContent = formatMoney(currentShift.opening_balance);
         }
 
         // Таблица инкассаций
-        renderCollections(currentShift.collections || []);
+        renderCollections(currentShiftCollections);
 
         // Кнопки действий
         renderShiftActions();
@@ -391,6 +435,9 @@
 
     // === Рендер состояния без смены ===
     function renderNoShift() {
+        currentShiftCollections = [];
+        currentShiftCollectionsTotal = 0;
+
         if (elements.currentShiftInfo) {
             elements.currentShiftInfo.style.display = 'none';
         }
@@ -484,13 +531,12 @@
         }
 
         elements.collectionsTbody.innerHTML = collections.map(c => {
-            const category = categoryList.find(cat => cat.id === c.category_id);
             return `
                 <tr>
-                    <td>${formatDateTime(c.created_at)}</td>
-                    <td>${category ? category.name : '—'}</td>
+                    <td>${formatDateTime(c.date)}</td>
+                    <td>${c.category_name || '—'}</td>
                     <td>${formatMoney(c.amount)}</td>
-                    <td>${c.comment || '—'}</td>
+                    <td>${c.custom_comment || '—'}</td>
                 </tr>
             `;
         }).join('');
@@ -503,7 +549,7 @@
         if (shiftsHistory.length === 0) {
             elements.shiftsTbody.innerHTML = `
                 <tr>
-                    <td colspan="8" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                    <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                         Нет закрытых смен
                     </td>
                 </tr>
@@ -511,7 +557,9 @@
             return;
         }
 
-        elements.shiftsTbody.innerHTML = shiftsHistory.map(shift => {
+        const role = currentUserData && currentUserData.role;
+
+        elements.shiftsTbody.innerHTML = shiftsHistory.map((shift, index) => {
             const store = storeList.find(s => s.id === shift.store_id);
             const discrepancy = shift.discrepancy || 0;
             const discrepancyClass = discrepancy > 10 ? 'color: var(--barkhat-error);' :
@@ -520,16 +568,24 @@
 
             const shiftTypeLabel = shift.shift_type === 'day' ? 'Дневная' : 'Ночная';
 
+            // Флорист может исправить только самую свежую закрытую смену своей точки
+            // (список уже отфильтрован по store_id и отсортирован DESC бэкендом)
+            const canEdit = role === 'admin' || (role === 'florist' && index === 0);
+            const actionsCell = canEdit
+                ? `<button class="btn btn-sm btn-secondary" data-edit-shift-id="${shift.id}">Исправить</button>`
+                : '—';
+
             return `
                 <tr>
                     <td>${formatDate(shift.closed_at)}</td>
                     <td>${store ? store.name : '—'}</td>
                     <td>${shiftTypeLabel}</td>
-                    <td>${formatTime(shift.opened_at)}</td>
+                    <td>${formatTime(shift.datetime_start)}</td>
                     <td>${formatTime(shift.closed_at)}</td>
-                    <td>${formatMoney(shift.cash_sales)}</td>
-                    <td>${formatMoney(shift.total_collections)}</td>
+                    <td>${formatMoney(shift.cash_orders_total)}</td>
+                    <td>${formatMoney(shift.collections_total)}</td>
                     <td style="${discrepancyClass}">${formatMoney(discrepancy)}</td>
+                    <td>${actionsCell}</td>
                 </tr>
             `;
         }).join('');
@@ -620,9 +676,9 @@
         if (isNaN(actualBalance)) return;
 
         // Ожидаемый остаток
-        expectedBalance = (currentShift.starting_balance || 0) +
-                        (currentShift.cash_sales || 0) -
-                        (currentShift.total_collections || 0);
+        expectedBalance = (currentShift.opening_balance || 0) +
+                        (currentShift.cash_orders_total || 0) -
+                        (currentShiftCollectionsTotal || 0);
 
         const discrepancy = actualBalance - expectedBalance;
 
@@ -738,6 +794,92 @@
 
         } catch (error) {
             console.error('[CashShifts] Ошибка добавления инкассации:', error);
+        }
+    }
+
+    // === Открытие модального окна исправления смены ===
+    async function openEditShiftModal(shiftId) {
+        if (!elements.editShiftModal) return;
+
+        try {
+            const result = await apiRequest(`/api/cash-shifts/${shiftId}`);
+            const shift = result.shift;
+            const collections = result.collections || [];
+
+            editingShiftId = shiftId;
+
+            if (elements.editShiftBalance) {
+                elements.editShiftBalance.value = shift.actual_balance ?? '';
+            }
+
+            if (elements.editShiftCollections) {
+                if (collections.length === 0) {
+                    elements.editShiftCollections.innerHTML = `<p class="form-hint">У смены нет инкассаций</p>`;
+                } else {
+                    elements.editShiftCollections.innerHTML = collections.map(c => `
+                        <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                            <span style="flex: 1;">${c.category_name || '—'}</span>
+                            <input type="number" class="form-input" style="width: 140px;"
+                                   min="0" step="0.01"
+                                   data-collection-id="${c.id}"
+                                   value="${c.amount}">
+                        </div>
+                    `).join('');
+                }
+            }
+
+            elements.editShiftModal.classList.add('active');
+        } catch (error) {
+            console.error('[CashShifts] Ошибка загрузки смены для исправления:', error);
+        }
+    }
+
+    // === Закрытие модального окна исправления смены ===
+    function closeEditShiftModal() {
+        if (!elements.editShiftModal) return;
+        elements.editShiftModal.classList.remove('active');
+        editingShiftId = null;
+    }
+
+    // === Сохранение исправлений смены ===
+    async function onSaveEditShift() {
+        if (!editingShiftId) return;
+
+        const actualBalance = parseFloat(elements.editShiftBalance?.value);
+        if (isNaN(actualBalance)) {
+            showNotification('Введите фактический остаток', 'error');
+            return;
+        }
+
+        const collections = [];
+        if (elements.editShiftCollections) {
+            elements.editShiftCollections.querySelectorAll('[data-collection-id]').forEach(input => {
+                collections.push({
+                    id: parseInt(input.dataset.collectionId, 10),
+                    amount: parseFloat(input.value)
+                });
+            });
+        }
+
+        try {
+            await apiRequest(`/api/cash-shifts/${editingShiftId}`, {
+                method: 'PUT',
+                body: JSON.stringify({
+                    actual_balance: actualBalance,
+                    collections: collections
+                })
+            });
+
+            await apiRequest(`/api/cash-shifts/${editingShiftId}/reclose`, {
+                method: 'POST'
+            });
+
+            showNotification('Смена исправлена и пересчитана', 'success');
+            closeEditShiftModal();
+            loadShiftsHistory();
+
+        } catch (error) {
+            console.error('[CashShifts] Ошибка исправления смены:', error);
         }
     }
 
