@@ -418,7 +418,20 @@ def _ref_create(table: str, name: str) -> int:
 
 
 def _ref_update(table: str, item_id: int, name: str) -> bool:
+    """
+    Та же ловушка, что и в _ref_create: если целевое имя занято чужой
+    неактивной (мягко удалённой) строкой, обычный UPDATE упадёт на UNIQUE
+    constraint, хотя в списке этого имени не видно. "Мёртвая" запись никому
+    не нужна — убираем её перед переименованием.
+    """
     conn = get_db()
+    ghost = conn.execute(
+        f"SELECT id FROM {table} WHERE name = ? AND id != ? AND is_active = 0",
+        (name, item_id)
+    ).fetchone()
+    if ghost:
+        conn.execute(f"DELETE FROM {table} WHERE id = ?", (ghost["id"],))
+
     conn.execute(f"UPDATE {table} SET name = ? WHERE id = ?", (name, item_id))
     conn.commit()
     conn.close()

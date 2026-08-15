@@ -77,6 +77,8 @@ def debug_schema():
     try:
         conn = _storage.get_db()
         info = {"db_path": _storage.DB_PATH}
+        info["journal_mode"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        info["busy_timeout_ms"] = conn.execute("PRAGMA busy_timeout").fetchone()[0]
 
         tables = [r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
