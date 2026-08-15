@@ -67,6 +67,12 @@ def get_db():
     """
     conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
+    # WAL вместо дефолтного rollback-journal: читатели не блокируют писателя
+    # и наоборот — резко меньше "database is locked" при нескольких воркерах
+    # на одном файле. Настройка хранится в самом файле БД, но выставляем на
+    # каждом соединении — дёшево и идемпотентно, если уже включено.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=20000")
     return conn
 
 
@@ -388,7 +394,22 @@ def _ref_get_by_id(table: str, item_id: int) -> Optional[Dict[str, Any]]:
 
 
 def _ref_create(table: str, name: str) -> int:
+    """
+    "Удалить" в справочниках — мягкое удаление (is_active=0), а name UNIQUE
+    действует на всю таблицу, а не только на активные строки. Без этой
+    проверки повторно завести ранее удалённое название (например, город)
+    невозможно — INSERT падает на UNIQUE constraint, хотя в списке его
+    уже не видно. Поэтому для неактивной записи с таким именем — просто
+    реактивируем её вместо INSERT.
+    """
     conn = get_db()
+    existing = conn.execute(f"SELECT id, is_active FROM {table} WHERE name = ?", (name,)).fetchone()
+    if existing and not existing["is_active"]:
+        conn.execute(f"UPDATE {table} SET is_active = 1 WHERE id = ?", (existing["id"],))
+        conn.commit()
+        conn.close()
+        return existing["id"]
+
     cursor = conn.execute(f"INSERT INTO {table} (name, is_active) VALUES (?, 1)", (name,))
     item_id = cursor.lastrowid
     conn.commit()

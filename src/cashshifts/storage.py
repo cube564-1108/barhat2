@@ -26,6 +26,9 @@ def get_db():
     # пишут в один файл SQLite параллельно, см. auth.get_db()
     conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
+    # WAL — читатели не блокируют писателя и наоборот, см. auth.get_db()
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=20000")
     return conn
 
 

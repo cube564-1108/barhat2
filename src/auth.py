@@ -50,6 +50,10 @@ def get_db():
     # падает с "database is locked" вместо того, чтобы дождаться очереди
     conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
+    # WAL — читатели не блокируют писателя и наоборот, резко меньше
+    # "database is locked" при нескольких воркерах на одном файле
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=20000")
     return conn
 
 
