@@ -97,6 +97,16 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint кассовых смен: {e}")
 
+# Регистрируем blueprint счетов на оплату
+try:
+    from invoices.server import invoices_bp
+    app.register_blueprint(invoices_bp)
+    logger.info("Blueprint счетов на оплату зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint счетов на оплату: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint счетов на оплату: {e}")
+
 # Инициализация таблиц авторизации
 with app.app_context():
     init_auth_tables()
@@ -110,6 +120,16 @@ with app.app_context():
         logger.warning(f"Не удалось импортировать модуль кассовых смен: {e}")
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц кассовых смен: {e}")
+
+    # Инициализация таблиц счетов на оплату
+    try:
+        from invoices.storage import init_invoices_tables
+        init_invoices_tables()
+        logger.info("Таблицы счетов на оплату инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль счетов на оплату: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц счетов на оплату: {e}")
 
 
 # Инициализация хранилища
@@ -236,6 +256,19 @@ def cash_shifts_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/invoices')
+def invoices_page():
+    """Страница счетов на оплату"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /invoices: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 # === Static File Routes ===
 
 @app.route('/styles.css')
@@ -268,6 +301,11 @@ def serve_users():
 def serve_cash_shifts():
     """Отдаёт скрипт кассовых смен"""
     return send_from_directory(DASHBOARD_DIR, 'cash-shifts.js')
+
+@app.route('/invoices.js')
+def serve_invoices():
+    """Отдаёт скрипт счетов на оплату"""
+    return send_from_directory(DASHBOARD_DIR, 'invoices.js')
 
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):

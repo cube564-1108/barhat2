@@ -36,8 +36,8 @@ login_manager = LoginManager()
 # Роли и какие разделы им доступны.
 # Меняйте под свои реальные разделы дашборда.
 ROLE_SECTIONS = {
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts"},
-    "manager": {"dashboard", "quality", "calculator", "cash_shifts"},
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices"},
     "florist": {"cash_shifts"},  # Флорист работает только с кассой
     "florist_analyst": {"quality"},
 }
@@ -202,6 +202,7 @@ ALL_MODULES = [
     'calculator',     # Калькулятор букетов
     'quality',        # Качество сборки
     'cash_shifts',    # Кассовые смены
+    'invoices',       # Счета на оплату
     'users_manage',   # Управление пользователями
 ]
 

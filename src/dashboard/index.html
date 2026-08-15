@@ -62,6 +62,20 @@
                     </a>
                 </div>
 
+                <!-- Финансы -->
+                <div class="nav-section">
+                    <div class="nav-section-title">ФИНАНСЫ</div>
+                    <a href="/invoices" class="nav-item" data-page="invoices">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                            <line x1="8" y1="13" x2="16" y2="13"/>
+                            <line x1="8" y1="17" x2="16" y2="17"/>
+                        </svg>
+                        <span>Счета на оплату</span>
+                    </a>
+                </div>
+
                 <!-- Качество -->
                 <div class="nav-section">
                     <div class="nav-section-title">КАЧЕСТВО</div>
@@ -1171,6 +1185,117 @@
                     </div>
                 </div>
 
+                <!-- Счета на оплату -->
+                <div class="page" data-page="invoices">
+                    <section class="section">
+                        <h2 class="section-title">СЧЕТА НА ОПЛАТУ</h2>
+                        <p class="section-description">Создание и согласование счетов взамен формы в Pyrus</p>
+
+                        <div class="card calculator-card">
+                            <div class="card-header">
+                                <h3 class="card-title">Список счетов</h3>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <select id="invoices-status-filter" class="form-select" style="width: 200px;">
+                                        <option value="">Все статусы</option>
+                                        <option value="on_approval">На согласовании</option>
+                                        <option value="approved">Согласован</option>
+                                        <option value="rejected">Отклонён</option>
+                                        <option value="sent_to_bank">Отправлен в банк</option>
+                                        <option value="paid">Оплачен</option>
+                                    </select>
+                                    <button id="create-invoice-btn" class="btn btn-primary">+ Создать счёт</button>
+                                </div>
+                            </div>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Номер</th>
+                                            <th>Салон</th>
+                                            <th>Контрагент</th>
+                                            <th>Статья</th>
+                                            <th>Сумма</th>
+                                            <th>Статус</th>
+                                            <th>Создал</th>
+                                            <th>Дата</th>
+                                            <th>Действия</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="invoices-tbody">
+                                        <tr>
+                                            <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Модалка создания счёта -->
+                    <div class="modal-overlay" id="create-invoice-overlay"></div>
+                    <div class="modal" id="create-invoice-modal">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title">Новый счёт на оплату</h3>
+                                <button class="modal-close-btn" id="close-create-invoice-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="form-group">
+                                    <label class="form-label">Салон</label>
+                                    <select id="invoice-store" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Статья расхода</label>
+                                    <select id="invoice-category" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Контрагент</label>
+                                    <input type="text" id="invoice-counterparty" class="form-input" placeholder="Название компании / ИП">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Сумма, ₽</label>
+                                    <input type="number" id="invoice-amount" class="form-input" min="0" step="0.01">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Комментарий</label>
+                                    <input type="text" id="invoice-description" class="form-input" placeholder="За что счёт">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">ИНН контрагента</label>
+                                    <input type="text" id="invoice-inn" class="form-input">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Банк получателя</label>
+                                    <input type="text" id="invoice-bank-name" class="form-input">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">БИК</label>
+                                    <input type="text" id="invoice-bank-bik" class="form-input">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Расчётный счёт</label>
+                                    <input type="text" id="invoice-bank-account" class="form-input">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Корр. счёт</label>
+                                    <input type="text" id="invoice-bank-corr" class="form-input">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Срок оплаты</label>
+                                    <input type="date" id="invoice-due-date" class="form-input">
+                                </div>
+                                <p class="form-hint">Реквизиты банка нужны для Фазы 5 плана (автоформирование платёжки в Модульбанк) — пока не обязательны, но лучше заполнить сразу.</p>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="cancel-create-invoice-btn" class="btn btn-secondary">Отмена</button>
+                                <button id="confirm-create-invoice-btn" class="btn btn-success">Отправить на согласование</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Остальные страницы будут добавлены по мере необходимости -->
             </div>
         </main>
@@ -1181,5 +1306,6 @@
     <script src="/quality-report.js"></script>
     <script src="/users.js"></script>
     <script src="/cash-shifts.js"></script>
+    <script src="/invoices.js"></script>
 </body>
 </html>

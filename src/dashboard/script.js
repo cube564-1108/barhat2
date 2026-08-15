@@ -138,6 +138,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (pageName === 'cash_shifts' && window.CashShiftsModule) {
                 window.CashShiftsModule.onPageActivated(currentUser);
             }
+
+            // Активируем модуль счетов на оплату
+            if (pageName === 'invoices' && window.InvoicesModule) {
+                window.InvoicesModule.onPageActivated(currentUser);
+            }
         } else {
             // Если страницы нет, показываем заглушку
             const targetNav = document.querySelector(`.nav-item[data-page="${pageName}"]`);
@@ -190,6 +195,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'calculator': 'КАЛЬКУЛЯТОР БУКЕТОВ',
             'quality': 'КАЧЕСТВО СБОРКИ БУКЕТОВ',
             'cash_shifts': 'КАССОВЫЕ СМЕНЫ',
+            'invoices': 'СЧЕТА НА ОПЛАТУ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'
         };
