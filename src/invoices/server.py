@@ -68,47 +68,6 @@ logger = logging.getLogger(__name__)
 invoices_bp = Blueprint("invoices", __name__, url_prefix="/api/invoices")
 
 
-@invoices_bp.route("/debug-schema", methods=["GET"])
-@role_required("admin")
-def debug_schema():
-    """ВРЕМЕННО: снимок состояния БД счетов для расследования инцидента. Убрать после диагностики."""
-    from . import storage as _storage
-
-    try:
-        conn = _storage.get_db()
-        info = {"db_path": _storage.DB_PATH}
-        info["journal_mode"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
-        info["busy_timeout_ms"] = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-
-        tables = [r["name"] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()]
-        info["tables"] = tables
-
-        for t in ("invoices", "invoices_old_v1", "invoice_cities", "invoice_payers",
-                  "invoice_vat_options", "invoice_expense_categories", "invoice_line_items",
-                  "invoice_attachments"):
-            if t in tables:
-                cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({t})").fetchall()]
-                count = conn.execute(f"SELECT COUNT(*) as c FROM {t}").fetchone()["c"]
-                info[t] = {"columns": cols, "row_count": count}
-            else:
-                info[t] = None
-
-        try:
-            conn.execute("INSERT INTO invoice_cities (name, is_active) VALUES ('__debug_probe__', 1)")
-            conn.rollback()
-            info["test_write_to_invoice_cities"] = "ok (rolled back)"
-        except Exception as e:
-            info["test_write_to_invoice_cities"] = f"{type(e).__name__}: {e}"
-
-        conn.close()
-        return jsonify(info)
-    except Exception as e:
-        logger.exception("debug_schema упал")
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
-
-
 # =============================================================================
 # СПРАВОЧНИКИ (для форм на фронте) — общий паттерн для 4 простых словарей
 # =============================================================================
@@ -129,19 +88,15 @@ def _register_reference_crud(name, get_all, get_by_id, create, update, delete):
             item_id = create(item_name)
         except sqlite3.IntegrityError:
             return jsonify({"error": f"«{item_name}» уже есть в справочнике"}), 400
-        except Exception as e:
-            # ВРЕМЕННО: реальный текст ошибки для расследования инцидента, убрать после диагностики
+        except Exception:
             logger.exception(f"create_{name} упал")
-            return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+            return jsonify({"error": "Не удалось сохранить запись"}), 500
         try:
             log_action(current_user.username, f"create_{name}", item_name)
-        except Exception as e:
-            # ВРЕМЕННО: запись уже создана (item_id есть) — не даём упасть всему
-            # запросу из-за лога, но фиксируем реальную причину для расследования.
-            # Убрать broad except после диагностики, оставив только логирование.
+        except Exception:
+            # Запись уже создана (item_id есть) — не проваливаем весь запрос
+            # из-за сбоя аудит-лога, только фиксируем в логах сервера
             logger.exception(f"log_action упал после успешного create_{name} (id={item_id})")
-            return jsonify({"ok": True, "id": item_id, "name": item_name,
-                             "warning": f"Запись создана, но лог действия не записался: {type(e).__name__}: {e}"}), 201
         return jsonify({"ok": True, "id": item_id, "name": item_name}), 201
     create_view.__name__ = f"add_{name}"
 
@@ -308,9 +263,9 @@ def add_invoice():
             due_date=due_date,
             line_items=line_items,
         )
-    except sqlite3.IntegrityError as e:
+    except sqlite3.IntegrityError:
         logger.exception("create_invoice упал с IntegrityError")
-        return jsonify({"error": f"Не удалось создать счёт: {e}"}), 409
+        return jsonify({"error": "Не удалось создать счёт, попробуйте ещё раз"}), 409
 
     log_action(current_user.username, "create_invoice", f"{invoice['invoice_number']}: {amount}")
     return jsonify({"ok": True, "invoice": invoice}), 201
