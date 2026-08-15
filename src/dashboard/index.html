@@ -1194,8 +1194,46 @@
                         <div class="card calculator-card">
                             <div class="card-header">
                                 <h3 class="card-title">Список счетов</h3>
-                                <div style="display: flex; gap: 8px; align-items: center;">
-                                    <select id="invoices-status-filter" class="form-select" style="width: 200px;">
+                                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                                    <button id="manage-references-btn" class="btn btn-secondary">Справочники</button>
+                                    <button id="create-invoice-btn" class="btn btn-primary">+ Создать счёт</button>
+                                </div>
+                            </div>
+
+                            <div class="invoices-filters" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; padding: 12px 0;">
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Контрагент</label>
+                                    <input type="text" id="invoices-filter-counterparty" class="form-input" style="width: 160px;">
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Назначение платежа</label>
+                                    <input type="text" id="invoices-filter-purpose" class="form-input" style="width: 180px;">
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Заведён с</label>
+                                    <input type="date" id="invoices-filter-created-from" class="form-input" style="width: 150px;">
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Заведён по</label>
+                                    <input type="date" id="invoices-filter-created-to" class="form-input" style="width: 150px;">
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Оплата (план) с</label>
+                                    <input type="date" id="invoices-filter-due-from" class="form-input" style="width: 150px;">
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Оплата (план) по</label>
+                                    <input type="date" id="invoices-filter-due-to" class="form-input" style="width: 150px;">
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Салон/проект</label>
+                                    <select id="invoices-filter-store" class="form-select" style="width: 160px;">
+                                        <option value="">Все</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Статус</label>
+                                    <select id="invoices-status-filter" class="form-select" style="width: 170px;">
                                         <option value="">Все статусы</option>
                                         <option value="on_approval">На согласовании</option>
                                         <option value="approved">Согласован</option>
@@ -1203,27 +1241,38 @@
                                         <option value="sent_to_bank">Отправлен в банк</option>
                                         <option value="paid">Оплачен</option>
                                     </select>
-                                    <button id="create-invoice-btn" class="btn btn-primary">+ Создать счёт</button>
                                 </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Автор</label>
+                                    <input type="text" id="invoices-filter-created-by" class="form-input" style="width: 130px;">
+                                </div>
+                                <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+                                    <input type="checkbox" id="invoices-filter-archived">
+                                    Показать архив
+                                </label>
+                                <button id="invoices-apply-filters-btn" class="btn btn-secondary btn-sm">Применить</button>
+                                <button id="invoices-reset-filters-btn" class="btn btn-secondary btn-sm">Сбросить</button>
                             </div>
+
                             <div style="overflow-x: auto;">
                                 <table style="width: 100%;">
                                     <thead>
                                         <tr>
                                             <th>Номер</th>
-                                            <th>Салон</th>
+                                            <th>Город</th>
                                             <th>Контрагент</th>
-                                            <th>Статья</th>
+                                            <th>На кого выставлен</th>
                                             <th>Сумма</th>
+                                            <th>Оплата (план)</th>
                                             <th>Статус</th>
                                             <th>Создал</th>
-                                            <th>Дата</th>
+                                            <th>Заведён</th>
                                             <th>Действия</th>
                                         </tr>
                                     </thead>
                                     <tbody id="invoices-tbody">
                                         <tr>
-                                            <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                            <td colspan="10" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                                                 Загрузка данных...
                                             </td>
                                         </tr>
@@ -1243,54 +1292,122 @@
                             </div>
                             <div class="modal-body">
                                 <div class="form-group">
-                                    <label class="form-label">Салон</label>
-                                    <select id="invoice-store" class="form-select"></select>
+                                    <label class="form-label">Город *</label>
+                                    <select id="invoice-city" class="form-select"></select>
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label">Статья расхода</label>
-                                    <select id="invoice-category" class="form-select"></select>
+                                    <label class="form-label">Планируемая дата оплаты *</label>
+                                    <input type="date" id="invoice-due-date" class="form-input">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label">Контрагент</label>
-                                    <input type="text" id="invoice-counterparty" class="form-input" placeholder="Название компании / ИП">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Сумма, ₽</label>
-                                    <input type="number" id="invoice-amount" class="form-input" min="0" step="0.01">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Комментарий</label>
-                                    <input type="text" id="invoice-description" class="form-input" placeholder="За что счёт">
+                                    <label class="form-label">На кого выставлен счёт *</label>
+                                    <select id="invoice-payer" class="form-select"></select>
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">ИНН контрагента</label>
                                     <input type="text" id="invoice-inn" class="form-input">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label">Банк получателя</label>
-                                    <input type="text" id="invoice-bank-name" class="form-input">
+                                    <label class="form-label">Наименование контрагента</label>
+                                    <input type="text" id="invoice-counterparty" class="form-input" placeholder="Название компании / ИП">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label">БИК</label>
-                                    <input type="text" id="invoice-bank-bik" class="form-input">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Расчётный счёт</label>
+                                    <label class="form-label">Расчётный счёт контрагента</label>
                                     <input type="text" id="invoice-bank-account" class="form-input">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label">Корр. счёт</label>
-                                    <input type="text" id="invoice-bank-corr" class="form-input">
+                                    <label class="form-label">БИК контрагента</label>
+                                    <input type="text" id="invoice-bank-bik" class="form-input">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label">Срок оплаты</label>
-                                    <input type="date" id="invoice-due-date" class="form-input">
+                                    <label class="form-label">НДС</label>
+                                    <select id="invoice-vat" class="form-select">
+                                        <option value="">Не указан</option>
+                                    </select>
                                 </div>
-                                <p class="form-hint">Реквизиты банка нужны для Фазы 5 плана (автоформирование платёжки в Модульбанк) — пока не обязательны, но лучше заполнить сразу.</p>
+                                <div class="form-group">
+                                    <label class="form-label">Сумма, ₽ *</label>
+                                    <input type="number" id="invoice-amount" class="form-input" min="0" step="0.01">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Назначение платежа *</label>
+                                    <textarea id="invoice-purpose" class="form-input" rows="2" placeholder="За что и на основании чего платим"></textarea>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Распределение по проекту (салону) и статье расхода</label>
+                                    <p class="form-hint">Опционально сейчас, доступно к правке до архивации счёта. Сумма строк должна совпасть с суммой счёта.</p>
+                                    <div id="invoice-lineitems-rows"></div>
+                                    <button type="button" id="invoice-add-lineitem-btn" class="btn btn-secondary btn-sm">+ Строка распределения</button>
+                                    <p id="invoice-lineitems-total" class="form-hint"></p>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Вложения (скрин/скан счёта)</label>
+                                    <input type="file" id="invoice-attachments-input" multiple accept=".png,.jpg,.jpeg,.webp,.pdf">
+                                </div>
                             </div>
                             <div class="modal-footer">
                                 <button id="cancel-create-invoice-btn" class="btn btn-secondary">Отмена</button>
                                 <button id="confirm-create-invoice-btn" class="btn btn-success">Отправить на согласование</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модалка деталей счёта -->
+                    <div class="modal" id="invoice-details-modal">
+                        <div class="modal-overlay" id="invoice-details-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title" id="invoice-details-title">Счёт</h3>
+                                <button class="modal-close-btn" id="close-invoice-details-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="invoice-details-info" class="invoice-details-info"></div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Распределение по проекту (салону) и статье расхода</label>
+                                    <div id="invoice-details-lineitems-rows"></div>
+                                    <button type="button" id="invoice-details-add-lineitem-btn" class="btn btn-secondary btn-sm">+ Строка</button>
+                                    <p id="invoice-details-lineitems-total" class="form-hint"></p>
+                                    <button type="button" id="invoice-details-save-lineitems-btn" class="btn btn-secondary btn-sm">Сохранить распределение</button>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Вложения</label>
+                                    <div id="invoice-details-attachments"></div>
+                                    <input type="file" id="invoice-details-attachment-input" multiple accept=".png,.jpg,.jpeg,.webp,.pdf">
+                                </div>
+                            </div>
+                            <div class="modal-footer" id="invoice-details-actions"></div>
+                        </div>
+                    </div>
+
+                    <!-- Модалка управления справочниками -->
+                    <div class="modal" id="invoice-references-modal">
+                        <div class="modal-overlay" id="invoice-references-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title">Справочники счетов</h3>
+                                <button class="modal-close-btn" id="close-invoice-references-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="admin-tabs" id="invoice-references-tabs">
+                                    <button class="admin-tab active" data-ref="categories">Статьи расхода</button>
+                                    <button class="admin-tab" data-ref="cities">Города</button>
+                                    <button class="admin-tab" data-ref="payers">На кого выставлен счёт</button>
+                                    <button class="admin-tab" data-ref="vat-options">НДС</button>
+                                </div>
+                                <div id="invoice-references-list" class="admin-items-list"></div>
+                                <div class="admin-add-item">
+                                    <div class="admin-add-form">
+                                        <input type="text" id="invoice-reference-new-name" class="form-input" placeholder="Название">
+                                        <button id="invoice-reference-add-btn" class="btn btn-primary btn-sm">Добавить</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="close-invoice-references-footer-btn" class="btn btn-secondary">Закрыть</button>
                             </div>
                         </div>
                     </div>
