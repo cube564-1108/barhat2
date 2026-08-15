@@ -196,6 +196,56 @@ def migrate_permissions_for_existing_users():
         conn.close()
 
 
+def migrate_new_module_permissions(module_name: str, roles: list):
+    """
+    Догрузить права на новый модуль пользователям с указанными ролями,
+    у которых он ещё не выдан.
+
+    migrate_permissions_for_existing_users() backfill'ит роли только для
+    пользователей БЕЗ единой записи в permissions — при добавлении нового
+    модуля к уже существующему приложению (как invoices) у всех активных
+    пользователей permissions уже есть, и они этот бэкафилл не проходят.
+    Отсюда и баг: пункт меню невидим, пока не выдать право явно.
+    """
+    if not roles:
+        return
+
+    conn = get_db()
+    try:
+        placeholders = ",".join("?" * len(roles))
+        users_missing = conn.execute(
+            f"""
+            SELECT username FROM users
+            WHERE role IN ({placeholders})
+              AND username NOT IN (
+                  SELECT username FROM permissions WHERE module_name = ?
+              )
+            """,
+            (*roles, module_name)
+        ).fetchall()
+
+        if not users_missing:
+            conn.close()
+            return
+
+        for user in users_missing:
+            try:
+                conn.execute(
+                    "INSERT INTO permissions (username, module_name, can_view) VALUES (?, ?, 1)",
+                    (user["username"], module_name)
+                )
+            except sqlite3.IntegrityError:
+                pass
+
+        conn.commit()
+        logger.info(f"Migration: добавлено право '{module_name}' для {len(users_missing)} пользователей")
+
+    except Exception as e:
+        logger.error(f"Migration error for module '{module_name}': {e}")
+    finally:
+        conn.close()
+
+
 # Все модули системы
 ALL_MODULES = [
     'dashboard',      # Дашборд
@@ -294,6 +344,10 @@ def init_auth_tables():
 
     # Миграция permissions для существующих пользователей
     migrate_permissions_for_existing_users()
+
+    # Догрузка права на модуль invoices тем, у кого permissions уже были
+    # созданы до появления этого модуля (см. docstring migrate_new_module_permissions)
+    migrate_new_module_permissions("invoices", ["admin", "manager"])
 
 
 class User(UserMixin):
