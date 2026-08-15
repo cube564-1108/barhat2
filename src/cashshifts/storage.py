@@ -22,7 +22,9 @@ DB_PATH = os.environ.get("BARHAT_DB_PATH", "barhat.db")
 
 def get_db():
     """Получить соединение с БД."""
-    conn = sqlite3.connect(DB_PATH)
+    # timeout увеличен против дефолтных 5с — 2 воркера gunicorn (amvera.yml)
+    # пишут в один файл SQLite параллельно, см. auth.get_db()
+    conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
     return conn
 

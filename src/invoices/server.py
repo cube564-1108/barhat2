@@ -12,6 +12,7 @@ Flask API сервер для модуля счетов на оплату БАР
 
 import logging
 import os
+import sqlite3
 import sys
 
 from flask import Blueprint, jsonify, request, send_from_directory
@@ -124,10 +125,8 @@ def _register_reference_crud(name, get_all, get_by_id, create, update, delete):
             return jsonify({"error": "Название обязательно"}), 400
         try:
             item_id = create(item_name)
-        except Exception as e:
-            # ВРЕМЕННО: реальный текст ошибки для расследования инцидента, убрать после диагностики
-            logger.exception(f"create_{name} упал")
-            return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+        except sqlite3.IntegrityError:
+            return jsonify({"error": f"«{item_name}» уже есть в справочнике"}), 400
         log_action(current_user.username, f"create_{name}", item_name)
         return jsonify({"ok": True, "id": item_id, "name": item_name}), 201
     create_view.__name__ = f"add_{name}"
@@ -139,7 +138,10 @@ def _register_reference_crud(name, get_all, get_by_id, create, update, delete):
         item_name = (data.get("name") or "").strip()
         if not item_name:
             return jsonify({"error": "Название обязательно"}), 400
-        update(item_id, item_name)
+        try:
+            update(item_id, item_name)
+        except sqlite3.IntegrityError:
+            return jsonify({"error": f"«{item_name}» уже есть в справочнике"}), 400
         log_action(current_user.username, f"update_{name}", f"{item_id}: {item_name}")
         return jsonify({"ok": True})
     update_view.__name__ = f"edit_{name}"
@@ -275,22 +277,26 @@ def add_invoice():
         if abs(total - amount) >= 0.01:
             return jsonify({"error": f"Сумма строк распределения ({total}) не равна сумме счёта ({amount})"}), 400
 
-    invoice = create_invoice(
-        amount=amount,
-        payment_purpose=payment_purpose,
-        created_by=current_user.username,
-        city_id=city_id,
-        payer_id=payer_id,
-        vat_id=vat_id,
-        counterparty_name=data.get("counterparty_name"),
-        counterparty_inn=data.get("counterparty_inn"),
-        counterparty_bank_name=data.get("counterparty_bank_name"),
-        counterparty_bank_bik=data.get("counterparty_bank_bik"),
-        counterparty_bank_account=data.get("counterparty_bank_account"),
-        counterparty_bank_corr_account=data.get("counterparty_bank_corr_account"),
-        due_date=due_date,
-        line_items=line_items,
-    )
+    try:
+        invoice = create_invoice(
+            amount=amount,
+            payment_purpose=payment_purpose,
+            created_by=current_user.username,
+            city_id=city_id,
+            payer_id=payer_id,
+            vat_id=vat_id,
+            counterparty_name=data.get("counterparty_name"),
+            counterparty_inn=data.get("counterparty_inn"),
+            counterparty_bank_name=data.get("counterparty_bank_name"),
+            counterparty_bank_bik=data.get("counterparty_bank_bik"),
+            counterparty_bank_account=data.get("counterparty_bank_account"),
+            counterparty_bank_corr_account=data.get("counterparty_bank_corr_account"),
+            due_date=due_date,
+            line_items=line_items,
+        )
+    except sqlite3.IntegrityError as e:
+        logger.exception("create_invoice упал с IntegrityError")
+        return jsonify({"error": f"Не удалось создать счёт: {e}"}), 409
 
     log_action(current_user.username, "create_invoice", f"{invoice['invoice_number']}: {amount}")
     return jsonify({"ok": True, "invoice": invoice}), 201

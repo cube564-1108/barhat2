@@ -44,7 +44,11 @@ ROLE_SECTIONS = {
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout увеличен против дефолтных 5с — на проде gunicorn поднимает
+    # 2 воркера (amvera.yml), пишущих в один файл SQLite; без запаса
+    # конкурентная запись (например log_action во время чужой транзакции)
+    # падает с "database is locked" вместо того, чтобы дождаться очереди
+    conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
     return conn
 
