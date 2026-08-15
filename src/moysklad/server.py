@@ -298,8 +298,15 @@ def trigger_sync():
     Запустить синхронизацию данных из МойСклад (склады, папки, каналы продаж,
     заказы покупателей с позициями) в фоновом потоке.
 
+    По умолчанию грузятся заказы за последние 6 месяцев (created >= сейчас - 6 мес) —
+    полная история на момент внедрения ABC-анализа составила 75К+ заказов (~110 мин
+    синхронизации), 6 месяцев покрывают 28К заказов (~40 мин) и достаточно для
+    большинства отчётов. Явный date_from переопределяет период, max_items — жёсткий
+    потолок на случай, если период всё равно окажется огромным.
+
     Body params:
-        - max_items (int): максимум заказов для загрузки (default 10000)
+        - date_from (str): нижняя граница created, формат YYYY-MM-DD (по умолчанию — 6 месяцев назад)
+        - max_items (int): максимум заказов для загрузки (default 100000)
     """
     global sync_status
 
@@ -311,7 +318,11 @@ def trigger_sync():
         })
 
     data = request.get_json(silent=True) or {}
-    max_items = data.get('max_items', 10000)
+    max_items = data.get('max_items', 100000)
+    date_from = data.get('date_from')
+    if not date_from:
+        from datetime import timedelta
+        date_from = (datetime.now() - timedelta(days=182)).strftime('%Y-%m-%d')
 
     def sync_in_background():
         global sync_status
@@ -340,11 +351,12 @@ def trigger_sync():
                 }[entity]
                 save_method(items)
 
-            sync_status['message'] = 'Загрузка заказов покупателей...'
+            sync_status['message'] = f'Загрузка заказов покупателей с {date_from}...'
             orders = fetcher.get_full_entity_data(
                 'sales_orders',
                 max_items=max_items,
-                expand='positions,positions.assortment,state'
+                expand='positions,positions.assortment,state',
+                filter={'filter': f'created>={date_from} 00:00:00'}
             )
             if orders is None:
                 raise Exception('Не удалось загрузить заказы')
