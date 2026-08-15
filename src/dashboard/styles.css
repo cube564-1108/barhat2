@@ -1337,6 +1337,67 @@ body {
     color: #721c24;
 }
 
+.status-idea {
+    background: #e2e3e5;
+    color: #383d41;
+}
+
+.status-in-progress {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-done {
+    background: #d4edda;
+    color: #155724;
+}
+
+/* === Задачи (раздел дашборда) === */
+
+.task-card {
+    border: 1px solid var(--barkhat-pink-light);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 12px;
+    background: rgba(232, 180, 184, 0.03);
+}
+
+.task-card-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.task-card-title {
+    flex: 1;
+    margin: 0;
+    font-size: 16px;
+    color: var(--barkhat-gray-dark);
+}
+
+.task-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.task-status-select {
+    padding: 4px 8px;
+    border: 1px solid var(--barkhat-pink-light);
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: var(--font-body);
+}
+
+.task-card-description,
+.task-card-notes {
+    margin: 8px 0 0;
+    font-size: 13px;
+    color: var(--barkhat-gray);
+    line-height: 1.5;
+}
+
 /* === Кнопка предупреждения === */
 
 .btn-warning {

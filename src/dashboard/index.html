@@ -261,6 +261,58 @@
                             </div>
                         </div>
                     </section>
+
+                    <!-- Задачи (только admin) -->
+                    <section class="section" id="tasksSection" style="display: none;">
+                        <h2 class="section-title">ЗАДАЧИ</h2>
+                        <p class="section-description">Идеи и фичи в работе — что делаем и на чём остановились</p>
+
+                        <button class="btn btn-primary" id="create-task-btn" style="margin-bottom: 16px;">+ Добавить задачу</button>
+
+                        <div id="tasks-list"></div>
+                    </section>
+
+                    <!-- Модалка создания/редактирования задачи -->
+                    <div id="task-modal" class="modal">
+                        <div class="modal-overlay" id="task-modal-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h2 class="modal-title" id="task-modal-title">Новая задача</h2>
+                                <button id="close-task-modal-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="form-group">
+                                    <label class="form-label" for="task-title">Название *</label>
+                                    <input type="text" id="task-title" class="form-input" placeholder="Название задачи">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="task-description">Описание</label>
+                                    <textarea id="task-description" class="form-input" rows="3" placeholder="Что делаем и зачем"></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="task-status">Статус</label>
+                                    <select id="task-status" class="form-select">
+                                        <option value="idea">Идея</option>
+                                        <option value="in_progress">В работе</option>
+                                        <option value="done">Выполнено</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="task-progress-notes">На чём остановились</label>
+                                    <textarea id="task-progress-notes" class="form-input" rows="3" placeholder="Прогресс, ссылки на планы"></textarea>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button class="btn btn-secondary" id="cancel-task-modal-btn">Отмена</button>
+                                <button class="btn btn-primary" id="confirm-task-modal-btn">Сохранить</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Другие страницы (заглушки) -->
@@ -1517,5 +1569,6 @@
     <script src="/cash-shifts.js"></script>
     <script src="/invoices.js"></script>
     <script src="/abc-analysis.js"></script>
+    <script src="/tasks.js"></script>
 </body>
 </html>

@@ -117,6 +117,16 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint МойСклад: {e}")
 
+# Регистрируем blueprint задач дашборда
+try:
+    from tasks.server import tasks_bp
+    app.register_blueprint(tasks_bp)
+    logger.info("Blueprint задач дашборда зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint задач дашборда: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint задач дашборда: {e}")
+
 # Инициализация таблиц авторизации
 with app.app_context():
     init_auth_tables()
@@ -140,6 +150,16 @@ with app.app_context():
         logger.warning(f"Не удалось импортировать модуль счетов на оплату: {e}")
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц счетов на оплату: {e}")
+
+    # Инициализация таблиц задач дашборда
+    try:
+        from tasks.storage import init_tasks_tables
+        init_tasks_tables()
+        logger.info("Таблицы задач дашборда инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль задач дашборда: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц задач дашборда: {e}")
 
 
 # Инициализация хранилища
@@ -334,6 +354,11 @@ def serve_invoices():
 def serve_abc_analysis():
     """Отдаёт скрипт ABC-анализа товаров"""
     return send_from_directory(DASHBOARD_DIR, 'abc-analysis.js')
+
+@app.route('/tasks.js')
+def serve_tasks():
+    """Отдаёт скрипт раздела задач дашборда"""
+    return send_from_directory(DASHBOARD_DIR, 'tasks.js')
 
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):
