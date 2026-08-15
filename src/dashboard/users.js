@@ -21,12 +21,13 @@
         'quality': 'Качество сборки',
         'cash_shifts': 'Кассовые смены',
         'invoices': 'Счета на оплату',
+        'abc_analysis': 'ABC-анализ товаров',
         'users_manage': 'Управление пользователями'
     };
 
     // === Пресеты permissions для ролей ===
     const ROLE_PERMISSIONS = {
-        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'users_manage'],
+        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'abc_analysis', 'users_manage'],
         'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices'],
         'florist': ['cash_shifts'],
         'florist_analyst': ['quality']

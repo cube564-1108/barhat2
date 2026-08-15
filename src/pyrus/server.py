@@ -107,6 +107,16 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint счетов на оплату: {e}")
 
+# Регистрируем blueprint МойСклад (ABC-анализ товаров)
+try:
+    from moysklad.server import moysklad_bp
+    app.register_blueprint(moysklad_bp)
+    logger.info("Blueprint МойСклад зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint МойСклад: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint МойСклад: {e}")
+
 # Инициализация таблиц авторизации
 with app.app_context():
     init_auth_tables()
@@ -269,6 +279,19 @@ def invoices_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/abc-analysis')
+def abc_analysis_page():
+    """Страница ABC-анализа товаров"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /abc-analysis: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 # === Static File Routes ===
 
 @app.route('/styles.css')
@@ -306,6 +329,11 @@ def serve_cash_shifts():
 def serve_invoices():
     """Отдаёт скрипт счетов на оплату"""
     return send_from_directory(DASHBOARD_DIR, 'invoices.js')
+
+@app.route('/abc-analysis.js')
+def serve_abc_analysis():
+    """Отдаёт скрипт ABC-анализа товаров"""
+    return send_from_directory(DASHBOARD_DIR, 'abc-analysis.js')
 
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):

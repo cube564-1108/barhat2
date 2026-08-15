@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 os.environ.setdefault('FLASK_ENV', 'production')
 os.environ.setdefault('PYRUS_DB_PATH', '/data/pyrus.db')
 os.environ.setdefault('BARHAT_DB_PATH', '/data/barhat.db')
+os.environ.setdefault('MOYSKLAD_DB_PATH', '/data/moysklad.db')
 
 from pyrus.server import app
 

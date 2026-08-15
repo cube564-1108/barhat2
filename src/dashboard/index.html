@@ -76,6 +76,19 @@
                     </a>
                 </div>
 
+                <!-- Аналитика -->
+                <div class="nav-section">
+                    <div class="nav-section-title">АНАЛИТИКА</div>
+                    <a href="/abc-analysis" class="nav-item" data-page="abc_analysis">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="20" x2="18" y2="10"/>
+                            <line x1="12" y1="20" x2="12" y2="4"/>
+                            <line x1="6" y1="20" x2="6" y2="14"/>
+                        </svg>
+                        <span>ABC-анализ товаров</span>
+                    </a>
+                </div>
+
                 <!-- Качество -->
                 <div class="nav-section">
                     <div class="nav-section-title">КАЧЕСТВО</div>
@@ -665,6 +678,85 @@
                                         </table>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- ABC-анализ товаров -->
+                <div class="page" data-page="abc_analysis">
+                    <section class="section">
+                        <h2 class="section-title">ABC-АНАЛИЗ ТОВАРОВ</h2>
+                        <p class="section-description">Товары по выручке — заказы в статусе «Выполнен», данные из МойСклад</p>
+
+                        <!-- Фильтры -->
+                        <div class="quality-filters" style="display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; align-items: flex-end;">
+                            <div class="filter-group">
+                                <label class="form-label">Период с:</label>
+                                <input type="date" id="abcDateFrom" class="form-input" style="width: 150px;">
+                            </div>
+                            <div class="filter-group">
+                                <label class="form-label">по:</label>
+                                <input type="date" id="abcDateTo" class="form-input" style="width: 150px;">
+                            </div>
+                            <div class="filter-group">
+                                <label class="form-label">Канал продаж:</label>
+                                <select id="abcChannel" class="form-select" style="width: 220px;">
+                                    <option value="">Все каналы</option>
+                                </select>
+                            </div>
+                            <button id="applyAbcFilters" class="btn btn-primary">Применить</button>
+                            <button id="resetAbcFilters" class="btn btn-secondary">Сбросить</button>
+                            <button id="syncMoyskladData" class="btn btn-accent">
+                                <span class="btn-text">🔄 Синхронизировать с МойСклад</span>
+                                <span class="btn-spinner hidden" style="margin-left: 8px;">⏳</span>
+                            </button>
+                            <div id="abcSyncStatus" class="update-status hidden"></div>
+                        </div>
+
+                        <!-- KPI плитки -->
+                        <div class="bx-kpi" style="margin: 24px 0;">
+                            <div class="card">
+                                <div class="label">Товаров в выдаче</div>
+                                <div class="value" id="abcTotalItems">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Выручка за период</div>
+                                <div class="value" id="abcTotalRevenue">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Класс A (топ по выручке)</div>
+                                <div class="value" id="abcClassACount">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Классы B / C</div>
+                                <div class="value" id="abcClassBCCount">-</div>
+                            </div>
+                        </div>
+
+                        <!-- Таблица товаров -->
+                        <div class="card calculator-card">
+                            <h3 class="card-title">Товары</h3>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Товар</th>
+                                            <th>Выручка</th>
+                                            <th>Доля</th>
+                                            <th>Накопительно</th>
+                                            <th>Класс</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="abcTableBody">
+                                        <tr>
+                                            <td colspan="6" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
                     </section>
@@ -1424,5 +1516,6 @@
     <script src="/users.js"></script>
     <script src="/cash-shifts.js"></script>
     <script src="/invoices.js"></script>
+    <script src="/abc-analysis.js"></script>
 </body>
 </html>

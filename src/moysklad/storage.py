@@ -146,6 +146,7 @@ class MoySkladStorage:
                     id TEXT PRIMARY KEY,
                     name TEXT,
                     description TEXT,
+                    created TIMESTAMP,
                     moment TIMESTAMP,
                     delivered TIMESTAMP,
                     rate REAL DEFAULT 1.0,
@@ -169,12 +170,17 @@ class MoySkladStorage:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sales_orders_agent_id ON sales_orders(agent_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sales_orders_snapshot_at ON sales_orders(snapshot_at)')
 
-            # Миграция: колонка канала продаж в заказах (добавлена позже создания таблицы)
+            # Миграция: колонки, добавленные позже создания таблицы
             cursor.execute("PRAGMA table_info(sales_orders)")
             sales_orders_cols = {row[1] for row in cursor.fetchall()}
             if 'sales_channel_id' not in sales_orders_cols:
                 cursor.execute('ALTER TABLE sales_orders ADD COLUMN sales_channel_id TEXT')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_sales_orders_channel_id ON sales_orders(sales_channel_id)')
+            if 'created' not in sales_orders_cols:
+                # customerorder.created — дата создания заказа, используется как "дата продажи"
+                # для ABC-анализа (see get_abc_analysis); изначально не сохранялась
+                cursor.execute('ALTER TABLE sales_orders ADD COLUMN created TIMESTAMP')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sales_orders_created ON sales_orders(created)')
 
             # Таблица каналов продаж (справочник)
             cursor.execute('''
@@ -458,14 +464,15 @@ class MoySkladStorage:
 
                 cursor.execute('''
                     INSERT OR REPLACE INTO sales_orders
-                    (id, name, description, moment, delivered, rate, sum, vat_sum,
+                    (id, name, description, created, moment, delivered, rate, sum, vat_sum,
                      state_id, state_name, agent_id, agent_name, store_id, store_name,
                      applicable, sales_channel_id, raw_data, snapshot_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     order.get('id'),
                     order.get('name'),
                     order.get('description'),
+                    order.get('created'),
                     order.get('moment'),
                     order.get('delivered'),
                     rate_value,

@@ -196,6 +196,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'quality': 'КАЧЕСТВО СБОРКИ БУКЕТОВ',
             'cash_shifts': 'КАССОВЫЕ СМЕНЫ',
             'invoices': 'СЧЕТА НА ОПЛАТУ',
+            'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'
         };

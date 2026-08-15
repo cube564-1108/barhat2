@@ -1,32 +1,37 @@
 """
-МойСklad JSON API Server
-Flask сервер для доступа к данным МойСклад
+МойСклад JSON API
+Blueprint для доступа к данным МойСклад (товары, остатки, заказы, ABC-анализ)
+
+Регистрируется в src/pyrus/server.py (мастер Flask-приложение) — см. паттерн
+cashshifts_bp / invoices_bp. Ниже также есть standalone-режим для локальной
+разработки (python -m moysklad.server).
 """
 
 import os
+import sys
 import logging
+import threading
 from datetime import datetime
 from typing import Any
-from flask import Flask, jsonify, request
+from flask import Blueprint, Flask, jsonify, request
+from flask_login import login_required
 from dotenv import load_dotenv
+
+# Импортируем модуль авторизации (как в cashshifts/server.py)
+auth_path = os.path.join(os.path.dirname(__file__), '../')
+sys.path.insert(0, auth_path)
+from auth import section_required, role_required
+
 from .storage import get_storage
 
 load_dotenv()
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
-
-# Создаём Flask приложение
-app = Flask(__name__)
 
 # Конфигурация
 DB_PATH = os.getenv('MOYSKLAD_DB_PATH', 'data/moysklad.db')
-HOST = os.getenv('MOYSKLAD_HOST', '0.0.0.0')
-PORT = int(os.getenv('MOYSKLAD_PORT', 5001))
+
+moysklad_bp = Blueprint("moysklad", __name__, url_prefix="/api/moysklad")
 
 
 def get_db():
@@ -53,21 +58,10 @@ def success_response(data: Any, meta: dict = None):
     return jsonify(response)
 
 
-# ========== Health check ==========
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Проверка здоровья"""
-    return jsonify({
-        'status': 'ok',
-        'service': 'moysklad-api',
-        'timestamp': datetime.now().isoformat()
-    })
-
-
 # ========== Products ==========
 
-@app.route('/api/moysklad/products', methods=['GET'])
+@moysklad_bp.route('/products', methods=['GET'])
+@login_required
 def get_products():
     """
     Получить товары
@@ -115,7 +109,8 @@ def get_products():
 
 # ========== Stock ==========
 
-@app.route('/api/moysklad/stock', methods=['GET'])
+@moysklad_bp.route('/stock', methods=['GET'])
+@login_required
 def get_stock():
     """
     Получить остатки
@@ -150,7 +145,8 @@ def get_stock():
 
 # ========== Stores ==========
 
-@app.route('/api/moysklad/stores', methods=['GET'])
+@moysklad_bp.route('/stores', methods=['GET'])
+@login_required
 def get_stores():
     """Получить все склады"""
     try:
@@ -166,7 +162,8 @@ def get_stores():
 
 # ========== Sales Orders ==========
 
-@app.route('/api/moysklad/sales_orders', methods=['GET'])
+@moysklad_bp.route('/sales_orders', methods=['GET'])
+@login_required
 def get_sales_orders():
     """
     Получить заказы покупателей
@@ -208,7 +205,8 @@ def get_sales_orders():
 
 # ========== Sales Channels ==========
 
-@app.route('/api/moysklad/sales_channels', methods=['GET'])
+@moysklad_bp.route('/sales_channels', methods=['GET'])
+@section_required('abc_analysis')
 def get_sales_channels():
     """Получить справочник каналов продаж"""
     try:
@@ -224,7 +222,8 @@ def get_sales_channels():
 
 # ========== ABC-анализ ==========
 
-@app.route('/api/moysklad/abc-analysis', methods=['GET'])
+@moysklad_bp.route('/abc-analysis', methods=['GET'])
+@section_required('abc_analysis')
 def get_abc_analysis():
     """
     ABC-анализ товаров по выручке (заказы в статусе "Выполнен",
@@ -267,7 +266,8 @@ def get_abc_analysis():
 
 # ========== Stats ==========
 
-@app.route('/api/moysklad/stats', methods=['GET'])
+@moysklad_bp.route('/stats', methods=['GET'])
+@login_required
 def get_stats():
     """Получить статистику БД"""
     try:
@@ -281,19 +281,139 @@ def get_stats():
         return error_response(str(e), 500)
 
 
-# ========== Main ==========
+# ========== Синхронизация с МойСклад ==========
+
+sync_status = {
+    'running': False,
+    'message': '',
+    'last_sync': None,
+    'error': None,
+}
+
+
+@moysklad_bp.route('/sync', methods=['POST'])
+@role_required('admin')
+def trigger_sync():
+    """
+    Запустить синхронизацию данных из МойСклад (склады, папки, каналы продаж,
+    заказы покупателей с позициями) в фоновом потоке.
+
+    Body params:
+        - max_items (int): максимум заказов для загрузки (default 10000)
+    """
+    global sync_status
+
+    if sync_status['running']:
+        return jsonify({
+            'success': False,
+            'error': 'Синхронизация уже запущена',
+            'status': sync_status
+        })
+
+    data = request.get_json(silent=True) or {}
+    max_items = data.get('max_items', 10000)
+
+    def sync_in_background():
+        global sync_status
+        try:
+            sync_status['running'] = True
+            sync_status['error'] = None
+            sync_status['message'] = 'Запуск синхронизации...'
+
+            from .fetcher import get_fetcher
+            fetcher = get_fetcher()
+            storage = get_db()
+
+            for entity, label in [
+                ('stores', 'складов'),
+                ('folders', 'папок'),
+                ('sales_channels', 'каналов продаж'),
+            ]:
+                sync_status['message'] = f'Загрузка {label}...'
+                items = fetcher.get_full_entity_data(entity, max_items=1000)
+                if items is None:
+                    raise Exception(f'Не удалось загрузить {label}')
+                save_method = {
+                    'stores': storage.save_stores,
+                    'folders': lambda rows: sum(1 for r in rows if storage.save_folder(r)),
+                    'sales_channels': storage.save_sales_channels,
+                }[entity]
+                save_method(items)
+
+            sync_status['message'] = 'Загрузка заказов покупателей...'
+            orders = fetcher.get_full_entity_data(
+                'sales_orders',
+                max_items=max_items,
+                expand='positions,positions.assortment,state'
+            )
+            if orders is None:
+                raise Exception('Не удалось загрузить заказы')
+
+            count = sum(1 for o in orders if storage.save_sales_order(o))
+            sync_status['message'] = f'Синхронизировано {count}/{len(orders)} заказов'
+            sync_status['last_sync'] = datetime.now().isoformat()
+
+        except Exception as e:
+            sync_status['error'] = str(e)
+            sync_status['message'] = f'Ошибка: {str(e)}'
+            logger.error(f"Ошибка синхронизации МойСклад: {e}")
+        finally:
+            sync_status['running'] = False
+
+    thread = threading.Thread(target=sync_in_background)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'success': True,
+        'message': 'Синхронизация запущена',
+        'status': sync_status
+    })
+
+
+@moysklad_bp.route('/sync-status', methods=['GET'])
+@login_required
+def get_sync_status():
+    """Получить статус синхронизации"""
+    return jsonify({
+        'success': True,
+        'status': sync_status
+    })
+
+
+# ========== Standalone-режим (локальная разработка) ==========
+
+def _build_standalone_app() -> Flask:
+    """Собрать отдельное Flask-приложение с этим blueprint'ом (без auth-обвязки
+    мастер-приложения) — только для локального запуска `python -m moysklad.server`."""
+    app = Flask(__name__)
+
+    @app.route('/health', methods=['GET'])
+    def health():
+        return jsonify({
+            'status': 'ok',
+            'service': 'moysklad-api',
+            'timestamp': datetime.now().isoformat()
+        })
+
+    app.register_blueprint(moysklad_bp)
+    return app
+
 
 def main():
-    """Запуск сервера"""
-    logger.info(f"Запуск MoySklad API сервера на {HOST}:{PORT}")
+    """Запуск standalone-сервера для локальной разработки"""
+    host = os.getenv('MOYSKLAD_HOST', '0.0.0.0')
+    port = int(os.getenv('MOYSKLAD_PORT', 5001))
+
+    logger.info(f"Запуск MoySklad API сервера на {host}:{port}")
     logger.info(f"База данных: {DB_PATH}")
 
-    # Проверяем что БД доступна
     storage = get_db()
     stats = storage.get_stats()
     logger.info(f"Статистика БД: {stats}")
 
-    app.run(host=HOST, port=PORT, debug=False)
+    app = _build_standalone_app()
+    app.run(host=host, port=port, debug=False)
 
 
 if __name__ == '__main__':
