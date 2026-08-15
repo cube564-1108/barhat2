@@ -58,8 +58,14 @@ REFERENCE_TABLES = {
 
 
 def get_db():
-    """Получить соединение с БД."""
-    conn = sqlite3.connect(DB_PATH)
+    """
+    Получить соединение с БД. Таймаут увеличен против дефолтных 5с — gunicorn
+    на проде поднимает 2 воркера (`amvera.yml`), которые независимо друг от
+    друга инициализируют таблицы при старте и могут одновременно писать
+    в один и тот же файл SQLite; без запаса воркер получает
+    "database is locked" вместо того, чтобы просто дождаться своей очереди.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -118,8 +124,7 @@ def init_invoices_tables():
     # 2. Миграция старой модели invoices (один store_id/category на счёт)
     #    на новую (распределение — в invoice_line_items)
     # ========================================================================
-    if _table_exists(conn, "invoices") and not _column_exists(conn, "invoices", "city_id"):
-        _migrate_invoices_to_line_items(conn)
+    _ensure_invoices_migrated(conn)
 
     # ========================================================================
     # 3. Счета на оплату (invoices) — новая схема
@@ -208,19 +213,52 @@ def init_invoices_tables():
     conn.close()
 
 
-def _migrate_invoices_to_line_items(conn: sqlite3.Connection):
+def _ensure_invoices_migrated(conn: sqlite3.Connection):
     """
     Переносит старую модель invoices (один store_id + expense_category_id
     NOT NULL на весь счёт) в новую (invoice_line_items, много строк на счёт).
 
-    Существующий счёт становится однострочной записью распределения —
-    частный случай новой модели, данные не теряются.
+    На проде gunicorn поднимает несколько воркеров (`amvera.yml`, --workers 2),
+    которые независимо друг от друга вызывают init_invoices_tables() при
+    старте — без защиты от гонки два воркера могли бы одновременно попытаться
+    переименовать/создать одну и ту же таблицу. Поэтому:
+    1) быстрая проверка без блокировки (частый случай — уже смигрировано,
+       незачем брать лок на каждый рестарт);
+    2) если похоже, что миграция нужна — берём эксклюзивную блокировку файла
+       (BEGIN IMMEDIATE) и перепроверяем условие уже под ней;
+    3) сама миграция резюмируема: если её уже начал и не доделал другой
+       воркер (осталась invoices_old_v1), доделываем с того места, а не
+       падаем и не теряем данные.
     """
-    logger.info("Миграция invoices: перенос store_id/expense_category_id в invoice_line_items...")
+    needs_check = _table_exists(conn, "invoices_old_v1") or (
+        _table_exists(conn, "invoices") and not _column_exists(conn, "invoices", "city_id")
+    )
+    if not needs_check:
+        return
 
-    conn.execute("ALTER TABLE invoices RENAME TO invoices_old_v1")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if _table_exists(conn, "invoices") and not _column_exists(conn, "invoices", "city_id") \
+                and not _table_exists(conn, "invoices_old_v1"):
+            logger.info("Миграция invoices: переименование старой таблицы...")
+            conn.execute("ALTER TABLE invoices RENAME TO invoices_old_v1")
 
-    # invoice_line_items должна существовать до переноса данных в неё
+        if _table_exists(conn, "invoices_old_v1"):
+            _finish_migration_from_old_table(conn, "invoices_old_v1")
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _finish_migration_from_old_table(conn: sqlite3.Connection, old_table_name: str):
+    """
+    Доводит миграцию до конца из таблицы old_table_name (старая invoices,
+    переименованная в рамках текущего вызова или оставленная прерванной
+    попыткой другого воркера). Вставки идемпотентны (проверка "уже перенесено?"
+    перед INSERT) — безопасно вызывать повторно на частично перенесённых данных.
+    """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS invoice_line_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,7 +270,7 @@ def _migrate_invoices_to_line_items(conn: sqlite3.Connection):
     """)
 
     conn.execute("""
-        CREATE TABLE invoices (
+        CREATE TABLE IF NOT EXISTS invoices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             invoice_number TEXT UNIQUE,
             match_code TEXT UNIQUE,
@@ -261,38 +299,42 @@ def _migrate_invoices_to_line_items(conn: sqlite3.Connection):
         )
     """)
 
-    old_rows = conn.execute("SELECT * FROM invoices_old_v1").fetchall()
+    old_rows = conn.execute(f"SELECT * FROM {old_table_name}").fetchall()
+    migrated = 0
 
     for row in old_rows:
-        conn.execute(
-            """
-            INSERT INTO invoices (
-                id, invoice_number, counterparty_name, counterparty_inn,
-                counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
-                counterparty_bank_corr_account, amount, payment_purpose, due_date,
-                status, created_by, created_at, approved_by, approved_at,
-                rejected_by, rejected_reason, paid_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                row["id"], row["invoice_number"], row["counterparty_name"], row["counterparty_inn"],
-                row["counterparty_bank_name"], row["counterparty_bank_bik"], row["counterparty_bank_account"],
-                row["counterparty_bank_corr_account"], row["amount"], row["payment_purpose"], row["due_date"],
-                row["status"], row["created_by"], row["created_at"], row["approved_by"], row["approved_at"],
-                row["rejected_by"], row["rejected_reason"], row["paid_at"],
+        if not conn.execute("SELECT 1 FROM invoices WHERE id = ?", (row["id"],)).fetchone():
+            conn.execute(
+                """
+                INSERT INTO invoices (
+                    id, invoice_number, counterparty_name, counterparty_inn,
+                    counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
+                    counterparty_bank_corr_account, amount, payment_purpose, due_date,
+                    status, created_by, created_at, approved_by, approved_at,
+                    rejected_by, rejected_reason, paid_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"], row["invoice_number"], row["counterparty_name"], row["counterparty_inn"],
+                    row["counterparty_bank_name"], row["counterparty_bank_bik"], row["counterparty_bank_account"],
+                    row["counterparty_bank_corr_account"], row["amount"], row["payment_purpose"], row["due_date"],
+                    row["status"], row["created_by"], row["created_at"], row["approved_by"], row["approved_at"],
+                    row["rejected_by"], row["rejected_reason"], row["paid_at"],
+                )
             )
-        )
-        conn.execute(
-            """
-            INSERT INTO invoice_line_items (invoice_id, store_id, expense_category_id, amount)
-            VALUES (?, ?, ?, ?)
-            """,
-            (row["id"], row["store_id"], row["expense_category_id"], row["amount"])
-        )
+            migrated += 1
 
-    conn.execute("DROP TABLE invoices_old_v1")
-    conn.commit()
-    logger.info(f"Перенесено {len(old_rows)} счетов в новую модель распределения")
+        if not conn.execute("SELECT 1 FROM invoice_line_items WHERE invoice_id = ?", (row["id"],)).fetchone():
+            conn.execute(
+                """
+                INSERT INTO invoice_line_items (invoice_id, store_id, expense_category_id, amount)
+                VALUES (?, ?, ?, ?)
+                """,
+                (row["id"], row["store_id"], row["expense_category_id"], row["amount"])
+            )
+
+    conn.execute(f"DROP TABLE {old_table_name}")
+    logger.info(f"Миграция invoices: перенесено {migrated} новых счетов из {len(old_rows)} в {old_table_name} (остальные уже были перенесены ранее)")
 
 
 def _backfill_match_codes(conn: sqlite3.Connection):

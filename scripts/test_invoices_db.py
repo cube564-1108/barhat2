@@ -296,12 +296,150 @@ def test_migration_from_old_schema():
     return True
 
 
+def test_concurrent_migration():
+    """
+    На проде gunicorn поднимает 2 воркера (amvera.yml, --workers 2), которые
+    независимо вызывают init_invoices_tables() при старте на один и тот же
+    файл SQLite. Эмулируем это двумя потоками с отдельными соединениями,
+    стартующими одновременно на одной старой схеме — миграция не должна
+    падать и не должна терять/дублировать данные.
+    """
+    print("\n=== Тест гонки двух воркеров при миграции ===\n")
+
+    import threading
+
+    concurrent_db_path = os.path.join(os.path.dirname(__file__), '_test_invoices_concurrent.db')
+    if os.path.exists(concurrent_db_path):
+        os.remove(concurrent_db_path)
+    os.environ['BARHAT_DB_PATH'] = concurrent_db_path
+
+    import importlib
+    import cashshifts.storage as cashshifts_storage
+    import invoices.storage as invoices_storage
+    importlib.reload(cashshifts_storage)
+    importlib.reload(invoices_storage)
+
+    cashshifts_storage.init_cashshifts_tables()
+    stores = cashshifts_storage.get_all_stores()
+    store_id = stores[0]["id"]
+
+    conn = sqlite3.connect(concurrent_db_path)
+    conn.execute("""
+        CREATE TABLE invoice_expense_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            planfact_category_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("INSERT INTO invoice_expense_categories (name) VALUES ('Старая статья')")
+    category_id = conn.execute("SELECT id FROM invoice_expense_categories").fetchone()[0]
+
+    conn.execute("""
+        CREATE TABLE invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_number TEXT UNIQUE,
+            store_id INTEGER NOT NULL,
+            expense_category_id INTEGER NOT NULL,
+            counterparty_name TEXT NOT NULL,
+            counterparty_inn TEXT,
+            counterparty_bank_name TEXT,
+            counterparty_bank_bik TEXT,
+            counterparty_bank_account TEXT,
+            counterparty_bank_corr_account TEXT,
+            amount REAL NOT NULL CHECK (amount > 0),
+            description TEXT,
+            payment_purpose TEXT,
+            due_date TEXT,
+            status TEXT NOT NULL DEFAULT 'on_approval',
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            approved_by TEXT,
+            approved_at TEXT,
+            rejected_by TEXT,
+            rejected_reason TEXT,
+            paid_at TEXT
+        )
+    """)
+    for i in range(5):
+        conn.execute(
+            """
+            INSERT INTO invoices (
+                invoice_number, store_id, expense_category_id, counterparty_name,
+                amount, payment_purpose, status, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, 'approved', 'old_user')
+            """,
+            (f"СЧ-{i+1:06d}", store_id, category_id, f"Контрагент {i+1}", 1000 + i, f"Оплата по счёту СЧ-{i+1:06d}")
+        )
+    conn.commit()
+    conn.close()
+
+    print("1. Старая схема с 5 счетами создана, запускаем init_invoices_tables() из 2 потоков одновременно...")
+
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def worker():
+        try:
+            barrier.wait()  # оба потока стартуют инициализацию максимально одновременно
+            invoices_storage.init_invoices_tables()
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    if errors:
+        print(f"   ✗ Ошибка: миграция упала при параллельном запуске: {errors}")
+        return False
+    print("   ✓ Оба воркера отработали без исключений\n")
+
+    print("2. Проверка целостности данных после гонки:")
+    conn = sqlite3.connect(concurrent_db_path)
+    conn.row_factory = sqlite3.Row
+
+    leftover = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='invoices_old_v1'"
+    ).fetchone()
+    if leftover:
+        print("   ✗ Ошибка: осталась незавершённая invoices_old_v1")
+        conn.close()
+        return False
+
+    all_invoices = conn.execute("SELECT * FROM invoices ORDER BY id").fetchall()
+    if len(all_invoices) != 5:
+        print(f"   ✗ Ошибка: ожидалось 5 счетов, получено {len(all_invoices)}")
+        conn.close()
+        return False
+
+    for row in all_invoices:
+        line_items = conn.execute(
+            "SELECT * FROM invoice_line_items WHERE invoice_id = ?", (row["id"],)
+        ).fetchall()
+        if len(line_items) != 1:
+            print(f"   ✗ Ошибка: у счёта {row['id']} {len(line_items)} строк распределения (ожидалась 1, дубликаты из-за гонки?)")
+            conn.close()
+            return False
+
+    conn.close()
+    print("   ✓ Все 5 счетов на месте, распределение без дублей, старая таблица убрана\n")
+
+    print("=== Гонка двух воркеров обработана корректно! ===")
+    return True
+
+
 if __name__ == "__main__":
     success = test_invoices()
     success = test_migration_from_old_schema() and success
+    success = test_concurrent_migration() and success
 
     for path in (TEST_DB_PATH,
-                 os.path.join(os.path.dirname(__file__), '_test_invoices_migration.db')):
+                 os.path.join(os.path.dirname(__file__), '_test_invoices_migration.db'),
+                 os.path.join(os.path.dirname(__file__), '_test_invoices_concurrent.db')):
         if os.path.exists(path):
             os.remove(path)
     if os.path.exists(TEST_ATTACHMENTS_DIR):
