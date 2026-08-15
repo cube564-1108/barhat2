@@ -20,13 +20,14 @@
         'calculator': 'Калькулятор букетов',
         'quality': 'Качество сборки',
         'cash_shifts': 'Кассовые смены',
+        'invoices': 'Счета на оплату',
         'users_manage': 'Управление пользователями'
     };
 
     // === Пресеты permissions для ролей ===
     const ROLE_PERMISSIONS = {
-        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'users_manage'],
-        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts'],
+        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'users_manage'],
+        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices'],
         'florist': ['cash_shifts'],
         'florist_analyst': ['quality']
     };
