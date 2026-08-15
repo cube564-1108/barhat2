@@ -127,7 +127,19 @@ def _register_reference_crud(name, get_all, get_by_id, create, update, delete):
             item_id = create(item_name)
         except sqlite3.IntegrityError:
             return jsonify({"error": f"«{item_name}» уже есть в справочнике"}), 400
-        log_action(current_user.username, f"create_{name}", item_name)
+        except Exception as e:
+            # ВРЕМЕННО: реальный текст ошибки для расследования инцидента, убрать после диагностики
+            logger.exception(f"create_{name} упал")
+            return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+        try:
+            log_action(current_user.username, f"create_{name}", item_name)
+        except Exception as e:
+            # ВРЕМЕННО: запись уже создана (item_id есть) — не даём упасть всему
+            # запросу из-за лога, но фиксируем реальную причину для расследования.
+            # Убрать broad except после диагностики, оставив только логирование.
+            logger.exception(f"log_action упал после успешного create_{name} (id={item_id})")
+            return jsonify({"ok": True, "id": item_id, "name": item_name,
+                             "warning": f"Запись создана, но лог действия не записался: {type(e).__name__}: {e}"}), 201
         return jsonify({"ok": True, "id": item_id, "name": item_name}), 201
     create_view.__name__ = f"add_{name}"
 
