@@ -29,6 +29,8 @@ from .storage import (
     STATUSES,
     ATTACHMENTS_DIR,
     get_moysklad_store,
+    list_moysklad_store_links,
+    link_moysklad_store,
     create_writeoff,
     get_writeoff_by_id,
     list_writeoffs,
@@ -105,6 +107,70 @@ def get_catalog():
         if (row.get("quantity") or 0) > 0
     ]
     return jsonify({"items": items})
+
+
+@writeoffs_bp.route("/store-links", methods=["GET"])
+@role_required("admin")
+def get_store_links():
+    """
+    Текущая связка точек продаж со складами МойСклад (для проверки без захода
+    в БД напрямую — на бою нет консоли на контейнер, эту БД видно только отсюда).
+    """
+    links = list_moysklad_store_links()
+    stores_by_id = {s["id"]: s["name"] for s in get_all_stores()}
+    moysklad_stores_by_id = {s.get("id"): s.get("name") for s in get_moysklad_storage().get_stores()}
+
+    result = [
+        {
+            "store_id": link["store_id"],
+            "store_name": stores_by_id.get(link["store_id"], f"#{link['store_id']}"),
+            "moysklad_store_id": link["moysklad_store_id"],
+            "moysklad_store_name": moysklad_stores_by_id.get(link["moysklad_store_id"], "?"),
+        }
+        for link in links
+    ]
+    linked_store_ids = {r["store_id"] for r in result}
+    unlinked = [{"store_id": s["id"], "store_name": s["name"]} for s in get_all_stores() if s["id"] not in linked_store_ids]
+
+    return jsonify({"links": result, "unlinked_stores": unlinked})
+
+
+@writeoffs_bp.route("/store-links", methods=["POST"])
+@role_required("admin")
+def set_store_links():
+    """
+    Применить связку точка -> склад МойСклад прямо к БД, с которой работает этот
+    процесс. Единственный способ настроить это на бою без shell-доступа к
+    контейнеру — см. plans/2026-08-16-stock-writeoffs-module.md, Фаза 7.
+
+    Body: {"links": [{"store_id": int, "moysklad_store_id": str}, ...]}
+    """
+    data = request.get_json(silent=True) or {}
+    raw_links = data.get("links")
+    if not isinstance(raw_links, list) or not raw_links:
+        return jsonify({"error": "Нужен непустой список links"}), 400
+
+    known_moysklad_ids = {s.get("id") for s in get_moysklad_storage().get_stores()}
+
+    applied = []
+    errors = []
+    for entry in raw_links:
+        store_id = entry.get("store_id")
+        moysklad_store_id = entry.get("moysklad_store_id")
+
+        if not isinstance(store_id, int) or not get_store_by_id(store_id):
+            errors.append({"store_id": store_id, "error": "Точка не найдена"})
+            continue
+        if not moysklad_store_id or moysklad_store_id not in known_moysklad_ids:
+            errors.append({"store_id": store_id, "error": "Склад МойСклад с таким id не найден"})
+            continue
+
+        href = build_entity_href("store", moysklad_store_id)
+        link_moysklad_store(store_id, moysklad_store_id, href)
+        applied.append({"store_id": store_id, "moysklad_store_id": moysklad_store_id})
+
+    log_action(current_user.username, "set_writeoff_store_links", f"{len(applied)} применено, {len(errors)} ошибок")
+    return jsonify({"ok": True, "applied": applied, "errors": errors})
 
 
 # =============================================================================
