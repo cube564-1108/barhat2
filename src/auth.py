@@ -36,9 +36,9 @@ login_manager = LoginManager()
 # Роли и какие разделы им доступны.
 # Меняйте под свои реальные разделы дашборда.
 ROLE_SECTIONS = {
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "abc_analysis"},
-    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices"},
-    "florist": {"cash_shifts"},  # Флорист работает только с кассой
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "abc_analysis", "writeoffs"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "writeoffs"},
+    "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
 }
 
@@ -263,6 +263,7 @@ ALL_MODULES = [
     'invoices',       # Счета на оплату
     'abc_analysis',   # ABC-анализ товаров
     'users_manage',   # Управление пользователями
+    'writeoffs',      # Списания товара
 ]
 
 
@@ -360,6 +361,9 @@ def init_auth_tables():
 
     # Догрузка права на модуль abc_analysis (по умолчанию только admin)
     migrate_new_module_permissions("abc_analysis", ["admin"])
+
+    # Догрузка права на модуль writeoffs (списания товара)
+    migrate_new_module_permissions("writeoffs", ["admin", "manager", "florist"])
 
 
 class User(UserMixin):
