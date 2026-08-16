@@ -143,6 +143,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (pageName === 'invoices' && window.InvoicesModule) {
                 window.InvoicesModule.onPageActivated(currentUser);
             }
+
+            // Активируем модуль списаний товара
+            if (pageName === 'writeoffs' && window.WriteoffsModule) {
+                window.WriteoffsModule.onPageActivated(currentUser);
+            }
         } else {
             // Если страницы нет, показываем заглушку
             const targetNav = document.querySelector(`.nav-item[data-page="${pageName}"]`);
@@ -196,6 +201,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'quality': 'КАЧЕСТВО СБОРКИ БУКЕТОВ',
             'cash_shifts': 'КАССОВЫЕ СМЕНЫ',
             'invoices': 'СЧЕТА НА ОПЛАТУ',
+            'writeoffs': 'СПИСАНИЯ ТОВАРА',
             'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'

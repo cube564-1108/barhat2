@@ -62,6 +62,19 @@
                     </a>
                 </div>
 
+                <!-- Склад -->
+                <div class="nav-section">
+                    <div class="nav-section-title">СКЛАД</div>
+                    <a href="/writeoffs" class="nav-item" data-page="writeoffs">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 6l9-4 9 4-9 4-9-4z"/>
+                            <path d="M3 6v12l9 4 9-4V6"/>
+                            <path d="M12 10v10"/>
+                        </svg>
+                        <span>Списания товара</span>
+                    </a>
+                </div>
+
                 <!-- Финансы -->
                 <div class="nav-section">
                     <div class="nav-section-title">ФИНАНСЫ</div>
@@ -1557,6 +1570,121 @@
                     </div>
                 </div>
 
+                <div class="page" data-page="writeoffs">
+                    <section class="section">
+                        <h2 class="section-title">СПИСАНИЯ ТОВАРА</h2>
+                        <p class="section-description">Флорист подаёт заявку с фото — управляющий согласует — списание автоматически уходит в МойСклад</p>
+
+                        <div class="card calculator-card">
+                            <div class="card-header">
+                                <h3 class="card-title">Заявки на списание</h3>
+                                <button id="create-writeoff-btn" class="btn btn-primary">+ Списать товар</button>
+                            </div>
+
+                            <div class="writeoffs-filters" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; padding: 12px 0;">
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Точка</label>
+                                    <select id="writeoffs-filter-store" class="form-select" style="width: 200px;">
+                                        <option value="">Все</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">Статус</label>
+                                    <select id="writeoffs-filter-status" class="form-select" style="width: 170px;">
+                                        <option value="">Все статусы</option>
+                                        <option value="on_approval">На согласовании</option>
+                                        <option value="processing">Отправляется</option>
+                                        <option value="sent">Списано</option>
+                                        <option value="failed">Ошибка отправки</option>
+                                        <option value="rejected">Отклонено</option>
+                                        <option value="cancelled">Отменено</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">С даты</label>
+                                    <input type="date" id="writeoffs-filter-date-from" class="form-input" style="width: 150px;">
+                                </div>
+                                <div class="form-group" style="margin: 0;">
+                                    <label class="form-label">По дату</label>
+                                    <input type="date" id="writeoffs-filter-date-to" class="form-input" style="width: 150px;">
+                                </div>
+                                <button id="writeoffs-apply-filters-btn" class="btn btn-secondary btn-sm">Применить</button>
+                                <button id="writeoffs-reset-filters-btn" class="btn btn-secondary btn-sm">Сбросить</button>
+                            </div>
+
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>№</th>
+                                            <th>Точка</th>
+                                            <th>Позиций</th>
+                                            <th>Статус</th>
+                                            <th>Создал</th>
+                                            <th>Создано</th>
+                                            <th>Действия</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="writeoffs-tbody">
+                                        <tr>
+                                            <td colspan="7" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Модалка создания заявки на списание -->
+                    <div class="modal" id="create-writeoff-modal">
+                        <div class="modal-overlay" id="create-writeoff-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title">Новое списание</h3>
+                                <button class="modal-close-btn" id="close-create-writeoff-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="form-group">
+                                    <label class="form-label">Точка *</label>
+                                    <select id="writeoff-store" class="form-select"></select>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Позиции *</label>
+                                    <p class="form-hint">Товар, количество, причина и фото списанного — на каждую позицию своё фото.</p>
+                                    <div id="writeoff-positions-rows"></div>
+                                    <button type="button" id="writeoff-add-position-btn" class="btn btn-secondary btn-sm">+ Добавить позицию</button>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="cancel-create-writeoff-btn" class="btn btn-secondary">Отмена</button>
+                                <button id="confirm-create-writeoff-btn" class="btn btn-success">Отправить на согласование</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модалка деталей заявки -->
+                    <div class="modal" id="writeoff-details-modal">
+                        <div class="modal-overlay" id="writeoff-details-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title" id="writeoff-details-title">Списание</h3>
+                                <button class="modal-close-btn" id="close-writeoff-details-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="writeoff-details-info" class="invoice-details-info"></div>
+                                <div class="form-group">
+                                    <label class="form-label">Позиции</label>
+                                    <div id="writeoff-details-positions"></div>
+                                </div>
+                            </div>
+                            <div class="modal-footer" id="writeoff-details-actions"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Остальные страницы будут добавлены по мере необходимости -->
             </div>
         </main>
@@ -1570,5 +1698,6 @@
     <script src="/invoices.js"></script>
     <script src="/abc-analysis.js"></script>
     <script src="/tasks.js"></script>
+    <script src="/writeoffs.js"></script>
 </body>
 </html>

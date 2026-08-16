@@ -319,6 +319,19 @@ def invoices_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/writeoffs')
+def writeoffs_page():
+    """Страница списаний товара"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /writeoffs: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 @app.route('/abc-analysis')
 def abc_analysis_page():
     """Страница ABC-анализа товаров"""
@@ -379,6 +392,11 @@ def serve_abc_analysis():
 def serve_tasks():
     """Отдаёт скрипт раздела задач дашборда"""
     return send_from_directory(DASHBOARD_DIR, 'tasks.js')
+
+@app.route('/writeoffs.js')
+def serve_writeoffs():
+    """Отдаёт скрипт раздела списаний товара"""
+    return send_from_directory(DASHBOARD_DIR, 'writeoffs.js')
 
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):

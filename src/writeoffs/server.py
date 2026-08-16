@@ -267,6 +267,11 @@ def approve(writeoff_id):
     if not _require_store_access(writeoff["store_id"]):
         return jsonify({"error": "Нет доступа к этой точке"}), 403
 
+    positions_without_photo = [p for p in writeoff["positions"] if not p["attachments"]]
+    if positions_without_photo:
+        names = ", ".join(p["product_name"] for p in positions_without_photo)
+        return jsonify({"error": f"Нет фото у позиций: {names}. Согласовать нельзя."}), 400
+
     if not lock_writeoff_for_sending(writeoff_id, current_user.username):
         return jsonify({"error": "Заявку уже обрабатывает кто-то другой или она уже рассмотрена"}), 409
 
