@@ -393,6 +393,92 @@ def get_sync_status():
     })
 
 
+# ========== Синхронизация каталога и остатков (для writeoffs/справочников) ==========
+# /sync выше тянет заказы для ABC-анализа и никогда не трогал products/stock —
+# это отдельная, более лёгкая и частая синхронизация под другой сценарий
+# (см. plans/2026-08-16-stock-writeoffs-module.md, Фаза 7).
+
+catalog_sync_status = {
+    'running': False,
+    'message': '',
+    'last_sync': None,
+    'error': None,
+}
+
+
+@moysklad_bp.route('/sync-catalog', methods=['POST'])
+@role_required('admin')
+def trigger_catalog_sync():
+    """Запустить синхронизацию товаров и остатков в фоновом потоке (products + stock)."""
+    global catalog_sync_status
+
+    if catalog_sync_status['running']:
+        return jsonify({
+            'success': False,
+            'error': 'Синхронизация каталога уже запущена',
+            'status': catalog_sync_status
+        })
+
+    data = request.get_json(silent=True) or {}
+    max_items = data.get('max_items', 10000)
+
+    def sync_catalog_in_background():
+        global catalog_sync_status
+        try:
+            catalog_sync_status['running'] = True
+            catalog_sync_status['error'] = None
+
+            scripts_path = os.path.join(os.path.dirname(__file__), '../../scripts')
+            if scripts_path not in sys.path:
+                sys.path.insert(0, scripts_path)
+            from update_moysklad import update_entity
+
+            from .fetcher import get_fetcher
+            fetcher = get_fetcher()
+            storage = get_db()
+
+            results = {}
+            for entity, label in [('products', 'товаров'), ('stock', 'остатков')]:
+                catalog_sync_status['message'] = f'Загрузка {label}...'
+                ok = update_entity(entity, fetcher, storage, max_items=max_items)
+                results[entity] = 'ok' if ok else 'failed'
+
+            failed = [e for e, r in results.items() if r == 'failed']
+            if failed:
+                catalog_sync_status['error'] = f'Не удалось загрузить: {", ".join(failed)}'
+                catalog_sync_status['message'] = catalog_sync_status['error']
+            else:
+                catalog_sync_status['message'] = 'Товары и остатки синхронизированы'
+                catalog_sync_status['last_sync'] = datetime.now().isoformat()
+
+        except Exception as e:
+            catalog_sync_status['error'] = str(e)
+            catalog_sync_status['message'] = f'Ошибка: {e}'
+            logger.error(f"Ошибка синхронизации каталога МойСклад: {e}")
+        finally:
+            catalog_sync_status['running'] = False
+
+    thread = threading.Thread(target=sync_catalog_in_background)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'success': True,
+        'message': 'Синхронизация каталога запущена',
+        'status': catalog_sync_status
+    })
+
+
+@moysklad_bp.route('/sync-catalog-status', methods=['GET'])
+@login_required
+def get_catalog_sync_status():
+    """Получить статус синхронизации товаров/остатков"""
+    return jsonify({
+        'success': True,
+        'status': catalog_sync_status
+    })
+
+
 # ========== Standalone-режим (локальная разработка) ==========
 
 def _build_standalone_app() -> Flask:
