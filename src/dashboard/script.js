@@ -250,25 +250,23 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     // === Мобильное меню ===
 
-    // Создаём кнопку гамбургер (для мобильных)
-    if (window.innerWidth <= 768) {
-        const menuToggle = document.createElement('button');
-        menuToggle.className = 'mobile-menu-toggle';
-        menuToggle.innerHTML = '<span></span>';
-        menuToggle.setAttribute('aria-label', 'Открыть меню');
+    // Кнопка гамбургер создаётся всегда — видимость (display) регулируется медиа-запросом
+    // в CSS, чтобы она появлялась и при resize/повороте экрана, а не только при загрузке страницы.
+    const menuToggle = document.createElement('button');
+    menuToggle.className = 'mobile-menu-toggle';
+    menuToggle.innerHTML = '<span></span>';
+    menuToggle.setAttribute('aria-label', 'Открыть меню');
 
-        menuToggle.addEventListener('click', function() {
-            document.querySelector('.sidebar').classList.toggle('open');
-        });
+    menuToggle.addEventListener('click', function() {
+        document.querySelector('.sidebar').classList.toggle('open');
+    });
 
-        document.body.appendChild(menuToggle);
-    }
+    document.body.appendChild(menuToggle);
 
     // Закрытие меню при клике вне его (на мобильных)
     document.addEventListener('click', function(e) {
         if (window.innerWidth <= 768) {
             const sidebar = document.querySelector('.sidebar');
-            const menuToggle = document.querySelector('.mobile-menu-toggle');
 
             if (!sidebar.contains(e.target) && !menuToggle.contains(e.target)) {
                 sidebar.classList.remove('open');

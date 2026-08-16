@@ -13,7 +13,12 @@
   --barkhat-pink-deep:   #B26FA1;  /* тёмный конец градиента */
   --barkhat-gray-dark:   #3C3C3C;  /* текст/знак */
   --barkhat-gray:        #6F6F6F;  /* вторичный серый */
+  --barkhat-gray-light:  #EFEAEF;  /* светло-серый фон (чекбоксы, плашки) */
   --barkhat-white:       #FFFFFF;
+  --barkhat-cream:       #F7EDE8;  /* кремовый фон плашек в шапке */
+  --barkhat-wine-dark:   #2E0D22;  /* тёмный винный — hover для кнопок на --barkhat-wine */
+  --barkhat-burgundy:    #5A1330;  /* бургунди — hover для кнопки выхода */
+  --barkhat-success:     #4CAF50; /* зелёный — успех/статус */
 
   /* Градиент */
   --barkhat-gradient: linear-gradient(135deg, #E1A4C9 0%, #B26FA1 100%);
