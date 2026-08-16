@@ -281,37 +281,6 @@ def get_stats():
         return error_response(str(e), 500)
 
 
-# ========== Диагностика: сырой ответ API остатков ==========
-# Временный эндпоинт — разобраться, почему /report/stock/all возвращает
-# пустой rows при реально ненулевых остатках в МойСклад. Убрать после
-# диагностики (см. plans/2026-08-16-stock-writeoffs-module.md, Фаза 7).
-
-@moysklad_bp.route('/debug-stock-raw', methods=['GET'])
-@role_required('admin')
-def debug_stock_raw():
-    """
-    Прямой GET-запрос к произвольному path МойСклад API (без сохранения) —
-    посмотреть на сырой ответ. По умолчанию /report/stock/all.
-    Query params: path (default /report/stock/all), limit (default 5), store_id.
-    """
-    try:
-        from .client import get_client
-        client = get_client()
-        path = request.args.get('path', '/report/stock/all')
-        limit = request.args.get('limit', 5, type=int)
-        params = {'limit': limit}
-        store_id = request.args.get('store_id')
-        if store_id:
-            from .client import build_entity_href
-            store_href = build_entity_href('store', store_id)
-            params['filter'] = f'store={store_href}'
-        raw = client.get(path, params=params)
-        return jsonify({'success': True, 'path': path, 'params': params, 'raw_response': raw})
-    except Exception as e:
-        logger.error(f"Ошибка debug_stock_raw: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
 # ========== Синхронизация с МойСклад ==========
 
 sync_status = {
@@ -424,10 +393,17 @@ def get_sync_status():
     })
 
 
-# ========== Синхронизация каталога и остатков (для writeoffs/справочников) ==========
-# /sync выше тянет заказы для ABC-анализа и никогда не трогал products/stock —
-# это отдельная, более лёгкая и частая синхронизация под другой сценарий
-# (см. plans/2026-08-16-stock-writeoffs-module.md, Фаза 7).
+# ========== Синхронизация каталога товаров (для справочников) ==========
+# /sync выше тянет заказы для ABC-анализа и никогда не трогал products.
+#
+# Остатки (stock) сюда сознательно не включены: writeoffs/server.py
+# get_catalog() запрашивает остатки у МойСклад напрямую, по одному складу
+# за раз (report/stock/all?filter=store=<href>) — это быстро и всегда
+# актуально. Локальная синхронизация stock в этот момент оказалась ещё и
+# сломана (storage.save_stock падал на каждой строке — расхождение числа
+# колонок/значений в INSERT, плюс /report/stock/all без фильтра по складу
+# вообще не отдаёт store_id на верхнем уровне), чинить её ради устаревающего
+# кэша смысла не было — см. plans/2026-08-16-stock-writeoffs-module.md, Фаза 7.
 
 catalog_sync_status = {
     'running': False,
@@ -440,7 +416,7 @@ catalog_sync_status = {
 @moysklad_bp.route('/sync-catalog', methods=['POST'])
 @role_required('admin')
 def trigger_catalog_sync():
-    """Запустить синхронизацию товаров и остатков в фоновом потоке (products + stock)."""
+    """Запустить синхронизацию товаров в фоновом потоке."""
     global catalog_sync_status
 
     if catalog_sync_status['running']:
@@ -458,6 +434,7 @@ def trigger_catalog_sync():
         try:
             catalog_sync_status['running'] = True
             catalog_sync_status['error'] = None
+            catalog_sync_status['message'] = 'Загрузка товаров...'
 
             scripts_path = os.path.join(os.path.dirname(__file__), '../../scripts')
             if scripts_path not in sys.path:
@@ -468,18 +445,12 @@ def trigger_catalog_sync():
             fetcher = get_fetcher()
             storage = get_db()
 
-            results = {}
-            for entity, label in [('products', 'товаров'), ('stock', 'остатков')]:
-                catalog_sync_status['message'] = f'Загрузка {label}...'
-                ok = update_entity(entity, fetcher, storage, max_items=max_items)
-                results[entity] = 'ok' if ok else 'failed'
-
-            failed = [e for e, r in results.items() if r == 'failed']
-            if failed:
-                catalog_sync_status['error'] = f'Не удалось загрузить: {", ".join(failed)}'
+            ok = update_entity('products', fetcher, storage, max_items=max_items)
+            if not ok:
+                catalog_sync_status['error'] = 'Не удалось загрузить товары'
                 catalog_sync_status['message'] = catalog_sync_status['error']
             else:
-                catalog_sync_status['message'] = 'Товары и остатки синхронизированы'
+                catalog_sync_status['message'] = 'Товары синхронизированы'
                 catalog_sync_status['last_sync'] = datetime.now().isoformat()
 
         except Exception as e:
@@ -503,7 +474,7 @@ def trigger_catalog_sync():
 @moysklad_bp.route('/sync-catalog-status', methods=['GET'])
 @login_required
 def get_catalog_sync_status():
-    """Получить статус синхронизации товаров/остатков"""
+    """Получить статус синхронизации товаров"""
     return jsonify({
         'success': True,
         'status': catalog_sync_status

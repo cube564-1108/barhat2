@@ -83,8 +83,17 @@ def get_stores():
 @section_required("writeoffs")
 def get_catalog():
     """
-    Товары для выбора при списании — остатки склада точки (только > 0),
-    из уже синхронизированного moysklad.db. Query params: store_id (обязателен).
+    Товары для выбора при списании — остатки склада точки (только > 0).
+
+    Запрашивается у МойСклад напрямую (report/stock/all?filter=store=<href>),
+    не из локального синка: остатки локально ни разу не были синхронизированы
+    корректно (см. Фазу 7 плана — save_stock падал на каждой строке из-за
+    несовпадения числа колонок/значений, плюс /report/stock/all вообще не
+    отдаёт store_id на верхнем уровне без фильтра по конкретному складу).
+    Прямой запрос, отфильтрованный по одному складу, у МойСклад быстрый
+    (проверено эмпирически) и не зависит от свежести локальной синхронизации —
+    остаток и так должен быть максимально актуальным на момент списания.
+    Query params: store_id (обязателен).
     """
     store_id = request.args.get("store_id", type=int)
     if not store_id or not get_store_by_id(store_id):
@@ -96,16 +105,34 @@ def get_catalog():
     if not link:
         return jsonify({"error": "Точка не сопоставлена складу МойСклад — обратитесь к админу"}), 400
 
-    stock_rows = get_moysklad_storage().get_stock(store_id=link["moysklad_store_id"], limit=1000)
-    items = [
-        {
-            "moysklad_product_id": row["product_id"],
-            "product_name": row["product_name"],
-            "quantity_available": row["quantity"],
-        }
-        for row in stock_rows
-        if (row.get("quantity") or 0) > 0
-    ]
+    try:
+        client = get_client()
+    except ValueError as e:
+        return jsonify({"error": f"МойСклад не настроен: {e}"}), 500
+
+    response = client.get('/report/stock/all', params={
+        'filter': f'store={link["moysklad_store_href"]}',
+        'limit': 1000,
+    })
+    if response is None:
+        return jsonify({"error": "Не удалось получить остатки из МойСклад"}), 502
+
+    items = []
+    for row in response.get('rows', []):
+        quantity = row.get('stock', 0) or 0
+        if quantity <= 0:
+            continue
+        product_href = row.get('meta', {}).get('href', '').split('?')[0]
+        product_id = product_href.rstrip('/').split('/')[-1] if product_href else None
+        if not product_id:
+            continue
+        items.append({
+            "moysklad_product_id": product_id,
+            "moysklad_product_href": product_href,
+            "product_name": row.get('name', ''),
+            "quantity_available": quantity,
+        })
+
     return jsonify({"items": items})
 
 
