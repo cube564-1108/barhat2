@@ -107,40 +107,47 @@ class MoySkladClient:
             path: API path (например, /entity/product)
             params: Query параметры
             json_data: JSON тело запроса
-            **kwargs: Дополнительные аргументы для requests
+            **kwargs: Дополнительные аргументы для requests (кроме headers/timeout — заданы здесь)
 
         Returns:
             JSON ответ или None в случае ошибки
+
+        Таймаут (30с) выставлен по умолчанию — без него зависший/медленный ответ
+        МойСклад блокирует gunicorn-воркер навсегда (реальный инцидент: воркер
+        завис на /report/stock/bystore, оба воркера заняты — сайт лёг). Ретрай
+        на 429 — цикл максимум на 3 попытки, не рекурсия без предела.
         """
         url = f"{self.api_url.rstrip('/')}/{path.lstrip('/')}"
 
         headers = kwargs.pop('headers', {})
         headers.update(self._get_auth_headers())
-        kwargs['headers'] = headers
-
+        request_kwargs = dict(kwargs)
+        request_kwargs['headers'] = headers
+        request_kwargs.setdefault('timeout', 30)
         if params:
-            kwargs['params'] = params
-
+            request_kwargs['params'] = params
         if json_data:
-            kwargs['json'] = json_data
+            request_kwargs['json'] = json_data
 
-        try:
-            logger.debug(f"{method} {url}")
-            response = self.session.request(method, url, **kwargs)
-            response.raise_for_status()
-            return response.json()
+        max_retries_429 = 3
+        for attempt in range(max_retries_429 + 1):
+            try:
+                logger.debug(f"{method} {url}")
+                response = self.session.request(method, url, **request_kwargs)
+                response.raise_for_status()
+                return response.json()
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка запроса {method} {path}: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response: {e.response.text}")
-                # Обработка rate limiting (429)
-                if e.response.status_code == 429:
-                    logger.warning("Rate limited, retrying after 1s...")
-                    import time
-                    time.sleep(1)
-                    return self.request(method, path, params, json_data, **kwargs)
-            return None
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Ошибка запроса {method} {path}: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logger.error(f"Response: {e.response.text}")
+                    if e.response.status_code == 429 and attempt < max_retries_429:
+                        logger.warning(f"Rate limited, retrying after 1s... (попытка {attempt + 1}/{max_retries_429})")
+                        import time
+                        time.sleep(1)
+                        continue
+                return None
+        return None
 
     def get(self, path: str, params: Optional[Dict] = None, **kwargs) -> Optional[Dict]:
         """GET запрос"""
