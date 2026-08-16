@@ -289,12 +289,22 @@ def get_stats():
 @moysklad_bp.route('/debug-stock-raw', methods=['GET'])
 @role_required('admin')
 def debug_stock_raw():
-    """Прямой вызов client.get_stock() без сохранения — посмотреть на сырой ответ API."""
+    """
+    Прямой GET-запрос к произвольному path МойСклад API (без сохранения) —
+    посмотреть на сырой ответ. По умолчанию /report/stock/all.
+    Query params: path (default /report/stock/all), limit (default 5), store_id.
+    """
     try:
         from .client import get_client
         client = get_client()
-        raw = client.get_stock(limit=5)
-        return jsonify({'success': True, 'raw_response': raw})
+        path = request.args.get('path', '/report/stock/all')
+        limit = request.args.get('limit', 5, type=int)
+        params = {'limit': limit}
+        store_id = request.args.get('store_id')
+        if store_id:
+            params['filter'] = f'store={store_id}'
+        raw = client.get(path, params=params)
+        return jsonify({'success': True, 'path': path, 'params': params, 'raw_response': raw})
     except Exception as e:
         logger.error(f"Ошибка debug_stock_raw: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
