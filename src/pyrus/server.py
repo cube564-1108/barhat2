@@ -161,6 +161,16 @@ with app.app_context():
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц задач дашборда: {e}")
 
+    # Инициализация таблиц списаний товара
+    try:
+        from writeoffs.storage import init_writeoffs_tables
+        init_writeoffs_tables()
+        logger.info("Таблицы списаний товара инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль списаний товара: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц списаний товара: {e}")
+
 
 # Инициализация хранилища
 db_path = os.getenv('PYRUS_DB_PATH', 'data/pyrus.db')
