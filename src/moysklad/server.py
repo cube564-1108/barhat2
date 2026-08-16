@@ -281,6 +281,25 @@ def get_stats():
         return error_response(str(e), 500)
 
 
+# ========== Диагностика: сырой ответ API остатков ==========
+# Временный эндпоинт — разобраться, почему /report/stock/all возвращает
+# пустой rows при реально ненулевых остатках в МойСклад. Убрать после
+# диагностики (см. plans/2026-08-16-stock-writeoffs-module.md, Фаза 7).
+
+@moysklad_bp.route('/debug-stock-raw', methods=['GET'])
+@role_required('admin')
+def debug_stock_raw():
+    """Прямой вызов client.get_stock() без сохранения — посмотреть на сырой ответ API."""
+    try:
+        from .client import get_client
+        client = get_client()
+        raw = client.get_stock(limit=5)
+        return jsonify({'success': True, 'raw_response': raw})
+    except Exception as e:
+        logger.error(f"Ошибка debug_stock_raw: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ========== Синхронизация с МойСклад ==========
 
 sync_status = {
