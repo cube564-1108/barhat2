@@ -84,13 +84,13 @@
 
 ---
 
-## Фаза 2: Миграции БД модуля writeoffs
+## Фаза 2: Миграции БД модуля writeoffs ✅
 
 **Goal:** Таблицы для заявок, позиций и вложений — в `barhat.db`, по паттерну `invoices`/`cashshifts`.
 
 **Задачи:**
-- [ ] Создать `src/writeoffs/storage.py` (паттерн `cashshifts/storage.py` / `invoices/storage.py`: `BARHAT_DB_PATH`, sqlite3 + row_factory)
-- [ ] Таблица `writeoffs`:
+- [x] Создать `src/writeoffs/storage.py` (паттерн `cashshifts/storage.py` / `invoices/storage.py`: `BARHAT_DB_PATH`, sqlite3 + row_factory)
+- [x] Таблица `writeoffs`:
   ```sql
   CREATE TABLE writeoffs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +109,7 @@
   CREATE INDEX idx_writeoffs_store ON writeoffs(store_id);
   CREATE INDEX idx_writeoffs_status ON writeoffs(status);
   ```
-- [ ] Таблица `writeoff_positions`:
+- [x] Таблица `writeoff_positions`:
   ```sql
   CREATE TABLE writeoff_positions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +122,7 @@
   );
   CREATE INDEX idx_writeoff_positions_writeoff ON writeoff_positions(writeoff_id);
   ```
-- [ ] Таблица `writeoff_attachments` (1:1 копия паттерна `invoice_attachments`, но привязана к позиции, а не к заявке — у каждого товара своё фото):
+- [x] Таблица `writeoff_attachments` (1:1 копия паттерна `invoice_attachments`, но привязана к позиции, а не к заявке — у каждого товара своё фото):
   ```sql
   CREATE TABLE writeoff_attachments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,8 +140,10 @@
 - Обязательно хотя бы одно фото на позицию — проверка на уровне API (Фаза 4), не БД
 
 **Done when:**
-- Миграция идемпотентна (`CREATE TABLE IF NOT EXISTS`), не ломает существующие таблицы `barhat.db`
-- Тестовая вставка заявки с 2 позициями и фото проходит без ошибок FK
+- [x] Миграция идемпотентна (`CREATE TABLE IF NOT EXISTS`), не ломает существующие таблицы `barhat.db` — прогнана на реальной `barhat.db` рядом с `cashshifts`/`invoices`/`auth`, конфликтов не возникло
+- [x] Тестовая вставка заявки с 2 позициями и фото проходит без ошибок FK — включая проверку атомарной блокировки статуса (второй параллельный `lock_writeoff_for_sending` на уже заблокированной заявке корректно возвращает `False`, не создавая гонки) и валидации вложений (недопустимое расширение отклоняется). Тестовые данные удалены из `barhat.db` после проверки.
+
+**Реализовано сверх черновика:** функции работы с заявками — `create_writeoff`, `get_writeoff_by_id`, `list_writeoffs`, `cancel_writeoff`, `lock_writeoff_for_sending`/`lock_writeoff_for_retry` (атомарные захваты статуса), `mark_writeoff_sent`/`mark_writeoff_failed`, `reject_writeoff`, `add_writeoff_attachment` и сопутствующие геттеры — понадобятся Фазе 4, но естественно легли в `storage.py` вместе со схемой.
 
 ---
 
