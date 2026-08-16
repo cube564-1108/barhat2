@@ -48,8 +48,13 @@ class MoySkladStorage:
     @contextmanager
     def _get_connection(self):
         """Контекст менеджер для подключения к SQLite"""
-        conn = sqlite3.connect(self.db_path)
+        # timeout + WAL — на проде несколько воркеров gunicorn пишут в один файл
+        # (см. auth.py::get_db); без этого конкурентная запись во время долгой
+        # синхронизации заказов даёт "database is locked" читателям
+        conn = sqlite3.connect(self.db_path, timeout=20)
         conn.row_factory = sqlite3.Row  # Доступ по имени колонки
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=20000")
         try:
             yield conn
             conn.commit()
@@ -636,6 +641,12 @@ class MoySkladStorage:
                     query += ' AND so.created >= ?'
                     params.append(date_from)
                 if date_to:
+                    # created хранится как полный ISO-datetime ("2026-07-31 03:26:04.037"),
+                    # а date_to обычно приходит голой датой ("2026-07-31") из <input type="date">.
+                    # Лексикографически "2026-07-31" < "2026-07-31 03:26:04.037", поэтому без
+                    # добавления времени последний день периода целиком выпадал из выборки.
+                    if len(date_to) <= 10:
+                        date_to = f'{date_to} 23:59:59.999999'
                     query += ' AND so.created <= ?'
                     params.append(date_to)
                 if channel_id:
@@ -878,6 +889,31 @@ class MoySkladStorage:
                 ''', (records_count, status, error_message, log_id))
         except Exception as e:
             logger.error(f"Ошибка обновления log записи: {e}")
+
+    def get_latest_sync_log(self, entity_type: Optional[str] = None) -> Optional[Dict]:
+        """
+        Получить последнюю запись лога синхронизации (опционально — по типу сущности).
+
+        Читается из общей таблицы sync_log (файл на диске), а не из памяти процесса —
+        в отличие от in-memory статуса, одинаково видна из любого воркера gunicorn
+        и переживает перезапуск воркера (запись 'started' без finished_at сигналит,
+        что синхронизация была прервана, не дойдя до завершения).
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if entity_type:
+                    cursor.execute(
+                        'SELECT * FROM sync_log WHERE entity_type = ? ORDER BY id DESC LIMIT 1',
+                        (entity_type,)
+                    )
+                else:
+                    cursor.execute('SELECT * FROM sync_log ORDER BY id DESC LIMIT 1')
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка получения лога синхронизации: {e}")
+            return None
 
     def get_stats(self) -> Dict:
         """Получить статистику БД"""

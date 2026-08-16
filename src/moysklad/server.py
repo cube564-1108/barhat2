@@ -281,15 +281,21 @@ def get_stats():
         return error_response(str(e), 500)
 
 
-# ========== Синхронизация с МойСклад ==========
-
-sync_status = {
-    'running': False,
-    'message': '',
-    'last_sync': None,
-    'error': None,
-}
-
+# ========== Синхронизация с МойСклад (заказы для ABC-анализа) ==========
+#
+# Статус синхронизации читается/пишется через таблицу sync_log (файл на диске),
+# а НЕ через in-memory словарь в процессе. Реальный инцидент: на Amvera 2 воркера
+# gunicorn (amvera.yml, --workers 2) — фоновый поток синхронизации стартовал на
+# одном воркере, а опрос /sync-status от фронтенда мог попасть на другой воркер
+# с чистым дефолтным статусом (running=False, message=''), показывая ложный ✅
+# сразу после запуска, пока реальная синхронизация ещё шла (или уже зависла —
+# см. таймаут в client.py) на первом воркере.
+#
+# Также заказы сохраняются постранично по мере загрузки, а не одним блоком в
+# конце: при 28К+ заказов и синхронизации на ~30+ минут любое прерывание процесса
+# (зависший запрос, перезапуск воркера) при старой схеме "сначала весь список в
+# память, потом сохранить" теряло вообще весь прогресс — сохранялось 0 записей
+# без единой ошибки, что и произошло на первом прогоне на проде.
 
 @moysklad_bp.route('/sync', methods=['POST'])
 @role_required('admin')
@@ -308,13 +314,12 @@ def trigger_sync():
         - date_from (str): нижняя граница created, формат YYYY-MM-DD (по умолчанию — 6 месяцев назад)
         - max_items (int): максимум заказов для загрузки (default 100000)
     """
-    global sync_status
-
-    if sync_status['running']:
+    storage = get_db()
+    last_log = storage.get_latest_sync_log('sales_orders')
+    if last_log and last_log['status'] == 'started':
         return jsonify({
             'success': False,
             'error': 'Синхронизация уже запущена',
-            'status': sync_status
         })
 
     data = request.get_json(silent=True) or {}
@@ -325,22 +330,20 @@ def trigger_sync():
         date_from = (datetime.now() - timedelta(days=182)).strftime('%Y-%m-%d')
 
     def sync_in_background():
-        global sync_status
+        storage = get_db()
+        log_id = storage.start_sync_log('sales_orders')
+        saved_count = 0
         try:
-            sync_status['running'] = True
-            sync_status['error'] = None
-            sync_status['message'] = 'Запуск синхронизации...'
-
             from .fetcher import get_fetcher
+            from .client import get_client
             fetcher = get_fetcher()
-            storage = get_db()
+            client = get_client()
 
             for entity, label in [
                 ('stores', 'складов'),
                 ('folders', 'папок'),
                 ('sales_channels', 'каналов продаж'),
             ]:
-                sync_status['message'] = f'Загрузка {label}...'
                 items = fetcher.get_full_entity_data(entity, max_items=1000)
                 if items is None:
                     raise Exception(f'Не удалось загрузить {label}')
@@ -351,26 +354,37 @@ def trigger_sync():
                 }[entity]
                 save_method(items)
 
-            sync_status['message'] = f'Загрузка заказов покупателей с {date_from}...'
-            orders = fetcher.get_full_entity_data(
-                'sales_orders',
-                max_items=max_items,
-                expand='positions,positions.assortment,state',
-                filter={'filter': f'created>={date_from} 00:00:00'}
-            )
-            if orders is None:
-                raise Exception('Не удалось загрузить заказы')
+            # Заказы — постранично: сохраняем каждую страницу сразу после
+            # загрузки, а не всё скопом в конце (см. комментарий выше блока)
+            offset = 0
+            batch_size = 100  # МойСклад не разворачивает positions.rows при limit > 100
+            while saved_count < max_items:
+                response = client.get_sales_orders(
+                    limit=batch_size,
+                    offset=offset,
+                    filter={'filter': f'created>={date_from} 00:00:00'},
+                    expand='positions,positions.assortment,state'
+                )
+                if response is None:
+                    raise Exception('Ошибка запроса заказов к МойСклад API')
 
-            count = sum(1 for o in orders if storage.save_sales_order(o))
-            sync_status['message'] = f'Синхронизировано {count}/{len(orders)} заказов'
-            sync_status['last_sync'] = datetime.now().isoformat()
+                rows = response.get('rows', [])
+                if not rows:
+                    break
+
+                for order in rows:
+                    storage.save_sales_order(order)
+                saved_count += len(rows)
+                offset += batch_size
+
+                if len(rows) < batch_size:
+                    break
+
+            storage.finish_sync_log(log_id, records_count=saved_count, status='completed')
 
         except Exception as e:
-            sync_status['error'] = str(e)
-            sync_status['message'] = f'Ошибка: {str(e)}'
+            storage.finish_sync_log(log_id, records_count=saved_count, status='failed', error_message=str(e))
             logger.error(f"Ошибка синхронизации МойСклад: {e}")
-        finally:
-            sync_status['running'] = False
 
     thread = threading.Thread(target=sync_in_background)
     thread.daemon = True
@@ -379,17 +393,37 @@ def trigger_sync():
     return jsonify({
         'success': True,
         'message': 'Синхронизация запущена',
-        'status': sync_status
     })
 
 
 @moysklad_bp.route('/sync-status', methods=['GET'])
 @login_required
 def get_sync_status():
-    """Получить статус синхронизации"""
+    """Получить статус синхронизации заказов (из sync_log — общий для всех воркеров)"""
+    storage = get_db()
+    last_log = storage.get_latest_sync_log('sales_orders')
+    stats = storage.get_stats()
+
+    running = bool(last_log and last_log['status'] == 'started')
+    error = last_log['error_message'] if last_log and last_log['status'] == 'failed' else None
+
+    if running:
+        message = f"Загружено {stats.get('sales_orders_count', 0)} заказов..."
+    elif error:
+        message = f"Ошибка: {error}"
+    elif last_log:
+        message = f"Синхронизировано {last_log['records_count']} заказов"
+    else:
+        message = ''
+
     return jsonify({
         'success': True,
-        'status': sync_status
+        'status': {
+            'running': running,
+            'error': error,
+            'message': message,
+            'last_sync': last_log['finished_at'] if last_log else None,
+        }
     })
 
 
