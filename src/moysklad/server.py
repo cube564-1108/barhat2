@@ -302,7 +302,9 @@ def debug_stock_raw():
         params = {'limit': limit}
         store_id = request.args.get('store_id')
         if store_id:
-            params['filter'] = f'store={store_id}'
+            from .client import build_entity_href
+            store_href = build_entity_href('store', store_id)
+            params['filter'] = f'store={store_href}'
         raw = client.get(path, params=params)
         return jsonify({'success': True, 'path': path, 'params': params, 'raw_response': raw})
     except Exception as e:
