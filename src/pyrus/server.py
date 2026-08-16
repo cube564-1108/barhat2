@@ -117,6 +117,16 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint МойСклад: {e}")
 
+# Регистрируем blueprint списаний товара
+try:
+    from writeoffs.server import writeoffs_bp
+    app.register_blueprint(writeoffs_bp)
+    logger.info("Blueprint списаний товара зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint списаний товара: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint списаний товара: {e}")
+
 # Регистрируем blueprint задач дашборда
 try:
     from tasks.server import tasks_bp

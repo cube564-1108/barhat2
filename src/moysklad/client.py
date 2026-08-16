@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 MOYSKLAD_API_URL = "https://api.moysklad.ru/api/remap/1.2/"
 
 
+def build_entity_href(entity: str, entity_id: str) -> str:
+    """meta.href сущности по типу и id (склад, товар и т.д.) — без похода в API."""
+    return f"{MOYSKLAD_API_URL.rstrip('/')}/entity/{entity}/{entity_id}"
+
+
 class MoySkladClient:
     """Клиент для работы с МойСклад API remap 1.2"""
 

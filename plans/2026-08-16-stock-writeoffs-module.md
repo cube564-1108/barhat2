@@ -171,24 +171,26 @@
 
 ---
 
-## Фаза 4: Flask API модуля writeoffs
+## Фаза 4: Flask API модуля writeoffs ✅ (код готов, живой прогон — вместе с Фазой 5)
 
 **Goal:** REST API — по паттерну `src/invoices/server.py`, blueprint `writeoffs_bp` (`url_prefix="/api/writeoffs"`).
 
-**Эндпоинты:**
-- [ ] `GET /api/writeoffs/catalog?store_id=` — список товаров для выбора (проксирует `moysklad.storage.get_products`, отфильтрованных по остаткам склада точки, если остаток = 0 — не показывать)
-- [ ] `POST /api/writeoffs` `{store_id, positions: [{moysklad_product_id, quantity, reason}]}` — создаёт заявку в статусе `on_approval`, `store_id` для роли `florist` берётся из его привязки (не из запроса), как в cashshifts
-- [ ] `POST /api/writeoffs/positions/<id>/attachments` — загрузка фото для позиции (multipart, поле `file`, паттерн `invoices` `upload_attachment`)
-- [ ] `GET /api/writeoffs/attachments/<id>/download` — отдача фото (`send_from_directory`)
-- [ ] `GET /api/writeoffs?store_id=&status=&date_from=&date_to=` — список с фильтрами, доступ по ролям (florist — своя точка, manager — свои точки через `user_stores`, admin — все)
-- [ ] `GET /api/writeoffs/<id>` — детали заявки + позиции + вложения
-- [ ] `DELETE /api/writeoffs/<id>` — отмена своей заявки автором, только пока `status='on_approval'`
-- [ ] `POST /api/writeoffs/<id>/approve` — только `manager`/`admin` с доступом к точке заявки. Алгоритм:
-  1. Атомарный `UPDATE writeoffs SET status='processing', approved_by=?, approved_at=datetime('now') WHERE id=? AND status='on_approval'` — проверить `rowcount == 1`; если 0, значит заявку уже кто-то обработал (двойной клик/два управляющих одновременно) → вернуть 409, ничего не отправлять
-  2. Только после успешного захвата статуса — собрать все позиции заявки и вызвать `create_loss()` **одним запросом**
-  3. Успех → `status='sent'`, сохранить `moysklad_loss_id`. Ошибка API → `status='failed'`, сохранить `moysklad_error`
-- [ ] `POST /api/writeoffs/<id>/reject` `{reason}` — только `manager`/`admin` с доступом к точке, тот же паттерн атомарного `UPDATE ... WHERE status='on_approval'` (защита от гонки с одновременным `/approve`)
-- [ ] `POST /api/writeoffs/<id>/retry` — только для `status='failed'`, тот же атомарный захват (`failed → processing`) перед повторным вызовом `create_loss()`
+**Эндпоинты (все реализованы в `src/writeoffs/server.py`):**
+- [x] `GET /api/writeoffs/catalog?store_id=` — товары из остатков склада точки (`moysklad.storage.get_stock`, только `quantity > 0`) — проще черновика: `stock` уже содержит `product_name`, отдельный джойн с `products` не понадобился
+- [x] `GET /api/writeoffs/stores` — точки, доступные текущему пользователю (переиспользует `cashshifts.get_all_stores` + `get_user_stores`) — не было в черновике Фазы 4, добавлено по аналогии с `invoices`/`cashshifts` (нужно фронтенду для селектора точки)
+- [x] `POST /api/writeoffs` `{store_id, positions: [{moysklad_product_id, product_name, quantity, reason?}]}` — создаёт заявку в `on_approval`; `href` товара пересобирается на сервере (`build_entity_href`), не берётся от клиента как есть — целостность ссылки на сущность МойСклад не зависит от того, что прислал браузер
+- [x] `POST /api/writeoffs/positions/<id>/attachments` — загрузка фото для позиции (multipart, поле `file`, паттерн `invoices` `upload_attachment`)
+- [x] `GET /api/writeoffs/positions/<id>/attachments` — список вложений позиции
+- [x] `GET /api/writeoffs/attachments/<id>/download` — отдача фото (`send_from_directory`)
+- [x] `GET /api/writeoffs?store_id=&status=&date_from=&date_to=` — список с фильтрами, доступ по ролям (florist/manager — свои точки через `user_stores`, admin — все)
+- [x] `GET /api/writeoffs/<id>` — детали заявки + позиции + вложения
+- [x] `DELETE /api/writeoffs/<id>` — отмена своей заявки автором, только пока `status='on_approval'` (проверка владельца — в `cancel_writeoff`)
+- [x] `POST /api/writeoffs/<id>/approve` — только `manager`/`admin` с доступом к точке заявки. Реализовано по алгоритму из критики (Чат 3):
+  1. `lock_writeoff_for_sending()` — атомарный `UPDATE ... WHERE status='on_approval'`, `rowcount != 1` → 409, ничего не отправляется
+  2. `_send_to_moysklad()` — один вызов `create_loss()` со всеми позициями заявки
+  3. Успех → `mark_writeoff_sent` (`status='sent'` + `moysklad_loss_id`). Ошибка/нет связки склада/нет `MOYSKLAD_ORGANIZATION_HREF` → `mark_writeoff_failed` с понятным текстом в `moysklad_error`
+- [x] `POST /api/writeoffs/<id>/reject` `{reason}` — атомарный `UPDATE ... WHERE status='on_approval'` через `reject_writeoff`
+- [x] `POST /api/writeoffs/<id>/retry` — атомарный захват `failed → processing` через `lock_writeoff_for_retry`, затем та же `_send_to_moysklad()`, что и в `/approve` (общий код, не дублирован)
 
 **Constraints:**
 - Все эндпоинты — `@login_required`/`@section_required("writeoffs")` как в invoices/cashshifts
@@ -197,8 +199,9 @@
 - Известный остаточный риск (осознанно не решается в MVP): если `create_loss()` реально создал документ в МойСклад, но ответ не дошёл до сервера (обрыв сети/таймаут) — заявка помечается `failed`, а документ в МойСклад уже есть. `/retry` создаст второй. При масштабе проекта (ручное согласование, не десятки заявок в секунду) — принимаем как редкий крайний случай с ручной сверкой, а не проектируем распределённую идемпотentность ради него
 
 **Done when:**
-- Полный цикл (создание → согласование → успешная отправка) проверен через curl/Postman
-- Сценарий `failed` → `retry` → `sent` проверен вручную (например, временно передав неверный `store_href`)
+- [x] Blueprint загружается без ошибок в реальном Flask-приложении (`pyrus.server`) — все роуты видны в `url_map`, порядок регистрации и `sys.path` совпадают с `invoices`/`cashshifts`
+- [ ] Полный цикл (создание → согласование → успешная отправка/ошибка) проверен через Flask test client — **отложено на Фазу 5**: `section_required("writeoffs")` сейчас блокирует все запросы, т.к. роли ещё не обновлены; сквозной прогон делаем сразу после Фазы 5, одним тестом на обе фазы
+- [ ] Сценарий `failed` → `retry` → `sent` проверен вручную — там же
 
 ---
 
