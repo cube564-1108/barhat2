@@ -420,6 +420,69 @@ class MoySkladClient:
 
         return self.get('/report/sales', params=params)
 
+    def get_organizations(self, limit: int = 100, offset: int = 0) -> Optional[Dict]:
+        """
+        Получить юрлица/ИП (organization) — нужно для создания документов
+        (списание, оприходование и т.д.), которые требуют ссылку на организацию.
+
+        Returns:
+            Словарь с meta и rows
+        """
+        return self.get('/entity/organization', params={'limit': limit, 'offset': offset})
+
+    def create_loss(
+        self,
+        organization_href: str,
+        store_href: str,
+        positions: List[Dict[str, Any]],
+        applicable: bool = True,
+        description: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """
+        Создать документ "Списание" (Loss) — списывает товар со склада.
+
+        Все позиции заявки уходят ОДНИМ документом за один запрос: MoySklad
+        нативно поддерживает несколько позиций в одном Loss, и это делает
+        отправку атомарной на стороне API — не бывает состояния "половина
+        позиций списалась, половина нет".
+
+        Args:
+            organization_href: meta.href организации (см. get_organizations())
+            store_href: meta.href склада, с которого списываем
+                (см. moysklad_store_links / get_stores())
+            positions: [{"assortment_href": str, "quantity": float}, ...] —
+                ВСЕ позиции заявки одним списком
+            applicable: True — списание проводится сразу (остаток уменьшается).
+                False — черновик, остаток не меняется
+            description: Комментарий к документу (например, номер заявки в дашборде)
+
+        Returns:
+            Созданный документ (с полем "id") или None при ошибке — причина
+            ошибки уже залогирована в self.request()
+        """
+        body: Dict[str, Any] = {
+            "organization": {"meta": {"href": organization_href, "type": "organization", "mediaType": "application/json"}},
+            "store": {"meta": {"href": store_href, "type": "store", "mediaType": "application/json"}},
+            "applicable": applicable,
+            "positions": [
+                {
+                    "assortment": {
+                        "meta": {
+                            "href": pos["assortment_href"],
+                            "type": "product",
+                            "mediaType": "application/json",
+                        }
+                    },
+                    "quantity": pos["quantity"],
+                }
+                for pos in positions
+            ],
+        }
+        if description:
+            body["description"] = description
+
+        return self.post('/entity/loss', json_data=body)
+
     def get_turnover_report(
         self,
         moment_from: str,

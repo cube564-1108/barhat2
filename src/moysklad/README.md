@@ -39,6 +39,10 @@ MOYSKLAD_PASSWORD=ваш_password
 
 # Путь к БД
 MOYSKLAD_DB_PATH=data/moysklad.db
+
+# Для создания документов (списание и т.д.) — href организации.
+# Получить: python scripts/get_moysklad_organization.py
+MOYSKLAD_ORGANIZATION_HREF=https://api.moysklad.ru/api/remap/1.2/entity/organization/...
 ```
 
 ### Получение API токена
@@ -145,6 +149,26 @@ curl http://localhost:5001/api/moysklad/stats
 - `counterparties` — контрагенты
 - `demands` — расходные накладные
 - `sync_log` — лог синхронизаций
+
+## Создание документов
+
+```python
+client = get_client()
+
+client.create_loss(
+    organization_href=os.getenv("MOYSKLAD_ORGANIZATION_HREF"),
+    store_href="https://api.moysklad.ru/api/remap/1.2/entity/store/...",
+    positions=[
+        {"assortment_href": "https://api.moysklad.ru/api/remap/1.2/entity/product/...", "quantity": 3},
+        {"assortment_href": "https://api.moysklad.ru/api/remap/1.2/entity/product/...", "quantity": 1},
+    ],
+    applicable=True,       # сразу проводит документ, остаток уменьшается
+    description="Списание #42 (дашборд)",
+)
+```
+
+Все позиции уходят одним документом за один запрос — списание либо проводится
+целиком, либо не проводится вовсе (используется модулем `src/writeoffs/`).
 
 ## Документация API МойСклад
 
