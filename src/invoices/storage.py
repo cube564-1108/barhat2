@@ -33,7 +33,7 @@ ALLOWED_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".pdf"}
 MAX_ATTACHMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ
 
 try:
-    from cashshifts.storage import get_all_stores, get_store_by_id, get_user_stores
+    from cashshifts.storage import get_all_stores, get_store_by_id, get_user_stores, get_users_full_names
 except ImportError:
     logger.warning("Модуль cashshifts недоступен — салоны для счетов не будут получены")
 
@@ -45,6 +45,9 @@ except ImportError:
 
     def get_user_stores(username: str) -> List[int]:
         return []
+
+    def get_users_full_names(usernames: List[str]) -> Dict[str, str]:
+        return {}
 
 
 STATUSES = ("on_approval", "approved", "rejected", "sent_to_bank", "paid")
@@ -245,6 +248,59 @@ def init_invoices_tables():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_invoice_comments_invoice
         ON invoice_comments(invoice_id)
+    """)
+
+    # ========================================================================
+    # 8. Сопоставление салонов с проектами ПланФакт (Фаза 6). Живёт в этом
+    # модуле, а не в cashshifts.stores — не трогаем чужую таблицу, salon-
+    # справочник модуля кассовых смен активно меняется отдельно.
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_store_planfact_projects (
+            store_id INTEGER PRIMARY KEY REFERENCES stores(id),
+            planfact_project_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # ========================================================================
+    # 9. Лог синхронизации с ПланФакт (Фаза 6) — статус синка виден из БД,
+    # общий для обоих gunicorn-воркеров, по аналогии с moysklad sync_log
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_planfact_sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL DEFAULT (datetime('now')),
+            finished_at TEXT,
+            status TEXT NOT NULL DEFAULT 'started' CHECK (status IN ('started','completed','failed')),
+            dry_run INTEGER NOT NULL DEFAULT 0,
+            matched_count INTEGER NOT NULL DEFAULT 0,
+            unmatched_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT
+        )
+    """)
+
+    # ========================================================================
+    # 10. Операции ПланФакт, которые не удалось однозначно сматчить/разнести
+    # автоматически — не теряются молча, видны админу в дашборде
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_planfact_unmatched (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            planfact_operation_id TEXT NOT NULL UNIQUE,
+            match_code TEXT,
+            invoice_id INTEGER REFERENCES invoices(id),
+            reason TEXT NOT NULL,
+            operation_amount REAL,
+            operation_comment TEXT,
+            detected_at TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved INTEGER NOT NULL DEFAULT 0,
+            resolved_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_invoice_planfact_unmatched_resolved
+        ON invoice_planfact_unmatched(resolved) WHERE resolved = 0
     """)
 
     conn.commit()

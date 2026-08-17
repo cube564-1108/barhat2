@@ -286,7 +286,7 @@
                     <td>${formatMoney(inv.amount)}</td>
                     <td>${inv.due_date || '—'}</td>
                     <td>${badge}</td>
-                    <td>${escapeHtml(inv.created_by || '')}</td>
+                    <td>${escapeHtml(inv.created_by_full_name || inv.created_by || '')}</td>
                     <td>${createdDate}</td>
                     <td style="white-space: nowrap;">${actions}</td>
                 </tr>
@@ -543,11 +543,11 @@
         elements.detailsTitle.textContent = `Счёт ${invoice.invoice_number}${invoice.is_archived ? ' (в архиве)' : ''}`;
 
         const rows = [
-            ['Создал', invoice.created_by],
+            ['Создал', invoice.created_by_full_name || invoice.created_by],
             ['Заведён', invoice.created_at ? invoice.created_at.slice(0, 16).replace('T', ' ') : '—'],
         ];
-        if (invoice.approved_by) rows.push(['Согласовал', `${invoice.approved_by}, ${(invoice.approved_at || '').slice(0, 16).replace('T', ' ')}`]);
-        if (invoice.rejected_by) rows.push(['Отклонил', `${invoice.rejected_by}${invoice.rejected_reason ? ': ' + invoice.rejected_reason : ''}`]);
+        if (invoice.approved_by) rows.push(['Согласовал', `${invoice.approved_by_full_name || invoice.approved_by}, ${(invoice.approved_at || '').slice(0, 16).replace('T', ' ')}`]);
+        if (invoice.rejected_by) rows.push(['Отклонил', `${invoice.rejected_by_full_name || invoice.rejected_by}${invoice.rejected_reason ? ': ' + invoice.rejected_reason : ''}`]);
         if (invoice.paid_at) rows.push(['Оплачен', invoice.paid_at.slice(0, 16).replace('T', ' ')]);
         if (invoice.is_archived) rows.push(['В архиве с', (invoice.archived_at || '').slice(0, 16).replace('T', ' ')]);
 
@@ -702,7 +702,7 @@
             const from = h.old_value !== null && h.old_value !== undefined ? escapeHtml(String(h.old_value)) : '—';
             const to = h.new_value !== null && h.new_value !== undefined ? escapeHtml(String(h.new_value)) : '—';
             return `<div style="padding:3px 0; font-size:13px;">
-                <span class="form-hint">${when}</span> — <strong>${escapeHtml(h.changed_by)}</strong>:
+                <span class="form-hint">${when}</span> — <strong>${escapeHtml(h.changed_by_full_name || h.changed_by)}</strong>:
                 ${escapeHtml(h.field_name)}: ${from} → ${to}
             </div>`;
         }).join('');
@@ -711,7 +711,7 @@
     function renderComments(comments) {
         elements.detailsComments.innerHTML = comments.length ? comments.map(c => `
             <div style="padding:4px 0; border-bottom:1px solid #eee;">
-                <div><strong>${escapeHtml(c.author)}</strong> <span class="form-hint">${(c.created_at || '').slice(0, 16).replace('T', ' ')}</span></div>
+                <div><strong>${escapeHtml(c.author_full_name || c.author)}</strong> <span class="form-hint">${(c.created_at || '').slice(0, 16).replace('T', ' ')}</span></div>
                 <div>${escapeHtml(c.message)}</div>
             </div>
         `).join('') : '<p class="form-hint">Сообщений нет</p>';

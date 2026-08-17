@@ -59,6 +59,7 @@ from .storage import (
     add_invoice_comment,
     get_invoice_comments,
     get_user_stores,
+    get_users_full_names,
     list_invoices,
     approve_invoice,
     reject_invoice,
@@ -198,6 +199,15 @@ def get_invoices():
         restrict_username=restrict_username,
         restrict_store_ids=restrict_store_ids,
     )
+
+    usernames = {inv.get("created_by") for inv in invoices}
+    usernames.update(inv.get("approved_by") for inv in invoices)
+    usernames.discard(None)
+    full_names = get_users_full_names(list(usernames))
+    for inv in invoices:
+        inv["created_by_full_name"] = full_names.get(inv.get("created_by"))
+        inv["approved_by_full_name"] = full_names.get(inv.get("approved_by"))
+
     return jsonify({"invoices": invoices, "count": len(invoices)})
 
 
@@ -210,6 +220,14 @@ def get_invoice(invoice_id):
         return jsonify({"error": "Счёт не найден"}), 404
     if not user_can_access_invoice(invoice, current_user.username, current_user.role):
         return jsonify({"error": "Нет доступа к этому счёту"}), 403
+
+    invoice_full_names = get_users_full_names(
+        [u for u in (invoice.get("created_by"), invoice.get("approved_by"), invoice.get("rejected_by")) if u]
+    )
+    invoice["created_by_full_name"] = invoice_full_names.get(invoice.get("created_by"))
+    invoice["approved_by_full_name"] = invoice_full_names.get(invoice.get("approved_by"))
+    invoice["rejected_by_full_name"] = invoice_full_names.get(invoice.get("rejected_by"))
+
     return jsonify({
         "invoice": invoice,
         "line_items": get_invoice_line_items(invoice_id),
@@ -573,7 +591,13 @@ def get_history(invoice_id):
         return jsonify({"error": "Счёт не найден"}), 404
     if not user_can_access_invoice(invoice, current_user.username, current_user.role):
         return jsonify({"error": "Нет доступа к этому счёту"}), 403
-    return jsonify({"history": get_invoice_history(invoice_id)})
+
+    history = get_invoice_history(invoice_id)
+    full_names = get_users_full_names(list({h["changed_by"] for h in history}))
+    for h in history:
+        h["changed_by_full_name"] = full_names.get(h["changed_by"])
+
+    return jsonify({"history": history})
 
 
 # =============================================================================
@@ -588,7 +612,13 @@ def list_comments(invoice_id):
         return jsonify({"error": "Счёт не найден"}), 404
     if not user_can_access_invoice(invoice, current_user.username, current_user.role):
         return jsonify({"error": "Нет доступа к этому счёту"}), 403
-    return jsonify({"comments": get_invoice_comments(invoice_id)})
+
+    comments = get_invoice_comments(invoice_id)
+    full_names = get_users_full_names(list({c["author"] for c in comments}))
+    for c in comments:
+        c["author_full_name"] = full_names.get(c["author"])
+
+    return jsonify({"comments": comments})
 
 
 @invoices_bp.route("/<int:invoice_id>/comments", methods=["POST"])

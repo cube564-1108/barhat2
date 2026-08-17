@@ -178,7 +178,7 @@
                     <td>${escapeHtml(storeName(w.store_id))}</td>
                     <td>${(w.positions || []).length}</td>
                     <td>${badge}</td>
-                    <td>${escapeHtml(w.created_by || '')}</td>
+                    <td>${escapeHtml(w.created_by_full_name || w.created_by || '')}</td>
                     <td>${createdDate}</td>
                     <td style="white-space: nowrap;">${actions}</td>
                 </tr>
@@ -473,11 +473,11 @@
         const rows = [
             ['Точка', storeName(writeoff.store_id)],
             ['Статус', STATUS_LABELS[writeoff.status] || writeoff.status],
-            ['Создал', writeoff.created_by],
+            ['Создал', writeoff.created_by_full_name || writeoff.created_by],
             ['Заведено', writeoff.created_at ? writeoff.created_at.slice(0, 16).replace('T', ' ') : '—'],
         ];
-        if (writeoff.approved_by) rows.push(['Согласовал', `${writeoff.approved_by}, ${(writeoff.approved_at || '').slice(0, 16).replace('T', ' ')}`]);
-        if (writeoff.rejected_by) rows.push(['Отклонил', `${writeoff.rejected_by}${writeoff.rejected_reason ? ': ' + writeoff.rejected_reason : ''}`]);
+        if (writeoff.approved_by) rows.push(['Согласовал', `${writeoff.approved_by_full_name || writeoff.approved_by}, ${(writeoff.approved_at || '').slice(0, 16).replace('T', ' ')}`]);
+        if (writeoff.rejected_by) rows.push(['Отклонил', `${writeoff.rejected_by_full_name || writeoff.rejected_by}${writeoff.rejected_reason ? ': ' + writeoff.rejected_reason : ''}`]);
         if (writeoff.moysklad_error) rows.push(['Ошибка МойСклад', writeoff.moysklad_error]);
         if (writeoff.moysklad_loss_id) rows.push(['Документ МойСклад', writeoff.moysklad_loss_id]);
 

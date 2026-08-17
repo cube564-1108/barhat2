@@ -21,7 +21,7 @@ auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
 from auth import role_required, section_required, log_action
 
-from cashshifts.storage import get_all_stores, get_store_by_id, get_user_stores, check_store_access
+from cashshifts.storage import get_all_stores, get_store_by_id, get_user_stores, check_store_access, get_users_full_names
 from moysklad.client import get_client, build_entity_href
 from moysklad.storage import get_storage as get_moysklad_storage
 
@@ -230,6 +230,15 @@ def get_writeoffs():
         limit=request.args.get("limit", 200, type=int),
         offset=request.args.get("offset", 0, type=int),
     )
+
+    usernames = {w.get("created_by") for w in writeoffs}
+    usernames.update(w.get("approved_by") for w in writeoffs)
+    usernames.discard(None)
+    full_names = get_users_full_names(list(usernames))
+    for w in writeoffs:
+        w["created_by_full_name"] = full_names.get(w.get("created_by"))
+        w["approved_by_full_name"] = full_names.get(w.get("approved_by"))
+
     return jsonify({"writeoffs": writeoffs, "count": len(writeoffs)})
 
 
@@ -241,6 +250,14 @@ def get_writeoff(writeoff_id):
         return jsonify({"error": "Заявка не найдена"}), 404
     if not _require_store_access(writeoff["store_id"]):
         return jsonify({"error": "Нет доступа к этой точке"}), 403
+
+    full_names = get_users_full_names(
+        [u for u in (writeoff.get("created_by"), writeoff.get("approved_by"), writeoff.get("rejected_by")) if u]
+    )
+    writeoff["created_by_full_name"] = full_names.get(writeoff.get("created_by"))
+    writeoff["approved_by_full_name"] = full_names.get(writeoff.get("approved_by"))
+    writeoff["rejected_by_full_name"] = full_names.get(writeoff.get("rejected_by"))
+
     return jsonify({"writeoff": writeoff})
 
 
