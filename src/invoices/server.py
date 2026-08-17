@@ -51,6 +51,13 @@ from .storage import (
     create_invoice,
     get_invoice_by_id,
     user_can_access_invoice,
+    can_edit_invoice_fields,
+    can_edit_invoice_status,
+    update_invoice,
+    update_invoice_status,
+    get_invoice_history,
+    add_invoice_comment,
+    get_invoice_comments,
     get_user_stores,
     list_invoices,
     approve_invoice,
@@ -207,7 +214,99 @@ def get_invoice(invoice_id):
         "invoice": invoice,
         "line_items": get_invoice_line_items(invoice_id),
         "attachments": get_invoice_attachments(invoice_id),
+        "can_edit_fields": can_edit_invoice_fields(invoice, current_user.username, current_user.role),
+        "can_edit_status": can_edit_invoice_status(invoice, current_user.role),
     })
+
+
+@invoices_bp.route("/<int:invoice_id>", methods=["PUT"])
+@section_required("invoices")
+def edit_invoice(invoice_id):
+    """
+    Частично отредактировать поля счёта (не статус — см. /<id>/status).
+
+    До согласования — автор счёта или админ. После согласования — только
+    админ. После отправки в банк/оплаты или в архиве — нельзя никому.
+    Body: любое подмножество редактируемых полей (см. can_edit_invoice_fields).
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
+    if not can_edit_invoice_fields(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Счёт закрыт для редактирования в текущем статусе"}), 409
+
+    data = request.get_json(silent=True) or {}
+    changes = {}
+
+    if "city_id" in data:
+        if not isinstance(data["city_id"], int) or not get_city_by_id(data["city_id"]):
+            return jsonify({"error": "Некорректный город"}), 400
+        changes["city_id"] = data["city_id"]
+
+    if "payer_id" in data:
+        if not isinstance(data["payer_id"], int) or not get_payer_by_id(data["payer_id"]):
+            return jsonify({"error": "Некорректный плательщик"}), 400
+        changes["payer_id"] = data["payer_id"]
+
+    if "vat_id" in data:
+        if data["vat_id"] is not None and not get_vat_option_by_id(data["vat_id"]):
+            return jsonify({"error": "Некорректный вариант НДС"}), 400
+        changes["vat_id"] = data["vat_id"]
+
+    if "due_date" in data:
+        if not (data["due_date"] or "").strip():
+            return jsonify({"error": "Планируемая дата оплаты обязательна"}), 400
+        changes["due_date"] = data["due_date"].strip()
+
+    if "amount" in data:
+        if not isinstance(data["amount"], (int, float)) or data["amount"] <= 0:
+            return jsonify({"error": "Сумма должна быть положительным числом"}), 400
+        changes["amount"] = data["amount"]
+
+    if "payment_purpose" in data:
+        if not (data["payment_purpose"] or "").strip():
+            return jsonify({"error": "Назначение платежа обязательно"}), 400
+        changes["payment_purpose"] = data["payment_purpose"].strip()
+
+    for field in ("counterparty_name", "counterparty_inn", "counterparty_bank_name",
+                  "counterparty_bank_bik", "counterparty_bank_account", "counterparty_bank_corr_account"):
+        if field in data:
+            changes[field] = data[field]
+
+    if not changes:
+        return jsonify({"error": "Нет полей для изменения"}), 400
+
+    updated = update_invoice(invoice_id, changes, current_user.username)
+    log_action(current_user.username, "edit_invoice", f"{invoice['invoice_number']}: {list(changes.keys())}")
+    return jsonify({"ok": True, "invoice": updated})
+
+
+@invoices_bp.route("/<int:invoice_id>/status", methods=["PUT"])
+@role_required("admin")
+def edit_invoice_status(invoice_id):
+    """
+    Прямая смена статуса счёта. Шире, чем обычное редактирование — не
+    закрывается после отправки в банк/оплаты, единственная граница — архив,
+    т.к. не все счета проходят через автозагрузку в банк и админу нужно
+    иметь возможность проставить статус вручную в любой момент до архивации.
+    Body: {"status": "on_approval"|"approved"|"rejected"|"sent_to_bank"|"paid"}
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not can_edit_invoice_status(invoice, current_user.role):
+        return jsonify({"error": "Счёт в архиве — статус изменить нельзя"}), 409
+
+    data = request.get_json(silent=True) or {}
+    new_status = data.get("status")
+    if new_status not in STATUSES:
+        return jsonify({"error": f"Неизвестный статус. Доступны: {list(STATUSES)}"}), 400
+
+    updated = update_invoice_status(invoice_id, new_status, current_user.username)
+    log_action(current_user.username, "edit_invoice_status", f"{invoice['invoice_number']}: {invoice['status']} -> {new_status}")
+    return jsonify({"ok": True, "invoice": updated})
 
 
 @invoices_bp.route("", methods=["POST"])
@@ -330,7 +429,7 @@ def mark_paid(invoice_id):
     if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
 
-    if not mark_invoice_paid(invoice_id):
+    if not mark_invoice_paid(invoice_id, current_user.username):
         return jsonify({"error": f"Счёт в статусе '{invoice['status']}', отметить оплаченным нельзя"}), 409
 
     log_action(current_user.username, "mark_invoice_paid", invoice["invoice_number"])
@@ -343,7 +442,7 @@ def archive_invoice_view(invoice_id):
     """Вручную перенести счёт в архив."""
     if not get_invoice_by_id(invoice_id):
         return jsonify({"error": "Счёт не найден"}), 404
-    set_invoice_archived(invoice_id, True)
+    set_invoice_archived(invoice_id, True, current_user.username)
     log_action(current_user.username, "archive_invoice", str(invoice_id))
     return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
 
@@ -354,7 +453,7 @@ def unarchive_invoice_view(invoice_id):
     """Вручную вернуть счёт из архива."""
     if not get_invoice_by_id(invoice_id):
         return jsonify({"error": "Счёт не найден"}), 404
-    set_invoice_archived(invoice_id, False)
+    set_invoice_archived(invoice_id, False, current_user.username)
     log_action(current_user.username, "unarchive_invoice", str(invoice_id))
     return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
 
@@ -377,6 +476,8 @@ def update_line_items(invoice_id):
         return jsonify({"error": "Счёт не найден"}), 404
     if not user_can_access_invoice(invoice, current_user.username, current_user.role):
         return jsonify({"error": "Нет доступа к этому счёту"}), 403
+    if not can_edit_invoice_fields(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Счёт закрыт для редактирования в текущем статусе"}), 409
 
     data = request.get_json(silent=True) or {}
     items = data.get("items") or []
@@ -389,7 +490,7 @@ def update_line_items(invoice_id):
         if not isinstance(item.get("amount"), (int, float)) or item["amount"] <= 0:
             return jsonify({"error": "Сумма строки должна быть положительным числом"}), 400
 
-    result = set_invoice_line_items(invoice_id, items)
+    result = set_invoice_line_items(invoice_id, items, current_user.username)
     if not result["ok"]:
         return jsonify({"error": result["error"]}), 400
 
@@ -455,6 +556,55 @@ def download_attachment(attachment_id):
 def remove_attachment(attachment_id):
     if not get_attachment_by_id(attachment_id):
         return jsonify({"error": "Вложение не найдено"}), 404
-    delete_attachment(attachment_id)
+    delete_attachment(attachment_id, current_user.username)
     log_action(current_user.username, "delete_invoice_attachment", str(attachment_id))
     return jsonify({"ok": True})
+
+
+# =============================================================================
+# ИСТОРИЯ ИЗМЕНЕНИЙ
+# =============================================================================
+
+@invoices_bp.route("/<int:invoice_id>/history", methods=["GET"])
+@section_required("invoices")
+def get_history(invoice_id):
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
+    return jsonify({"history": get_invoice_history(invoice_id)})
+
+
+# =============================================================================
+# СООБЩЕНИЯ
+# =============================================================================
+
+@invoices_bp.route("/<int:invoice_id>/comments", methods=["GET"])
+@section_required("invoices")
+def list_comments(invoice_id):
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
+    return jsonify({"comments": get_invoice_comments(invoice_id)})
+
+
+@invoices_bp.route("/<int:invoice_id>/comments", methods=["POST"])
+@section_required("invoices")
+def add_comment(invoice_id):
+    """Body: {"message": str}. Доступно, пока есть доступ к счёту — даже после архивации (обсуждение не редактирование)."""
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
+
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "Сообщение не может быть пустым"}), 400
+
+    comment = add_invoice_comment(invoice_id, current_user.username, message)
+    return jsonify({"ok": True, "comment": comment}), 201

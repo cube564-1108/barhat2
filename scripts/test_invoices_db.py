@@ -49,6 +49,13 @@ from invoices.storage import (
     is_invoice_fully_allocated,
     user_can_access_invoice,
     set_invoice_archived,
+    can_edit_invoice_fields,
+    can_edit_invoice_status,
+    update_invoice,
+    update_invoice_status,
+    get_invoice_history,
+    add_invoice_comment,
+    get_invoice_comments,
 )
 from invoices.seed_data import EXPENSE_CATEGORIES
 
@@ -486,10 +493,118 @@ def test_concurrent_migration():
     return True
 
 
+def test_editing_history_comments():
+    """Редактирование полей/статуса с учётом окна прав, история изменений, сообщения."""
+    print("\n=== Тест редактирования, истории и сообщений ===\n")
+
+    os.environ['BARHAT_DB_PATH'] = TEST_DB_PATH
+    import importlib
+    import cashshifts.storage as cashshifts_storage
+    import invoices.storage as s
+    importlib.reload(cashshifts_storage)
+    importlib.reload(s)
+
+    cashshifts_storage.init_cashshifts_tables()
+    s.init_invoices_tables()
+
+    stores = cashshifts_storage.get_all_stores()
+    city_id = s.create_city("Новосибирск")
+    payer_id = s.create_payer("ООО Плательщик")
+
+    print("1. Создание счёта автором creator_x:")
+    invoice = s.create_invoice(
+        amount=1000, payment_purpose="Черновое назначение", created_by="creator_x",
+        city_id=city_id, payer_id=payer_id, due_date="2026-09-01",
+    )
+    inv_id = invoice["id"]
+
+    if not s.can_edit_invoice_fields(invoice, "creator_x", "manager"):
+        print("   ✗ Ошибка: автор должен редактировать свой счёт до согласования")
+        return False
+    if s.can_edit_invoice_fields(invoice, "other_user", "manager"):
+        print("   ✗ Ошибка: чужой не-админ не должен редактировать чужой счёт")
+        return False
+    if not s.can_edit_invoice_fields(invoice, "anyone", "admin"):
+        print("   ✗ Ошибка: админ должен редактировать любой счёт до согласования")
+        return False
+    print("   ✓ Права на редактирование на этапе on_approval верны\n")
+
+    print("2. Правка полей автором + проверка истории:")
+    updated = s.update_invoice(inv_id, {"amount": 1500, "payment_purpose": "Итоговое назначение"}, "creator_x")
+    if updated["amount"] != 1500 or updated["payment_purpose"] != "Итоговое назначение":
+        print("   ✗ Ошибка: поля не обновились")
+        return False
+    history = s.get_invoice_history(inv_id)
+    fields_changed = {h["field_name"] for h in history}
+    if "amount" not in fields_changed or "payment_purpose" not in fields_changed or "счёт создан" not in fields_changed:
+        print(f"   ✗ Ошибка: в истории не хватает записей, получено: {fields_changed}")
+        return False
+    print(f"   ✓ Поля обновлены, в истории {len(history)} записей\n")
+
+    print("3. Согласование -> редактирование полей закрыто для не-админа:")
+    s.approve_invoice(inv_id, "admin_user")
+    invoice = s.get_invoice_by_id(inv_id)
+    if s.can_edit_invoice_fields(invoice, "creator_x", "manager"):
+        print("   ✗ Ошибка: после согласования автор-не-админ не должен редактировать поля")
+        return False
+    if not s.can_edit_invoice_fields(invoice, "admin_user", "admin"):
+        print("   ✗ Ошибка: админ должен редактировать поля после согласования")
+        return False
+    print("   ✓ После согласования поля редактирует только админ\n")
+
+    print("4. Ручная смена статуса на sent_to_bank (не через approve/reject/mark-paid):")
+    updated = s.update_invoice_status(inv_id, "sent_to_bank", "admin_user")
+    if updated["status"] != "sent_to_bank":
+        print(f"   ✗ Ошибка: статус не изменился, получено {updated['status']}")
+        return False
+    if s.can_edit_invoice_fields(updated, "admin_user", "admin"):
+        print("   ✗ Ошибка: после sent_to_bank поля должны быть закрыты даже для админа")
+        return False
+    if not s.can_edit_invoice_status(updated, "admin"):
+        print("   ✗ Ошибка: статус должен оставаться редактируемым (не все счета идут через банк)")
+        return False
+    print("   ✓ Поля закрыты, статус всё ещё редактируем\n")
+
+    print("5. Дальнейшая смена статуса sent_to_bank -> paid и авто-архив:")
+    updated = s.update_invoice_status(inv_id, "paid", "admin_user")
+    if updated["status"] != "paid" or not updated["paid_at"]:
+        print("   ✗ Ошибка: paid_at не проставлен при ручной смене статуса")
+        return False
+    # без распределения счёт не считается полностью разнесённым -> не архивируется автоматически
+    if updated["is_archived"]:
+        print("   ✗ Ошибка: счёт без распределения не должен архивироваться автоматически")
+        return False
+    if not s.can_edit_invoice_status(updated, "admin"):
+        print("   ✗ Ошибка: статус редактируем, пока счёт не в архиве")
+        return False
+    print("   ✓ Статус меняется вручную в обход approve/reject/mark-paid\n")
+
+    print("6. Архивация -> статус закрыт даже для админа:")
+    s.set_invoice_archived(inv_id, True, "admin_user")
+    archived_invoice = s.get_invoice_by_id(inv_id)
+    if s.can_edit_invoice_status(archived_invoice, "admin"):
+        print("   ✗ Ошибка: статус архивного счёта не должен быть редактируемым")
+        return False
+    print("   ✓ Архив закрывает изменение статуса\n")
+
+    print("7. Сообщения на карточке счёта:")
+    s.add_invoice_comment(inv_id, "creator_x", "Отправил счёт на согласование")
+    s.add_invoice_comment(inv_id, "admin_user", "Проверил, всё ок")
+    comments = s.get_invoice_comments(inv_id)
+    if len(comments) != 2 or comments[0]["author"] != "creator_x" or comments[1]["author"] != "admin_user":
+        print(f"   ✗ Ошибка: сообщения не сохранились в правильном порядке: {comments}")
+        return False
+    print("   ✓ Сообщения сохраняются и отдаются по порядку\n")
+
+    print("=== Редактирование, история и сообщения работают корректно! ===")
+    return True
+
+
 if __name__ == "__main__":
     success = test_invoices()
     success = test_migration_from_old_schema() and success
     success = test_concurrent_migration() and success
+    success = test_editing_history_comments() and success
 
     for path in (TEST_DB_PATH,
                  os.path.join(os.path.dirname(__file__), '_test_invoices_migration.db'),

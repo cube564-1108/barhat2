@@ -14,6 +14,7 @@
     let vatList = [];
     let loaded = false;
     let currentDetailsInvoiceId = null;
+    let currentDetailsInvoice = null;
     let currentRefType = 'categories';
 
     const REF_LABELS = {
@@ -27,7 +28,7 @@
         on_approval: 'На согласовании',
         approved: 'Согласован',
         rejected: 'Отклонён',
-        sent_to_bank: 'Отправлен в банк',
+        sent_to_bank: 'Загружен в банк',
         paid: 'Оплачен',
     };
 
@@ -94,6 +95,14 @@
         elements.detailsAttachments = document.getElementById('invoice-details-attachments');
         elements.detailsAttachmentInput = document.getElementById('invoice-details-attachment-input');
         elements.detailsActions = document.getElementById('invoice-details-actions');
+        elements.detailsEditFields = document.getElementById('invoice-details-edit-fields');
+        elements.detailsSaveFieldsBtn = document.getElementById('invoice-details-save-fields-btn');
+        elements.detailsStatusSelect = document.getElementById('invoice-details-status-select');
+        elements.detailsSaveStatusBtn = document.getElementById('invoice-details-save-status-btn');
+        elements.detailsHistory = document.getElementById('invoice-details-history');
+        elements.detailsComments = document.getElementById('invoice-details-comments');
+        elements.detailsNewComment = document.getElementById('invoice-details-new-comment');
+        elements.detailsSendCommentBtn = document.getElementById('invoice-details-send-comment-btn');
 
         elements.referencesModal = document.getElementById('invoice-references-modal');
         elements.referencesOverlay = document.getElementById('invoice-references-overlay');
@@ -125,6 +134,9 @@
         });
         elements.detailsSaveLineItemsBtn?.addEventListener('click', saveDetailsLineItems);
         elements.detailsAttachmentInput?.addEventListener('change', uploadDetailsAttachments);
+        elements.detailsSaveFieldsBtn?.addEventListener('click', saveDetailsFields);
+        elements.detailsSaveStatusBtn?.addEventListener('click', saveDetailsStatus);
+        elements.detailsSendCommentBtn?.addEventListener('click', sendDetailsComment);
 
         elements.manageReferencesBtn?.addEventListener('click', openReferencesModal);
         elements.closeReferencesBtn?.addEventListener('click', closeReferencesModal);
@@ -497,10 +509,21 @@
     async function openDetailsModal(id) {
         currentDetailsInvoiceId = parseInt(id, 10);
         try {
-            const res = await fetch(`/api/invoices/${id}`, { credentials: 'include' });
-            const data = await res.json();
-            if (!res.ok) { alert(data.error || 'Счёт не найден'); return; }
-            renderDetails(data.invoice, data.line_items || [], data.attachments || []);
+            const [detailsRes, historyRes, commentsRes] = await Promise.all([
+                fetch(`/api/invoices/${id}`, { credentials: 'include' }),
+                fetch(`/api/invoices/${id}/history`, { credentials: 'include' }),
+                fetch(`/api/invoices/${id}/comments`, { credentials: 'include' }),
+            ]);
+            const data = await detailsRes.json();
+            if (!detailsRes.ok) { alert(data.error || 'Счёт не найден'); return; }
+            const historyData = await historyRes.json();
+            const commentsData = await commentsRes.json();
+
+            renderDetails(data.invoice, data.line_items || [], data.attachments || [],
+                Boolean(data.can_edit_fields), Boolean(data.can_edit_status));
+            renderHistory(historyData.history || []);
+            renderComments(commentsData.comments || []);
+
             elements.detailsModal.classList.add('active');
             elements.detailsOverlay.classList.add('active');
         } catch (e) {
@@ -515,21 +538,11 @@
         currentDetailsInvoiceId = null;
     }
 
-    function renderDetails(invoice, lineItems, attachments) {
+    function renderDetails(invoice, lineItems, attachments, canEditFields, canEditStatus) {
+        currentDetailsInvoice = invoice;
         elements.detailsTitle.textContent = `Счёт ${invoice.invoice_number}${invoice.is_archived ? ' (в архиве)' : ''}`;
 
         const rows = [
-            ['Город', cityName(invoice.city_id)],
-            ['На кого выставлен', payerName(invoice.payer_id)],
-            ['Контрагент', invoice.counterparty_name || '—'],
-            ['ИНН контрагента', invoice.counterparty_inn || '—'],
-            ['Расчётный счёт контрагента', invoice.counterparty_bank_account || '—'],
-            ['БИК контрагента', invoice.counterparty_bank_bik || '—'],
-            ['НДС', vatName(invoice.vat_id)],
-            ['Сумма', formatMoney(invoice.amount)],
-            ['Назначение платежа', invoice.payment_purpose || '—'],
-            ['Планируемая дата оплаты', invoice.due_date || '—'],
-            ['Статус', STATUS_LABELS[invoice.status] || invoice.status],
             ['Создал', invoice.created_by],
             ['Заведён', invoice.created_at ? invoice.created_at.slice(0, 16).replace('T', ' ') : '—'],
         ];
@@ -542,15 +555,21 @@
             `<div style="display:flex; gap:8px; padding:2px 0;"><strong style="min-width:220px;">${escapeHtml(label)}:</strong><span>${escapeHtml(String(value))}</span></div>`
         ).join('');
 
+        elements.detailsStatusSelect.value = invoice.status;
+        elements.detailsStatusSelect.disabled = !canEditStatus;
+        elements.detailsSaveStatusBtn.style.display = canEditStatus ? '' : 'none';
+
+        renderEditFields(invoice, canEditFields);
+
         elements.detailsLineItemsRows.innerHTML = '';
         lineItems.forEach(item => {
             elements.detailsLineItemsRows.appendChild(createLineItemRow(item, elements.detailsLineItemsTotal));
         });
         updateLineItemsTotal(elements.detailsLineItemsRows, elements.detailsLineItemsTotal);
 
-        const canEditDistribution = !invoice.is_archived;
-        elements.detailsAddLineItemBtn.style.display = canEditDistribution ? '' : 'none';
-        elements.detailsSaveLineItemsBtn.style.display = canEditDistribution ? '' : 'none';
+        elements.detailsAddLineItemBtn.style.display = canEditFields ? '' : 'none';
+        elements.detailsSaveLineItemsBtn.style.display = canEditFields ? '' : 'none';
+        elements.detailsLineItemsRows.querySelectorAll('select, input').forEach(el => { el.disabled = !canEditFields; });
 
         elements.detailsAttachments.innerHTML = attachments.length ? attachments.map(a => `
             <div style="display:flex; gap:8px; align-items:center; padding:2px 0;">
@@ -565,6 +584,160 @@
         });
 
         renderDetailsActions(invoice);
+    }
+
+    function renderEditFields(invoice, canEditFields) {
+        const disabled = canEditFields ? '' : 'disabled';
+        elements.detailsEditFields.innerHTML = `
+            <div class="form-group">
+                <label class="form-label">Город</label>
+                <select id="edit-field-city" class="form-select" ${disabled}>
+                    ${cityList.map(c => `<option value="${c.id}" ${c.id === invoice.city_id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">На кого выставлен счёт</label>
+                <select id="edit-field-payer" class="form-select" ${disabled}>
+                    ${payerList.map(p => `<option value="${p.id}" ${p.id === invoice.payer_id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">НДС</label>
+                <select id="edit-field-vat" class="form-select" ${disabled}>
+                    <option value="">Не указан</option>
+                    ${vatList.map(v => `<option value="${v.id}" ${v.id === invoice.vat_id ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Наименование контрагента</label>
+                <input type="text" id="edit-field-counterparty" class="form-input" value="${escapeHtml(invoice.counterparty_name || '')}" ${disabled}>
+            </div>
+            <div class="form-group">
+                <label class="form-label">ИНН контрагента</label>
+                <input type="text" id="edit-field-inn" class="form-input" value="${escapeHtml(invoice.counterparty_inn || '')}" ${disabled}>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Расчётный счёт контрагента</label>
+                <input type="text" id="edit-field-account" class="form-input" value="${escapeHtml(invoice.counterparty_bank_account || '')}" ${disabled}>
+            </div>
+            <div class="form-group">
+                <label class="form-label">БИК контрагента</label>
+                <input type="text" id="edit-field-bik" class="form-input" value="${escapeHtml(invoice.counterparty_bank_bik || '')}" ${disabled}>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Сумма, ₽</label>
+                <input type="number" id="edit-field-amount" class="form-input" min="0" step="0.01" value="${invoice.amount}" ${disabled}>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Назначение платежа</label>
+                <textarea id="edit-field-purpose" class="form-input" rows="2" ${disabled}>${escapeHtml(invoice.payment_purpose || '')}</textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Планируемая дата оплаты</label>
+                <input type="date" id="edit-field-due-date" class="form-input" value="${invoice.due_date || ''}" ${disabled}>
+            </div>
+        `;
+        elements.detailsSaveFieldsBtn.style.display = canEditFields ? '' : 'none';
+    }
+
+    async function saveDetailsFields() {
+        if (!currentDetailsInvoiceId) return;
+        const payload = {
+            city_id: parseInt(document.getElementById('edit-field-city').value, 10),
+            payer_id: parseInt(document.getElementById('edit-field-payer').value, 10),
+            vat_id: document.getElementById('edit-field-vat').value ? parseInt(document.getElementById('edit-field-vat').value, 10) : null,
+            counterparty_name: document.getElementById('edit-field-counterparty').value.trim() || null,
+            counterparty_inn: document.getElementById('edit-field-inn').value.trim() || null,
+            counterparty_bank_account: document.getElementById('edit-field-account').value.trim() || null,
+            counterparty_bank_bik: document.getElementById('edit-field-bik').value.trim() || null,
+            amount: parseFloat(document.getElementById('edit-field-amount').value),
+            payment_purpose: document.getElementById('edit-field-purpose').value.trim(),
+            due_date: document.getElementById('edit-field-due-date').value,
+        };
+        try {
+            const res = await fetch(`/api/invoices/${currentDetailsInvoiceId}`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Ошибка сохранения'); return; }
+            await openDetailsModal(currentDetailsInvoiceId);
+            await loadInvoices();
+        } catch (e) {
+            console.error('Ошибка сохранения счёта:', e);
+            alert('Ошибка сохранения счёта');
+        }
+    }
+
+    async function saveDetailsStatus() {
+        if (!currentDetailsInvoiceId) return;
+        const status = elements.detailsStatusSelect.value;
+        if (!confirm(`Сменить статус на «${STATUS_LABELS[status] || status}»?`)) return;
+        try {
+            const res = await fetch(`/api/invoices/${currentDetailsInvoiceId}/status`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status }),
+            });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Ошибка смены статуса'); return; }
+            await openDetailsModal(currentDetailsInvoiceId);
+            await loadInvoices();
+        } catch (e) {
+            console.error('Ошибка смены статуса:', e);
+            alert('Ошибка смены статуса');
+        }
+    }
+
+    function renderHistory(history) {
+        if (!history.length) {
+            elements.detailsHistory.innerHTML = '<p class="form-hint">Изменений нет</p>';
+            return;
+        }
+        elements.detailsHistory.innerHTML = history.map(h => {
+            const when = (h.changed_at || '').slice(0, 16).replace('T', ' ');
+            const from = h.old_value !== null && h.old_value !== undefined ? escapeHtml(String(h.old_value)) : '—';
+            const to = h.new_value !== null && h.new_value !== undefined ? escapeHtml(String(h.new_value)) : '—';
+            return `<div style="padding:3px 0; font-size:13px;">
+                <span class="form-hint">${when}</span> — <strong>${escapeHtml(h.changed_by)}</strong>:
+                ${escapeHtml(h.field_name)}: ${from} → ${to}
+            </div>`;
+        }).join('');
+    }
+
+    function renderComments(comments) {
+        elements.detailsComments.innerHTML = comments.length ? comments.map(c => `
+            <div style="padding:4px 0; border-bottom:1px solid #eee;">
+                <div><strong>${escapeHtml(c.author)}</strong> <span class="form-hint">${(c.created_at || '').slice(0, 16).replace('T', ' ')}</span></div>
+                <div>${escapeHtml(c.message)}</div>
+            </div>
+        `).join('') : '<p class="form-hint">Сообщений нет</p>';
+    }
+
+    async function sendDetailsComment() {
+        if (!currentDetailsInvoiceId) return;
+        const message = elements.detailsNewComment.value.trim();
+        if (!message) return;
+        try {
+            const res = await fetch(`/api/invoices/${currentDetailsInvoiceId}/comments`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message }),
+            });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Ошибка отправки сообщения'); return; }
+            elements.detailsNewComment.value = '';
+            const commentsRes = await fetch(`/api/invoices/${currentDetailsInvoiceId}/comments`, { credentials: 'include' });
+            const commentsData = await commentsRes.json();
+            renderComments(commentsData.comments || []);
+        } catch (e) {
+            console.error('Ошибка отправки сообщения:', e);
+            alert('Ошибка отправки сообщения');
+        }
     }
 
     function renderDetailsActions(invoice) {

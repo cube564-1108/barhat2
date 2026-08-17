@@ -211,6 +211,42 @@ def init_invoices_tables():
         ON invoice_attachments(invoice_id)
     """)
 
+    # ========================================================================
+    # 6. История изменений
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+            changed_by TEXT NOT NULL,
+            changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            field_name TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_invoice_history_invoice
+        ON invoice_history(invoice_id)
+    """)
+
+    # ========================================================================
+    # 7. Сообщения (обсуждение счёта)
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+            author TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_invoice_comments_invoice
+        ON invoice_comments(invoice_id)
+    """)
+
     conn.commit()
 
     # ========================================================================
@@ -558,7 +594,7 @@ def is_invoice_fully_allocated(invoice_id: int) -> bool:
     return total > 0 and abs(total - invoice["amount"]) < 0.01
 
 
-def set_invoice_line_items(invoice_id: int, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+def set_invoice_line_items(invoice_id: int, items: List[Dict[str, Any]], changed_by: str = "system") -> Dict[str, Any]:
     """
     Полностью заменить распределение счёта по проектам/статьям.
 
@@ -582,6 +618,12 @@ def set_invoice_line_items(invoice_id: int, items: List[Dict[str, Any]]) -> Dict
             conn.close()
             return {"ok": False, "error": f"Сумма строк ({total}) не равна сумме счёта ({invoice['amount']})"}
 
+    old_line_items = conn.execute(
+        "SELECT * FROM invoice_line_items WHERE invoice_id = ?", (invoice_id,)
+    ).fetchall()
+    old_summary = ", ".join(f"салон {r['store_id']}: {r['amount']}" for r in old_line_items) or "—"
+    new_summary = ", ".join(f"салон {i['store_id']}: {i['amount']}" for i in items) or "—"
+
     conn.execute("DELETE FROM invoice_line_items WHERE invoice_id = ?", (invoice_id,))
     for item in items:
         conn.execute(
@@ -593,6 +635,9 @@ def set_invoice_line_items(invoice_id: int, items: List[Dict[str, Any]]) -> Dict
         )
     conn.commit()
     conn.close()
+
+    if old_summary != new_summary:
+        add_invoice_history(invoice_id, changed_by, "распределение", old_summary, new_summary)
 
     _auto_archive_if_ready(invoice_id)
 
@@ -629,6 +674,8 @@ def add_invoice_attachment(invoice_id: int, original_filename: str, file_bytes: 
     row = conn.execute("SELECT * FROM invoice_attachments WHERE id = ?", (attachment_id,)).fetchone()
     conn.close()
 
+    add_invoice_history(invoice_id, uploaded_by, "вложение", None, original_filename)
+
     return {"ok": True, "error": None, "attachment": dict(row)}
 
 
@@ -649,7 +696,7 @@ def get_attachment_by_id(attachment_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
-def delete_attachment(attachment_id: int) -> bool:
+def delete_attachment(attachment_id: int, changed_by: str = "system") -> bool:
     attachment = get_attachment_by_id(attachment_id)
     if not attachment:
         return False
@@ -664,6 +711,7 @@ def delete_attachment(attachment_id: int) -> bool:
     except OSError:
         logger.warning(f"Не удалось удалить файл вложения {attachment['stored_filename']} с диска")
 
+    add_invoice_history(attachment["invoice_id"], changed_by, "вложение удалено", attachment["original_filename"], None)
     return True
 
 
@@ -746,6 +794,8 @@ def create_invoice(
     row = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
     conn.close()
 
+    add_invoice_history(invoice_id, created_by, "счёт создан", None, invoice_number)
+
     return dict(row)
 
 
@@ -776,6 +826,171 @@ def user_can_access_invoice(invoice: Dict[str, Any], username: str, role: str) -
 
     line_items = get_invoice_line_items(invoice["id"])
     return any(item["store_id"] in allowed_store_ids for item in line_items)
+
+
+# Статусы, после которых деньги уже в движении/ушли — правки полей закрыты
+# для всех, включая админа (см. план: "после того как счёт загружен в банк
+# изменения в счёте закрыты").
+_CLOSED_FOR_EDIT_STATUSES = ("sent_to_bank", "paid")
+
+
+def can_edit_invoice_fields(invoice: Dict[str, Any], username: str, role: str) -> bool:
+    """
+    Может ли пользователь редактировать обычные поля счёта (не статус).
+
+    До согласования — автор счёта или админ. После согласования — только
+    админ. После отправки в банк/оплаты (или архивации) — никто.
+    """
+    if invoice["is_archived"] or invoice["status"] in _CLOSED_FOR_EDIT_STATUSES:
+        return False
+    if invoice["status"] == "on_approval":
+        return role == "admin" or invoice["created_by"] == username
+    return role == "admin"
+
+
+def can_edit_invoice_status(invoice: Dict[str, Any], role: str) -> bool:
+    """
+    Смена статуса — отдельная, более широкая возможность админа: не все
+    счета проходят через автозагрузку в банк, поэтому статус должен
+    оставаться редактируемым дольше, чем остальные поля (иначе номерной
+    статус "Загружен в банк" никогда нельзя было бы проставить руками).
+    Единственная граница — архив (счёт, по которому работа закрыта).
+    """
+    return role == "admin" and not invoice["is_archived"]
+
+
+def add_invoice_history(invoice_id: int, changed_by: str, field_name: str,
+                         old_value: Optional[str], new_value: Optional[str]) -> None:
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO invoice_history (invoice_id, changed_by, field_name, old_value, new_value)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (invoice_id, changed_by, field_name, old_value, new_value)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_invoice_history(invoice_id: int) -> List[Dict[str, Any]]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM invoice_history WHERE invoice_id = ? ORDER BY changed_at, id",
+        (invoice_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def add_invoice_comment(invoice_id: int, author: str, message: str) -> Dict[str, Any]:
+    conn = get_db()
+    cursor = conn.execute(
+        "INSERT INTO invoice_comments (invoice_id, author, message) VALUES (?, ?, ?)",
+        (invoice_id, author, message)
+    )
+    comment_id = cursor.lastrowid
+    conn.commit()
+    row = conn.execute("SELECT * FROM invoice_comments WHERE id = ?", (comment_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def get_invoice_comments(invoice_id: int) -> List[Dict[str, Any]]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM invoice_comments WHERE invoice_id = ? ORDER BY created_at, id",
+        (invoice_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+# Поля счёта, которые можно менять через update_invoice (кроме статуса —
+# у него отдельная функция update_invoice_status с более широким доступом)
+_EDITABLE_INVOICE_FIELDS = (
+    "city_id", "payer_id", "vat_id", "counterparty_name", "counterparty_inn",
+    "counterparty_bank_name", "counterparty_bank_bik", "counterparty_bank_account",
+    "counterparty_bank_corr_account", "amount", "payment_purpose", "due_date",
+)
+
+
+def update_invoice(invoice_id: int, changes: Dict[str, Any], changed_by: str) -> Dict[str, Any]:
+    """
+    Частично обновить поля счёта (без статуса, см. update_invoice_status).
+    Каждое реально изменившееся поле пишется в invoice_history.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    conn = get_db()
+
+    # Сначала все UPDATE в одной транзакции, историю пишем ПОСЛЕ commit/close —
+    # add_invoice_history открывает своё собственное соединение, и попытка
+    # записать через него, пока это (conn) ещё держит незакоммиченную
+    # транзакцию, падает с "database is locked"
+    actually_changed = []
+    for field, new_value in changes.items():
+        if field not in _EDITABLE_INVOICE_FIELDS:
+            continue
+        old_value = invoice.get(field)
+        if old_value == new_value:
+            continue
+        conn.execute(f"UPDATE invoices SET {field} = ? WHERE id = ?", (new_value, invoice_id))
+        actually_changed.append((field, old_value, new_value))
+
+    conn.commit()
+    conn.close()
+
+    for field, old_value, new_value in actually_changed:
+        add_invoice_history(invoice_id, changed_by, field,
+                             None if old_value is None else str(old_value),
+                             None if new_value is None else str(new_value))
+
+    return get_invoice_by_id(invoice_id)
+
+
+def update_invoice_status(invoice_id: int, new_status: str, changed_by: str) -> Dict[str, Any]:
+    """
+    Прямая смена статуса счёта админом — в обход стандартных переходов
+    approve/reject/mark_invoice_paid, для случаев, которые не укладываются
+    в стандартный процесс (например, счёт не проводится через банк вовсе).
+
+    Заполняет те же сопутствующие поля, что и выделенные функции перехода
+    (approved_by/rejected_by/paid_at), чтобы история согласования не
+    выглядела пустой при ручной правке статуса.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    old_status = invoice["status"]
+    if old_status == new_status:
+        return invoice
+
+    conn = get_db()
+    conn.execute("UPDATE invoices SET status = ? WHERE id = ?", (new_status, invoice_id))
+
+    if new_status == "approved" and not invoice["approved_by"]:
+        conn.execute(
+            "UPDATE invoices SET approved_by = ?, approved_at = datetime('now') WHERE id = ?",
+            (changed_by, invoice_id)
+        )
+    elif new_status == "rejected" and not invoice["rejected_by"]:
+        conn.execute(
+            "UPDATE invoices SET rejected_by = ? WHERE id = ?",
+            (changed_by, invoice_id)
+        )
+    elif new_status == "paid" and not invoice["paid_at"]:
+        conn.execute(
+            "UPDATE invoices SET paid_at = datetime('now') WHERE id = ?",
+            (invoice_id,)
+        )
+
+    conn.commit()
+    conn.close()
+
+    add_invoice_history(invoice_id, changed_by, "status", old_status, new_status)
+
+    if new_status == "paid":
+        _auto_archive_if_ready(invoice_id)
+
+    return get_invoice_by_id(invoice_id)
 
 
 def get_invoice_by_number(invoice_number: str) -> Optional[Dict[str, Any]]:
@@ -913,6 +1128,8 @@ def approve_invoice(invoice_id: int, approved_by: str) -> bool:
     )
     conn.commit()
     conn.close()
+
+    add_invoice_history(invoice_id, approved_by, "status", "on_approval", "approved")
     return True
 
 
@@ -938,10 +1155,12 @@ def reject_invoice(invoice_id: int, rejected_by: str, reason: Optional[str] = No
     )
     conn.commit()
     conn.close()
+
+    add_invoice_history(invoice_id, rejected_by, "status", "on_approval", f"rejected ({reason})" if reason else "rejected")
     return True
 
 
-def mark_invoice_paid(invoice_id: int) -> bool:
+def mark_invoice_paid(invoice_id: int, changed_by: str = "system") -> bool:
     """
     Пометить счёт оплаченным. Пока нет токена Модульбанк/ПланФакт (Фазы 5-6),
     вызывается вручную из дашборда админом; в будущем — автоматически при
@@ -955,6 +1174,7 @@ def mark_invoice_paid(invoice_id: int) -> bool:
     if not row or row["status"] not in ("approved", "sent_to_bank"):
         conn.close()
         return False
+    old_status = row["status"]
 
     conn.execute(
         "UPDATE invoices SET status = 'paid', paid_at = datetime('now') WHERE id = ?",
@@ -963,6 +1183,7 @@ def mark_invoice_paid(invoice_id: int) -> bool:
     conn.commit()
     conn.close()
 
+    add_invoice_history(invoice_id, changed_by, "status", old_status, "paid")
     _auto_archive_if_ready(invoice_id)
     return True
 
@@ -980,13 +1201,14 @@ def _auto_archive_if_ready(invoice_id: int):
         set_invoice_archived(invoice_id, True)
 
 
-def set_invoice_archived(invoice_id: int, archived: bool) -> bool:
+def set_invoice_archived(invoice_id: int, archived: bool, changed_by: str = "system") -> bool:
     """Ручной перевод счёта в архив/из архива (доступно и вне авто-условий)."""
     conn = get_db()
-    row = conn.execute("SELECT id FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    row = conn.execute("SELECT id, is_archived FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
     if not row:
         conn.close()
         return False
+    was_archived = bool(row["is_archived"])
 
     conn.execute(
         """
@@ -998,4 +1220,8 @@ def set_invoice_archived(invoice_id: int, archived: bool) -> bool:
     )
     conn.commit()
     conn.close()
+
+    if was_archived != bool(archived):
+        add_invoice_history(invoice_id, changed_by, "is_archived",
+                             "1" if was_archived else "0", "1" if archived else "0")
     return True

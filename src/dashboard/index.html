@@ -1395,7 +1395,7 @@
                                         <option value="on_approval">На согласовании</option>
                                         <option value="approved">Согласован</option>
                                         <option value="rejected">Отклонён</option>
-                                        <option value="sent_to_bank">Отправлен в банк</option>
+                                        <option value="sent_to_bank">Загружен в банк</option>
                                         <option value="paid">Оплачен</option>
                                     </select>
                                 </div>
@@ -1523,6 +1523,23 @@
                                 <div id="invoice-details-info" class="invoice-details-info"></div>
 
                                 <div class="form-group">
+                                    <label class="form-label">Статус</label>
+                                    <div style="display:flex; gap:8px; align-items:center;">
+                                        <select id="invoice-details-status-select" class="form-select" style="width:220px;">
+                                            <option value="on_approval">На согласовании</option>
+                                            <option value="approved">Согласован</option>
+                                            <option value="rejected">Отклонён</option>
+                                            <option value="sent_to_bank">Загружен в банк</option>
+                                            <option value="paid">Оплачен</option>
+                                        </select>
+                                        <button type="button" id="invoice-details-save-status-btn" class="btn btn-secondary btn-sm">Сохранить статус</button>
+                                    </div>
+                                </div>
+
+                                <div id="invoice-details-edit-fields"></div>
+                                <button type="button" id="invoice-details-save-fields-btn" class="btn btn-success btn-sm" style="margin-bottom:16px;">Сохранить изменения</button>
+
+                                <div class="form-group">
                                     <label class="form-label">Распределение по проекту (салону) и статье расхода</label>
                                     <div id="invoice-details-lineitems-rows"></div>
                                     <button type="button" id="invoice-details-add-lineitem-btn" class="btn btn-secondary btn-sm">+ Строка</button>
@@ -1534,6 +1551,18 @@
                                     <label class="form-label">Вложения</label>
                                     <div id="invoice-details-attachments"></div>
                                     <input type="file" id="invoice-details-attachment-input" multiple accept=".png,.jpg,.jpeg,.webp,.pdf">
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">История изменений</label>
+                                    <div id="invoice-details-history"></div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Сообщения</label>
+                                    <div id="invoice-details-comments"></div>
+                                    <textarea id="invoice-details-new-comment" class="form-input" rows="2" placeholder="Написать сообщение"></textarea>
+                                    <button type="button" id="invoice-details-send-comment-btn" class="btn btn-secondary btn-sm">Отправить</button>
                                 </div>
                             </div>
                             <div class="modal-footer" id="invoice-details-actions"></div>
