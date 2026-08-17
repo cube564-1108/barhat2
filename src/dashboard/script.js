@@ -35,7 +35,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (!currentUser) return;  // Редирект уже произошёл
 
     // Отображаем информацию о пользователе
-    document.getElementById('userName').textContent = currentUser.username;
+    document.getElementById('userName').textContent = currentUser.full_name || currentUser.username;
     const roleNames = {
         'admin': 'Администратор',
         'manager': 'Менеджер',
