@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import threading
 from datetime import datetime, timedelta
+from typing import Optional
 
 from flask import Blueprint, jsonify, request, send_from_directory
 from flask_login import current_user, login_required
@@ -504,6 +505,46 @@ _INVOICE_REQUIRED_BANK_FIELDS = (
     "counterparty_bank_bik", "counterparty_bank_account", "counterparty_bank_corr_account",
 )
 
+_VAT_NO_TAX_RE = re.compile(r"без\s*нал|без\s*нд[сc]|не облага", re.IGNORECASE)
+_VAT_RATE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+
+
+def _format_vat_suffix(vat_name: Optional[str], amount: float) -> str:
+    """
+    Фраза про НДС для назначения платежа. У 1С-обмена (document.py) нет
+    отдельного структурного поля под НДС — по 383-П это указывается текстом
+    внутри назначения платежа, банк вытаскивает ставку/сумму из него сам
+    (баг: без этой фразы поле НДС в личном кабинете банка оставалось пустым).
+    Если название варианта НДС не удаётся распознать как ставку/безНДС —
+    подставляем его как есть, лучше показать что-то, чем ничего.
+    """
+    if not vat_name:
+        return ""
+    name = vat_name.strip()
+    if _VAT_NO_TAX_RE.search(name):
+        return "Без налога (НДС)."
+    match = _VAT_RATE_RE.search(name)
+    if match:
+        rate = float(match.group(1).replace(",", "."))
+        vat_amount = round(amount * rate / (100 + rate), 2)
+        return f"В том числе НДС {match.group(1)}% — {vat_amount:.2f} руб."
+    return f"НДС: {name}."
+
+
+def _build_bank_payment_purpose(invoice: dict, vat_name: Optional[str]) -> str:
+    """
+    match_code — строго в начале строки (см. план, "Уточнения от владельца
+    после исследования API ПланФакт") — Фаза 6 матчит операции ПланФакт
+    регэкспом REF-\\d{6} по этому полю. Без него платёж, ушедший в банк,
+    никогда не находится синхронизацией (баг: код не попадал в назначение
+    платежа при автоотправке в Модульбанк).
+    """
+    parts = [invoice["match_code"], invoice["payment_purpose"]]
+    vat_suffix = _format_vat_suffix(vat_name, invoice["amount"])
+    if vat_suffix:
+        parts.append(vat_suffix)
+    return " ".join(parts)
+
 
 def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict:
     """
@@ -551,11 +592,14 @@ def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict
     except ValueError as e:
         return {"ok": False, "http_status": 400, "body": {"error": str(e)}}
 
+    vat_option = get_vat_option_by_id(invoice["vat_id"]) if invoice.get("vat_id") else None
+    purpose = _build_bank_payment_purpose(invoice, vat_option["name"] if vat_option else None)
+
     result = client.send_invoice_payment(
         doc_num=str(invoice["id"]),
         date=datetime.now().strftime("%Y-%m-%d"),
         amount=invoice["amount"],
-        purpose=invoice["payment_purpose"],
+        purpose=purpose,
         payer=payer_requisites,
         recipient=recipient,
     )

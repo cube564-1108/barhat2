@@ -48,6 +48,7 @@ from invoices.storage import (
     create_invoice,
     get_invoice_by_id,
     approve_invoice,
+    create_vat_option,
 )
 
 from modulbank.document import build_1c_payment_document
@@ -170,10 +171,10 @@ def test_payer_bank_requisites():
     return payer_id, payer_no_bank_id
 
 
-def _make_invoice(payer_id, with_counterparty_bank=True, amount=1000.0):
+def _make_invoice(payer_id, with_counterparty_bank=True, amount=1000.0, vat_id=None):
     invoice = create_invoice(
         amount=amount, payment_purpose="Аренда за август", created_by="tester",
-        payer_id=payer_id,
+        payer_id=payer_id, vat_id=vat_id,
         counterparty_name=RECIPIENT["name"] if with_counterparty_bank else None,
         counterparty_inn=RECIPIENT["inn"] if with_counterparty_bank else None,
         counterparty_kpp=RECIPIENT["kpp"],
@@ -221,8 +222,13 @@ def test_send_invoice_to_bank():
     assert outcome["http_status"] == 409, outcome
     print("   ✓ боевая отправка неcогласованного счёта запрещена (409)")
 
-    # d) sandbox — не меняет статус счёта даже на approved
-    invoice_ok = _make_invoice(payer_id)
+    # d) sandbox — не меняет статус счёта даже на approved; назначение
+    # платежа, реально ушедшее в банк, должно содержать match_code (баг:
+    # раньше уходил только payment_purpose, код для матчинга с ПланФакт
+    # никогда не попадал в реальный платёж) и фразу про НДС (баг: банк не
+    # заполнял поле НДС, т.к. в назначении платежа не было ставки текстом)
+    vat_id = create_vat_option("20%")
+    invoice_ok = _make_invoice(payer_id, vat_id=vat_id)
     approve_invoice(invoice_ok["id"], "admin")
     invoice_ok = get_invoice_by_id(invoice_ok["id"])
 
@@ -233,7 +239,13 @@ def test_send_invoice_to_bank():
     invoice_after_sandbox = get_invoice_by_id(invoice_ok["id"])
     assert invoice_after_sandbox["status"] == "approved", "sandbox не должен менять статус счёта"
     assert len(fake.calls) == 1
+    sent_purpose = fake.calls[0]["purpose"]
+    assert sent_purpose.startswith(invoice_ok["match_code"]), \
+        f"match_code должен быть в начале назначения платежа: {sent_purpose!r}"
+    assert "НДС 20%" in sent_purpose and "166.67" in sent_purpose, \
+        f"назначение платежа должно содержать сумму НДС: {sent_purpose!r}"
     print("   ✓ sandbox=true отправляет в тестовый контур, статус счёта не меняется")
+    print("   ✓ назначение платежа содержит match_code и корректную сумму НДС")
 
     # e) боевая отправка — успех, статус sent_to_bank, ошибка очищена
     outcome = _send_invoice_to_bank(invoice_ok, sandbox=False, changed_by="admin")
