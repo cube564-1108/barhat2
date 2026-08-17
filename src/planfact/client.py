@@ -172,14 +172,28 @@ class PlanFactClient:
         return data is not None
 
     def get_projects(self, active_only: bool = True) -> Optional[List[Dict[str, Any]]]:
-        """Справочник проектов ПланФакт (соответствуют салонам Бархата)."""
+        """
+        Справочник проектов ПланФакт (соответствуют салонам Бархата).
+
+        Реальный ответ — не плоский список, а {"items": [...], "deletedItems":
+        [...], "total", "totalDeleted"} (баг: фронт ждал массив и падал на
+        .map() прямо на этом объекте — см. историю сессий, "Ошибка загрузки"
+        во вкладке "Сопоставление"). deletedItems сознательно отбрасываем —
+        удалённые проекты не нужны в списке для сопоставления.
+        """
         params = {"filter.active": "true"} if active_only else None
-        return self.request("GET", "projects", params=params)
+        data = self.request("GET", "projects", params=params)
+        if data is None:
+            return None
+        return data.get("items", []) if isinstance(data, dict) else data
 
     def get_operation_categories(self, operation_category_type: str = "Outcome") -> Optional[List[Dict[str, Any]]]:
-        """Справочник статей операций указанного типа (по умолчанию — расходы)."""
+        """Справочник статей операций указанного типа (по умолчанию — расходы). См. get_projects — та же обёртка {"items": [...]}."""
         params = {"filter.operationCategoryType": operation_category_type}
-        return self.request("GET", "operationcategories", params=params)
+        data = self.request("GET", "operationcategories", params=params)
+        if data is None:
+            return None
+        return data.get("items", []) if isinstance(data, dict) else data
 
 
 def get_client(api_key: Optional[str] = None) -> PlanFactClient:
