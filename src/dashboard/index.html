@@ -1353,6 +1353,7 @@
                                 <h3 class="card-title">Список счетов</h3>
                                 <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                                     <button id="manage-references-btn" class="btn btn-secondary">Справочники</button>
+                                    <button id="open-planfact-btn" class="btn btn-secondary">ПланФакт</button>
                                     <button id="create-invoice-btn" class="btn btn-primary">+ Создать счёт</button>
                                 </div>
                             </div>
@@ -1594,6 +1595,48 @@
                             </div>
                             <div class="modal-footer">
                                 <button id="close-invoice-references-footer-btn" class="btn btn-secondary">Закрыть</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модалка ПланФакт: синхронизация оплаченных счетов, сопоставление, требует внимания -->
+                    <div class="modal" id="invoice-planfact-modal">
+                        <div class="modal-overlay" id="invoice-planfact-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title">ПланФакт — авторазноска оплаченных счетов</h3>
+                                <button class="modal-close-btn" id="close-invoice-planfact-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="admin-tabs" id="invoice-planfact-tabs">
+                                    <button class="admin-tab active" data-pf-tab="sync">Синхронизация</button>
+                                    <button class="admin-tab" data-pf-tab="mapping">Сопоставление</button>
+                                    <button class="admin-tab" data-pf-tab="unmatched">Требует внимания</button>
+                                </div>
+
+                                <div id="invoice-planfact-tab-sync">
+                                    <p class="form-hint">Ищет в ПланФакт операции с кодом счёта (REF-000123) в назначении платежа и разносит их по проекту/статье из распределения счёта. Сначала «Проверить» — ничего не меняет, только показывает, что будет сделано.</p>
+                                    <div style="display:flex; gap:8px; margin: 8px 0; flex-wrap: wrap;">
+                                        <button id="invoice-planfact-dry-run-btn" class="btn btn-secondary btn-sm">Проверить (без записи)</button>
+                                        <button id="invoice-planfact-run-btn" class="btn btn-primary btn-sm">Синхронизировать</button>
+                                    </div>
+                                    <div id="invoice-planfact-sync-status" class="form-hint"></div>
+                                    <div id="invoice-planfact-sync-result"></div>
+                                </div>
+
+                                <div id="invoice-planfact-tab-mapping" style="display:none;">
+                                    <h4>Салоны → проекты ПланФакт</h4>
+                                    <div id="invoice-planfact-store-mapping"><p class="form-hint">Загрузка...</p></div>
+                                    <h4 style="margin-top:16px;">Статьи расхода → статьи ПланФакт</h4>
+                                    <div id="invoice-planfact-category-mapping"><p class="form-hint">Загрузка...</p></div>
+                                </div>
+
+                                <div id="invoice-planfact-tab-unmatched" style="display:none;">
+                                    <div id="invoice-planfact-unmatched-list"><p class="form-hint">Загрузка...</p></div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="close-invoice-planfact-footer-btn" class="btn btn-secondary">Закрыть</button>
                             </div>
                         </div>
                     </div>

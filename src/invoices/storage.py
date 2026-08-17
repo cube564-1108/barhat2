@@ -621,6 +621,152 @@ def delete_vat_option(vat_id: int) -> bool:
     return _ref_deactivate("invoice_vat_options", vat_id)
 
 
+def update_expense_category_planfact_id(category_id: int, planfact_category_id: Optional[str]) -> bool:
+    """Привязать статью расхода к id статьи в ПланФакт (для авторазноски, Фаза 6)."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE invoice_expense_categories SET planfact_category_id = ? WHERE id = ?",
+        (planfact_category_id or None, category_id)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+# =============================================================================
+# СОПОСТАВЛЕНИЕ САЛОНОВ С ПРОЕКТАМИ ПЛАНФАКТ (Фаза 6)
+# =============================================================================
+
+def get_all_store_planfact_mappings() -> Dict[int, str]:
+    """{store_id: planfact_project_id} для всех настроенных салонов."""
+    conn = get_db()
+    rows = conn.execute("SELECT store_id, planfact_project_id FROM invoice_store_planfact_projects").fetchall()
+    conn.close()
+    return {row["store_id"]: row["planfact_project_id"] for row in rows}
+
+
+def set_store_planfact_project(store_id: int, planfact_project_id: str) -> bool:
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO invoice_store_planfact_projects (store_id, planfact_project_id, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(store_id) DO UPDATE SET
+            planfact_project_id = excluded.planfact_project_id,
+            updated_at = excluded.updated_at
+        """,
+        (store_id, planfact_project_id)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_store_planfact_project(store_id: int) -> bool:
+    conn = get_db()
+    conn.execute("DELETE FROM invoice_store_planfact_projects WHERE store_id = ?", (store_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+# =============================================================================
+# СИНХРОНИЗАЦИЯ С ПЛАНФАКТ — ЛОГ И НЕСМАТЧЕННЫЕ ОПЕРАЦИИ (Фаза 6)
+# =============================================================================
+
+def start_planfact_sync_log(dry_run: bool = False) -> int:
+    conn = get_db()
+    cursor = conn.execute(
+        "INSERT INTO invoice_planfact_sync_log (status, dry_run) VALUES ('started', ?)",
+        (1 if dry_run else 0,)
+    )
+    log_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return log_id
+
+
+def finish_planfact_sync_log(log_id: int, matched_count: int, unmatched_count: int,
+                              status: str = "completed", error_message: Optional[str] = None) -> None:
+    conn = get_db()
+    conn.execute(
+        """
+        UPDATE invoice_planfact_sync_log
+        SET finished_at = datetime('now'), status = ?, matched_count = ?,
+            unmatched_count = ?, error_message = ?
+        WHERE id = ?
+        """,
+        (status, matched_count, unmatched_count, error_message, log_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_latest_planfact_sync_log() -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM invoice_planfact_sync_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def record_planfact_unmatched(
+    planfact_operation_id: str,
+    reason: str,
+    match_code: Optional[str] = None,
+    invoice_id: Optional[int] = None,
+    operation_amount: Optional[float] = None,
+    operation_comment: Optional[str] = None,
+) -> None:
+    """
+    Записать/обновить операцию, которую не удалось разнести автоматически.
+    UPSERT по planfact_operation_id — повторный прогон синка по той же
+    операции обновляет причину и "поднимает" её из resolved, а не плодит
+    дубликаты в списке "Требует внимания".
+    """
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO invoice_planfact_unmatched
+            (planfact_operation_id, match_code, invoice_id, reason, operation_amount, operation_comment)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(planfact_operation_id) DO UPDATE SET
+            match_code = excluded.match_code,
+            invoice_id = excluded.invoice_id,
+            reason = excluded.reason,
+            operation_amount = excluded.operation_amount,
+            operation_comment = excluded.operation_comment,
+            detected_at = datetime('now'),
+            resolved = 0,
+            resolved_at = NULL
+        """,
+        (planfact_operation_id, match_code, invoice_id, reason, operation_amount, operation_comment)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_unresolved_planfact_unmatched() -> List[Dict[str, Any]]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM invoice_planfact_unmatched WHERE resolved = 0 ORDER BY detected_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def resolve_planfact_unmatched(unmatched_id: int) -> bool:
+    conn = get_db()
+    conn.execute(
+        "UPDATE invoice_planfact_unmatched SET resolved = 1, resolved_at = datetime('now') WHERE id = ?",
+        (unmatched_id,)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 # =============================================================================
 # РАСПРЕДЕЛЕНИЕ ПО ПРОЕКТАМ/СТАТЬЯМ (invoice_line_items)
 # =============================================================================

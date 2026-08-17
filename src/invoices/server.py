@@ -12,8 +12,11 @@ Flask API сервер для модуля счетов на оплату БАР
 
 import logging
 import os
+import re
 import sqlite3
 import sys
+import threading
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request, send_from_directory
 from flask_login import current_user, login_required
@@ -71,6 +74,17 @@ from .storage import (
     get_invoice_attachments,
     get_attachment_by_id,
     delete_attachment,
+    update_expense_category_planfact_id,
+    get_all_store_planfact_mappings,
+    set_store_planfact_project,
+    delete_store_planfact_project,
+    start_planfact_sync_log,
+    finish_planfact_sync_log,
+    get_latest_planfact_sync_log,
+    record_planfact_unmatched,
+    get_unresolved_planfact_unmatched,
+    resolve_planfact_unmatched,
+    get_invoice_by_match_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -638,3 +652,302 @@ def add_comment(invoice_id):
 
     comment = add_invoice_comment(invoice_id, current_user.username, message)
     return jsonify({"ok": True, "comment": comment}), 201
+
+
+# =============================================================================
+# ПЛАНФАКТ — АВТОРАЗНОСКА ОПЛАЧЕННЫХ СЧЕТОВ (Фаза 6 плана)
+# =============================================================================
+#
+# Матчинг ищет операции ПланФакт с "REF-" в назначении платежа (наш собственный
+# match_code, см. storage.py) вместо попытки угадать системную категорию
+# "нераспределённые расходы" — её точный API-идентификатор нигде не задоку-
+# ментирован дословно (см. src/planfact/README.md, раздел "Известные пробелы").
+#
+# Запуск — только вручную, кнопкой в дашборде (см. src/planfact/README.md
+# почему не сделали периодический автопоток на первом этапе). dry_run=true
+# ничего не пишет в ПланФакт и не меняет статусы счетов — только показывает,
+# что было бы сделано, для проверки перед первым боевым запуском.
+
+_MATCH_CODE_RE = re.compile(r"REF-\d{6}")
+_PLANFACT_POLL_WINDOW_DAYS = 60
+
+
+def _match_planfact_operation(op, client, store_map, category_map, dry_run):
+    """Обработать одну операцию ПланФакт. Возвращает dict с ключом 'status':
+    'skip' (не наша операция или уже разнесена раньше), 'matched' (успех/превью)
+    или 'unmatched' (нужна ручная разноска, см. 'reason')."""
+    operation_id = str(op.get("operationId") or op.get("id") or "")
+    comment = op.get("comment") or ""
+    match = _MATCH_CODE_RE.search(comment)
+    if not match:
+        return {"status": "skip"}
+    match_code = match.group(0)
+
+    invoice = get_invoice_by_match_code(match_code)
+    if not invoice:
+        return {
+            "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
+            "reason": f"Нет счёта с кодом {match_code}",
+        }
+
+    if invoice["status"] == "paid":
+        return {"status": "skip"}
+
+    if invoice["status"] not in ("approved", "sent_to_bank"):
+        return {
+            "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
+            "invoice_id": invoice["id"],
+            "reason": f"Счёт {invoice['invoice_number']} в статусе «{invoice['status']}» — разноска невозможна",
+        }
+
+    line_items = get_invoice_line_items(invoice["id"])
+    if not line_items:
+        return {
+            "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
+            "invoice_id": invoice["id"],
+            "reason": f"Счёт {invoice['invoice_number']} ещё не распределён по проектам/статьям",
+        }
+
+    pf_items = []
+    for li in line_items:
+        project_id = store_map.get(li["store_id"])
+        pf_category_id = category_map.get(li["expense_category_id"])
+        if not project_id or not pf_category_id:
+            store = get_store_by_id(li["store_id"])
+            category = get_expense_category_by_id(li["expense_category_id"])
+            return {
+                "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
+                "invoice_id": invoice["id"],
+                "reason": (
+                    f"Не настроено сопоставление с ПланФакт: "
+                    f"салон «{store['name'] if store else li['store_id']}» "
+                    f"или статья «{category['name'] if category else li['expense_category_id']}»"
+                ),
+            }
+        pf_items.append({
+            "calculationDate": op.get("operationDate"),
+            "isCalculationCommitted": bool(op.get("isCommitted", True)),
+            "contrAgentId": op.get("contrAgentId"),
+            "operationCategoryId": int(pf_category_id),
+            "projectId": int(project_id),
+            "value": li["amount"],
+        })
+
+    preview = {
+        "status": "matched",
+        "operation_id": operation_id,
+        "match_code": match_code,
+        "invoice_id": invoice["id"],
+        "invoice_number": invoice["invoice_number"],
+        "operation_amount": op.get("amount"),
+        "items": pf_items,
+    }
+    if dry_run:
+        return preview
+
+    ok = client.update_outcome_operation(
+        operation_id,
+        operation_date=op.get("operationDate"),
+        account_id=op.get("accountId"),
+        comment=comment,
+        is_committed=bool(op.get("isCommitted", True)),
+        items=pf_items,
+    )
+    if not ok:
+        return {
+            "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
+            "invoice_id": invoice["id"],
+            "reason": "Ошибка записи в ПланФакт (подробности в логах сервера)",
+        }
+
+    mark_invoice_paid(invoice["id"], changed_by="planfact-sync")
+    return preview
+
+
+def _run_planfact_sync(dry_run: bool = False) -> dict:
+    from planfact.client import get_client
+
+    client = get_client()
+    store_map = get_all_store_planfact_mappings()
+    categories = get_all_expense_categories()
+    category_map = {c["id"]: c["planfact_category_id"] for c in categories if c.get("planfact_category_id")}
+
+    date_start = (datetime.now() - timedelta(days=_PLANFACT_POLL_WINDOW_DAYS)).strftime("%Y-%m-%d")
+
+    matched = []
+    unmatched = []
+    offset = 0
+    while True:
+        ops = client.list_operations(
+            operation_type=["Outcome"],
+            search_string="REF-",
+            operation_date_start=date_start,
+            offset=offset,
+            limit=1000,
+        )
+        if ops is None:
+            raise RuntimeError("Не удалось получить список операций из ПланФакт")
+        if not ops:
+            break
+
+        for op in ops:
+            result = _match_planfact_operation(op, client, store_map, category_map, dry_run)
+            if result["status"] == "matched":
+                matched.append(result)
+            elif result["status"] == "unmatched":
+                unmatched.append(result)
+                if not dry_run:
+                    record_planfact_unmatched(
+                        planfact_operation_id=result["operation_id"],
+                        reason=result["reason"],
+                        match_code=result.get("match_code"),
+                        invoice_id=result.get("invoice_id"),
+                        operation_amount=op.get("amount"),
+                        operation_comment=op.get("comment"),
+                    )
+
+        if len(ops) < 1000:
+            break
+        offset += 1000
+
+    return {"matched": matched, "unmatched": unmatched}
+
+
+@invoices_bp.route("/planfact/sync", methods=["POST"])
+@role_required("admin")
+def trigger_planfact_sync():
+    """
+    Body: {"dry_run": bool}. dry_run=true — синхронный превью-прогон, ничего
+    не пишет в ПланФакт и не меняет счета, возвращает результат сразу.
+    dry_run=false — реальный прогон в фоновом потоке (по аналогии с
+    /api/moysklad/sync), статус — через /planfact/sync-status.
+    """
+    data = request.get_json(silent=True) or {}
+    dry_run = bool(data.get("dry_run"))
+
+    if dry_run:
+        try:
+            result = _run_planfact_sync(dry_run=True)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            logger.exception("Ошибка dry-run синхронизации с ПланФакт")
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"ok": True, "dry_run": True, **result})
+
+    last_log = get_latest_planfact_sync_log()
+    if last_log and last_log["status"] == "started":
+        return jsonify({"error": "Синхронизация уже запущена"}), 409
+
+    try:
+        log_id = start_planfact_sync_log(dry_run=False)
+    except Exception:
+        logger.exception("Не удалось создать запись лога синхронизации ПланФакт")
+        return jsonify({"error": "Не удалось запустить синхронизацию"}), 500
+
+    def run_in_background():
+        try:
+            result = _run_planfact_sync(dry_run=False)
+            finish_planfact_sync_log(log_id, len(result["matched"]), len(result["unmatched"]), status="completed")
+        except Exception as e:
+            logger.exception("Ошибка синхронизации с ПланФакт")
+            finish_planfact_sync_log(log_id, 0, 0, status="failed", error_message=str(e))
+
+    thread = threading.Thread(target=run_in_background, daemon=True)
+    thread.start()
+
+    log_action(current_user.username, "trigger_planfact_sync", "")
+    return jsonify({"ok": True, "message": "Синхронизация запущена"})
+
+
+@invoices_bp.route("/planfact/sync-status", methods=["GET"])
+@role_required("admin")
+def planfact_sync_status():
+    return jsonify({"status": get_latest_planfact_sync_log()})
+
+
+@invoices_bp.route("/planfact/unmatched", methods=["GET"])
+@role_required("admin")
+def list_planfact_unmatched():
+    return jsonify({"unmatched": get_unresolved_planfact_unmatched()})
+
+
+@invoices_bp.route("/planfact/unmatched/<int:unmatched_id>/resolve", methods=["POST"])
+@role_required("admin")
+def resolve_planfact_unmatched_view(unmatched_id):
+    """Отметить, что операция разнесена вручную — убрать из списка "Требует внимания"."""
+    resolve_planfact_unmatched(unmatched_id)
+    log_action(current_user.username, "resolve_planfact_unmatched", str(unmatched_id))
+    return jsonify({"ok": True})
+
+
+@invoices_bp.route("/planfact/mappings/stores", methods=["GET"])
+@role_required("admin")
+def get_store_planfact_mappings():
+    """Салоны вместе с текущим сопоставлением на проект ПланФакт (если настроено)."""
+    mapping = get_all_store_planfact_mappings()
+    stores = get_all_stores()
+    return jsonify({"stores": [
+        {**store, "planfact_project_id": mapping.get(store["id"])}
+        for store in stores
+    ]})
+
+
+@invoices_bp.route("/planfact/mappings/stores/<int:store_id>", methods=["PUT"])
+@role_required("admin")
+def set_store_planfact_mapping(store_id):
+    """Body: {"planfact_project_id": str}. Пустое значение — снять сопоставление."""
+    if not get_store_by_id(store_id):
+        return jsonify({"error": "Салон не найден"}), 404
+    data = request.get_json(silent=True) or {}
+    planfact_project_id = (data.get("planfact_project_id") or "").strip()
+    if not planfact_project_id:
+        delete_store_planfact_project(store_id)
+        log_action(current_user.username, "unset_store_planfact_mapping", str(store_id))
+        return jsonify({"ok": True})
+    set_store_planfact_project(store_id, planfact_project_id)
+    log_action(current_user.username, "set_store_planfact_mapping", f"{store_id}: {planfact_project_id}")
+    return jsonify({"ok": True})
+
+
+@invoices_bp.route("/categories/<int:category_id>/planfact-mapping", methods=["PUT"])
+@role_required("admin")
+def set_category_planfact_mapping(category_id):
+    """Body: {"planfact_category_id": str}. Пустое значение — снять сопоставление."""
+    if not get_expense_category_by_id(category_id):
+        return jsonify({"error": "Статья не найдена"}), 404
+    data = request.get_json(silent=True) or {}
+    planfact_category_id = (data.get("planfact_category_id") or "").strip() or None
+    update_expense_category_planfact_id(category_id, planfact_category_id)
+    log_action(current_user.username, "set_category_planfact_mapping", f"{category_id}: {planfact_category_id}")
+    return jsonify({"ok": True})
+
+
+@invoices_bp.route("/planfact/projects", methods=["GET"])
+@role_required("admin")
+def get_planfact_projects():
+    """Живой список проектов ПланФакт — для выпадающего списка при настройке сопоставления."""
+    from planfact.client import get_client
+    try:
+        client = get_client()
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    projects = client.get_projects()
+    if projects is None:
+        return jsonify({"error": "Не удалось получить проекты из ПланФакт"}), 502
+    return jsonify({"projects": projects})
+
+
+@invoices_bp.route("/planfact/categories", methods=["GET"])
+@role_required("admin")
+def get_planfact_categories():
+    """Живой список статей расходов ПланФакт — для настройки сопоставления."""
+    from planfact.client import get_client
+    try:
+        client = get_client()
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    categories = client.get_operation_categories("Outcome")
+    if categories is None:
+        return jsonify({"error": "Не удалось получить статьи из ПланФакт"}), 502
+    return jsonify({"categories": categories})

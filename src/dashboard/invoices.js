@@ -113,6 +113,23 @@
         elements.referenceNewName = document.getElementById('invoice-reference-new-name');
         elements.referenceAddBtn = document.getElementById('invoice-reference-add-btn');
 
+        elements.openPlanfactBtn = document.getElementById('open-planfact-btn');
+        elements.planfactModal = document.getElementById('invoice-planfact-modal');
+        elements.planfactOverlay = document.getElementById('invoice-planfact-overlay');
+        elements.closePlanfactBtn = document.getElementById('close-invoice-planfact-btn');
+        elements.closePlanfactFooterBtn = document.getElementById('close-invoice-planfact-footer-btn');
+        elements.planfactTabs = document.getElementById('invoice-planfact-tabs');
+        elements.planfactTabSync = document.getElementById('invoice-planfact-tab-sync');
+        elements.planfactTabMapping = document.getElementById('invoice-planfact-tab-mapping');
+        elements.planfactTabUnmatched = document.getElementById('invoice-planfact-tab-unmatched');
+        elements.planfactDryRunBtn = document.getElementById('invoice-planfact-dry-run-btn');
+        elements.planfactRunBtn = document.getElementById('invoice-planfact-run-btn');
+        elements.planfactSyncStatus = document.getElementById('invoice-planfact-sync-status');
+        elements.planfactSyncResult = document.getElementById('invoice-planfact-sync-result');
+        elements.planfactStoreMapping = document.getElementById('invoice-planfact-store-mapping');
+        elements.planfactCategoryMapping = document.getElementById('invoice-planfact-category-mapping');
+        elements.planfactUnmatchedList = document.getElementById('invoice-planfact-unmatched-list');
+
         elements.createBtn?.addEventListener('click', openCreateModal);
         elements.closeBtn?.addEventListener('click', closeCreateModal);
         elements.cancelBtn?.addEventListener('click', closeCreateModal);
@@ -151,6 +168,18 @@
             loadReferenceList();
         });
         elements.referenceAddBtn?.addEventListener('click', addReferenceItem);
+
+        elements.openPlanfactBtn?.addEventListener('click', openPlanfactModal);
+        elements.closePlanfactBtn?.addEventListener('click', closePlanfactModal);
+        elements.closePlanfactFooterBtn?.addEventListener('click', closePlanfactModal);
+        elements.planfactOverlay?.addEventListener('click', closePlanfactModal);
+        elements.planfactTabs?.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-pf-tab]');
+            if (!btn) return;
+            switchPlanfactTab(btn.getAttribute('data-pf-tab'));
+        });
+        elements.planfactDryRunBtn?.addEventListener('click', () => runPlanfactSync(true));
+        elements.planfactRunBtn?.addEventListener('click', () => runPlanfactSync(false));
     }
 
     async function onPageActivated(userData) {
@@ -163,8 +192,10 @@
 
         if (currentUserData?.role === 'admin') {
             elements.manageReferencesBtn.style.display = '';
+            elements.openPlanfactBtn.style.display = '';
         } else {
             elements.manageReferencesBtn.style.display = 'none';
+            elements.openPlanfactBtn.style.display = 'none';
         }
 
         await loadInvoices();
@@ -936,6 +967,273 @@
         } catch (e) {
             console.error('Ошибка удаления из справочника:', e);
             alert('Ошибка удаления');
+        }
+    }
+
+    // =========================================================================
+    // ПЛАНФАКТ — синхронизация оплаченных счетов, сопоставление, требует внимания
+    // =========================================================================
+
+    function openPlanfactModal() {
+        switchPlanfactTab('sync');
+        elements.planfactSyncStatus.textContent = '';
+        elements.planfactSyncResult.innerHTML = '';
+        elements.planfactModal.classList.add('active');
+        elements.planfactOverlay.classList.add('active');
+    }
+
+    function closePlanfactModal() {
+        elements.planfactModal.classList.remove('active');
+        elements.planfactOverlay.classList.remove('active');
+    }
+
+    function switchPlanfactTab(tab) {
+        elements.planfactTabs.querySelectorAll('.admin-tab').forEach(b => b.classList.remove('active'));
+        elements.planfactTabs.querySelector(`[data-pf-tab="${tab}"]`)?.classList.add('active');
+
+        elements.planfactTabSync.style.display = tab === 'sync' ? '' : 'none';
+        elements.planfactTabMapping.style.display = tab === 'mapping' ? '' : 'none';
+        elements.planfactTabUnmatched.style.display = tab === 'unmatched' ? '' : 'none';
+
+        if (tab === 'mapping') loadPlanfactMappingTab();
+        if (tab === 'unmatched') loadPlanfactUnmatchedTab();
+    }
+
+    async function runPlanfactSync(dryRun) {
+        elements.planfactDryRunBtn.disabled = true;
+        elements.planfactRunBtn.disabled = true;
+        elements.planfactSyncStatus.textContent = dryRun ? 'Проверяю...' : 'Синхронизирую...';
+        elements.planfactSyncResult.innerHTML = '';
+        try {
+            const res = await fetch('/api/invoices/planfact/sync', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dry_run: dryRun }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                elements.planfactSyncStatus.textContent = data.error || 'Ошибка синхронизации';
+                return;
+            }
+
+            if (dryRun) {
+                elements.planfactSyncStatus.textContent = 'Проверка завершена, ничего не записано в ПланФакт:';
+                renderPlanfactSyncResult(data.matched || [], data.unmatched || []);
+            } else {
+                elements.planfactSyncStatus.textContent = 'Синхронизация запущена в фоне...';
+                pollPlanfactSyncStatus();
+            }
+        } catch (e) {
+            console.error('Ошибка синхронизации с ПланФакт:', e);
+            elements.planfactSyncStatus.textContent = 'Ошибка синхронизации';
+        } finally {
+            elements.planfactDryRunBtn.disabled = false;
+            elements.planfactRunBtn.disabled = false;
+        }
+    }
+
+    async function pollPlanfactSyncStatus() {
+        for (let attempt = 0; attempt < 60; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            try {
+                const res = await fetch('/api/invoices/planfact/sync-status', { credentials: 'include' });
+                const data = await res.json();
+                const status = data.status;
+                if (!status || status.status !== 'started') {
+                    if (!status) {
+                        elements.planfactSyncStatus.textContent = 'Статус синхронизации недоступен';
+                    } else if (status.status === 'completed') {
+                        elements.planfactSyncStatus.textContent =
+                            `Готово: разнесено ${status.matched_count}, требует внимания ${status.unmatched_count}`;
+                    } else {
+                        elements.planfactSyncStatus.textContent = `Ошибка: ${status.error_message || 'см. логи сервера'}`;
+                    }
+                    await loadInvoices();
+                    return;
+                }
+            } catch (e) {
+                console.error('Ошибка опроса статуса синхронизации:', e);
+                return;
+            }
+        }
+        elements.planfactSyncStatus.textContent = 'Синхронизация выполняется дольше обычного, проверьте статус позже';
+    }
+
+    function renderPlanfactSyncResult(matched, unmatched) {
+        let html = '';
+        if (matched.length) {
+            html += `<p><strong>Разнесено (${matched.length}):</strong></p>` + matched.map(m => `
+                <div style="padding:3px 0; font-size:13px;">Счёт ${escapeHtml(m.invoice_number || '')} (${escapeHtml(m.match_code)}) — ${formatMoney(m.operation_amount)}</div>
+            `).join('');
+        }
+        if (unmatched.length) {
+            html += `<p><strong>Требует внимания (${unmatched.length}):</strong></p>` + unmatched.map(u => `
+                <div style="padding:3px 0; font-size:13px;">${escapeHtml(u.match_code || u.operation_id)} — ${escapeHtml(u.reason)}</div>
+            `).join('');
+        }
+        if (!matched.length && !unmatched.length) {
+            html = '<p class="form-hint">Подходящих операций не найдено</p>';
+        }
+        elements.planfactSyncResult.innerHTML = html;
+    }
+
+    async function loadPlanfactMappingTab() {
+        elements.planfactStoreMapping.innerHTML = '<p class="form-hint">Загрузка...</p>';
+        elements.planfactCategoryMapping.innerHTML = '<p class="form-hint">Загрузка...</p>';
+        try {
+            const [storesRes, categoriesRes, pfProjectsRes, pfCategoriesRes] = await Promise.all([
+                fetch('/api/invoices/planfact/mappings/stores', { credentials: 'include' }),
+                fetch('/api/invoices/categories', { credentials: 'include' }),
+                fetch('/api/invoices/planfact/projects', { credentials: 'include' }),
+                fetch('/api/invoices/planfact/categories', { credentials: 'include' }),
+            ]);
+            const storesData = await storesRes.json();
+            const categoriesData = await categoriesRes.json();
+            const pfProjects = pfProjectsRes.ok ? (await pfProjectsRes.json()).projects || [] : null;
+            const pfCategories = pfCategoriesRes.ok ? (await pfCategoriesRes.json()).categories || [] : null;
+
+            renderStoreMapping(storesData.stores || [], pfProjects);
+            renderCategoryMapping(categoriesData.categories || [], pfCategories);
+        } catch (e) {
+            console.error('Ошибка загрузки сопоставления с ПланФакт:', e);
+            elements.planfactStoreMapping.innerHTML = '<p class="form-hint">Ошибка загрузки</p>';
+            elements.planfactCategoryMapping.innerHTML = '<p class="form-hint">Ошибка загрузки</p>';
+        }
+    }
+
+    function mappingRowHtml(id, label, currentValue, options, dataAttr) {
+        if (options) {
+            const optionsHtml = ['<option value="">— не сопоставлено —</option>']
+                .concat(options.map(o => {
+                    const value = o.projectId ?? o.operationCategoryId;
+                    const title = o.title ?? o.name ?? String(value);
+                    const selected = String(value) === String(currentValue) ? 'selected' : '';
+                    return `<option value="${escapeHtml(String(value))}" ${selected}>${escapeHtml(title)}</option>`;
+                }))
+                .join('');
+            return `
+                <div style="display:flex; gap:8px; align-items:center; padding:4px 0; justify-content: space-between;">
+                    <span style="min-width:220px;">${escapeHtml(label)}</span>
+                    <select class="form-select" style="width:260px;" data-${dataAttr}="${id}">${optionsHtml}</select>
+                </div>
+            `;
+        }
+        return `
+            <div style="display:flex; gap:8px; align-items:center; padding:4px 0; justify-content: space-between;">
+                <span style="min-width:220px;">${escapeHtml(label)}</span>
+                <input type="text" class="form-input" style="width:260px;" placeholder="id в ПланФакт" value="${escapeHtml(currentValue || '')}" data-${dataAttr}="${id}">
+            </div>
+        `;
+    }
+
+    function renderStoreMapping(stores, pfProjects) {
+        if (!stores.length) {
+            elements.planfactStoreMapping.innerHTML = '<p class="form-hint">Салонов нет</p>';
+            return;
+        }
+        if (pfProjects === null) {
+            elements.planfactStoreMapping.innerHTML = '<p class="form-hint">Не удалось получить список проектов из ПланФакт — впишите id вручную.</p>' +
+                stores.map(s => mappingRowHtml(s.id, s.name, s.planfact_project_id, null, 'store-id')).join('');
+        } else {
+            elements.planfactStoreMapping.innerHTML = stores.map(s => mappingRowHtml(s.id, s.name, s.planfact_project_id, pfProjects, 'store-id')).join('');
+        }
+        elements.planfactStoreMapping.querySelectorAll('[data-store-id]').forEach(el => {
+            const handler = () => savePlanfactStoreMapping(el.getAttribute('data-store-id'), el.value.trim());
+            el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'blur', handler);
+        });
+    }
+
+    function renderCategoryMapping(categories, pfCategories) {
+        if (!categories.length) {
+            elements.planfactCategoryMapping.innerHTML = '<p class="form-hint">Статей нет</p>';
+            return;
+        }
+        if (pfCategories === null) {
+            elements.planfactCategoryMapping.innerHTML = '<p class="form-hint">Не удалось получить список статей из ПланФакт — впишите id вручную.</p>' +
+                categories.map(c => mappingRowHtml(c.id, c.name, c.planfact_category_id, null, 'category-id')).join('');
+        } else {
+            elements.planfactCategoryMapping.innerHTML = categories.map(c => mappingRowHtml(c.id, c.name, c.planfact_category_id, pfCategories, 'category-id')).join('');
+        }
+        elements.planfactCategoryMapping.querySelectorAll('[data-category-id]').forEach(el => {
+            const handler = () => savePlanfactCategoryMapping(el.getAttribute('data-category-id'), el.value.trim());
+            el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'blur', handler);
+        });
+    }
+
+    async function savePlanfactStoreMapping(storeId, planfactProjectId) {
+        try {
+            const res = await fetch(`/api/invoices/planfact/mappings/stores/${storeId}`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ planfact_project_id: planfactProjectId }),
+            });
+            const data = await res.json();
+            if (!res.ok) alert(data.error || 'Ошибка сохранения сопоставления');
+        } catch (e) {
+            console.error('Ошибка сохранения сопоставления салона:', e);
+            alert('Ошибка сохранения сопоставления');
+        }
+    }
+
+    async function savePlanfactCategoryMapping(categoryId, planfactCategoryId) {
+        try {
+            const res = await fetch(`/api/invoices/categories/${categoryId}/planfact-mapping`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ planfact_category_id: planfactCategoryId }),
+            });
+            const data = await res.json();
+            if (!res.ok) alert(data.error || 'Ошибка сохранения сопоставления');
+        } catch (e) {
+            console.error('Ошибка сохранения сопоставления статьи:', e);
+            alert('Ошибка сохранения сопоставления');
+        }
+    }
+
+    async function loadPlanfactUnmatchedTab() {
+        elements.planfactUnmatchedList.innerHTML = '<p class="form-hint">Загрузка...</p>';
+        try {
+            const res = await fetch('/api/invoices/planfact/unmatched', { credentials: 'include' });
+            const data = await res.json();
+            renderPlanfactUnmatched(data.unmatched || []);
+        } catch (e) {
+            console.error('Ошибка загрузки списка "Требует внимания":', e);
+            elements.planfactUnmatchedList.innerHTML = '<p class="form-hint">Ошибка загрузки</p>';
+        }
+    }
+
+    function renderPlanfactUnmatched(list) {
+        if (!list.length) {
+            elements.planfactUnmatchedList.innerHTML = '<p class="form-hint">Нерешённых операций нет</p>';
+            return;
+        }
+        elements.planfactUnmatchedList.innerHTML = list.map(u => `
+            <div style="display:flex; gap:8px; align-items:center; justify-content: space-between; padding:6px 0; border-bottom:1px solid #eee;">
+                <div>
+                    <div><strong>${escapeHtml(u.match_code || u.planfact_operation_id)}</strong> ${u.operation_amount ? formatMoney(u.operation_amount) : ''}</div>
+                    <div class="form-hint">${escapeHtml(u.reason)}</div>
+                    <div class="form-hint">${escapeHtml((u.detected_at || '').slice(0, 16).replace('T', ' '))}</div>
+                </div>
+                <button class="btn btn-sm btn-secondary" data-action="resolve" data-id="${u.id}">Разнесено вручную</button>
+            </div>
+        `).join('');
+        elements.planfactUnmatchedList.querySelectorAll('button[data-action="resolve"]').forEach(btn => {
+            btn.addEventListener('click', () => resolvePlanfactUnmatched(btn.getAttribute('data-id')));
+        });
+    }
+
+    async function resolvePlanfactUnmatched(id) {
+        try {
+            const res = await fetch(`/api/invoices/planfact/unmatched/${id}/resolve`, { method: 'POST', credentials: 'include' });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Ошибка'); return; }
+            await loadPlanfactUnmatchedTab();
+        } catch (e) {
+            console.error('Ошибка отметки операции как решённой:', e);
+            alert('Ошибка');
         }
     }
 
