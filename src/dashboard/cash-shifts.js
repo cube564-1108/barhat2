@@ -227,7 +227,10 @@
 
         // Выбор точки для просмотра текущей смены (админ/менеджер)
         if (elements.shiftStoreSelector) {
-            elements.shiftStoreSelector.addEventListener('change', loadCurrentShift);
+            elements.shiftStoreSelector.addEventListener('change', () => {
+                loadCurrentShift();
+                loadShiftsHistory();
+            });
         }
 
         // Исправление закрытой смены
@@ -315,7 +318,9 @@
             return await response.json();
         } catch (error) {
             console.error('[CashShifts] API error:', error);
-            showNotification(error.message, 'error');
+            if (!options.silent) {
+                showNotification(error.message, 'error');
+            }
             throw error;
         }
     }
@@ -432,8 +437,16 @@
         try {
             const params = new URLSearchParams();
 
-            if (currentUserData && currentUserData.store_id) {
-                params.append('store_id', currentUserData.store_id);
+            // Определяем ID точки: у флориста точка фиксирована, у остальных — выбирается вручную
+            let storeId = null;
+            if (currentUserData && currentUserData.role === 'florist' && currentUserData.store_id) {
+                storeId = currentUserData.store_id;
+            } else if (elements.shiftStoreSelector && elements.shiftStoreSelector.value) {
+                storeId = parseInt(elements.shiftStoreSelector.value, 10);
+            }
+
+            if (storeId) {
+                params.append('store_id', storeId);
             }
 
             // Фильтр по дате
@@ -445,13 +458,18 @@
             params.append('status', 'closed');
             params.append('limit', '50');
 
-            const result = await apiRequest(`/api/cash-shifts?${params}`);
+            // Если точка не определена, а у пользователя их несколько — бэкенд попросит
+            // явно выбрать точку в селекторе; это ожидаемо, не показываем ошибку
+            const silent = !storeId && currentUserData && currentUserData.role !== 'admin';
+            const result = await apiRequest(`/api/cash-shifts?${params}`, { silent });
             shiftsHistory = result.shifts || [];
             renderShiftsHistory();
 
             console.log('[CashShifts] История смен загружена:', shiftsHistory.length);
         } catch (error) {
             console.error('[CashShifts] Ошибка загрузки истории:', error);
+            shiftsHistory = [];
+            renderShiftsHistory();
         }
     }
 
