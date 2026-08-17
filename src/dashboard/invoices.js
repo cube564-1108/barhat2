@@ -16,6 +16,8 @@
     let currentDetailsInvoiceId = null;
     let currentDetailsInvoice = null;
     let currentRefType = 'categories';
+    let currentRefList = [];
+    let editingPayerBankId = null;
 
     const REF_LABELS = {
         categories: 'Статьи расхода',
@@ -77,6 +79,9 @@
         elements.innInput = document.getElementById('invoice-inn');
         elements.bankBikInput = document.getElementById('invoice-bank-bik');
         elements.bankAccountInput = document.getElementById('invoice-bank-account');
+        elements.kppInput = document.getElementById('invoice-kpp');
+        elements.bankNameInput = document.getElementById('invoice-bank-name');
+        elements.bankCorrAccountInput = document.getElementById('invoice-bank-corr-account');
         elements.dueDateInput = document.getElementById('invoice-due-date');
         elements.lineItemsRows = document.getElementById('invoice-lineitems-rows');
         elements.addLineItemBtn = document.getElementById('invoice-add-lineitem-btn');
@@ -165,6 +170,7 @@
             elements.referencesTabs.querySelectorAll('.admin-tab').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             currentRefType = btn.getAttribute('data-ref');
+            editingPayerBankId = null;
             loadReferenceList();
         });
         elements.referenceAddBtn?.addEventListener('click', addReferenceItem);
@@ -366,6 +372,31 @@
         }
     }
 
+    async function sendInvoiceToBank(invoiceId, sandbox) {
+        if (!sandbox && !confirm('Отправить платёжку в Модульбанк? Банк создаст черновик — подписывать нужно будет вручную в личном кабинете.')) return;
+        try {
+            const res = await fetch(`/api/invoices/${invoiceId}/send-to-bank`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sandbox }),
+            });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Ошибка отправки в банк'); return; }
+            if (sandbox) {
+                const errors = data.result?.errors?.length ? `\nОшибки банка: ${data.result.errors.join('; ')}` : '';
+                alert(`Sandbox-проверка: ${data.ok ? 'банк принял черновик' : 'банк отклонил'}${errors}\n\nСобранный документ:\n${data.result?.document || ''}`);
+                return;
+            }
+            alert('Платёжка загружена в Модульбанк черновиком. Подпишите её в личном кабинете банка.');
+            await openDetailsModal(invoiceId);
+            await loadInvoices();
+        } catch (e) {
+            console.error('Ошибка отправки счёта в банк:', e);
+            alert('Ошибка отправки в банк');
+        }
+    }
+
     // =========================================================================
     // СОЗДАНИЕ СЧЁТА
     // =========================================================================
@@ -440,6 +471,9 @@
         elements.innInput.value = '';
         elements.bankBikInput.value = '';
         elements.bankAccountInput.value = '';
+        elements.kppInput.value = '';
+        elements.bankNameInput.value = '';
+        elements.bankCorrAccountInput.value = '';
         elements.dueDateInput.value = '';
         elements.lineItemsRows.innerHTML = '';
         elements.lineItemsTotal.textContent = '';
@@ -485,8 +519,11 @@
             vat_id: elements.vatSelect.value ? parseInt(elements.vatSelect.value, 10) : null,
             counterparty_name: elements.counterpartyInput.value.trim() || null,
             counterparty_inn: elements.innInput.value.trim() || null,
+            counterparty_kpp: elements.kppInput.value.trim() || null,
             counterparty_bank_bik: elements.bankBikInput.value.trim() || null,
             counterparty_bank_account: elements.bankAccountInput.value.trim() || null,
+            counterparty_bank_name: elements.bankNameInput.value.trim() || null,
+            counterparty_bank_corr_account: elements.bankCorrAccountInput.value.trim() || null,
             line_items: lineItems,
         };
 
@@ -584,7 +621,9 @@
 
         elements.detailsInfo.innerHTML = rows.map(([label, value]) =>
             `<div style="display:flex; gap:8px; padding:2px 0;"><strong style="min-width:220px;">${escapeHtml(label)}:</strong><span>${escapeHtml(String(value))}</span></div>`
-        ).join('');
+        ).join('') + (invoice.bank_send_error ? `
+            <div style="display:flex; gap:8px; padding:2px 0; color:#721c24;"><strong style="min-width:220px;">Ошибка отправки в банк:</strong><span>${escapeHtml(invoice.bank_send_error)}</span></div>
+        ` : '');
 
         elements.detailsStatusSelect.value = invoice.status;
         elements.detailsStatusSelect.disabled = !canEditStatus;
@@ -656,6 +695,18 @@
                 <input type="text" id="edit-field-bik" class="form-input" value="${escapeHtml(invoice.counterparty_bank_bik || '')}" ${disabled}>
             </div>
             <div class="form-group">
+                <label class="form-label">КПП контрагента</label>
+                <input type="text" id="edit-field-kpp" class="form-input" value="${escapeHtml(invoice.counterparty_kpp || '')}" ${disabled}>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Банк контрагента</label>
+                <input type="text" id="edit-field-bank-name" class="form-input" value="${escapeHtml(invoice.counterparty_bank_name || '')}" ${disabled}>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Корр. счёт банка контрагента</label>
+                <input type="text" id="edit-field-corr-account" class="form-input" value="${escapeHtml(invoice.counterparty_bank_corr_account || '')}" ${disabled}>
+            </div>
+            <div class="form-group">
                 <label class="form-label">Сумма, ₽</label>
                 <input type="number" id="edit-field-amount" class="form-input" min="0" step="0.01" value="${invoice.amount}" ${disabled}>
             </div>
@@ -681,6 +732,9 @@
             counterparty_inn: document.getElementById('edit-field-inn').value.trim() || null,
             counterparty_bank_account: document.getElementById('edit-field-account').value.trim() || null,
             counterparty_bank_bik: document.getElementById('edit-field-bik').value.trim() || null,
+            counterparty_kpp: document.getElementById('edit-field-kpp').value.trim() || null,
+            counterparty_bank_name: document.getElementById('edit-field-bank-name').value.trim() || null,
+            counterparty_bank_corr_account: document.getElementById('edit-field-corr-account').value.trim() || null,
             amount: parseFloat(document.getElementById('edit-field-amount').value),
             payment_purpose: document.getElementById('edit-field-purpose').value.trim(),
             due_date: document.getElementById('edit-field-due-date').value,
@@ -780,6 +834,11 @@
             html += `<button class="btn btn-danger" data-action="reject">Отклонить</button>`;
         }
         if (isAdmin && invoice.status === 'approved') {
+            html += `<button class="btn btn-secondary" data-action="send-to-bank-sandbox">Проверить отправку в банк (sandbox)</button>`;
+            html += `<button class="btn btn-primary" data-action="send-to-bank">Отправить в банк</button>`;
+            html += `<button class="btn btn-success" data-action="mark-paid">Отметить оплаченным</button>`;
+        }
+        if (isAdmin && invoice.status === 'sent_to_bank') {
             html += `<button class="btn btn-success" data-action="mark-paid">Отметить оплаченным</button>`;
         }
         if (isAdmin) {
@@ -800,6 +859,8 @@
 
         if (action === 'approve') { await approveInvoice(invoiceId); await openDetailsModal(invoiceId); return; }
         if (action === 'reject') { await rejectInvoice(invoiceId); await openDetailsModal(invoiceId); return; }
+        if (action === 'send-to-bank-sandbox') { await sendInvoiceToBank(invoiceId, true); return; }
+        if (action === 'send-to-bank') { await sendInvoiceToBank(invoiceId, false); return; }
 
         const endpoints = { 'mark-paid': 'mark-paid', archive: 'archive', unarchive: 'unarchive' };
         const endpoint = endpoints[action];
@@ -866,6 +927,7 @@
 
     function openReferencesModal() {
         currentRefType = 'categories';
+        editingPayerBankId = null;
         elements.referencesTabs.querySelectorAll('.admin-tab').forEach(b => b.classList.remove('active'));
         elements.referencesTabs.querySelector('[data-ref="categories"]')?.classList.add('active');
         elements.referenceNewName.value = '';
@@ -884,12 +946,35 @@
         try {
             const res = await fetch(`/api/invoices/${currentRefType}`, { credentials: 'include' });
             const data = await res.json();
-            const list = data[currentRefType] || [];
-            renderReferenceList(list);
+            currentRefList = data[currentRefType] || [];
+            renderReferenceList(currentRefList);
         } catch (e) {
             console.error('Ошибка загрузки справочника:', e);
             elements.referencesList.innerHTML = '<p class="form-hint">Ошибка загрузки</p>';
         }
+    }
+
+    // Реквизиты расчётного счёта плательщика (Фаза 5) — своя запись у каждой
+    // компании, все в одном кабинете Модульбанка под одним токеном. Пустые
+    // реквизиты = этот плательщик не проводится через банк-автоматику.
+    const PAYER_BANK_FIELDS = [
+        ['inn', 'ИНН'], ['kpp', 'КПП'], ['bank_account', 'Расчётный счёт'],
+        ['bank_name', 'Банк'], ['bank_bik', 'БИК'], ['bank_corr_account', 'Корр. счёт'],
+    ];
+
+    function renderPayerBankForm(item) {
+        return `
+            <div style="padding:8px 0 12px; border-top: 1px dashed #ccc; margin-top:4px;">
+                ${PAYER_BANK_FIELDS.map(([field, label]) => `
+                    <div class="form-group">
+                        <label class="form-label">${label}</label>
+                        <input type="text" class="form-input" data-payer-bank-field="${field}" value="${escapeHtml(item[field] || '')}">
+                    </div>
+                `).join('')}
+                <button class="btn btn-sm btn-success" data-action="save-bank" data-id="${item.id}">Сохранить реквизиты</button>
+                <button class="btn btn-sm btn-secondary" data-action="cancel-bank">Отмена</button>
+            </div>
+        `;
     }
 
     function renderReferenceList(list) {
@@ -897,13 +982,18 @@
             elements.referencesList.innerHTML = `<p class="form-hint">Список пуст</p>`;
             return;
         }
+        const isPayers = currentRefType === 'payers';
         elements.referencesList.innerHTML = list.map(item => `
-            <div style="display:flex; gap:8px; align-items:center; padding:4px 0; justify-content: space-between;">
-                <span>${escapeHtml(item.name)}</span>
-                <span>
-                    <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${item.id}" data-name="${escapeHtml(item.name)}">Изменить</button>
-                    <button class="btn btn-sm btn-danger" data-action="deactivate" data-id="${item.id}">Удалить</button>
-                </span>
+            <div data-payer-row="${item.id}" style="padding:4px 0;">
+                <div style="display:flex; gap:8px; align-items:center; justify-content: space-between;">
+                    <span>${escapeHtml(item.name)}</span>
+                    <span>
+                        <button class="btn btn-sm btn-secondary" data-action="edit" data-id="${item.id}" data-name="${escapeHtml(item.name)}">Изменить</button>
+                        ${isPayers ? `<button class="btn btn-sm btn-secondary" data-action="toggle-bank" data-id="${item.id}">${item.bank_account ? 'Реквизиты банка ✓' : 'Реквизиты банка'}</button>` : ''}
+                        <button class="btn btn-sm btn-danger" data-action="deactivate" data-id="${item.id}">Удалить</button>
+                    </span>
+                </div>
+                ${isPayers && editingPayerBankId === item.id ? renderPayerBankForm(item) : ''}
             </div>
         `).join('');
 
@@ -913,6 +1003,42 @@
         elements.referencesList.querySelectorAll('button[data-action="deactivate"]').forEach(btn => {
             btn.addEventListener('click', () => deactivateReferenceItem(btn.getAttribute('data-id')));
         });
+        elements.referencesList.querySelectorAll('button[data-action="toggle-bank"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = parseInt(btn.getAttribute('data-id'), 10);
+                editingPayerBankId = editingPayerBankId === id ? null : id;
+                renderReferenceList(currentRefList);
+            });
+        });
+        elements.referencesList.querySelectorAll('button[data-action="cancel-bank"]').forEach(btn => {
+            btn.addEventListener('click', () => { editingPayerBankId = null; renderReferenceList(currentRefList); });
+        });
+        elements.referencesList.querySelectorAll('button[data-action="save-bank"]').forEach(btn => {
+            btn.addEventListener('click', () => savePayerBankRequisites(parseInt(btn.getAttribute('data-id'), 10)));
+        });
+    }
+
+    async function savePayerBankRequisites(id) {
+        const row = elements.referencesList.querySelector(`[data-payer-row="${id}"]`);
+        const payload = {};
+        PAYER_BANK_FIELDS.forEach(([field]) => {
+            payload[field] = row.querySelector(`[data-payer-bank-field="${field}"]`).value.trim();
+        });
+        try {
+            const res = await fetch(`/api/invoices/payers/${id}/bank-requisites`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Ошибка сохранения реквизитов'); return; }
+            editingPayerBankId = null;
+            await loadReferenceList();
+        } catch (e) {
+            console.error('Ошибка сохранения реквизитов плательщика:', e);
+            alert('Ошибка сохранения реквизитов');
+        }
     }
 
     async function addReferenceItem() {

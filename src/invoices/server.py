@@ -46,6 +46,10 @@ from .storage import (
     create_payer,
     update_payer,
     delete_payer,
+    update_payer_bank_requisites,
+    get_payer_bank_requisites,
+    payer_has_bank_requisites,
+    set_invoice_bank_send_error,
     get_all_vat_options,
     get_vat_option_by_id,
     create_vat_option,
@@ -168,6 +172,32 @@ _register_reference_crud("payers", get_all_payers, get_payer_by_id,
                           create_payer, update_payer, delete_payer)
 _register_reference_crud("vat-options", get_all_vat_options, get_vat_option_by_id,
                           create_vat_option, update_vat_option, delete_vat_option)
+
+
+@invoices_bp.route("/payers/<int:payer_id>/bank-requisites", methods=["PUT"])
+@role_required("admin")
+def set_payer_bank_requisites(payer_id):
+    """
+    Реквизиты расчётного счёта плательщика (Фаза 5) — своя запись у каждой
+    компании ("На кого выставлен счёт"), все компании в одном кабинете
+    Модульбанка под одним токеном. Пустые реквизиты = этот плательщик не
+    проводится через банк-автоматику, счёт закрывается вручную.
+    Body: {"inn","kpp","bank_account","bank_name","bank_bik","bank_corr_account"}
+    """
+    if not get_payer_by_id(payer_id):
+        return jsonify({"error": "Плательщик не найден"}), 404
+    data = request.get_json(silent=True) or {}
+    update_payer_bank_requisites(
+        payer_id,
+        inn=(data.get("inn") or "").strip() or None,
+        kpp=(data.get("kpp") or "").strip() or None,
+        bank_account=(data.get("bank_account") or "").strip() or None,
+        bank_name=(data.get("bank_name") or "").strip() or None,
+        bank_bik=(data.get("bank_bik") or "").strip() or None,
+        bank_corr_account=(data.get("bank_corr_account") or "").strip() or None,
+    )
+    log_action(current_user.username, "set_payer_bank_requisites", str(payer_id))
+    return jsonify({"ok": True, "payer": get_payer_by_id(payer_id)})
 
 
 # =============================================================================
@@ -302,7 +332,7 @@ def edit_invoice(invoice_id):
             return jsonify({"error": "Назначение платежа обязательно"}), 400
         changes["payment_purpose"] = data["payment_purpose"].strip()
 
-    for field in ("counterparty_name", "counterparty_inn", "counterparty_bank_name",
+    for field in ("counterparty_name", "counterparty_inn", "counterparty_kpp", "counterparty_bank_name",
                   "counterparty_bank_bik", "counterparty_bank_account", "counterparty_bank_corr_account"):
         if field in data:
             changes[field] = data[field]
@@ -401,6 +431,7 @@ def add_invoice():
             vat_id=vat_id,
             counterparty_name=data.get("counterparty_name"),
             counterparty_inn=data.get("counterparty_inn"),
+            counterparty_kpp=data.get("counterparty_kpp"),
             counterparty_bank_name=data.get("counterparty_bank_name"),
             counterparty_bank_bik=data.get("counterparty_bank_bik"),
             counterparty_bank_account=data.get("counterparty_bank_account"),
@@ -466,6 +497,111 @@ def mark_paid(invoice_id):
 
     log_action(current_user.username, "mark_invoice_paid", invoice["invoice_number"])
     return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
+
+
+_INVOICE_REQUIRED_BANK_FIELDS = (
+    "counterparty_name", "counterparty_inn", "counterparty_bank_name",
+    "counterparty_bank_bik", "counterparty_bank_account", "counterparty_bank_corr_account",
+)
+
+
+def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict:
+    """
+    Собрать платёжку в формате 1С из реквизитов счёта (получатель) и
+    реквизитов выбранного плательщика (см. invoice_payers.bank_*, Фаза 5) и
+    загрузить черновик в Модульбанк. Не трогает Flask-глобалы (request/
+    current_user/jsonify) — вынесена отдельно от вьюхи specifically, чтобы
+    её можно было прогнать в тестах без Flask-контекста (см.
+    scripts/test_modulbank.py), по аналогии с _run_planfact_sync выше.
+
+    Возвращает {"ok": bool, "http_status": int, "body": dict} — body уже в
+    форме, готовой под jsonify(), http_status — какой код вернуть вьюхе.
+    """
+    if not sandbox and invoice["status"] != "approved":
+        return {"ok": False, "http_status": 409,
+                "body": {"error": f"Счёт в статусе '{invoice['status']}', отправить в банк нельзя"}}
+
+    missing_invoice_fields = [f for f in _INVOICE_REQUIRED_BANK_FIELDS if not invoice.get(f)]
+    if missing_invoice_fields:
+        return {"ok": False, "http_status": 400,
+                "body": {"error": f"В счёте не заполнены реквизиты контрагента: {', '.join(missing_invoice_fields)}"}}
+
+    if not payer_has_bank_requisites(invoice["payer_id"]):
+        payer = get_payer_by_id(invoice["payer_id"])
+        payer_name = payer["name"] if payer else invoice["payer_id"]
+        return {"ok": False, "http_status": 400, "body": {
+            "error": f"У плательщика «{payer_name}» не настроены реквизиты Модульбанка — "
+                     f"добавьте их в справочнике плательщиков или оплатите счёт вручную и отметьте оплаченным"
+        }}
+
+    payer_requisites = get_payer_bank_requisites(invoice["payer_id"])
+    recipient = {
+        "name": invoice["counterparty_name"],
+        "inn": invoice["counterparty_inn"],
+        "kpp": invoice.get("counterparty_kpp"),
+        "account": invoice["counterparty_bank_account"],
+        "bank_name": invoice["counterparty_bank_name"],
+        "bank_bik": invoice["counterparty_bank_bik"],
+        "bank_corr_account": invoice["counterparty_bank_corr_account"],
+    }
+
+    try:
+        from modulbank.client import get_client
+        client = get_client(sandbox_mode=sandbox)
+    except ValueError as e:
+        return {"ok": False, "http_status": 400, "body": {"error": str(e)}}
+
+    result = client.send_invoice_payment(
+        doc_num=str(invoice["id"]),
+        date=datetime.now().strftime("%Y-%m-%d"),
+        amount=invoice["amount"],
+        purpose=invoice["payment_purpose"],
+        payer=payer_requisites,
+        recipient=recipient,
+    )
+
+    if sandbox:
+        return {"ok": result["ok"], "http_status": 200, "body": {"ok": result["ok"], "sandbox": True, "result": result}}
+
+    if result["ok"]:
+        set_invoice_bank_send_error(invoice["id"], None)
+        updated = update_invoice_status(invoice["id"], "sent_to_bank", changed_by)
+        return {"ok": True, "http_status": 200, "body": {"ok": True, "invoice": updated, "result": result}}
+
+    error_message = "; ".join(result["errors"]) if result["errors"] else "Неизвестная ошибка банка"
+    set_invoice_bank_send_error(invoice["id"], error_message)
+    return {"ok": False, "http_status": 502, "body": {"ok": False, "error": error_message, "result": result}}
+
+
+@invoices_bp.route("/<int:invoice_id>/send-to-bank", methods=["POST"])
+@role_required("admin")
+def send_to_bank(invoice_id):
+    """
+    Body: {"sandbox": bool}. sandbox=true — черновик уходит в тестовый контур
+    банка, статус счёта не меняется, используется для проверки сборки
+    документа перед первой боевой отправкой (см. план, Фаза 5). Банк всегда
+    создаёт статус "Черновик" — подписание доступно только вручную в личном
+    кабинете, поэтому даже боевая (не sandbox) отправка сама по себе не
+    двигает деньги.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+
+    data = request.get_json(silent=True) or {}
+    sandbox = bool(data.get("sandbox"))
+
+    outcome = _send_invoice_to_bank(invoice, sandbox, current_user.username)
+
+    # Логируем только реальные обращения к банку — не ранние отказы валидации
+    # (не заполнены реквизиты и т.п.), иначе лог засоряется попытками из UI
+    if "result" in outcome["body"]:
+        action = "send_invoice_to_bank_sandbox" if sandbox else (
+            "send_invoice_to_bank" if outcome["ok"] else "send_invoice_to_bank_failed"
+        )
+        log_action(current_user.username, action, invoice["invoice_number"])
+
+    return jsonify(outcome["body"]), outcome["http_status"]
 
 
 @invoices_bp.route("/<int:invoice_id>/archive", methods=["POST"])

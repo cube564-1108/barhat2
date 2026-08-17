@@ -132,6 +132,13 @@ def init_invoices_tables():
 
     conn.commit()
 
+    # Фаза 5 (автоформирование платёжки в Модульбанк): у каждого плательщика
+    # (компании из "На кого выставлен счёт") — свой расчётный счёт в банке,
+    # один API-токен обслуживает весь кабинет сразу со всеми компаниями.
+    # Реквизиты живут в самом справочнике плательщиков, а не в .env — иначе
+    # пришлось бы городить отдельный конфиг на каждую компанию.
+    _ensure_payer_bank_columns(conn)
+
     # ========================================================================
     # 2. Миграция старой модели invoices (один store_id/category на счёт)
     #    на новую (распределение — в invoice_line_items)
@@ -151,6 +158,7 @@ def init_invoices_tables():
             vat_id INTEGER REFERENCES invoice_vat_options(id),
             counterparty_name TEXT,
             counterparty_inn TEXT,
+            counterparty_kpp TEXT,
             counterparty_bank_name TEXT,
             counterparty_bank_bik TEXT,
             counterparty_bank_account TEXT,
@@ -167,13 +175,21 @@ def init_invoices_tables():
             approved_at TEXT,
             rejected_by TEXT,
             rejected_reason TEXT,
-            paid_at TEXT
+            paid_at TEXT,
+            bank_send_error TEXT
         )
     """)
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_invoices_archived ON invoices(is_archived)")
+
+    # Фаза 5 (автоформирование платёжки в Модульбанк): счета, созданные до
+    # этого поля, не имеют counterparty_kpp/bank_send_error — добавляем
+    # ALTER TABLE тем же паттерном блокировки, что и _ensure_invoices_migrated
+    # (см. её докстринг — на проде несколько gunicorn-воркеров стартуют
+    # параллельно и могут столкнуться на "duplicate column name").
+    _ensure_invoice_bank_columns(conn)
 
     # ========================================================================
     # 4. Распределение по проектам/статьям (invoice_line_items)
@@ -347,6 +363,62 @@ def _ensure_invoices_migrated(conn: sqlite3.Connection):
         if _table_exists(conn, "invoices_old_v1"):
             _finish_migration_from_old_table(conn, "invoices_old_v1")
 
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+_PAYER_BANK_COLUMNS = ("inn", "kpp", "bank_account", "bank_name", "bank_bik", "bank_corr_account")
+
+
+def _ensure_payer_bank_columns(conn: sqlite3.Connection):
+    """
+    Реквизиты расчётного счёта плательщика (Фаза 5) — своя запись у каждой
+    компании ("На кого выставлен счёт": ООО Кофферс, ИП Насуленко и т.д.),
+    все компании — в одном кабинете Модульбанка под одним токеном. Пустые
+    реквизиты у плательщика означают "этот плательщик не проводится через
+    банк-автоматику" — счёт закрывается вручную (mark-paid), без отдельного
+    флага на этот случай.
+    """
+    if not _table_exists(conn, "invoice_payers"):
+        return
+    if all(_column_exists(conn, "invoice_payers", col) for col in _PAYER_BANK_COLUMNS):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for col in _PAYER_BANK_COLUMNS:
+            if not _column_exists(conn, "invoice_payers", col):
+                conn.execute(f"ALTER TABLE invoice_payers ADD COLUMN {col} TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _ensure_invoice_bank_columns(conn: sqlite3.Connection):
+    """
+    Добивка полей invoices, добавленных для Фазы 5 (автоформирование платёжки
+    в Модульбанк): counterparty_kpp (обязателен в 1С-формате платёжки для
+    юрлиц) и bank_send_error (текст последней ошибки отправки, чтобы сбой
+    банка не терялся молча — см. план, Фаза 5).
+
+    ADD COLUMN — лёгкая метаданная-операция в SQLite, но два gunicorn-
+    воркера всё равно могут одновременно попытаться добавить одну и ту же
+    колонку без эксклюзивной блокировки и упасть на "duplicate column name".
+    """
+    if not _table_exists(conn, "invoices"):
+        return
+    if _column_exists(conn, "invoices", "counterparty_kpp") and _column_exists(conn, "invoices", "bank_send_error"):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not _column_exists(conn, "invoices", "counterparty_kpp"):
+            conn.execute("ALTER TABLE invoices ADD COLUMN counterparty_kpp TEXT")
+        if not _column_exists(conn, "invoices", "bank_send_error"):
+            conn.execute("ALTER TABLE invoices ADD COLUMN bank_send_error TEXT")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -599,6 +671,58 @@ def update_payer(payer_id: int, name: str) -> bool:
 
 def delete_payer(payer_id: int) -> bool:
     return _ref_deactivate("invoice_payers", payer_id)
+
+
+def update_payer_bank_requisites(
+    payer_id: int,
+    inn: Optional[str],
+    kpp: Optional[str],
+    bank_account: Optional[str],
+    bank_name: Optional[str],
+    bank_bik: Optional[str],
+    bank_corr_account: Optional[str],
+) -> bool:
+    """
+    Реквизиты расчётного счёта плательщика для Фазы 5 (автоформирование
+    платёжки в Модульбанк). Пустые реквизиты — сигнал, что этот плательщик
+    не проводится через банк-автоматику (см. _ensure_payer_bank_columns).
+    """
+    conn = get_db()
+    conn.execute(
+        """
+        UPDATE invoice_payers
+        SET inn = ?, kpp = ?, bank_account = ?, bank_name = ?, bank_bik = ?, bank_corr_account = ?
+        WHERE id = ?
+        """,
+        (inn, kpp, bank_account, bank_name, bank_bik, bank_corr_account, payer_id)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_payer_bank_requisites(payer_id: int) -> Optional[Dict[str, Any]]:
+    """Возвращает {"name","inn","kpp","bank_account","bank_name","bank_bik","bank_corr_account"} или None."""
+    payer = get_payer_by_id(payer_id)
+    if not payer:
+        return None
+    return {
+        "name": payer["name"],
+        "inn": payer.get("inn"),
+        "kpp": payer.get("kpp"),
+        "account": payer.get("bank_account"),
+        "bank_name": payer.get("bank_name"),
+        "bank_bik": payer.get("bank_bik"),
+        "bank_corr_account": payer.get("bank_corr_account"),
+    }
+
+
+def payer_has_bank_requisites(payer_id: int) -> bool:
+    """Заполнены ли реквизиты банка у плательщика полностью (кроме kpp — у ИП его нет)."""
+    req = get_payer_bank_requisites(payer_id)
+    if not req:
+        return False
+    return all(req.get(f) for f in ("inn", "account", "bank_name", "bank_bik", "bank_corr_account"))
 
 
 def get_all_vat_options() -> List[Dict[str, Any]]:
@@ -930,6 +1054,7 @@ def create_invoice(
     vat_id: Optional[int] = None,
     counterparty_name: Optional[str] = None,
     counterparty_inn: Optional[str] = None,
+    counterparty_kpp: Optional[str] = None,
     counterparty_bank_name: Optional[str] = None,
     counterparty_bank_bik: Optional[str] = None,
     counterparty_bank_account: Optional[str] = None,
@@ -958,14 +1083,14 @@ def create_invoice(
     cursor = conn.execute(
         """
         INSERT INTO invoices (
-            city_id, payer_id, vat_id, counterparty_name, counterparty_inn,
+            city_id, payer_id, vat_id, counterparty_name, counterparty_inn, counterparty_kpp,
             counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
             counterparty_bank_corr_account, amount, payment_purpose, due_date,
             created_by, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'on_approval')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'on_approval')
         """,
         (
-            city_id, payer_id, vat_id, counterparty_name, counterparty_inn,
+            city_id, payer_id, vat_id, counterparty_name, counterparty_inn, counterparty_kpp,
             counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
             counterparty_bank_corr_account, amount, payment_purpose, due_date,
             created_by,
@@ -1111,7 +1236,7 @@ def get_invoice_comments(invoice_id: int) -> List[Dict[str, Any]]:
 # Поля счёта, которые можно менять через update_invoice (кроме статуса —
 # у него отдельная функция update_invoice_status с более широким доступом)
 _EDITABLE_INVOICE_FIELDS = (
-    "city_id", "payer_id", "vat_id", "counterparty_name", "counterparty_inn",
+    "city_id", "payer_id", "vat_id", "counterparty_name", "counterparty_inn", "counterparty_kpp",
     "counterparty_bank_name", "counterparty_bank_bik", "counterparty_bank_account",
     "counterparty_bank_corr_account", "amount", "payment_purpose", "due_date",
 )
@@ -1360,6 +1485,18 @@ def reject_invoice(invoice_id: int, rejected_by: str, reason: Optional[str] = No
 
     add_invoice_history(invoice_id, rejected_by, "status", "on_approval", f"rejected ({reason})" if reason else "rejected")
     return True
+
+
+def set_invoice_bank_send_error(invoice_id: int, error_message: Optional[str]) -> None:
+    """
+    Записать (error_message задан) или очистить (None) текст последней ошибки
+    отправки платёжки в Модульбанк — чтобы сбой банка был виден в UI, а не
+    терялся молча (см. план, Фаза 5).
+    """
+    conn = get_db()
+    conn.execute("UPDATE invoices SET bank_send_error = ? WHERE id = ?", (error_message, invoice_id))
+    conn.commit()
+    conn.close()
 
 
 def mark_invoice_paid(invoice_id: int, changed_by: str = "system") -> bool:
