@@ -33,7 +33,7 @@ ALLOWED_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".pdf"}
 MAX_ATTACHMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ
 
 try:
-    from cashshifts.storage import get_all_stores, get_store_by_id
+    from cashshifts.storage import get_all_stores, get_store_by_id, get_user_stores
 except ImportError:
     logger.warning("Модуль cashshifts недоступен — салоны для счетов не будут получены")
 
@@ -42,6 +42,9 @@ except ImportError:
 
     def get_store_by_id(store_id: int) -> Optional[Dict[str, Any]]:
         return None
+
+    def get_user_stores(username: str) -> List[int]:
+        return []
 
 
 STATUSES = ("on_approval", "approved", "rejected", "sent_to_bank", "paid")
@@ -754,6 +757,27 @@ def get_invoice_by_id(invoice_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def user_can_access_invoice(invoice: Dict[str, Any], username: str, role: str) -> bool:
+    """
+    Может ли пользователь видеть/трогать этот счёт.
+
+    Админ — всегда. Автор счёта — всегда (иначе только что созданный счёт
+    без распределения тут же исчезает из своего же списка). Остальные —
+    только если распределение счёта задевает хотя бы один из салонов,
+    к которым у пользователя есть доступ (user_stores, тот же справочник,
+    что и в cashshifts).
+    """
+    if role == "admin" or invoice["created_by"] == username:
+        return True
+
+    allowed_store_ids = set(get_user_stores(username))
+    if not allowed_store_ids:
+        return False
+
+    line_items = get_invoice_line_items(invoice["id"])
+    return any(item["store_id"] in allowed_store_ids for item in line_items)
+
+
 def get_invoice_by_number(invoice_number: str) -> Optional[Dict[str, Any]]:
     """Получить счёт по номеру (человекочитаемый, для UI/бухгалтерии)."""
     conn = get_db()
@@ -788,11 +812,35 @@ def list_invoices(
     is_archived: bool = False,
     limit: int = 100,
     offset: int = 0,
+    restrict_username: Optional[str] = None,
+    restrict_store_ids: Optional[List[int]] = None,
 ) -> List[Dict[str, Any]]:
-    """Получить список счетов с фильтрами."""
+    """
+    Получить список счетов с фильтрами.
+
+    restrict_username/restrict_store_ids — ограничение видимости для не-админов:
+    показываем счёт, если его создал сам пользователь (restrict_username),
+    ИЛИ распределение счёта задевает хотя бы один из его салонов
+    (restrict_store_ids). Передавать оба вместе для не-админа, оба None —
+    для админа (без ограничений).
+    """
 
     query = "SELECT * FROM invoices WHERE is_archived = ?"
     params: List[Any] = [1 if is_archived else 0]
+
+    if restrict_username is not None:
+        if restrict_store_ids:
+            placeholders = ",".join("?" * len(restrict_store_ids))
+            query += f"""
+                AND (created_by = ? OR id IN (
+                    SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders})
+                ))
+            """
+            params.append(restrict_username)
+            params.extend(restrict_store_ids)
+        else:
+            query += " AND created_by = ?"
+            params.append(restrict_username)
 
     if status:
         query += " AND status = ?"

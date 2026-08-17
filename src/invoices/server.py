@@ -50,6 +50,8 @@ from .storage import (
     delete_vat_option,
     create_invoice,
     get_invoice_by_id,
+    user_can_access_invoice,
+    get_user_stores,
     list_invoices,
     approve_invoice,
     reject_invoice,
@@ -164,6 +166,14 @@ def get_invoices():
     if status and status not in STATUSES:
         return jsonify({"error": f"Неизвестный статус. Доступны: {list(STATUSES)}"}), 400
 
+    # Не-админ видит только счета своих салонов (или созданные им самим) —
+    # см. user_can_access_invoice в storage.py
+    restrict_username = None
+    restrict_store_ids = None
+    if current_user.role != "admin":
+        restrict_username = current_user.username
+        restrict_store_ids = get_user_stores(current_user.username)
+
     invoices = list_invoices(
         status=status,
         store_id=request.args.get("store_id", type=int),
@@ -178,6 +188,8 @@ def get_invoices():
         is_archived=request.args.get("archived", "false").lower() == "true",
         limit=request.args.get("limit", 100, type=int),
         offset=request.args.get("offset", 0, type=int),
+        restrict_username=restrict_username,
+        restrict_store_ids=restrict_store_ids,
     )
     return jsonify({"invoices": invoices, "count": len(invoices)})
 
@@ -189,6 +201,8 @@ def get_invoice(invoice_id):
     invoice = get_invoice_by_id(invoice_id)
     if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
     return jsonify({
         "invoice": invoice,
         "line_items": get_invoice_line_items(invoice_id),
@@ -358,8 +372,11 @@ def update_line_items(invoice_id):
     Body: {"items": [{"store_id", "expense_category_id", "amount"}, ...]}
     Доступно к правке до архивации счёта.
     """
-    if not get_invoice_by_id(invoice_id):
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
 
     data = request.get_json(silent=True) or {}
     items = data.get("items") or []
@@ -387,8 +404,11 @@ def update_line_items(invoice_id):
 @invoices_bp.route("/<int:invoice_id>/attachments", methods=["GET"])
 @section_required("invoices")
 def list_attachments(invoice_id):
-    if not get_invoice_by_id(invoice_id):
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
     return jsonify({"attachments": get_invoice_attachments(invoice_id)})
 
 
@@ -396,8 +416,11 @@ def list_attachments(invoice_id):
 @section_required("invoices")
 def upload_attachment(invoice_id):
     """Загрузить вложение (скрин/скан счёта). multipart/form-data, поле 'file'."""
-    if not get_invoice_by_id(invoice_id):
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
 
     file = request.files.get("file")
     if not file or not file.filename:
@@ -417,6 +440,9 @@ def download_attachment(attachment_id):
     attachment = get_attachment_by_id(attachment_id)
     if not attachment:
         return jsonify({"error": "Вложение не найдено"}), 404
+    invoice = get_invoice_by_id(attachment["invoice_id"])
+    if not invoice or not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому вложению"}), 403
     return send_from_directory(
         os.path.abspath(ATTACHMENTS_DIR),
         attachment["stored_filename"],

@@ -28,7 +28,7 @@ if os.path.exists(TEST_DB_PATH):
 os.environ['BARHAT_DB_PATH'] = TEST_DB_PATH
 os.environ['INVOICE_ATTACHMENTS_DIR'] = TEST_ATTACHMENTS_DIR
 
-from cashshifts.storage import init_cashshifts_tables, get_all_stores
+from cashshifts.storage import init_cashshifts_tables, get_all_stores, set_user_stores
 from invoices.storage import (
     init_invoices_tables,
     get_all_expense_categories,
@@ -47,6 +47,7 @@ from invoices.storage import (
     get_invoice_line_items,
     set_invoice_line_items,
     is_invoice_fully_allocated,
+    user_can_access_invoice,
     set_invoice_archived,
 )
 from invoices.seed_data import EXPENSE_CATEGORIES
@@ -196,6 +197,59 @@ def test_invoices():
         print("   ✗ Ошибка: фильтр по контрагенту не сработал")
         return False
     print("   ✓ Фильтры по статусу/архиву/салону/контрагенту работают\n")
+
+    print("12. Ограничение видимости по доступу к салонам (не-админ):")
+    invoice_store1 = create_invoice(
+        amount=2000, payment_purpose="Счёт салона 1", created_by="manager_a",
+        city_id=city_id, payer_id=payer_id, due_date="2026-08-22",
+        line_items=[{"store_id": store_id, "expense_category_id": category_id, "amount": 2000}],
+    )
+    invoice_store2 = create_invoice(
+        amount=3000, payment_purpose="Счёт салона 2", created_by="manager_b",
+        city_id=city_id, payer_id=payer_id, due_date="2026-08-22",
+        line_items=[{"store_id": store_id_2, "expense_category_id": category_id, "amount": 3000}],
+    )
+    invoice_no_dist = create_invoice(
+        amount=1000, payment_purpose="Свой счёт без распределения ещё", created_by="manager_a",
+        city_id=city_id, payer_id=payer_id, due_date="2026-08-22",
+    )
+    set_user_stores("manager_a", [store_id])  # доступ только к своему салону
+
+    if not user_can_access_invoice(invoice_store1, "manager_a", "manager"):
+        print("   ✗ Ошибка: manager_a должен видеть счёт своего салона")
+        return False
+    if user_can_access_invoice(invoice_store2, "manager_a", "manager"):
+        print("   ✗ Ошибка: manager_a НЕ должен видеть счёт чужого салона")
+        return False
+    if not user_can_access_invoice(invoice_no_dist, "manager_a", "manager"):
+        print("   ✗ Ошибка: manager_a должен видеть свой же счёт, даже без распределения")
+        return False
+    if not user_can_access_invoice(invoice_store2, "manager_b", "manager"):
+        print("   ✗ Ошибка: manager_b должен видеть свой счёт, даже без доступа к салону в user_stores")
+        return False
+    if not user_can_access_invoice(invoice_store2, "admin_user", "admin"):
+        print("   ✗ Ошибка: admin должен видеть любой счёт")
+        return False
+    print("   ✓ user_can_access_invoice верно разграничивает доступ\n")
+
+    visible_to_a = list_invoices(is_archived=False, restrict_username="manager_a", restrict_store_ids=[store_id])
+    visible_ids = {i["id"] for i in visible_to_a}
+    if invoice_store1["id"] not in visible_ids or invoice_no_dist["id"] not in visible_ids:
+        print("   ✗ Ошибка: в списке manager_a не хватает его собственных/своего-салона счетов")
+        return False
+    if invoice_store2["id"] in visible_ids:
+        print("   ✗ Ошибка: manager_a не должен видеть в списке счёт чужого салона")
+        return False
+
+    visible_no_stores = list_invoices(is_archived=False, restrict_username="manager_a", restrict_store_ids=[])
+    visible_no_stores_ids = {i["id"] for i in visible_no_stores}
+    if invoice_store2["id"] in visible_no_stores_ids:
+        print("   ✗ Ошибка: без единого доступного салона (пустой user_stores) не должен быть виден чужой счёт")
+        return False
+    if invoice_store1["id"] not in visible_no_stores_ids or invoice_no_dist["id"] not in visible_no_stores_ids:
+        print("   ✗ Ошибка: свои же счета (created_by) должны быть видны даже без единого доступного салона")
+        return False
+    print("   ✓ Фильтр списка по доступным салонам работает\n")
 
     print("=== Все тесты пройдены успешно! ===")
     return True
