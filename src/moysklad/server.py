@@ -160,6 +160,40 @@ def get_stores():
         return error_response(str(e), 500)
 
 
+# ========== Сотрудники и отделы (для owner/group на документах) ==========
+
+@moysklad_bp.route('/employees', methods=['GET'])
+@role_required('admin')
+def get_employees():
+    """Сотрудники МойСклад (для связки с пользователями дашборда — owner на документах)."""
+    try:
+        from .client import get_client
+        client = get_client()
+        response = client.get_employees()
+        rows = (response or {}).get('rows', [])
+        items = [{'id': r.get('id'), 'name': r.get('name'), 'href': r.get('meta', {}).get('href')} for r in rows]
+        return success_response(items, meta={'count': len(items)})
+    except Exception as e:
+        logger.error(f"Ошибка получения сотрудников МойСклад: {e}")
+        return error_response(str(e), 500)
+
+
+@moysklad_bp.route('/groups', methods=['GET'])
+@role_required('admin')
+def get_groups():
+    """Отделы МойСклад (для связки с точками/городами — group на документах)."""
+    try:
+        from .client import get_client
+        client = get_client()
+        response = client.get_groups()
+        rows = (response or {}).get('rows', [])
+        items = [{'id': r.get('id'), 'name': r.get('name'), 'href': r.get('meta', {}).get('href')} for r in rows]
+        return success_response(items, meta={'count': len(items)})
+    except Exception as e:
+        logger.error(f"Ошибка получения отделов МойСклад: {e}")
+        return error_response(str(e), 500)
+
+
 # ========== Sales Orders ==========
 
 @moysklad_bp.route('/sales_orders', methods=['GET'])

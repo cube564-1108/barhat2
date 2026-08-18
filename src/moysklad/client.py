@@ -375,6 +375,19 @@ class MoySkladClient:
         """
         return self.get('/entity/employee', params={'limit': limit, 'offset': offset})
 
+    def get_groups(self, limit: int = 1000, offset: int = 0) -> Optional[Dict]:
+        """
+        Получить отделы (group) — используются как owner/group на документах
+
+        Args:
+            limit: Количество записей
+            offset: Смещение
+
+        Returns:
+            Словарь с meta и rows
+        """
+        return self.get('/entity/group', params={'limit': limit, 'offset': offset})
+
     def get_projects(self, limit: int = 1000, offset: int = 0) -> Optional[Dict]:
         """
         Получить проекты
