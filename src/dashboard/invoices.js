@@ -948,10 +948,20 @@
         elements.referencesOverlay.classList.remove('active');
     }
 
+    // Салоны (проекты) физически живут в модуле cashshifts (своя таблица
+    // stores, общая с кассовыми сменами), а не в invoices — остальные
+    // справочники этой модалки принадлежат invoices. Обе группы роутов
+    // построены по одному и тому же шаблону (GET/POST list, PUT/DELETE
+    // /<id>), поэтому вкладку "Салоны" проще переиспользовать здесь, чем
+    // заводить отдельную модалку только ради одной вкладки.
+    function refApiBase() {
+        return currentRefType === 'stores' ? '/api/cash-shifts' : '/api/invoices';
+    }
+
     async function loadReferenceList() {
         elements.referencesList.innerHTML = '<p class="form-hint">Загрузка...</p>';
         try {
-            const res = await fetch(`/api/invoices/${currentRefType}`, { credentials: 'include' });
+            const res = await fetch(`${refApiBase()}/${currentRefType}`, { credentials: 'include' });
             const data = await res.json();
             currentRefList = data[currentRefType] || [];
             renderReferenceList(currentRefList);
@@ -1052,7 +1062,7 @@
         const name = elements.referenceNewName.value.trim();
         if (!name) { alert('Укажите название'); return; }
         try {
-            const res = await fetch(`/api/invoices/${currentRefType}`, {
+            const res = await fetch(`${refApiBase()}/${currentRefType}`, {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
@@ -1073,7 +1083,7 @@
         const name = prompt('Новое название:', currentName);
         if (!name || !name.trim()) return;
         try {
-            const res = await fetch(`/api/invoices/${currentRefType}/${id}`, {
+            const res = await fetch(`${refApiBase()}/${currentRefType}/${id}`, {
                 method: 'PUT',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
@@ -1092,7 +1102,7 @@
     async function deactivateReferenceItem(id) {
         if (!confirm('Удалить запись из справочника?')) return;
         try {
-            const res = await fetch(`/api/invoices/${currentRefType}/${id}`, { method: 'DELETE', credentials: 'include' });
+            const res = await fetch(`${refApiBase()}/${currentRefType}/${id}`, { method: 'DELETE', credentials: 'include' });
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Ошибка удаления'); return; }
             await loadReferenceList();

@@ -277,6 +277,55 @@ def get_store_by_id(store_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def create_store(name: str) -> int:
+    """
+    Создать точку продаж (салон/офис). Возвращает ID.
+
+    Реактивирует ранее деактивированную запись с тем же именем вместо
+    INSERT — UNIQUE(name) действует на всю таблицу, а не только на активные
+    строки, иначе повторно завести ранее удалённое название невозможно
+    (тот же баг был найден и исправлен в invoices.storage._ref_create).
+    """
+    conn = get_db()
+    existing = conn.execute("SELECT id, is_active FROM stores WHERE name = ?", (name,)).fetchone()
+    if existing and not existing["is_active"]:
+        conn.execute("UPDATE stores SET is_active = 1 WHERE id = ?", (existing["id"],))
+        conn.commit()
+        conn.close()
+        return existing["id"]
+
+    cursor = conn.execute("INSERT INTO stores (name, is_active) VALUES (?, 1)", (name,))
+    store_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return store_id
+
+
+def update_store(store_id: int, name: str) -> bool:
+    """Переименовать точку продаж. Та же ловушка с "мёртвым" именем, что и в create_store."""
+    conn = get_db()
+    ghost = conn.execute(
+        "SELECT id FROM stores WHERE name = ? AND id != ? AND is_active = 0",
+        (name, store_id)
+    ).fetchone()
+    if ghost:
+        conn.execute("DELETE FROM stores WHERE id = ?", (ghost["id"],))
+
+    conn.execute("UPDATE stores SET name = ? WHERE id = ?", (name, store_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_store(store_id: int) -> bool:
+    """Деактивировать точку продаж (мягкое удаление, is_active = 0)."""
+    conn = get_db()
+    conn.execute("UPDATE stores SET is_active = 0 WHERE id = ?", (store_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def get_all_categories() -> List[Dict[str, Any]]:
     """Получить список всех активных категорий расходов."""
     conn = get_db()

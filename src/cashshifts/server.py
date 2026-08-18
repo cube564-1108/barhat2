@@ -20,13 +20,16 @@ from flask_login import login_required, current_user
 # Импортируем модуль авторизации
 auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
-from auth import role_required
+from auth import role_required, log_action
 
 from .storage import (
     get_all_stores,
     get_all_categories,
     get_store_by_id,
     get_category_by_id,
+    create_store,
+    update_store,
+    delete_store,
     get_user_stores,
     check_store_access,
     get_users_full_names,
@@ -186,6 +189,53 @@ def get_stores():
     except Exception as e:
         logger.error(f"Ошибка /api/cash-shifts/stores: {e}")
         return error_response(str(e), 500)
+
+
+@cashshifts_bp.route("/stores", methods=["POST"])
+@role_required("admin")
+def add_store():
+    """Создать точку продаж (салон/офис). Body: {"name": str}."""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return error_response("Название обязательно", 400)
+    try:
+        store_id = create_store(name)
+    except Exception as e:
+        logger.error(f"Ошибка создания точки продаж «{name}»: {e}")
+        return error_response(f"«{name}» уже есть в списке или произошла ошибка", 400)
+    log_action(current_user.username, "create_store", name)
+    return jsonify(success_response({"id": store_id, "name": name})), 201
+
+
+@cashshifts_bp.route("/stores/<int:store_id>", methods=["PUT"])
+@role_required("admin")
+def edit_store(store_id):
+    """Переименовать точку продаж. Body: {"name": str}."""
+    if not get_store_by_id(store_id):
+        return error_response("Точка не найдена", 404)
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return error_response("Название обязательно", 400)
+    try:
+        update_store(store_id, name)
+    except Exception as e:
+        logger.error(f"Ошибка переименования точки продаж {store_id} в «{name}»: {e}")
+        return error_response(f"«{name}» уже есть в списке или произошла ошибка", 400)
+    log_action(current_user.username, "update_store", f"{store_id}: {name}")
+    return jsonify(success_response())
+
+
+@cashshifts_bp.route("/stores/<int:store_id>", methods=["DELETE"])
+@role_required("admin")
+def remove_store(store_id):
+    """Деактивировать точку продаж (мягкое удаление)."""
+    if not get_store_by_id(store_id):
+        return error_response("Точка не найдена", 404)
+    delete_store(store_id)
+    log_action(current_user.username, "delete_store", str(store_id))
+    return jsonify(success_response())
 
 
 @cashshifts_bp.route("/categories", methods=["GET"])
