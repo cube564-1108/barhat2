@@ -10,7 +10,11 @@
     <link rel="stylesheet" href="/brand/tokens.css">
     <link rel="stylesheet" href="/brand/brand.css">
     <link rel="stylesheet" href="/styles.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- chart.js — со своего домена, не с jsdelivr: чужой CDN означал лишние
+         DNS + TLS перед первой отрисовкой и зависимость от его доступности.
+         defer у всех скриптов: качаются параллельно с разбором страницы,
+         выполняются строго в порядке тегов (chart.js — раньше остальных). -->
+    <script defer src="/vendor/chart-4.4.0.umd.min.js"></script>
 </head>
 <body>
     <div class="dashboard-container">
@@ -1775,14 +1779,14 @@
         </main>
     </div>
 
-    <script src="/script.js"></script>
-    <script src="/bouquet-calculator.js"></script>
-    <script src="/quality-report.js"></script>
-    <script src="/users.js"></script>
-    <script src="/cash-shifts.js"></script>
-    <script src="/invoices.js"></script>
-    <script src="/abc-analysis.js"></script>
-    <script src="/tasks.js"></script>
-    <script src="/writeoffs.js"></script>
+    <script defer src="/script.js"></script>
+    <script defer src="/bouquet-calculator.js"></script>
+    <script defer src="/quality-report.js"></script>
+    <script defer src="/users.js"></script>
+    <script defer src="/cash-shifts.js"></script>
+    <script defer src="/invoices.js"></script>
+    <script defer src="/abc-analysis.js"></script>
+    <script defer src="/tasks.js"></script>
+    <script defer src="/writeoffs.js"></script>
 </body>
 </html>

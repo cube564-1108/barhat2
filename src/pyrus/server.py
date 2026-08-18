@@ -11,6 +11,7 @@ from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory, redirect, session
 from flask.sessions import SecureCookieSessionInterface
 from flask_cors import CORS
+from flask_compress import Compress
 from dotenv import load_dotenv
 
 # Импорт авторизации
@@ -63,6 +64,19 @@ app = Flask(__name__)
 # Конфигурация
 app.config['JSON_AS_ASCII'] = False  # Поддержка кириллицы
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True  # Красивый JSON
+
+# gzip-сжатие ответов. Amvera (envoy) ничего не сжимает сама, а дашборд —
+# это ~450 КБ текста (index.html + 9 JS + CSS) на первую загрузку; после
+# сжатия остаётся ~90 КБ. Брать br/zstd не даём: их жмёт сам Python на
+# каждый запрос и это заметно дороже по CPU, чем gzip, при тех же 2 воркерах.
+app.config['COMPRESS_ALGORITHM'] = ['gzip']
+app.config['COMPRESS_LEVEL'] = 6
+app.config['COMPRESS_MIN_SIZE'] = 1024
+app.config['COMPRESS_MIMETYPES'] = [
+    'text/html', 'text/css', 'text/javascript', 'application/javascript',
+    'application/json', 'image/svg+xml',
+]
+Compress(app)
 
 # Секретный ключ для сессий из env
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -271,6 +285,7 @@ SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(SERVER_DIR))
 DASHBOARD_DIR = os.path.abspath(os.path.join(SERVER_DIR, '..', 'dashboard'))
 BRAND_DIR = os.path.abspath(os.path.join(PROJECT_ROOT, 'brand'))
+VENDOR_DIR = os.path.abspath(os.path.join(DASHBOARD_DIR, 'vendor'))
 
 # Debug: print paths
 print(f"SERVER_DIR: {SERVER_DIR}")
@@ -504,6 +519,23 @@ def serve_writeoffs():
 def serve_brand(filename):
     """Отдаёт файлы из директории brand"""
     return send_from_directory(BRAND_DIR, filename)
+
+
+@app.route('/vendor/<path:filename>')
+def serve_vendor(filename):
+    """Отдаёт сторонние библиотеки (chart.js) со своего домена.
+
+    Раньше chart.js тянулся с cdn.jsdelivr.net блокирующим тегом в <head>:
+    это лишние DNS + TLS к чужому домену (~1 с) перед первой отрисовкой, да
+    ещё и на CDN, доступность которого мы не контролируем.
+
+    Версия зашита в имя файла (chart-4.4.0.umd.min.js), поэтому ответ можно
+    кэшировать надолго — при обновлении библиотеки меняется имя, и браузер
+    сам сходит за новым файлом.
+    """
+    response = send_from_directory(VENDOR_DIR, filename)
+    response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+    return response
 
 
 @app.route('/debug/module', methods=['GET'])
@@ -897,8 +929,9 @@ def get_data_coverage():
         date_to = request.args.get('date_to')
         granularity = request.args.get('granularity', 'day')
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=20000")
         cursor = conn.cursor()
 
         # Получаем все уникальные задачи

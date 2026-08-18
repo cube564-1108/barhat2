@@ -8,5 +8,9 @@ build:
   useCache: true
 run:
   persistenceMount: /data
-  command: gunicorn app:app --bind 0.0.0.0:80 --workers 2 --timeout 120
+  # gthread вместо sync: первая загрузка дашборда — это 16 запросов (HTML,
+  # CSS, 10 JS, иконки), а два sync-воркера обрабатывали их строго по одному
+  # за раз и выстраивали браузер в очередь. Соединения к SQLite создаются на
+  # каждый вызов (см. storage.py в модулях), общего conn между потоками нет.
+  command: gunicorn app:app --bind 0.0.0.0:80 --worker-class gthread --workers 2 --threads 8 --timeout 120
   containerPort: 80

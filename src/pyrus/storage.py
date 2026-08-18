@@ -40,8 +40,13 @@ class PyrusStorage:
     @contextmanager
     def _get_connection(self):
         """Контекст менеджер для подключения к SQLite"""
-        conn = sqlite3.connect(self.db_path)
+        # timeout + busy_timeout, как в остальных модулях: воркеров теперь не 2,
+        # а 2 × 8 потоков (см. amvera.yml), и без запаса на ожидание блокировки
+        # параллельный запрос получил бы "database is locked" вместо очереди.
+        conn = sqlite3.connect(self.db_path, timeout=20)
         conn.row_factory = sqlite3.Row  # Доступ по имени колонки
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=20000")
         try:
             yield conn
             conn.commit()
