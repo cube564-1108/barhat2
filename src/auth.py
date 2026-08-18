@@ -41,10 +41,11 @@ ROLE_SECTIONS = {
     "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
     # Пользователи, залогиненные через SSO из портала БАРХАТ Пульс (см. src/sso.py).
-    # Роль в Пульсе (director/manager/...) на внутренние права намеренно не мапится —
-    # SSO-вход даёт доступ только к разделу "Качество", остальной функционал (кассы,
-    # счета, управление пользователями) через портал не открывается.
-    "sso_viewer": {"quality"},
+    # Роль в Пульсе (director/manager/...) на внутренние права намеренно не мапится:
+    # все входящие через портал получают один и тот же набор — всё, КРОМЕ
+    # управления пользователями. Админку через внешний JWT не открываем, иначе
+    # пропуск Пульса позволял бы заводить и править учётки в нашем сервисе.
+    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "abc_analysis", "writeoffs"},
 }
 
 
@@ -271,6 +272,20 @@ ALL_MODULES = [
     'writeoffs',      # Списания товара
 ]
 
+# Модули, доступные пользователям, вошедшим через SSO из портала БАРХАТ Пульс.
+# Всё, кроме админки: управление учётками не должно открываться по внешнему
+# пропуску. Список задан явно (а не вычитанием из ALL_MODULES), чтобы при
+# добавлении нового модуля решение «пускать ли туда портал» принималось руками.
+SSO_MODULES = [
+    'dashboard',
+    'calculator',
+    'quality',
+    'cash_shifts',
+    'invoices',
+    'abc_analysis',
+    'writeoffs',
+]
+
 
 def init_auth_tables():
     """Вызвать один раз при старте приложения (создаёт таблицы, если их нет)."""
@@ -393,6 +408,11 @@ def init_auth_tables():
 
     # Догрузка права на модуль writeoffs (списания товара)
     migrate_new_module_permissions("writeoffs", ["admin", "manager", "florist"])
+
+    # Догрузка прав SSO-пользователям: первые из них были заведены, когда
+    # sso_viewer имел доступ только к "quality" (см. SSO_MODULES выше).
+    for module in SSO_MODULES:
+        migrate_new_module_permissions(module, ["sso_viewer"])
 
 
 class User(UserMixin):

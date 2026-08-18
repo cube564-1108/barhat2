@@ -8,7 +8,7 @@ import sys
 import logging
 from datetime import datetime
 from typing import Optional
-from flask import Flask, jsonify, request, send_from_directory, redirect
+from flask import Flask, jsonify, request, send_from_directory, redirect, session
 from flask.sessions import SecureCookieSessionInterface
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -281,6 +281,41 @@ print(f"BRAND_DIR: {BRAND_DIR}")
 print(f"BRAND exists: {os.path.exists(BRAND_DIR)}")
 
 
+def _is_embed_request():
+    """Нужно ли отдавать «голый» отчёт без сайдбара и шапки.
+
+    Включается для сессий, заведённых через /sso (внутри iframe Пульса своя
+    навигация уже есть — наша дублирует её и путает), либо явным ?embed=1 —
+    им же можно посмотреть embed-вид, залогинившись обычным паролем.
+    """
+    if request.args.get("embed") == "1":
+        return True
+    return bool(session.get("sso"))
+
+
+def _serve_dashboard_shell():
+    """Отдаёт index.html, помечая <html> классом embed-mode в embed-режиме.
+
+    Метку ставит сервер, а не JS: класс должен быть в разметке ДО первой
+    отрисовки, иначе сайдбар и шапка успевают мигнуть внутри iframe, пока
+    не ответит /api/auth/me.
+    """
+    index_path = os.path.join(DASHBOARD_DIR, 'index.html')
+    if not _is_embed_request():
+        return send_from_directory(DASHBOARD_DIR, "index.html")
+
+    with open(index_path, encoding='utf-8') as f:
+        html = f.read()
+    html = html.replace('<html lang="ru">', '<html lang="ru" class="embed-mode">', 1)
+
+    response = app.make_response(html)
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
+    # Оболочка в embed-виде отличается от обычной — кэшировать её нельзя,
+    # иначе браузер подставит вариант с сайдбаром (или наоборот).
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route('/')
 def index():
     """Главная страница — дашборд (с проверкой авторизации)"""
@@ -289,7 +324,7 @@ def index():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return send_from_directory(DASHBOARD_DIR, 'login.html')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки index.html: {e}")
         return f"Ошибка загрузки дашборда: {e}", 500
@@ -314,7 +349,7 @@ def dashboard_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /dashboard: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -327,7 +362,7 @@ def calculator_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /calculator: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -340,7 +375,7 @@ def quality_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /quality: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -353,7 +388,7 @@ def users_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /users: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -367,7 +402,7 @@ def cash_shifts_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /cash-shifts: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -380,7 +415,7 @@ def invoices_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /invoices: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -393,7 +428,7 @@ def writeoffs_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /writeoffs: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -406,7 +441,7 @@ def abc_analysis_page():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return redirect('/login')
-        return send_from_directory(DASHBOARD_DIR, 'index.html')
+        return _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /abc-analysis: {e}")
         return f"Ошибка загрузки страницы: {e}", 500

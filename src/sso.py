@@ -25,7 +25,7 @@ from flask import Blueprint, request, redirect, abort, session, jsonify
 from flask_login import login_user
 from werkzeug.security import generate_password_hash
 
-from auth import get_db, User, log_action, role_required
+from auth import get_db, User, log_action, role_required, SSO_MODULES
 
 logger = logging.getLogger("barhat.sso")
 
@@ -92,10 +92,11 @@ def _find_or_create_sso_user(email: str, full_name: str):
                        VALUES (?, ?, ?, ?, 1, ?, ?, 1)""",
                     (username, full_name, unusable_hash, SSO_ROLE, datetime.utcnow().isoformat(), email),
                 )
-                conn.execute(
-                    "INSERT INTO permissions (username, module_name, can_view) VALUES (?, 'quality', 1)",
-                    (username,),
-                )
+                for module in SSO_MODULES:
+                    conn.execute(
+                        "INSERT INTO permissions (username, module_name, can_view) VALUES (?, ?, 1)",
+                        (username, module),
+                    )
                 conn.commit()
                 break
             except Exception:

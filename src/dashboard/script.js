@@ -5,6 +5,11 @@
 
 document.addEventListener('DOMContentLoaded', async function() {
 
+    // Embed-режим: страница открыта внутри iframe портала БАРХАТ Пульс.
+    // Класс на <html> проставляет сервер (_serve_dashboard_shell в
+    // src/pyrus/server.py) — до первой отрисовки, чтобы сайдбар не мигал.
+    const isEmbed = document.documentElement.classList.contains('embed-mode');
+
     // === Проверка авторизации ===
 
     async function checkAuth() {
@@ -126,8 +131,12 @@ document.addEventListener('DOMContentLoaded', async function() {
             targetNav.classList.add('active');
             targetPage.classList.add('active');
 
-            // Обновляем URL без перезагрузки
-            history.pushState({ page: pageName }, '', `/${pageNameToUrlSlug(pageName)}`);
+            // Обновляем URL без перезагрузки. В embed-режиме тащим за собой
+            // ?embed=1: иначе перезагрузка страницы внутри рамки (или переход
+            // по F5) вернёт вид с сайдбаром для сессий, где embed включён
+            // флагом, а не SSO.
+            const newUrl = `/${pageNameToUrlSlug(pageName)}${isEmbed ? '?embed=1' : ''}`;
+            history.pushState({ page: pageName }, '', newUrl);
 
             // Загружаем данные для страницы пользователей
             if (pageName === 'users' && window.BarhatUsers) {
@@ -249,30 +258,33 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
 
     // === Мобильное меню ===
+    // В embed-режиме сайдбара нет — гамбургер и обработчики к нему не нужны.
 
-    // Кнопка гамбургер создаётся всегда — видимость (display) регулируется медиа-запросом
-    // в CSS, чтобы она появлялась и при resize/повороте экрана, а не только при загрузке страницы.
-    const menuToggle = document.createElement('button');
-    menuToggle.className = 'mobile-menu-toggle';
-    menuToggle.innerHTML = '<span></span>';
-    menuToggle.setAttribute('aria-label', 'Открыть меню');
+    if (!isEmbed) {
+        // Кнопка гамбургер создаётся всегда — видимость (display) регулируется медиа-запросом
+        // в CSS, чтобы она появлялась и при resize/повороте экрана, а не только при загрузке страницы.
+        const menuToggle = document.createElement('button');
+        menuToggle.className = 'mobile-menu-toggle';
+        menuToggle.innerHTML = '<span></span>';
+        menuToggle.setAttribute('aria-label', 'Открыть меню');
 
-    menuToggle.addEventListener('click', function() {
-        document.querySelector('.sidebar').classList.toggle('open');
-    });
+        menuToggle.addEventListener('click', function() {
+            document.querySelector('.sidebar').classList.toggle('open');
+        });
 
-    document.body.appendChild(menuToggle);
+        document.body.appendChild(menuToggle);
 
-    // Закрытие меню при клике вне его (на мобильных)
-    document.addEventListener('click', function(e) {
-        if (window.innerWidth <= 768) {
-            const sidebar = document.querySelector('.sidebar');
+        // Закрытие меню при клике вне его (на мобильных)
+        document.addEventListener('click', function(e) {
+            if (window.innerWidth <= 768) {
+                const sidebar = document.querySelector('.sidebar');
 
-            if (!sidebar.contains(e.target) && !menuToggle.contains(e.target)) {
-                sidebar.classList.remove('open');
+                if (!sidebar.contains(e.target) && !menuToggle.contains(e.target)) {
+                    sidebar.classList.remove('open');
+                }
             }
-        }
-    });
+        });
+    }
 
     // === Загрузка метрик (заглушка для будущего API) ===
 

@@ -1519,3 +1519,31 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+
+/* === Embed-режим (внутри iframe портала БАРХАТ Пульс) ===
+   Класс embed-mode ставит сервер на <html> (см. _serve_dashboard_shell
+   в src/pyrus/server.py) для SSO-сессий и для ?embed=1. Убираем свою
+   навигацию и шапку: внутри рамки навигация между отчётами живёт в меню
+   Пульса, а наш сайдбар её дублирует. Остаётся только сам отчёт. */
+
+.embed-mode .sidebar,
+.embed-mode .content-header,
+.embed-mode .mobile-menu-toggle {
+    display: none !important;
+}
+
+.embed-mode .main-content {
+    margin-left: 0;
+    padding: 20px 24px;
+    max-width: none;
+}
+
+.embed-mode .dashboard-container {
+    min-height: 0;
+}
+
+@media (max-width: 768px) {
+    .embed-mode .main-content {
+        padding: 16px;
+    }
+}
