@@ -1000,15 +1000,174 @@ def get_data_coverage():
         }), 500
 
 
-# Глобальная переменная для статуса обновления
-update_status = {
-    'running': False,
-    'progress': 0,
-    'total': 0,
-    'message': '',
-    'last_update': None,
-    'error': None
-}
+# ========== Загрузка задач из Pyrus ==========
+#
+# Статус загрузки хранится в таблице sync_log (файл на диске), а НЕ в памяти
+# процесса: на Amvera 2 воркера gunicorn (amvera.yml), фоновый поток стартует
+# на одном из них, а опрос /update-status от фронтенда мог попасть на другой
+# и вернуть чистый дефолт (running=False) — ложное "готово" посреди загрузки.
+# Тот же инцидент уже был в синхронизации МойСклада.
+#
+# Задачи грузятся окнами по датам, а не одним запросом: Pyrus ограничивает
+# item_count реестра 20 000 записями (client.py), а история формы качества —
+# почти 100 000 задач. Каждое окно сохраняется сразу после загрузки, поэтому
+# обрыв процесса теряет одно окно, а не весь прогресс.
+
+QUALITY_FORM_ID = 1327961
+
+# Если фоновый поток не обновлял heartbeat дольше этого времени, считаем
+# загрузку мёртвой (упал воркер) и разрешаем запустить новую — иначе запись
+# в статусе 'started' блокировала бы кнопку до перезапуска сервиса.
+SYNC_STALE_MINUTES = 15
+
+
+def _sync_status_payload(log_row):
+    """Привести запись sync_log к формату, который ждёт фронтенд"""
+    if not log_row:
+        return {
+            'running': False,
+            'progress': 0,
+            'total': 0,
+            'message': '',
+            'last_update': None,
+            'error': None
+        }
+
+    from datetime import datetime, timedelta
+
+    running = log_row.get('status') == 'started'
+    if running:
+        heartbeat = log_row.get('updated_at') or log_row.get('started_at')
+        try:
+            beat_time = datetime.fromisoformat(str(heartbeat))
+            if datetime.utcnow() - beat_time > timedelta(minutes=SYNC_STALE_MINUTES):
+                running = False
+        except (TypeError, ValueError):
+            pass
+
+    count = log_row.get('tasks_count') or 0
+    error = log_row.get('error_message')
+    # message появился вместе с фоновой загрузкой окнами; у записей, созданных
+    # до этого, его нет — показываем хотя бы количество задач
+    message = log_row.get('message') or (f'Обновлено {count} задач' if count else '')
+    if not running and log_row.get('status') == 'started' and not error:
+        error = 'Загрузка прервана (процесс не отвечает)'
+
+    return {
+        'running': running,
+        'progress': count,
+        'total': count,
+        'message': message,
+        'last_update': log_row.get('finished_at'),
+        'error': error
+    }
+
+
+def _fetch_register_window(client, form_id, start_iso, end_iso):
+    """Загрузить реестр формы за одно окно дат"""
+    response = client.session.get(
+        f'{client.api_url}forms/{form_id}/register',
+        headers={'Authorization': f'Bearer {client.access_token}'},
+        params={
+            'include_archived': 'y',
+            'item_count': 20000,
+            'created_after': start_iso,
+            'created_before': end_iso
+        },
+        # без таймаута зависший Pyrus держал бы поток вечно, а запись в
+        # sync_log — в статусе 'started'
+        timeout=(10, 180)
+    )
+
+    if response.status_code != 200:
+        raise Exception(f'Ошибка API: {response.status_code}')
+
+    return response.json().get('tasks', [])
+
+
+def _import_tasks_background(log_id, start_date, end_date, step_days):
+    """Фоновая загрузка задач формы качества окнами по step_days дней"""
+    from datetime import timedelta
+
+    total_saved = 0
+
+    try:
+        client = get_client()
+        if not client.authenticate():
+            raise Exception('Ошибка авторизации')
+
+        # Границы окон включительные с обеих сторон (created_after 00:00:00,
+        # created_before 23:59:59), поэтому следующее окно начинается со
+        # СЛЕДУЮЩЕГО дня — иначе стыковой день грузился бы дважды
+        windows = []
+        cursor_date = start_date
+        while cursor_date <= end_date:
+            window_end = min(cursor_date + timedelta(days=step_days - 1), end_date)
+            windows.append((cursor_date, window_end))
+            cursor_date = window_end + timedelta(days=1)
+
+        for index, (window_start, window_end) in enumerate(windows, 1):
+            tasks = _fetch_register_window(
+                client,
+                QUALITY_FORM_ID,
+                window_start.strftime('%Y-%m-%dT00:00:00Z'),
+                window_end.strftime('%Y-%m-%dT23:59:59Z')
+            )
+            total_saved += storage.save_tasks(QUALITY_FORM_ID, tasks)
+
+            storage.update_sync_log(
+                log_id,
+                f'Период {window_start:%d.%m.%Y}–{window_end:%d.%m.%Y} '
+                f'({index}/{len(windows)}): загружено {total_saved} задач',
+                total_saved
+            )
+
+        storage.finish_sync_log(
+            log_id,
+            forms_count=1,
+            tasks_count=total_saved,
+            status='completed',
+            message=f'Обновлено {total_saved} задач'
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка фоновой загрузки Pyrus: {e}")
+        storage.finish_sync_log(
+            log_id,
+            forms_count=1,
+            tasks_count=total_saved,
+            status='failed',
+            error_message=str(e),
+            message=f'Ошибка после {total_saved} задач'
+        )
+
+
+def _start_import(job, start_date, end_date, step_days):
+    """Проверить, что загрузка не идёт, и запустить фоновый поток"""
+    import threading
+
+    last_log = storage.get_latest_sync_log()
+    if _sync_status_payload(last_log)['running']:
+        return jsonify({
+            'success': False,
+            'error': 'Обновление уже запущено',
+            'status': _sync_status_payload(last_log)
+        })
+
+    log_id = storage.start_sync_log(job=job, message='Запуск обновления...')
+
+    thread = threading.Thread(
+        target=_import_tasks_background,
+        args=(log_id, start_date, end_date, step_days)
+    )
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'success': True,
+        'message': 'Обновление запущено',
+        'status': _sync_status_payload(storage.get_latest_sync_log())
+    })
 
 
 @app.route('/api/pyrus/update', methods=['POST'])
@@ -1020,96 +1179,60 @@ def trigger_update():
     Body params:
         - days: Количество последних дней для обновления (default: 7)
     """
-    global update_status
-
-    if update_status['running']:
-        return jsonify({
-            'success': False,
-            'error': 'Обновление уже запущено',
-            'status': update_status
-        })
-
     try:
-        import threading
         from datetime import datetime, timedelta
 
-        data = request.get_json() or {}
-        days = data.get('days', 7)
+        data = request.get_json(silent=True) or {}
+        days = int(data.get('days', 7))
 
-        # Функция обновления в фоновом потоке
-        def update_in_background():
-            global update_status
-            try:
-                update_status['running'] = True
-                update_status['message'] = 'Запуск обновления...'
-                update_status['error'] = None
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
 
-                # Используем уже импортированные модули
-                client = get_client()
-                storage_obj = get_storage()
-
-                if not client.authenticate():
-                    raise Exception('Ошибка авторизации')
-
-                # Вычисляем даты
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=days)
-
-                start_iso = start_date.strftime('%Y-%m-%dT00:00:00Z')
-                end_iso = end_date.strftime('%Y-%m-%dT23:59:59Z')
-
-                # Получаем задачи
-                response = client.session.get(
-                    f'{client.api_url}forms/1327961/register',
-                    headers={'Authorization': f'Bearer {client.access_token}'},
-                    params={
-                        'include_archived': 'y',
-                        'item_count': 20000,
-                        'created_after': start_iso,
-                        'created_before': end_iso
-                    },
-                    timeout=(10, 180)
-                )
-
-                if response.status_code != 200:
-                    raise Exception(f'Ошибка API: {response.status_code}')
-
-                tasks_data = response.json()
-                tasks = tasks_data.get('tasks', [])
-
-                update_status['total'] = len(tasks)
-                update_status['message'] = f'Получено {len(tasks)} задач'
-
-                # Сохраняем
-                count = storage.save_tasks(1327961, tasks)
-                update_status['progress'] = count
-
-                # Обновляем статистику
-                stats = storage.get_stats()
-
-                update_status['message'] = f'Обновлено {count} задач'
-                update_status['last_update'] = datetime.now().isoformat()
-
-            except Exception as e:
-                update_status['error'] = str(e)
-                update_status['message'] = f'Ошибка: {str(e)}'
-                logger.error(f"Ошибка фонового обновления: {e}")
-            finally:
-                update_status['running'] = False
-
-        # Запускаем в фоновом потоке
-        thread = threading.Thread(target=update_in_background)
-        thread.daemon = True
-        thread.start()
-
-        return jsonify({
-            'success': True,
-            'message': 'Обновление запущено',
-            'status': update_status
-        })
+        return _start_import('update', start_date, end_date, step_days=7)
 
     except Exception as e:
         logger.error(f"Ошибка запуска обновления: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/pyrus/backfill', methods=['POST'])
+@role_required('admin')
+def trigger_backfill():
+    """
+    Разовая загрузка истории задач формы качества за длительный период.
+
+    Нужна потому, что прод-база наполняется только ежедневной подкачкой за
+    7 дней: вся история формы (~98 тыс. задач) осталась в локальной базе,
+    с которой отчёт работал, пока фронтенд ходил на 127.0.0.1.
+
+    Body params:
+        - date_from: начало периода, YYYY-MM-DD (default: 2026-01-01)
+        - date_to: конец периода, YYYY-MM-DD (default: сегодня)
+        - step_days: размер окна загрузки в днях (default: 7)
+    """
+    try:
+        from datetime import datetime
+
+        data = request.get_json(silent=True) or {}
+        date_from = data.get('date_from', '2026-01-01')
+        date_to = data.get('date_to')
+        step_days = int(data.get('step_days', 7))
+
+        start_date = datetime.strptime(date_from, '%Y-%m-%d')
+        end_date = datetime.strptime(date_to, '%Y-%m-%d') if date_to else datetime.now()
+
+        if start_date >= end_date:
+            return jsonify({'success': False, 'error': 'date_from должен быть раньше date_to'}), 400
+
+        return _start_import('backfill', start_date, end_date, step_days)
+
+    except ValueError as e:
+        return jsonify({'success': False, 'error': f'Неверный формат даты: {e}'}), 400
+    except Exception as e:
+        logger.error(f"Ошибка запуска backfill: {e}")
         return jsonify({
             'success': False,
             'error': str(e)
@@ -1121,7 +1244,7 @@ def get_update_status():
     """Получить статус обновления"""
     return jsonify({
         'success': True,
-        'status': update_status
+        'status': _sync_status_payload(storage.get_latest_sync_log())
     })
 
 

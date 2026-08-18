@@ -135,6 +135,20 @@ class PyrusStorage:
                 )
             ''')
 
+            # Миграция: колонки для отслеживания прогресса фоновых загрузок.
+            # Статус обновления раньше жил в памяти процесса, но на Amvera 2
+            # воркера gunicorn — опрос статуса мог попасть на воркер, который
+            # ничего не запускал, и показать ложное "готово" (тот же инцидент
+            # уже был в МойСкладе, см. комментарий в moysklad/server.py).
+            existing = {row['name'] for row in cursor.execute("PRAGMA table_info(sync_log)")}
+            for column, ddl in (
+                ('job', "ALTER TABLE sync_log ADD COLUMN job TEXT DEFAULT 'update'"),
+                ('message', "ALTER TABLE sync_log ADD COLUMN message TEXT"),
+                ('updated_at', "ALTER TABLE sync_log ADD COLUMN updated_at TIMESTAMP"),
+            ):
+                if column not in existing:
+                    cursor.execute(ddl)
+
             logger.info(f"БД инициализирована: {self.db_path}")
 
     def save_form(self, form: Dict) -> bool:
@@ -430,19 +444,61 @@ class PyrusStorage:
             logger.error(f"Ошибка получения истории: {e}")
             return []
 
-    def start_sync_log(self) -> int:
+    def start_sync_log(self, job: str = 'update', message: str = '') -> int:
         """Начать запись лога синхронизации, возвращает ID записи"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO sync_log (started_at, status)
-                    VALUES (CURRENT_TIMESTAMP, 'started')
-                ''')
+                    INSERT INTO sync_log (started_at, updated_at, status, job, message, tasks_count)
+                    VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'started', ?, ?, 0)
+                ''', (job, message))
                 return cursor.lastrowid
         except Exception as e:
             logger.error(f"Ошибка создания log записи: {e}")
             return 0
+
+    def update_sync_log(self, log_id: int, message: str, tasks_count: Optional[int] = None) -> None:
+        """
+        Обновить прогресс выполняющейся загрузки.
+
+        updated_at служит heartbeat'ом: по нему видно, что фоновый поток жив
+        (см. is_sync_running) — иначе упавший воркер оставил бы запись в статусе
+        'started' навсегда и заблокировал повторный запуск.
+        """
+        if not log_id:
+            return
+        try:
+            with self._get_connection() as conn:
+                if tasks_count is None:
+                    conn.execute(
+                        "UPDATE sync_log SET message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (message, log_id)
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE sync_log SET message = ?, tasks_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (message, tasks_count, log_id)
+                    )
+        except Exception as e:
+            logger.error(f"Ошибка обновления прогресса log записи: {e}")
+
+    def get_latest_sync_log(self, job: Optional[str] = None) -> Optional[Dict]:
+        """Последняя запись лога (при job=None — по всем типам загрузок)"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if job:
+                    cursor.execute(
+                        "SELECT * FROM sync_log WHERE job = ? ORDER BY id DESC LIMIT 1", (job,)
+                    )
+                else:
+                    cursor.execute("SELECT * FROM sync_log ORDER BY id DESC LIMIT 1")
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка получения последней log записи: {e}")
+            return None
 
     def finish_sync_log(
         self,
@@ -450,21 +506,26 @@ class PyrusStorage:
         forms_count: int,
         tasks_count: int,
         status: str = 'completed',
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        message: Optional[str] = None
     ) -> None:
         """Завершить запись лога синхронизации"""
+        if not log_id:
+            return
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE sync_log
                     SET finished_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP,
                         forms_count = ?,
                         tasks_count = ?,
                         status = ?,
-                        error_message = ?
+                        error_message = ?,
+                        message = COALESCE(?, message)
                     WHERE id = ?
-                ''', (forms_count, tasks_count, status, error_message, log_id))
+                ''', (forms_count, tasks_count, status, error_message, message, log_id))
         except Exception as e:
             logger.error(f"Ошибка обновления log записи: {e}")
 
