@@ -270,11 +270,32 @@ storage = get_storage(db_path)
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Проверка здоровья сервера"""
+    """Проверка здоровья сервера.
+
+    Показывает фактические пути и размеры баз: на Amvera нет консоли, и
+    единственный способ заметить, что база уехала с постоянного диска /data
+    на эфемерный /app (см. комментарий про пути в app.py), — посмотреть их
+    отсюда. Пустой размер у боевой базы = данные потерялись при сборке.
+    """
+    databases = {}
+    for name, path in (
+        ('pyrus', db_path),
+        ('barhat', os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
+        ('moysklad', os.environ.get('MOYSKLAD_DB_PATH', 'moysklad.db')),
+    ):
+        exists = os.path.exists(path)
+        databases[name] = {
+            'path': path,
+            'exists': exists,
+            'size_mb': round(os.path.getsize(path) / 1024 / 1024, 2) if exists else 0,
+            'persistent': os.path.abspath(path).startswith('/data'),
+        }
+
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
-        'database': db_path
+        'database': db_path,
+        'databases': databases
     })
 
 
