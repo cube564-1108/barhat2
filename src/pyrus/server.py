@@ -1067,7 +1067,8 @@ def trigger_update():
                         'item_count': 20000,
                         'created_after': start_iso,
                         'created_before': end_iso
-                    }
+                    },
+                    timeout=(10, 180)
                 )
 
                 if response.status_code != 200:
