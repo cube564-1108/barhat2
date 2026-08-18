@@ -1103,6 +1103,27 @@ def set_category_planfact_mapping(category_id):
     return jsonify({"ok": True})
 
 
+# Инцидент 2026-08-17: вкладка "Сопоставление" дёргает эти два live-эндпоинта
+# при каждом открытии без кэша; на нескольких быстрых перезагрузках медленные/
+# рейтлимитящие ответы ПланФакт заняли собой обоих gunicorn-воркеров (их
+# всего 2, amvera.yml) и подвесили весь сайт. Короткий TTL-кэш в процессе —
+# самая простая защита от повторного залпа запросов при повторных открытиях
+# вкладки одним и тем же админом; данные тут не критичны к свежести (это
+# просто список для выпадающего списка настройки).
+_planfact_dropdown_cache: dict = {}
+_PLANFACT_DROPDOWN_CACHE_TTL_SECONDS = 120
+
+
+def _get_planfact_dropdown_cached(cache_key: str, fetch_fn):
+    cached = _planfact_dropdown_cache.get(cache_key)
+    if cached and (datetime.now() - cached["at"]).total_seconds() < _PLANFACT_DROPDOWN_CACHE_TTL_SECONDS:
+        return cached["value"]
+    value = fetch_fn()
+    if value is not None:
+        _planfact_dropdown_cache[cache_key] = {"value": value, "at": datetime.now()}
+    return value
+
+
 @invoices_bp.route("/planfact/projects", methods=["GET"])
 @role_required("admin")
 def get_planfact_projects():
@@ -1112,7 +1133,7 @@ def get_planfact_projects():
         client = get_client()
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    projects = client.get_projects()
+    projects = _get_planfact_dropdown_cached("projects", client.get_projects)
     if projects is None:
         return jsonify({"error": "Не удалось получить проекты из ПланФакт"}), 502
     return jsonify({"projects": projects})
@@ -1127,7 +1148,7 @@ def get_planfact_categories():
         client = get_client()
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    categories = client.get_operation_categories("Outcome")
+    categories = _get_planfact_dropdown_cached("categories", lambda: client.get_operation_categories("Outcome"))
     if categories is None:
         return jsonify({"error": "Не удалось получить статьи из ПланФакт"}), 502
     return jsonify({"categories": categories})

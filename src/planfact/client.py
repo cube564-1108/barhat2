@@ -56,20 +56,30 @@ class PlanFactClient:
         path: str,
         params: Optional[Dict] = None,
         json_data: Optional[Dict] = None,
+        timeout: int = 30,
+        max_retries_429: int = 3,
     ) -> Optional[Dict[str, Any]]:
         """
         Выполнить запрос к ПланФакт API.
 
-        Таймаут 30с и ретрай на 429 (макс 3 попытки, 2-5с пауза) — по аналогии
-        с MoySkladClient (src/moysklad/client.py), там же объяснение, почему
-        таймаут обязателен на прод gunicorn-воркерах.
+        Таймаут по умолчанию 30с и ретрай на 429 (макс 3 попытки, 2-5с пауза)
+        — по аналогии с MoySkladClient (src/moysklad/client.py), там же
+        объяснение, почему таймаут обязателен на прод gunicorn-воркерах.
+
+        timeout/max_retries_429 переопределяемы — на проде всего 2 воркера
+        (amvera.yml), а get_projects()/get_operation_categories() дёргаются
+        при каждом открытии вкладки "Сопоставление" в UI без кэша; при
+        нескольких быстрых перезагрузках вкладки медленные/рейтлимитящие
+        ответы ПланФакт с дефолтным таймаутом+ретраями заняли собой обоих
+        воркеров и подвесили весь сайт (см. историю сессий, инцидент
+        2026-08-17) — для некритичных "справочных" вызовов таймаут короче и
+        без ретраев, лучше быстро отказать, чем держать воркер занятым.
 
         Возвращает содержимое поля "data" при isSuccess=true, иначе None
         (ошибка уже залогирована).
         """
         url = f"{self.api_url.rstrip('/')}/{path.lstrip('/')}"
 
-        max_retries_429 = 3
         for attempt in range(max_retries_429 + 1):
             try:
                 logger.debug(f"{method} {url}")
@@ -79,7 +89,7 @@ class PlanFactClient:
                     headers=self._headers(),
                     params=params,
                     json=json_data,
-                    timeout=30,
+                    timeout=timeout,
                 )
 
                 if response.status_code == 429 and attempt < max_retries_429:
@@ -182,7 +192,10 @@ class PlanFactClient:
         удалённые проекты не нужны в списке для сопоставления.
         """
         params = {"filter.active": "true"} if active_only else None
-        data = self.request("GET", "projects", params=params)
+        # timeout короткий, ретраев нет — это справочный вызов для выпадающего
+        # списка в UI, дёргается при каждом открытии вкладки без кэша (см.
+        # request(), докстринг про инцидент 2026-08-17)
+        data = self.request("GET", "projects", params=params, timeout=8, max_retries_429=0)
         if data is None:
             return None
         return data.get("items", []) if isinstance(data, dict) else data
@@ -190,7 +203,7 @@ class PlanFactClient:
     def get_operation_categories(self, operation_category_type: str = "Outcome") -> Optional[List[Dict[str, Any]]]:
         """Справочник статей операций указанного типа (по умолчанию — расходы). См. get_projects — та же обёртка {"items": [...]}."""
         params = {"filter.operationCategoryType": operation_category_type}
-        data = self.request("GET", "operationcategories", params=params)
+        data = self.request("GET", "operationcategories", params=params, timeout=8, max_retries_429=0)
         if data is None:
             return None
         return data.get("items", []) if isinstance(data, dict) else data
