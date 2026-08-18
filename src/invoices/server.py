@@ -907,7 +907,7 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
         pf_items.append({
             "calculationDate": op.get("operationDate"),
             "isCalculationCommitted": bool(op.get("isCommitted", True)),
-            "contrAgentId": op.get("contrAgentId"),
+            "contrAgentId": (op.get("contrAgent") or {}).get("contrAgentId"),
             "operationCategoryId": int(pf_category_id),
             "projectId": int(project_id),
             "value": li["amount"],
@@ -919,16 +919,22 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
         "match_code": match_code,
         "invoice_id": invoice["id"],
         "invoice_number": invoice["invoice_number"],
-        "operation_amount": op.get("amount"),
+        "operation_amount": op.get("value"),
         "items": pf_items,
     }
     if dry_run:
         return preview
 
+    # Реальный ответ ПланФакт вкладывает счёт списания в объект account
+    # ({"account": {"accountId": ...}}), а не плоским полем на операции —
+    # баг: раньше брали op.get("accountId") (всегда None), ПланФакт отвечал
+    # "Не указан счёт" на каждую попытку разноски (см. историю сессий,
+    # инцидент 2026-08-18). Аналогично amount у операции на самом деле в
+    # поле "value", "accountId" плоско не существует нигде на операции.
     ok = client.update_outcome_operation(
         operation_id,
         operation_date=op.get("operationDate"),
-        account_id=op.get("accountId"),
+        account_id=(op.get("account") or {}).get("accountId"),
         comment=comment,
         is_committed=bool(op.get("isCommitted", True)),
         items=pf_items,
@@ -982,7 +988,7 @@ def _run_planfact_sync(dry_run: bool = False) -> dict:
                         reason=result["reason"],
                         match_code=result.get("match_code"),
                         invoice_id=result.get("invoice_id"),
-                        operation_amount=op.get("amount"),
+                        operation_amount=op.get("value"),
                         operation_comment=op.get("comment"),
                     )
 

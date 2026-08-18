@@ -104,14 +104,21 @@ def test_match_dry_run_then_real():
     invoice = get_invoice_by_id(invoice["id"])
     match_code = invoice["match_code"]
 
+    # Реальный ответ ПланФакт вкладывает счёт списания/контрагента в объекты
+    # account/contrAgent, а не плоскими полями accountId/contrAgentId прямо
+    # на операции, и сумма — в поле "value", не "amount" (баг: раньше фейковые
+    # операции в тесте были собраны по неверной — плоской — форме и не ловили
+    # это; реальный прод ловил "Не указан счёт" на каждую разноску, см.
+    # историю сессий, инцидент 2026-08-18). Форма ниже — как в реальном
+    # дословном ответе POST /operations/list.
     op = {
         "operationId": "op-1",
         "comment": f"Оплата по счёту, назначение: {match_code} аренда",
         "operationDate": "2026-08-10",
-        "accountId": 42,
+        "account": {"accountId": 42},
         "isCommitted": True,
-        "contrAgentId": 99,
-        "amount": 1000.0,
+        "contrAgent": {"contrAgentId": 99},
+        "value": 1000.0,
     }
     fake = set_fake_client([op])
 
@@ -129,6 +136,7 @@ def test_match_dry_run_then_real():
     assert len(fake.update_calls) == 1, "реальный прогон должен вызвать запись один раз"
     call = fake.update_calls[0]
     assert call["operation_id"] == "op-1"
+    assert call["account_id"] == 42, f"account_id должен быть вытащен из вложенного account.accountId: {call}"
     assert call["items"] == [{
         "calculationDate": "2026-08-10",
         "isCalculationCommitted": True,
@@ -163,9 +171,9 @@ def test_unmatched_cases():
         "operationId": "op-no-invoice",
         "comment": "Платёж REF-999999 без счёта в базе",
         "operationDate": "2026-08-10",
-        "accountId": 1,
+        "account": {"accountId": 1},
         "isCommitted": True,
-        "amount": 500.0,
+        "value": 500.0,
     }
 
     # b) счёт есть, но не распределён (без line_items)
@@ -178,9 +186,9 @@ def test_unmatched_cases():
         "operationId": "op-no-items",
         "comment": f"Оплата {invoice_no_items['match_code']}",
         "operationDate": "2026-08-11",
-        "accountId": 1,
+        "account": {"accountId": 1},
         "isCommitted": True,
-        "amount": 200.0,
+        "value": 200.0,
     }
 
     # c) счёт распределён, но нет сопоставления салона/статьи с ПланФакт
@@ -194,9 +202,9 @@ def test_unmatched_cases():
         "operationId": "op-no-mapping",
         "comment": f"Оплата {invoice_no_mapping['match_code']}",
         "operationDate": "2026-08-12",
-        "accountId": 1,
+        "account": {"accountId": 1},
         "isCommitted": True,
-        "amount": 300.0,
+        "value": 300.0,
     }
 
     fake = set_fake_client([op_no_invoice, op_no_items, op_no_mapping])
