@@ -39,6 +39,7 @@
         if (!elements.tbody) return; // Страницы нет в DOM — модуль не нужен
 
         elements.createBtn = document.getElementById('create-writeoff-btn');
+        elements.mappingBtn = document.getElementById('writeoff-mapping-btn');
 
         elements.filterStore = document.getElementById('writeoffs-filter-store');
         elements.filterStatus = document.getElementById('writeoffs-filter-status');
@@ -64,6 +65,19 @@
         elements.detailsPositions = document.getElementById('writeoff-details-positions');
         elements.detailsActions = document.getElementById('writeoff-details-actions');
 
+        elements.mappingModal = document.getElementById('writeoff-mapping-modal');
+        elements.mappingOverlay = document.getElementById('writeoff-mapping-overlay');
+        elements.closeMappingBtn = document.getElementById('close-writeoff-mapping-btn');
+        elements.cancelMappingBtn = document.getElementById('cancel-writeoff-mapping-btn');
+        elements.saveMappingBtn = document.getElementById('save-writeoff-mapping-btn');
+        elements.mappingRows = document.getElementById('writeoff-mapping-rows');
+
+        elements.mappingBtn?.addEventListener('click', openMappingModal);
+        elements.closeMappingBtn?.addEventListener('click', closeMappingModal);
+        elements.cancelMappingBtn?.addEventListener('click', closeMappingModal);
+        elements.mappingOverlay?.addEventListener('click', closeMappingModal);
+        elements.saveMappingBtn?.addEventListener('click', saveMapping);
+
         elements.createBtn?.addEventListener('click', openCreateModal);
         elements.closeBtn?.addEventListener('click', closeCreateModal);
         elements.cancelBtn?.addEventListener('click', closeCreateModal);
@@ -86,6 +100,10 @@
 
     async function onPageActivated(userData) {
         currentUserData = userData;
+
+        if (elements.mappingBtn) {
+            elements.mappingBtn.style.display = currentUserData?.role === 'admin' ? '' : 'none';
+        }
 
         if (!loaded) {
             await loadStores();
@@ -529,6 +547,105 @@
             await cancelWriteoff(writeoffId);
             closeDetailsModal();
             return;
+        }
+    }
+
+    // =========================================================================
+    // СОПОСТАВЛЕНИЕ СОТРУДНИКОВ МОЙСКЛАД (только админ)
+    // =========================================================================
+
+    async function openMappingModal() {
+        elements.mappingRows.innerHTML = '<p class="form-hint">Загрузка...</p>';
+        elements.mappingModal.classList.add('active');
+        elements.mappingOverlay.classList.add('active');
+
+        try {
+            const [usersRes, employeesRes, groupsRes, linksRes] = await Promise.all([
+                fetch('/api/auth/users', { credentials: 'include' }),
+                fetch('/api/moysklad/employees', { credentials: 'include' }),
+                fetch('/api/moysklad/groups', { credentials: 'include' }),
+                fetch('/api/writeoffs/employee-links', { credentials: 'include' }),
+            ]);
+            const usersData = await usersRes.json();
+            const employeesData = await employeesRes.json();
+            const groupsData = await groupsRes.json();
+            const linksData = await linksRes.json();
+
+            const users = (usersData.users || []).filter(u => (u.permissions || []).includes('writeoffs'));
+            const employees = employeesData.data || [];
+            const groups = groupsData.data || [];
+            const links = linksData.links || [];
+            const linkByUsername = Object.fromEntries(links.map(l => [l.username, l]));
+
+            if (users.length === 0) {
+                elements.mappingRows.innerHTML = '<p class="form-hint">Нет пользователей с доступом к списаниям</p>';
+                return;
+            }
+
+            elements.mappingRows.innerHTML = users.map(u => {
+                const current = linkByUsername[u.username];
+                const employeeOptions = '<option value="">Не выбран</option>' + employees.map(e =>
+                    `<option value="${e.id}" ${current?.moysklad_employee_id === e.id ? 'selected' : ''}>${escapeHtml(e.name)}</option>`
+                ).join('');
+                const groupOptions = '<option value="">Не выбран</option>' + groups.map(g =>
+                    `<option value="${g.id}" ${current?.moysklad_group_id === g.id ? 'selected' : ''}>${escapeHtml(g.name)}</option>`
+                ).join('');
+
+                return `
+                    <div class="writeoff-mapping-row" data-username="${escapeHtml(u.username)}"
+                         style="display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #eee; flex-wrap:wrap;">
+                        <span style="min-width:200px;">${escapeHtml(u.full_name || u.username)} <span class="form-hint">(${escapeHtml(u.role)})</span></span>
+                        <select class="form-select mapping-employee" style="min-width:180px;">${employeeOptions}</select>
+                        <select class="form-select mapping-group" style="min-width:150px;">${groupOptions}</select>
+                    </div>
+                `;
+            }).join('');
+        } catch (e) {
+            console.error('Ошибка загрузки данных для сопоставления:', e);
+            elements.mappingRows.innerHTML = '<p class="form-hint">Ошибка загрузки</p>';
+        }
+    }
+
+    function closeMappingModal() {
+        elements.mappingModal.classList.remove('active');
+        elements.mappingOverlay.classList.remove('active');
+    }
+
+    async function saveMapping() {
+        const rows = Array.from(elements.mappingRows.querySelectorAll('.writeoff-mapping-row'));
+        const links = rows.map(row => ({
+            username: row.getAttribute('data-username'),
+            moysklad_employee_id: row.querySelector('.mapping-employee').value,
+            moysklad_group_id: row.querySelector('.mapping-group').value,
+        })).filter(l => l.moysklad_employee_id && l.moysklad_group_id);
+
+        if (links.length === 0) {
+            alert('Выберите сотрудника и отдел хотя бы для одного пользователя');
+            return;
+        }
+
+        try {
+            elements.saveMappingBtn.disabled = true;
+            const res = await fetch('/api/writeoffs/employee-links', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ links }),
+            });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Ошибка сохранения'); return; }
+
+            if (data.errors && data.errors.length > 0) {
+                alert(`Сохранено: ${data.applied.length}. Ошибки:\n` + data.errors.map(e => `${e.username}: ${e.error}`).join('\n'));
+            } else {
+                alert(`Сопоставление сохранено (${data.applied.length})`);
+            }
+            closeMappingModal();
+        } catch (e) {
+            console.error('Ошибка сохранения сопоставления:', e);
+            alert('Ошибка сохранения сопоставления');
+        } finally {
+            elements.saveMappingBtn.disabled = false;
         }
     }
 

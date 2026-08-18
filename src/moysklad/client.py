@@ -462,6 +462,8 @@ class MoySkladClient:
         positions: List[Dict[str, Any]],
         applicable: bool = True,
         description: Optional[str] = None,
+        owner_href: Optional[str] = None,
+        group_href: Optional[str] = None,
     ) -> Optional[Dict]:
         """
         Создать документ "Списание" (Loss) — списывает товар со склада.
@@ -480,6 +482,12 @@ class MoySkladClient:
             applicable: True — списание проводится сразу (остаток уменьшается).
                 False — черновик, остаток не меняется
             description: Комментарий к документу (например, номер заявки в дашборде)
+            owner_href: meta.href сотрудника (owner), от лица которого создаётся
+                документ (см. get_employees()). Без этого МойСклад подставляет
+                сотрудника, привязанного к API-токену — не того, кто реально
+                списал товар
+            group_href: meta.href отдела (group). Без этого — дефолтный отдел
+                аккаунта ("Основной"), не отдел точки/сотрудника
 
         Returns:
             Созданный документ (с полем "id") или None при ошибке — причина
@@ -505,6 +513,10 @@ class MoySkladClient:
         }
         if description:
             body["description"] = description
+        if owner_href:
+            body["owner"] = {"meta": {"href": owner_href, "type": "employee", "mediaType": "application/json"}}
+        if group_href:
+            body["group"] = {"meta": {"href": group_href, "type": "group", "mediaType": "application/json"}}
 
         return self.post('/entity/loss', json_data=body)
 

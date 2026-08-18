@@ -1667,7 +1667,10 @@
                         <div class="card calculator-card">
                             <div class="card-header">
                                 <h3 class="card-title">Заявки на списание</h3>
-                                <button id="create-writeoff-btn" class="btn btn-primary">+ Списать товар</button>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <button id="writeoff-mapping-btn" class="btn btn-secondary" style="display: none;">Сопоставление</button>
+                                    <button id="create-writeoff-btn" class="btn btn-primary">+ Списать товар</button>
+                                </div>
                             </div>
 
                             <div class="writeoffs-filters" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; padding: 12px 0;">
@@ -1770,6 +1773,29 @@
                                 </div>
                             </div>
                             <div class="modal-footer" id="writeoff-details-actions"></div>
+                        </div>
+                    </div>
+
+                    <!-- Модалка сопоставления сотрудников МойСклад (только админ) -->
+                    <div class="modal" id="writeoff-mapping-modal">
+                        <div class="modal-overlay" id="writeoff-mapping-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title">Сопоставление сотрудников МойСклад</h3>
+                                <button class="modal-close-btn" id="close-writeoff-mapping-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <p class="form-hint">
+                                    Для каждого пользователя дашборда — сотрудник и отдел МойСклад, от лица которых
+                                    будет создан документ «Списание». Без сопоставления МойСклад подставит сотрудника
+                                    API-токена и отдел «Основной».
+                                </p>
+                                <div id="writeoff-mapping-rows"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="cancel-writeoff-mapping-btn" class="btn btn-secondary">Отмена</button>
+                                <button id="save-writeoff-mapping-btn" class="btn btn-success">Сохранить</button>
+                            </div>
                         </div>
                     </div>
                 </div>

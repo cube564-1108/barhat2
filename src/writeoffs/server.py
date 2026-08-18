@@ -31,6 +31,9 @@ from .storage import (
     get_moysklad_store,
     list_moysklad_store_links,
     link_moysklad_store,
+    get_moysklad_employee,
+    list_moysklad_employee_links,
+    link_moysklad_employee,
     create_writeoff,
     get_writeoff_by_id,
     list_writeoffs,
@@ -200,6 +203,81 @@ def set_store_links():
     return jsonify({"ok": True, "applied": applied, "errors": errors})
 
 
+@writeoffs_bp.route("/employee-links", methods=["GET"])
+@role_required("admin")
+def get_employee_links():
+    """Текущая связка пользователей дашборда с сотрудниками/отделами МойСклад."""
+    links = list_moysklad_employee_links()
+    usernames = [link["username"] for link in links]
+    full_names = get_users_full_names(usernames)
+
+    result = [
+        {
+            "username": link["username"],
+            "full_name": full_names.get(link["username"], link["username"]),
+            "moysklad_employee_id": link["moysklad_employee_id"],
+            "moysklad_group_id": link["moysklad_group_id"],
+        }
+        for link in links
+    ]
+    return jsonify({"links": result})
+
+
+@writeoffs_bp.route("/employee-links", methods=["POST"])
+@role_required("admin")
+def set_employee_links():
+    """
+    Применить связку пользователь дашборда -> сотрудник + отдел МойСклад.
+    Тот же приём, что и store-links — прямо в БД работающего процесса,
+    без shell-доступа к контейнеру на бою.
+
+    Body: {"links": [{"username": str, "moysklad_employee_id": str, "moysklad_group_id": str}, ...]}
+    """
+    data = request.get_json(silent=True) or {}
+    raw_links = data.get("links")
+    if not isinstance(raw_links, list) or not raw_links:
+        return jsonify({"error": "Нужен непустой список links"}), 400
+
+    try:
+        client = get_client()
+        employees_response = client.get_employees()
+        groups_response = client.get_groups()
+    except ValueError as e:
+        return jsonify({"error": f"МойСклад не настроен: {e}"}), 500
+
+    known_employee_ids = {r.get("id") for r in (employees_response or {}).get("rows", [])}
+    known_group_ids = {r.get("id") for r in (groups_response or {}).get("rows", [])}
+
+    applied = []
+    errors = []
+    for entry in raw_links:
+        username = entry.get("username")
+        employee_id = entry.get("moysklad_employee_id")
+        group_id = entry.get("moysklad_group_id")
+
+        if not username:
+            errors.append({"username": username, "error": "Не указан пользователь"})
+            continue
+        if not employee_id or employee_id not in known_employee_ids:
+            errors.append({"username": username, "error": "Сотрудник МойСклад с таким id не найден"})
+            continue
+        if not group_id or group_id not in known_group_ids:
+            errors.append({"username": username, "error": "Отдел МойСклад с таким id не найден"})
+            continue
+
+        link_moysklad_employee(
+            username,
+            employee_id,
+            build_entity_href("employee", employee_id),
+            group_id,
+            build_entity_href("group", group_id),
+        )
+        applied.append({"username": username, "moysklad_employee_id": employee_id, "moysklad_group_id": group_id})
+
+    log_action(current_user.username, "set_writeoff_employee_links", f"{len(applied)} применено, {len(errors)} ошибок")
+    return jsonify({"ok": True, "applied": applied, "errors": errors})
+
+
 # =============================================================================
 # ЗАЯВКИ НА СПИСАНИЕ
 # =============================================================================
@@ -328,7 +406,7 @@ def cancel(writeoff_id):
 # СОГЛАСОВАНИЕ
 # =============================================================================
 
-def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list) -> None:
+def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list, created_by: str) -> None:
     """
     Отправить заявку в МойСклад одним документом "Списание". Заявка уже
     захвачена (status='processing') вызывающим кодом — здесь только сама
@@ -350,6 +428,11 @@ def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list) -> None:
         mark_writeoff_failed(writeoff_id, f"МойСклад не настроен: {e}")
         return
 
+    # Если для флориста нет связки сотрудник/отдел — МойСклад подставит
+    # дефолт (сотрудника API-токена, отдел "Основной"). Не блокируем
+    # списание из-за незаполненного справочника, см. "Сопоставление" в UI.
+    employee_link = get_moysklad_employee(created_by)
+
     result = client.create_loss(
         organization_href=organization_href,
         store_href=link["moysklad_store_href"],
@@ -359,6 +442,8 @@ def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list) -> None:
         ],
         applicable=True,
         description=f"Списание #{writeoff_id} (дашборд БАРХАТ)",
+        owner_href=employee_link["moysklad_employee_href"] if employee_link else None,
+        group_href=employee_link["moysklad_group_href"] if employee_link else None,
     )
 
     if result and result.get("id"):
@@ -385,7 +470,7 @@ def approve(writeoff_id):
     if not lock_writeoff_for_sending(writeoff_id, current_user.username):
         return jsonify({"error": "Заявку уже обрабатывает кто-то другой или она уже рассмотрена"}), 409
 
-    _send_to_moysklad(writeoff_id, writeoff["store_id"], writeoff["positions"])
+    _send_to_moysklad(writeoff_id, writeoff["store_id"], writeoff["positions"], writeoff["created_by"])
 
     log_action(current_user.username, "approve_writeoff", str(writeoff_id))
     return jsonify({"ok": True, "writeoff": get_writeoff_by_id(writeoff_id)})
@@ -422,7 +507,7 @@ def retry(writeoff_id):
     if not lock_writeoff_for_retry(writeoff_id):
         return jsonify({"error": "Заявка не в статусе 'failed' или уже обрабатывается"}), 409
 
-    _send_to_moysklad(writeoff_id, writeoff["store_id"], writeoff["positions"])
+    _send_to_moysklad(writeoff_id, writeoff["store_id"], writeoff["positions"], writeoff["created_by"])
 
     log_action(current_user.username, "retry_writeoff", str(writeoff_id))
     return jsonify({"ok": True, "writeoff": get_writeoff_by_id(writeoff_id)})

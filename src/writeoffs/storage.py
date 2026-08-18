@@ -66,6 +66,28 @@ def init_writeoffs_tables():
     """)
 
     # ========================================================================
+    # Связка: пользователь дашборда <-> сотрудник + отдел МойСклад
+    #
+    # Явная связка, а не вывод отдела по городу точки — люди (особенно
+    # флористы) меняются, справочник заполняется постепенно и независимо
+    # от того, заведён ли у товарища ещё аккаунт-сотрудник в МойСклад.
+    # Без записи в этой таблице create_loss() просто не проставляет
+    # owner/group — МойСклад подставит дефолт (токен API, "Основной").
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS moysklad_employee_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            moysklad_employee_id TEXT NOT NULL,
+            moysklad_employee_href TEXT NOT NULL,
+            moysklad_group_id TEXT NOT NULL,
+            moysklad_group_href TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(username)
+        )
+    """)
+
+    # ========================================================================
     # Заявки на списание
     #
     # 'processing' — переходное состояние во время отправки в МойСклад,
@@ -170,6 +192,56 @@ def list_moysklad_store_links() -> List[Dict[str, Any]]:
     conn = get_db()
     rows = conn.execute(
         "SELECT * FROM moysklad_store_links ORDER BY store_id"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+# ============================================================================
+# Связка сотрудников (пользователь дашборда -> сотрудник + отдел МойСклад)
+# ============================================================================
+
+def link_moysklad_employee(
+    username: str,
+    moysklad_employee_id: str,
+    moysklad_employee_href: str,
+    moysklad_group_id: str,
+    moysklad_group_href: str,
+) -> None:
+    """Сопоставить пользователя дашборда сотруднику и отделу МойСклад (перезаписывает существующую связку)."""
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO moysklad_employee_links
+            (username, moysklad_employee_id, moysklad_employee_href, moysklad_group_id, moysklad_group_href)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(username) DO UPDATE SET
+            moysklad_employee_id = excluded.moysklad_employee_id,
+            moysklad_employee_href = excluded.moysklad_employee_href,
+            moysklad_group_id = excluded.moysklad_group_id,
+            moysklad_group_href = excluded.moysklad_group_href
+        """,
+        (username, moysklad_employee_id, moysklad_employee_href, moysklad_group_id, moysklad_group_href),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_moysklad_employee(username: str) -> Optional[Dict[str, Any]]:
+    """Получить связку сотрудника/отдела МойСклад для пользователя (или None, если не сопоставлен)."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM moysklad_employee_links WHERE username = ?", (username,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_moysklad_employee_links() -> List[Dict[str, Any]]:
+    """Получить все связки сотрудников (для экрана сопоставления)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM moysklad_employee_links ORDER BY username"
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
