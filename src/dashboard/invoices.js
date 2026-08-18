@@ -135,7 +135,7 @@
         elements.planfactCategoryMapping = document.getElementById('invoice-planfact-category-mapping');
         elements.planfactUnmatchedList = document.getElementById('invoice-planfact-unmatched-list');
 
-        elements.createBtn?.addEventListener('click', openCreateModal);
+        elements.createBtn?.addEventListener('click', () => openCreateModal());
         elements.closeBtn?.addEventListener('click', closeCreateModal);
         elements.cancelBtn?.addEventListener('click', closeCreateModal);
         elements.overlay?.addEventListener('click', closeCreateModal);
@@ -461,20 +461,25 @@
         })).filter(i => i.amount > 0);
     }
 
-    function openCreateModal() {
-        elements.citySelect.value = '';
-        elements.payerSelect.value = '';
-        elements.vatSelect.value = '';
-        elements.counterpartyInput.value = '';
+    function openCreateModal(sourceInvoice = null) {
+        // Копирование счёта (см. handleDetailsAction 'copy') — переносит
+        // всё, кроме файла, суммы и разнесения по проектам/статьям: это
+        // именно те поля, которые у одного и того же поставщика меняются
+        // от счёта к счёту, остальное (реквизиты, город, плательщик, НДС,
+        // назначение платежа) обычно одинаково.
+        elements.citySelect.value = sourceInvoice?.city_id || '';
+        elements.payerSelect.value = sourceInvoice?.payer_id || '';
+        elements.vatSelect.value = sourceInvoice?.vat_id || '';
+        elements.counterpartyInput.value = sourceInvoice?.counterparty_name || '';
         elements.amountInput.value = '';
-        elements.purposeInput.value = '';
-        elements.innInput.value = '';
-        elements.bankBikInput.value = '';
-        elements.bankAccountInput.value = '';
-        elements.kppInput.value = '';
-        elements.bankNameInput.value = '';
-        elements.bankCorrAccountInput.value = '';
-        elements.dueDateInput.value = '';
+        elements.purposeInput.value = sourceInvoice?.payment_purpose || '';
+        elements.innInput.value = sourceInvoice?.counterparty_inn || '';
+        elements.bankBikInput.value = sourceInvoice?.counterparty_bank_bik || '';
+        elements.bankAccountInput.value = sourceInvoice?.counterparty_bank_account || '';
+        elements.kppInput.value = sourceInvoice?.counterparty_kpp || '';
+        elements.bankNameInput.value = sourceInvoice?.counterparty_bank_name || '';
+        elements.bankCorrAccountInput.value = sourceInvoice?.counterparty_bank_corr_account || '';
+        elements.dueDateInput.value = sourceInvoice?.due_date || '';
         elements.lineItemsRows.innerHTML = '';
         elements.lineItemsTotal.textContent = '';
         elements.attachmentsInput.value = '';
@@ -846,6 +851,7 @@
                 ? `<button class="btn btn-secondary" data-action="unarchive">Вернуть из архива</button>`
                 : `<button class="btn btn-secondary" data-action="archive">В архив</button>`;
         }
+        html += `<button class="btn btn-secondary" data-action="copy">Копировать счёт</button>`;
         html += `<button class="btn btn-secondary" data-action="close">Закрыть</button>`;
 
         elements.detailsActions.innerHTML = html;
@@ -861,6 +867,7 @@
         if (action === 'reject') { await rejectInvoice(invoiceId); await openDetailsModal(invoiceId); return; }
         if (action === 'send-to-bank-sandbox') { await sendInvoiceToBank(invoiceId, true); return; }
         if (action === 'send-to-bank') { await sendInvoiceToBank(invoiceId, false); return; }
+        if (action === 'copy') { closeDetailsModal(); openCreateModal(currentDetailsInvoice); return; }
 
         const endpoints = { 'mark-paid': 'mark-paid', archive: 'archive', unarchive: 'unarchive' };
         const endpoint = endpoints[action];
