@@ -1385,10 +1385,16 @@
         return num.toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' ₽';
     }
 
+    // ВАЖНО: не заменять на div.textContent/innerHTML — тот способ не
+    // экранирует кавычки, из-за чего значение с " (например название
+    // контрагента ООО Фирма "Арома-Люкс") обрывалось прямо на кавычке при
+    // подстановке в value="${...}" — браузер закрывал атрибут раньше
+    // времени, и обрезанное значение потом реально пересохранялось в БД
+    // (см. историю сессий, счёт СЧ-000003, инцидент 2026-08-18).
     function escapeHtml(str) {
-        const div = document.createElement('div');
-        div.textContent = str ?? '';
-        return div.innerHTML;
+        return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
     }
 
     document.addEventListener('DOMContentLoaded', init);

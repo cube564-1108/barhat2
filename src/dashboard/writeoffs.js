@@ -532,10 +532,13 @@
         }
     }
 
+    // Не div.textContent/innerHTML — не экранирует кавычки, значения с "
+    // обрывались при подстановке в value="${...}" (см. историю сессий,
+    // инцидент 2026-08-18, invoices.js).
     function escapeHtml(str) {
-        const div = document.createElement('div');
-        div.textContent = str ?? '';
-        return div.innerHTML;
+        return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
     }
 
     document.addEventListener('DOMContentLoaded', init);
