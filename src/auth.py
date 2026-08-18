@@ -40,6 +40,11 @@ ROLE_SECTIONS = {
     "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "writeoffs"},
     "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
+    # Пользователи, залогиненные через SSO из портала БАРХАТ Пульс (см. src/sso.py).
+    # Роль в Пульсе (director/manager/...) на внутренние права намеренно не мапится —
+    # SSO-вход даёт доступ только к разделу "Качество", остальной функционал (кассы,
+    # счета, управление пользователями) через портал не открывается.
+    "sso_viewer": {"quality"},
 }
 
 
@@ -321,6 +326,30 @@ def init_auth_tables():
             logger.info("Migration: full_name column added and populated")
     except Exception as e:
         logger.error(f"Migration error for full_name: {e}")
+
+    # Миграция: колонки для SSO-входа из БАРХАТ Пульс (см. src/sso.py)
+    try:
+        cursor = conn.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+
+        if 'email' not in columns:
+            logger.info("Migration: adding email column to users")
+            conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            conn.commit()
+
+        if 'is_sso' not in columns:
+            logger.info("Migration: adding is_sso column to users")
+            conn.execute("ALTER TABLE users ADD COLUMN is_sso INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+
+        # Уникальный индекс на email — без него find_or_create по email в sso.py
+        # мог бы создать дубликаты при гонке двух воркеров gunicorn
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL"
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Migration error for email/is_sso: {e}")
 
     # Таблица permissions
     conn.execute("""

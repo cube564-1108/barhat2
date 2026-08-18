@@ -9,6 +9,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory, redirect
+from flask.sessions import SecureCookieSessionInterface
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -66,13 +67,75 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True  # Красивый JSON
 # Секретный ключ для сессий из env
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
 
-# Безопасные cookie для сессий
+# Безопасные cookie для сессий.
+# SESSION_COOKIE_SAMESITE остаётся "Lax" — это единственная CSRF-защита
+# POST-эндпоинтов в проекте (CSRF-токенов нет). Ослаблять её глобально до
+# "None" ради SSO-встраивания в Пульс нельзя: любой сторонний сайт с формой
+# смог бы дёргать /api/auth/users/... от имени залогиненного пользователя.
+# Вместо этого SameSite=None + Partitioned выставляются точечно — только
+# сессиям, заведённым через /sso (см. _PartitionedSsoSessionInterface ниже
+# и src/sso.py, где после login_user() ставится session["sso"] = True).
 app.config.update(
     SESSION_COOKIE_SECURE=True,      # только HTTPS
     SESSION_COOKIE_HTTPONLY=True,    # недоступна из JS
-    SESSION_COOKIE_SAMESITE="Lax",   # защита от CSRF
+    SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=60 * 60 * 8,  # 8 часов
 )
+
+# Домен портала БАРХАТ Пульс — единственный, кому разрешено встраивать
+# дашборд в <iframe> (frame-ancestors CSP ниже). Переопределяем через env,
+# если у портала когда-нибудь сменится домен.
+PULSE_ORIGIN = os.environ.get(
+    "BARKHAT_PULSE_ORIGIN", "https://proekt-barhat-doorhandle2.amvera.io"
+)
+
+
+@app.after_request
+def _apply_frame_ancestors(response):
+    # Разрешаем встраивание только с домена Пульса. X-Frame-Options
+    # намеренно НЕ выставляем — DENY/SAMEORIGIN сломали бы встраивание,
+    # а frame-ancestors современным браузерам достаточно.
+    response.headers["Content-Security-Policy"] = f"frame-ancestors {PULSE_ORIGIN}"
+    return response
+
+
+class _PartitionedSsoSessionInterface(SecureCookieSessionInterface):
+    """Для сессий из /sso (см. src/sso.py, session["sso"] = True) кука
+    получает SameSite=None + Partitioned (CHIPS) — иначе Chrome/Safari режут
+    её внутри чужого <iframe> при следующем же AJAX-запросе. Обычные сессии
+    по паролю остаются на SameSite=Lax (SESSION_COOKIE_SAMESITE из конфига).
+
+    Partitioned дописывается вручную строкой в Set-Cookie: Werkzeug 3.0 ещё
+    не принимает этот атрибут как kwarg в response.set_cookie(). save_session()
+    вызывается уже ПОСЛЕ всех after_request-хуков (Flask.process_response),
+    поэтому патчить куку нужно именно тут, а не в after_request.
+    """
+
+    def save_session(self, app, session, response):
+        is_sso = bool(session.get("sso"))
+        if not is_sso:
+            super().save_session(app, session, response)
+            return
+
+        original_samesite = app.config.get("SESSION_COOKIE_SAMESITE")
+        app.config["SESSION_COOKIE_SAMESITE"] = "None"
+        try:
+            super().save_session(app, session, response)
+        finally:
+            app.config["SESSION_COOKIE_SAMESITE"] = original_samesite
+
+        cookie_name = self.get_cookie_name(app)
+        cookies = response.headers.getlist("Set-Cookie")
+        if not cookies:
+            return
+        del response.headers["Set-Cookie"]
+        for cookie in cookies:
+            if cookie.startswith(f"{cookie_name}=") and "Partitioned" not in cookie:
+                cookie += "; Partitioned"
+            response.headers.add("Set-Cookie", cookie)
+
+
+app.session_interface = _PartitionedSsoSessionInterface()
 
 # CORS — ограничиваем доменом
 CORS(app, supports_credentials=True, origins=[
@@ -86,6 +149,10 @@ login_manager.login_view = None  # SPA сам решает, куда редир�
 
 # Регистрируем auth blueprint
 app.register_blueprint(auth_bp)
+
+# Регистрируем SSO blueprint (единый вход из портала БАРХАТ Пульс)
+from sso import sso_bp
+app.register_blueprint(sso_bp)
 
 # Регистрируем blueprint кассовых смен
 try:
