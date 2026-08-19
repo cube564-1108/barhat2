@@ -2,7 +2,7 @@
 
 > **Цель:** Автоматический учёт наличных в кассах по точкам продаж БАРХАТ
 > **Дата создания:** 2025-08-14
-> **Статус:** 🚧 В разработке
+> **Статус:** 🚧 В разработке (Фазы 1-4 завершены, 5-7 частично, обновлено 2026-08-14)
 
 ---
 
@@ -29,17 +29,17 @@
 
 ---
 
-## Фаза 1: Seed-данные и подготовка
+## Фаза 1: Seed-данные и подготовка ✅
 
 **Goal:** Подготовить все справочники до создания миграций
 
 **Задачи:**
-- [ ] Создать файл `src/cashshifts/seed_data.py` с константами:
+- [x] Создать файл `src/cashshifts/seed_data.py` с константами:
   - 9 точек продаж (НСК Восход, 3; НСК Блюхера, 61; и т.д.)
   - 16 категорий расходов (Бананы, Декор и упаковка, ЗП флористы, и т.д.)
   - + категория "Корректировка излишка"
-- [ ] Добавить код оплаты наличных: `cash-in-shop`
-- [ ] Подготовить SQL для вставки seed-данных
+- [x] Добавить код оплаты наличных: `cash-in-shop`
+- [x] Подготовить SQL для вставки seed-данных
 
 **Constraints:**
 - Все данные как константы в Python (не хардкод в SQL)
@@ -52,22 +52,22 @@
 
 ---
 
-## Фаза 2: Миграции БД
+## Фаза 2: Миграции БД ✅
 
 **Goal:** Создать все таблицы для модуля кассовых смен
 
 **Задачи:**
-- [ ] Создать модуль `src/cashshifts/storage.py`
-- [ ] SQL-таблицы:
+- [x] Создать модуль `src/cashshifts/storage.py`
+- [x] SQL-таблицы:
   - `stores` — точки продаж
   - `expense_categories` — статьи расхода
   - `cash_shifts` — кассовые смены
   - `cash_collections` — инкассации
   - `cash_orders_cache` — кэш заказов из CRM
   - `user_stores` — связь пользователей с точками (новое!)
-- [ ] Вставить seed-данные при создании таблиц
-- [ ] Добавить FK-constraints и CHECK-constraints
-- [ ] Индексы для быстрого поиска (store_id, datetime_start, status)
+- [x] Вставить seed-данные при создании таблиц
+- [x] Добавить FK-constraints и CHECK-constraints
+- [x] Индексы для быстрого поиска (store_id, datetime_start, status)
 
 **Constraints:**
 - Использовать `BARHAT_DB_PATH` из .env
@@ -81,20 +81,20 @@
 
 ---
 
-## Фаза 3: RetailCRM-клиент
+## Фаза 3: RetailCRM-клиент ✅
 
 **Goal:** Модуль запроса наличных заказов из CRM
 
 **Задачи:**
-- [ ] Создать `src/cashshifts/retailcrm_client.py`
-- [ ] Функция `get_cash_orders(store_id, datetime_start, datetime_end)`:
+- [x] Создать `src/cashshifts/retailcrm_client.py`
+- [x] Функция `get_cash_orders(store_id, datetime_start, datetime_end)`:
   - Фильтрация по магазину (store_code в CRM)
   - Фильтрация по периоду (datetime_start .. datetime_end)
   - Фильтрация платежей по type='cash-in-shop'
   - Парсинг массива payments[] в заказе
   - Суммирование подходящих платежей
-- [ ] Кэширование результатов в `cash_orders_cache`
-- [ ] Обработка ошибок API (таймауты, авторизация)
+- [x] Кэширование результатов в `cash_orders_cache`
+- [x] Обработка ошибок API (таймауты, авторизация) — доработано серией fix-коммитов 2026-08-14 (endpoint v5, `filter[]`, лимит 100)
 
 **Constraints:**
 - Использовать `RETAILCRM_URL` и `RETAILCRM_API_KEY` из .env
@@ -108,7 +108,7 @@
 
 ---
 
-## Фаза 4: Flask API — базовые операции
+## Фаза 4: Flask API — базовые операции ✅
 
 **Goal:** REST API для открытия/закрытия смен и инкассаций
 
@@ -117,18 +117,18 @@
 **Эндпоинты:**
 
 ### Открытие смены
-- [ ] `POST /api/cash-shifts/open` {store_id, shift_type}
+- [x] `POST /api/cash-shifts/open` {store_id, shift_type}
   - Проверка: нет ли открытой смены на этой точке
   - opening_balance = actual_balance последней закрытой смены
   - Создание записи со status='open'
 
 ### Добавление инкассации
-- [ ] `POST /api/cash-shifts/{id}/collections` {amount, expense_category_id, custom_comment}
+- [x] `POST /api/cash-shifts/{id}/collections` {amount, expense_category_id, custom_comment}
   - Проверка: смена должна быть открыта
   - Создание записи в cash_collections
 
 ### Закрытие смены
-- [ ] `POST /api/cash-shifts/{id}/close` {actual_balance}
+- [x] `POST /api/cash-shifts/{id}/close` {actual_balance}
   - Запрос наличных заказов из CRM
   - Расчёт collections_total (сумма инкассаций)
   - Расчёт expected_balance
@@ -147,40 +147,42 @@
 
 ---
 
-## Фаза 5: Flask API — история и корректировки
+## Фаза 5: Flask API — история и корректировки ✅
 
 **Goal:** API для просмотра истории и редактирования смен админом
 
 **Эндпоинты:**
 
 ### Детали смены
-- [ ] `GET /api/cash-shifts/{id}`
+- [x] `GET /api/cash-shifts/{id}`
   - Основные данные смены
   - Список инкассаций
   - Детализация наличных заказов (из cash_orders_cache)
 
 ### Список смен с фильтрами
-- [ ] `GET /api/cash-shifts?store_id=&status=&date_from=&date_to=`
-  - Пагинация
+- [x] `GET /api/cash-shifts?store_id=&status=&date_from=&date_to=`
+  - Пагинация (limit/offset)
   - Сортировка по дате
 
 ### Редактирование смены (только админ)
-- [ ] `PUT /api/cash-shifts/{id}` {actual_balance, collections?}
+- [x] `PUT /api/cash-shifts/{id}` {actual_balance, collections?}
   - Перезапись actual_balance
   - Обновление сумм инкассаций
-  - Пересчёт discrepancy
+  - Пересчёт discrepancy (только от уже закэшированного cash_orders_total — для учёта новых данных из CRM нужен последующий `/reclose`)
 
 ### Повторное закрытие смены
-- [ ] `POST /api/cash-shifts/{id}/reclose`
-  - Повторный запрос к CRM
+- [x] `POST /api/cash-shifts/{id}/reclose`
+  - Повторный запрос к CRM (тот же store_code + fallback, что и при `/close`)
   - Пересчёт expected_balance и discrepancy
   - Обновление cash_orders_cache
 
 ### CRUD категорий расходов
-- [ ] `GET /api/expense-categories` — список активных
-- [ ] `POST /api/expense-categories` — добавить (только админ)
-- [ ] `PUT /api/expense-categories/{id}` — редактировать
-- [ ] `DELETE /api/expense-categories/{id}` — деактивировать (не удалять)
+- [x] `GET /api/expense-categories` — список активных (реализовано как `/api/cash-shifts/categories`)
+- [x] `POST /api/expense-categories` — реализовано как `POST /api/cash-shifts/categories`
+- [x] `PUT /api/expense-categories/{id}` — реализовано как `PUT /api/cash-shifts/categories/{id}`
+- [x] `DELETE /api/expense-categories/{id}` — реализовано как `DELETE /api/cash-shifts/categories/{id}` (деактивация, `is_active=0`)
+
+> Фаза 5 реализована полностью (2026-08-14). Не проверено на реальных данных через RetailCRM — см. Фазу 7.
 
 **Constraints:**
 - Редактирование смены — только @role_required('admin')
@@ -194,26 +196,20 @@
 
 ---
 
-## Фаза 6: Интеграция с системой авторизации
+## Фаза 6: Интеграция с системой авторизации 🚧 (частично)
 
 **Goal:** Добавить роль florist и права доступа
 
 **Задачи:**
-- [ ] Добавить роли `florist` и `supervisor` в ROLE_SECTIONS (src/auth.py)
-- [ ] Определить права доступа:
+- [x] Добавить роль `florist` в ROLE_SECTIONS (src/auth.py) — **`supervisor` не добавлена**, есть только `florist`
+- [x] Определить права доступа:
   - florist: открытие/закрытие смен СВОЕЙ точки, добавление инкассаций
-  - supervisor: открытие/закрытие смен НА НЕСКОЛЬКИХ точках, просмотр истории
-  - admin: всё + редактирование смен + CRUD категорий + управление доступом
-- [ ] Создать модуль `src/cashshifts/access_control.py`:
-  - `get_user_stores(username)` — возвращает список точек пользователя
-  - `check_store_access(username, store_id)` — проверка доступа к точке
-  - `is_florist(username)` — флорист привязан к 1 точке
-  - `is_supervisor(username)` — управляющий привязан к >1 точке
-- [ ] Добавить API для управления доступом (только админ):
-  - `POST /api/auth/users/{username}/stores` — привязать к точкам
-  - `GET /api/auth/users/{username}/stores` — список точек пользователя
-  - `DELETE /api/auth/users/{username}/stores/{store_id}` — отвязать
-- [ ] Обновить ALL_MODULES в auth.py (добавить `cash_management`)
+  - [ ] supervisor: открытие/закрытие смен НА НЕСКОЛЬКИХ точках — роль не создана
+  - admin: всё + редактирование смен + CRUD категорий (см. пробелы в Фазе 5)
+- [x] `get_user_stores(username)` и `check_store_access(username, store_id, role)` реализованы — но в `src/cashshifts/storage.py`, а не в отдельном модуле `access_control.py`, как планировалось (сознательное упрощение, функционал эквивалентен)
+- [ ] `is_florist(username)` / `is_supervisor(username)` — **не реализованы**
+- [ ] API для управления доступом администратором (`POST/GET/DELETE /api/auth/users/{username}/stores`) — **не реализовано**; привязка `user_stores` возможна только напрямую через БД/скрипты
+- [x] Обновить ALL_MODULES в auth.py — добавлен `cash_shifts` (а не `cash_management`, как в изначальном плане — используется существующее имя модуля)
 
 **Constraints:**
 - Не сломать существующие роли (admin, manager, florist_analyst)
@@ -227,18 +223,20 @@
 
 ---
 
-## Фаза 7: Тестирование и отладка
+## Фаза 7: Тестирование и отладка 🚧 (начата)
 
 **Goal:** Проверить все сценарии на реальных данных
 
 **Сценарии тестирования:**
-- [ ] Открытие смены → проверка opening_balance
+- [x] Открытие смены → проверка opening_balance — покрыто ручным дебагом RetailCRM-интеграции (коммиты 08787ad…e28bdec, 2026-08-14)
 - [ ] Добавление инкассации → проверка списков
 - [ ] Закрытие смены → проверка расчёта discrepancy
-- [ ] Расхождение (недостача) → редактирование админом → повторное закрытие
-- [ ] Излишек → добавление корректирующей инкассации → повторное закрытие
+- [ ] Расхождение (недостача) → редактирование админом → повторное закрытие — заблокировано отсутствием эндпоинтов из Фазы 5 (PUT, reclose)
+- [ ] Излишек → добавление корректирующей инкассации → повторное закрытие — аналогично заблокировано
 - [ ] История смен → фильтры по точке и дате
-- [ ] Добавление категории расходов (админом)
+- [ ] Добавление категории расходов (админом) — заблокировано отсутствием POST /expense-categories
+
+> `scripts/test_cashshifts_db.py` сейчас проверяет только миграции/seed-данные (Фаза 2), не полные сценарии смен.
 
 **Constraints:**
 - Тестировать на реальном .env с RetailCRM
@@ -403,9 +401,32 @@ API управления доступом (только admin):
 
 ## Следующие шаги
 
-1. **Чат 2:** Реализация Фазы 1-2 (Seed-данные + Миграции)
-2. **Чат 3:** Реализация Фазы 3-4 (RetailCRM + Базовый API)
-3. **Чат 4:** Реализация Фазы 5-7 (История + Корректировки + Тестирование)
+1. ~~**Чат 2:** Реализация Фазы 1-2 (Seed-данные + Миграции)~~ — готово
+2. ~~**Чат 3:** Реализация Фазы 3-4 (RetailCRM + Базовый API)~~ — готово
+3. ~~**Чат 4:** Реализация Фазы 5 (История + Корректировки)~~ — готово (роуты `PUT /{id}`, `POST /{id}/reclose`, CRUD категорий)
+4. **Чат 5:** осталось:
+   - Добавить роль `supervisor` и функции `is_florist`/`is_supervisor`
+   - Добавить admin API для привязки пользователей к точкам (`user_stores`)
+   - Дописать сценарные тесты (расхождение, излишек, ночная смена) и проверить новые эндпоинты Фазы 5 на реальном RetailCRM
+
+---
+
+## Итог (обновлено 2026-08-14)
+
+**Реализовано:**
+- Фаза 1 — Seed-данные ✅
+- Фаза 2 — Миграции БД ✅
+- Фаза 3 — RetailCRM-клиент ✅ (включая исправления по реальным ошибкам API)
+- Фаза 4 — Базовый API (открытие/инкассация/закрытие смены) ✅
+- Фаза 5 — Flask API история и корректировки ✅ (`PUT /{id}`, `POST /{id}/reclose`, CRUD `/categories` подключены в `server.py`)
+
+**Частично:**
+- Фаза 6 — роль florist и проверка доступа к точке работают; роли supervisor, функций `is_florist`/`is_supervisor` и admin-API управления точками (`user_stores`) нет
+
+**Не начато:**
+- Фаза 7 — сценарное тестирование (кроме миграций); новые эндпоинты Фазы 5 не проверены на реальных данных RetailCRM
+
+**Что поменялось по ходу:** функции контроля доступа (`get_user_stores`, `check_store_access`) реализованы прямо в `storage.py`, а не в отдельном `access_control.py`, как планировалось изначально — по факту работает так же, но модуль не выделен отдельно.
 
 ---
 

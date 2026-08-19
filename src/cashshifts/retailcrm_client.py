@@ -31,7 +31,17 @@ if not RETAILCRM_URL or not RETAILCRM_API_KEY:
 # уже во время смены) — это окно лишь ограничивает, СКОЛЬКО заказов запросить
 # у CRM для проверки, а не то, что засчитывается в кассу. Реальный критерий
 # попадания в смену — исключительно paidAt конкретного платежа (см. ниже).
+#
+# Используется при окончательном расчёте (закрытие/пересчёт смены, get_client(),
+# без дедлайна) — там точность важнее скорости, пользователь осознанно ждёт.
 ORDER_LOOKBACK_DAYS = 30
+
+# Укороченное окно для быстрых/фоновых запросов с бюджетом времени (таблица
+# «Открытые смены», виджет текущей смены, get_fast_client()). 30-дневное окно
+# на загруженной точке (сотни заказов) не укладывается в бюджет — пагинация
+# обрывается по дедлайну, и число вообще не приходит. 7 дней с запасом
+# покрывает подавляющее большинство предзаказов и укладывается по времени.
+FAST_ORDER_LOOKBACK_DAYS = 7
 
 # Таймаут одного HTTP-запроса к CRM. 30с — для закрытия/пересчёта смены, где
 # пользователь осознанно ждёт результат и терять его нельзя. FAST_TIMEOUT — для
@@ -242,13 +252,14 @@ class RetailCRMClient:
         datetime_start: Optional[datetime] = None,
         datetime_end: Optional[datetime] = None,
         limit: int = 100,
-        deadline: Optional[float] = None
+        deadline: Optional[float] = None,
+        lookback_days: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Получить все наличные заказы за период.
 
         Это основная функция для кассовых смен:
-        - Запрашивает заказы из CRM (с запасом по дате создания — ORDER_LOOKBACK_DAYS,
+        - Запрашивает заказы из CRM (с запасом по дате создания — lookback_days,
           чтобы не потерять предзаказы, оплаченные наличными уже во время смены)
         - Фильтрует по наличным платежам (payments[].type == 'cash-in-shop')
         - Отбирает только платежи, чей paidAt попадает в [datetime_start, datetime_end]
@@ -260,6 +271,12 @@ class RetailCRMClient:
             datetime_end: Конец периода включительно
             limit: Максимум заказов за один запрос (для пагинации)
             deadline: time.monotonic()-дедлайн на всю пагинацию (см. get_orders)
+            lookback_days: на сколько дней раньше datetime_start запрашивать заказы
+                (по умолчанию ORDER_LOOKBACK_DAYS=30 — полное окно для окончательного
+                расчёта при закрытии смены). Для быстрых/фоновых запросов с дедлайном
+                (таблица «Открытые смены») передавайте меньшее значение — иначе для
+                загруженной точки пагинация 30 дней не укладывается в бюджет времени
+                и результат вообще не приходит, хотя деньги в CRM есть.
 
         Returns:
             Список наличных платежей:
@@ -284,8 +301,9 @@ class RetailCRMClient:
         )
 
         # Получаем заказы с запасом по дате создания (предзаказы)
+        effective_lookback = lookback_days if lookback_days is not None else ORDER_LOOKBACK_DAYS
         fetch_from = (
-            datetime_start - timedelta(days=ORDER_LOOKBACK_DAYS)
+            datetime_start - timedelta(days=effective_lookback)
             if datetime_start else None
         )
         orders = self.get_orders(

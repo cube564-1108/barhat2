@@ -1079,11 +1079,17 @@ def get_open_shift_by_store(store_id: int):
     """
     Получить открытую смену для точки (если есть).
 
+    Продажи наличными подтягиваются из CRM тем же механизмом (TTL, бюджет
+    времени), что и сводная таблица «Открытые смены» — см. _sync_open_shifts_from_crm.
+
     Args:
         store_id: ID точки продажи
 
+    Query params:
+        - refresh (1): принудительно обновить продажи из CRM, игнорируя TTL
+
     Returns:
-        - shift: Данные открытой смены или null
+        - shift: Данные открытой смены (с cash_orders_total/cash_orders_stale) или null
     """
     try:
         # Проверка доступа
@@ -1100,6 +1106,12 @@ def get_open_shift_by_store(store_id: int):
         store = get_store_by_id(store_id)
         collections = get_shift_collections(shift["id"])
         collections_total = get_collections_total(shift["id"])
+
+        if store:
+            shift["store_name"] = store["name"]
+            force = request.args.get("refresh") == "1"
+            _sync_open_shifts_from_crm([shift], force=force)
+            shift["cash_orders_stale"] = _crm_data_is_stale(shift)
 
         return jsonify(success_response({
             "shift": shift,
@@ -1161,6 +1173,7 @@ def _sync_open_shifts_from_crm(shifts: List[Dict[str, Any]], force: bool = False
             get_fast_client,
             get_store_code_from_name,
             CRMDeadlineExceeded,
+            FAST_ORDER_LOOKBACK_DAYS,
         )
         client = get_fast_client()
     except Exception as e:
@@ -1185,7 +1198,8 @@ def _sync_open_shifts_from_crm(shifts: List[Dict[str, Any]], force: bool = False
                 store_code=get_store_code_from_name(shift["store_name"]),
                 datetime_start=datetime_start,
                 datetime_end=datetime_end,
-                deadline=deadline
+                deadline=deadline,
+                lookback_days=FAST_ORDER_LOOKBACK_DAYS
             )
         except CRMDeadlineExceeded as e:
             # Бюджет кончился на середине пагинации — остальным точкам его
