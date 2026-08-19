@@ -5,6 +5,9 @@ Pyrus API Server
 
 import os
 import sys
+import time
+import shutil
+import sqlite3
 import logging
 from datetime import datetime
 from typing import Optional
@@ -268,6 +271,59 @@ db_path = os.getenv('PYRUS_DB_PATH', 'data/pyrus.db')
 storage = get_storage(db_path)
 
 
+def _disk_free_info():
+    """Свободное место на постоянном диске. Кончившееся место — одна из
+    немногих причин, по которой SQLite читает нормально, но перестаёт писать."""
+    target = '/data' if os.path.isdir('/data') else os.path.abspath(os.sep)
+    try:
+        usage = shutil.disk_usage(target)
+        return {
+            'path': target,
+            'total_mb': round(usage.total / 1024 / 1024, 2),
+            'used_mb': round(usage.used / 1024 / 1024, 2),
+            'free_mb': round(usage.free / 1024 / 1024, 2),
+        }
+    except Exception as e:
+        return {'path': target, 'error': str(e)}
+
+
+def _sqlite_write_probe(path):
+    """Проверить, что в базу вообще получается ПИСАТЬ, и за сколько.
+
+    Логин отличается от неудачного логина ровно одним: успешный доходит до
+    log_action() — INSERT в audit_log. Если запись заблокирована, чтение и
+    /health остаются мгновенными, а вход висит до busy_timeout. Отсюда проба:
+    пишем ровно в ту же таблицу audit_log и откатываем — база не меняется,
+    но блокировка записи проявляется. Никакого DDL: служебных таблиц в боевой
+    базе после диагностики не остаётся. Таймаут короткий (2с), чтобы сама
+    проба не заняла воркер.
+    """
+    if not os.path.exists(path):
+        return {'ok': False, 'error': 'база не найдена'}
+
+    started = time.monotonic()
+    conn = None
+    try:
+        conn = sqlite3.connect(path, timeout=2)
+        conn.execute('PRAGMA busy_timeout=2000')
+        conn.execute(
+            "INSERT INTO audit_log (username, action, details, ip, created_at)"
+            " VALUES ('_probe', '_write_probe', '', '', ?)",
+            (datetime.utcnow().isoformat(),)
+        )
+        conn.rollback()
+        return {'ok': True, 'seconds': round(time.monotonic() - started, 3)}
+    except Exception as e:
+        return {
+            'ok': False,
+            'error': f'{type(e).__name__}: {e}',
+            'seconds': round(time.monotonic() - started, 3),
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Проверка здоровья сервера.
@@ -284,18 +340,24 @@ def health_check():
         ('moysklad', os.environ.get('MOYSKLAD_DB_PATH', 'moysklad.db')),
     ):
         exists = os.path.exists(path)
+        wal = path + '-wal'
         databases[name] = {
             'path': path,
             'exists': exists,
             'size_mb': round(os.path.getsize(path) / 1024 / 1024, 2) if exists else 0,
             'persistent': os.path.abspath(path).startswith('/data'),
+            # Раздутый WAL = чекпоинт не проходит, обычно из-за зависшего
+            # читателя или кончившегося места; тогда запись встаёт колом
+            'wal_mb': round(os.path.getsize(wal) / 1024 / 1024, 2) if os.path.exists(wal) else 0,
         }
 
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
         'database': db_path,
-        'databases': databases
+        'databases': databases,
+        'disk': _disk_free_info(),
+        'write_test': _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
     })
 
 
