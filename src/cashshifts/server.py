@@ -684,6 +684,15 @@ def _edit_open_shift(shift: dict):
     if opening_balance is None and not collections:
         return error_response("Нечего обновлять: укажите opening_balance и/или collections")
 
+    # Приводим суммы к числу до записи: SQLite не приводит типы насильно, и
+    # строка из JSON легла бы в денежную колонку как текст, ломая все
+    # последующие расчёты остатка
+    if opening_balance is not None:
+        try:
+            opening_balance = float(opening_balance)
+        except (TypeError, ValueError):
+            return error_response("Начальный остаток должен быть числом")
+
     if collections:
         existing_ids = {c["id"] for c in get_shift_collections(shift_id)}
         for item in collections:
@@ -693,6 +702,10 @@ def _edit_open_shift(shift: dict):
                 return error_response(f"Инкассация {collection_id} не принадлежит смене {shift_id}", 404)
             if amount is None:
                 return error_response(f"Не указана сумма для инкассации {collection_id}")
+            try:
+                amount = float(amount)
+            except (TypeError, ValueError):
+                return error_response(f"Сумма инкассации {collection_id} должна быть числом")
             update_collection(collection_id, amount)
 
     collections_total = get_collections_total(shift_id)

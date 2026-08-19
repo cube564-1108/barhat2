@@ -306,6 +306,22 @@ def main():
     check(isinstance(result, tuple) and result[1] == 404,
           "чужая инкассация отклоняется с 404")
 
+    with app.test_request_context(json={"opening_balance": "не число"}):
+        result = _edit_open_shift(get_cash_shift_by_id(shift_a))
+    check(isinstance(result, tuple) and result[1] == 400,
+          "нечисловой начальный остаток отклоняется, а не пишется в денежную колонку")
+
+    with app.test_request_context(json={"collections": [{"id": collection_id, "amount": "abc"}]}):
+        result = _edit_open_shift(get_cash_shift_by_id(shift_a))
+    check(isinstance(result, tuple) and result[1] == 400,
+          "нечисловая сумма инкассации отклоняется")
+
+    survived = get_cash_shift_by_id(shift_a)
+    check(isinstance(survived["opening_balance"], float),
+          f"начальный остаток остался числом ({survived['opening_balance']!r})")
+    check(storage.get_collections_total(shift_a) == 800.0,
+          "инкассации не пострадали от отклонённых запросов")
+
     print("\n" + "=" * 50)
     if failures:
         print(f"ПРОВАЛЕНО ПРОВЕРОК: {len(failures)}")
