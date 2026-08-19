@@ -5,8 +5,9 @@ RetailCRM API-клиент для модуля кассовых смен БАР�
 """
 
 import os
+import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import requests
 
@@ -24,6 +25,39 @@ RETAILCRM_API_KEY = os.environ.get("RETAILCRM_API_KEY")
 if not RETAILCRM_URL or not RETAILCRM_API_KEY:
     logger.warning("RETAILCRM_URL или RETAILCRM_API_KEY не заданы — интеграция отключена")
 
+# RetailCRM не даёт фильтровать заказы по дате ОПЛАТЫ — только по дате СОЗДАНИЯ.
+# Дата создания заказа для этого модуля значения не имеет (заказ мог быть
+# оформлен на самовывоз/доставку сильно заранее, а оплачен наличными в салоне
+# уже во время смены) — это окно лишь ограничивает, СКОЛЬКО заказов запросить
+# у CRM для проверки, а не то, что засчитывается в кассу. Реальный критерий
+# попадания в смену — исключительно paidAt конкретного платежа (см. ниже).
+ORDER_LOOKBACK_DAYS = 30
+
+# Таймаут одного HTTP-запроса к CRM. 30с — для закрытия/пересчёта смены, где
+# пользователь осознанно ждёт результат и терять его нельзя. FAST_TIMEOUT — для
+# фоновых/справочных запросов (таблица «Открытые смены»), где лучше показать
+# устаревшее число, чем занять воркер gunicorn на полминуты: воркеров всего 2,
+# и незакэшированные live-запросы к внешнему API уже один раз положили прод.
+DEFAULT_TIMEOUT = 30
+FAST_TIMEOUT = 6
+
+
+def _parse_paid_at(paid_at: str) -> Optional[datetime]:
+    """Распарсить дату оплаты платежа в naive datetime для сравнения с окном смены."""
+    if not paid_at:
+        return None
+    try:
+        if "T" in paid_at:
+            return datetime.fromisoformat(paid_at.replace("Z", "+00:00")).replace(tzinfo=None)
+        return datetime.strptime(paid_at, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+
+
+class CRMDeadlineExceeded(Exception):
+    """Запрос к CRM не уложился в отведённый бюджет времени."""
+    pass
+
 
 # =============================================================================
 # API КЛИЕНТ
@@ -32,9 +66,10 @@ if not RETAILCRM_URL or not RETAILCRM_API_KEY:
 class RetailCRMClient:
     """Клиент для работы с RetailCRM API."""
 
-    def __init__(self, api_url: str = None, api_key: str = None):
+    def __init__(self, api_url: str = None, api_key: str = None, timeout: int = DEFAULT_TIMEOUT):
         self.api_url = (api_url or RETAILCRM_URL).rstrip("/")
         self.api_key = api_key or RETAILCRM_API_KEY
+        self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({
             "X-API-KEY": self.api_key
@@ -45,7 +80,7 @@ class RetailCRMClient:
         url = f"{self.api_url}/{endpoint.lstrip('/')}"
 
         try:
-            response = self.session.get(url, params=params, timeout=30)
+            response = self.session.get(url, params=params, timeout=self.timeout)
 
             # Логируем тело ответа при ошибке (ПЕРЕД raise_for_status)
             if not response.ok:
@@ -73,7 +108,8 @@ class RetailCRMClient:
         store_code: Optional[str] = None,
         datetime_start: Optional[datetime] = None,
         datetime_end: Optional[datetime] = None,
-        limit: int = 100
+        limit: int = 100,
+        deadline: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Получить заказы из CRM с фильтрами.
@@ -82,10 +118,18 @@ class RetailCRMClient:
             store_code: Код магазина для фильтрации (опционально)
             datetime_start: Начало периода
             datetime_end: Конец периода
-            limit: Максимум заказов
+            limit: Максимум заказов на страницу
+            deadline: Значение time.monotonic(), после которого пагинация
+                прерывается с CRMDeadlineExceeded. None — качать до конца
+                (закрытие смены: недобрать заказы нельзя, пользователь ждёт).
 
         Returns:
             Список заказов
+
+        Raises:
+            CRMDeadlineExceeded: если дедлайн истёк, а страницы ещё не кончились.
+                Намеренно исключение, а не частичный список: неполная сумма
+                продаж выглядит как обычное число и молча врёт про кассу.
         """
         params = {"limit": limit}
 
@@ -103,6 +147,12 @@ class RetailCRMClient:
 
         all_orders = []
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise CRMDeadlineExceeded(
+                    f"Истёк бюджет времени на запрос заказов (store={store_code}, "
+                    f"страниц получено: {params['page'] - 1})"
+                )
+
             data = self._get("api/v5/orders", params=params)
 
             # Проверяем success флаг
@@ -124,12 +174,19 @@ class RetailCRMClient:
 
         return all_orders
 
-    def extract_cash_payments(self, order: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def extract_cash_payments(
+        self,
+        order: Dict[str, Any],
+        datetime_start: Optional[datetime] = None,
+        datetime_end: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Извлечь наличные платежи из заказа.
+        Извлечь наличные платежи из заказа, попадающие в окно смены по paidAt.
 
         Args:
             order: Данные заказа из CRM
+            datetime_start: Начало окна смены (по дате ОПЛАТЫ, не заказа)
+            datetime_end: Конец окна смены
 
         Returns:
             Список наличных платежей [{amount, paid_at, payment_type}]
@@ -144,19 +201,38 @@ class RetailCRMClient:
         for payment in payments:
             payment_type = payment.get("type", "")
 
-            if payment_type == RETAILCRM_CASH_PAYMENT_CODE:
-                # Наличный платеж в салоне
-                paid_at = payment.get("paidAt") or order.get("createdAt", "")
-                amount = float(payment.get("amount", 0))
+            if payment_type != RETAILCRM_CASH_PAYMENT_CODE:
+                continue
 
-                if amount > 0:
-                    cash_payments.append({
-                        "amount": amount,
-                        "paid_at": paid_at,
-                        "payment_type": payment_type,
-                        "order_id": order.get("id"),
-                        "order_number": order.get("number"),
-                    })
+            # Наличный платеж в салоне
+            paid_at = payment.get("paidAt") or order.get("createdAt", "")
+            amount = float(payment.get("amount", 0))
+
+            if amount <= 0:
+                continue
+
+            # Заказ мог попасть в выборку из-за широкого окна по createdAt
+            # (см. ORDER_LOOKBACK_DAYS) — реальную принадлежность к смене
+            # определяем по дате оплаты конкретного платежа
+            if datetime_start or datetime_end:
+                paid_at_dt = _parse_paid_at(paid_at)
+                if paid_at_dt is None:
+                    logger.warning(
+                        f"Не удалось распарсить paidAt='{paid_at}' заказа {order.get('id')}, платёж пропущен"
+                    )
+                    continue
+                if datetime_start and paid_at_dt < datetime_start:
+                    continue
+                if datetime_end and paid_at_dt > datetime_end:
+                    continue
+
+            cash_payments.append({
+                "amount": amount,
+                "paid_at": paid_at,
+                "payment_type": payment_type,
+                "order_id": order.get("id"),
+                "order_number": order.get("number"),
+            })
 
         return cash_payments
 
@@ -165,14 +241,17 @@ class RetailCRMClient:
         store_code: Optional[str] = None,
         datetime_start: Optional[datetime] = None,
         datetime_end: Optional[datetime] = None,
-        limit: int = 100
+        limit: int = 100,
+        deadline: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Получить все наличные заказы за период.
 
         Это основная функция для кассовых смен:
-        - Запрашивает заказы из CRM
+        - Запрашивает заказы из CRM (с запасом по дате создания — ORDER_LOOKBACK_DAYS,
+          чтобы не потерять предзаказы, оплаченные наличными уже во время смены)
         - Фильтрует по наличным платежам (payments[].type == 'cash-in-shop')
+        - Отбирает только платежи, чей paidAt попадает в [datetime_start, datetime_end]
         - Возвращает плоский список наличных транзакций
 
         Args:
@@ -180,6 +259,7 @@ class RetailCRMClient:
             datetime_start: Начало периода включительно
             datetime_end: Конец периода включительно
             limit: Максимум заказов за один запрос (для пагинации)
+            deadline: time.monotonic()-дедлайн на всю пагинацию (см. get_orders)
 
         Returns:
             Список наличных платежей:
@@ -203,18 +283,23 @@ class RetailCRMClient:
             f"period={datetime_start} — {datetime_end}"
         )
 
-        # Получаем заказы
+        # Получаем заказы с запасом по дате создания (предзаказы)
+        fetch_from = (
+            datetime_start - timedelta(days=ORDER_LOOKBACK_DAYS)
+            if datetime_start else None
+        )
         orders = self.get_orders(
             store_code=store_code,
-            datetime_start=datetime_start,
+            datetime_start=fetch_from,
             datetime_end=datetime_end,
-            limit=limit
+            limit=limit,
+            deadline=deadline
         )
 
-        # Извлекаем наличные платежи
+        # Извлекаем наличные платежи, попадающие в окно смены по paidAt
         cash_orders = []
         for order in orders:
-            payments = self.extract_cash_payments(order)
+            payments = self.extract_cash_payments(order, datetime_start, datetime_end)
             for payment in payments:
                 cash_orders.append({
                     "retailcrm_order_id": payment["order_id"],
@@ -234,10 +319,11 @@ class RetailCRMClient:
 # =============================================================================
 
 _client: Optional[RetailCRMClient] = None
+_fast_client: Optional[RetailCRMClient] = None
 
 
 def get_client() -> RetailCRMClient:
-    """Получить глобальный экземпляр клиента."""
+    """Получить глобальный экземпляр клиента (таймаут 30с, для закрытия смены)."""
     global _client
     if _client is None:
         if not RETAILCRM_URL or not RETAILCRM_API_KEY:
@@ -246,10 +332,24 @@ def get_client() -> RetailCRMClient:
     return _client
 
 
+def get_fast_client() -> RetailCRMClient:
+    """
+    Клиент с коротким таймаутом — для справочных запросов, которые нельзя
+    давать блокировать воркер (таблица «Открытые смены»).
+    """
+    global _fast_client
+    if _fast_client is None:
+        if not RETAILCRM_URL or not RETAILCRM_API_KEY:
+            raise RuntimeError("RetailCRM не настроен: задайте RETAILCRM_URL и RETAILCRM_API_KEY")
+        _fast_client = RetailCRMClient(timeout=FAST_TIMEOUT)
+    return _fast_client
+
+
 def reset_client():
     """Сбросить глобальный экземпляр (для тестов)."""
-    global _client
+    global _client, _fast_client
     _client = None
+    _fast_client = None
 
 
 # =============================================================================

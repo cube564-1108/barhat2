@@ -16,6 +16,8 @@
     let currentUserData = null;
     let expectedBalance = 0;  // Ожидаемый остаток при закрытии
     let editingShiftId = null;  // Смена, открытая в модалке исправления
+    let editingShiftStatus = null;  // 'open' | 'closed' — от него зависит, что правим
+    let openShifts = [];  // Открытые смены по всем доступным точкам
 
     // === DOM элементы ===
     const elements = {
@@ -37,6 +39,10 @@
         shiftStartBalance: null,
         collectionsTbody: null,
         shiftsTbody: null,
+        openShiftsCard: null,
+        openShiftsTbody: null,
+        openShiftsSyncedAt: null,
+        refreshOpenShiftsBtn: null,
         shiftDateFilter: null,
         applyDateFilterBtn: null,
         // Модальные окна
@@ -47,7 +53,6 @@
         confirmOpenShiftBtn: null,
         openShiftStore: null,
         openShiftType: null,
-        openShiftBalance: null,
         closeShiftModal: null,
         closeShiftOverlay: null,
         closeCloseShiftBtn: null,
@@ -72,6 +77,8 @@
         cancelEditShiftBtn: null,
         confirmEditShiftBtn: null,
         editShiftBalance: null,
+        editShiftBalanceLabel: null,
+        editShiftHint: null,
         editShiftCollections: null,
         editShiftNewCategory: null,
         editShiftNewAmount: null,
@@ -110,6 +117,10 @@
         elements.shiftStartBalance = document.getElementById('shift-start-balance');
         elements.collectionsTbody = document.getElementById('collections-tbody');
         elements.shiftsTbody = document.getElementById('shifts-tbody');
+        elements.openShiftsCard = document.getElementById('open-shifts-card');
+        elements.openShiftsTbody = document.getElementById('open-shifts-tbody');
+        elements.openShiftsSyncedAt = document.getElementById('open-shifts-synced-at');
+        elements.refreshOpenShiftsBtn = document.getElementById('refresh-open-shifts');
         elements.shiftDateFilter = document.getElementById('shift-date-filter');
         elements.applyDateFilterBtn = document.getElementById('apply-date-filter');
 
@@ -121,7 +132,6 @@
         elements.confirmOpenShiftBtn = document.getElementById('confirm-open-shift-btn');
         elements.openShiftStore = document.getElementById('open-shift-store');
         elements.openShiftType = document.getElementById('open-shift-type');
-        elements.openShiftBalance = document.getElementById('open-shift-balance');
 
         elements.closeShiftModal = document.getElementById('close-shift-modal');
         elements.closeShiftOverlay = document.getElementById('close-shift-overlay');
@@ -149,6 +159,8 @@
         elements.cancelEditShiftBtn = document.getElementById('cancel-edit-shift-btn');
         elements.confirmEditShiftBtn = document.getElementById('confirm-edit-shift-btn');
         elements.editShiftBalance = document.getElementById('edit-shift-balance');
+        elements.editShiftBalanceLabel = document.getElementById('edit-shift-balance-label');
+        elements.editShiftHint = document.getElementById('edit-shift-hint');
         elements.editShiftCollections = document.getElementById('edit-shift-collections');
         elements.editShiftNewCategory = document.getElementById('edit-shift-new-category');
         elements.editShiftNewAmount = document.getElementById('edit-shift-new-amount');
@@ -261,9 +273,11 @@
             elements.shiftJournalOverlay.addEventListener('click', closeShiftJournalModal);
         }
 
-        // Делегирование клика по кнопкам "Исправить"/"Журнал" в истории смен
-        if (elements.shiftsTbody) {
-            elements.shiftsTbody.addEventListener('click', (e) => {
+        // Делегирование клика по кнопкам "Исправить"/"Журнал" — одинаково
+        // работает и в истории смен, и в таблице открытых смен
+        [elements.shiftsTbody, elements.openShiftsTbody].forEach(tbody => {
+            if (!tbody) return;
+            tbody.addEventListener('click', (e) => {
                 const editBtn = e.target.closest('[data-edit-shift-id]');
                 if (editBtn) {
                     openEditShiftModal(parseInt(editBtn.dataset.editShiftId, 10));
@@ -274,6 +288,11 @@
                     openShiftJournalModal(parseInt(journalBtn.dataset.journalShiftId, 10));
                 }
             });
+        });
+
+        // Принудительный перезапрос продаж из CRM по открытым сменам
+        if (elements.refreshOpenShiftsBtn) {
+            elements.refreshOpenShiftsBtn.addEventListener('click', () => loadOpenShifts(true));
         }
     }
 
@@ -288,11 +307,22 @@
         loadCurrentShift();
         loadShiftsHistory();
 
+        // Сводка по открытым сменам — админу (все точки) и менеджеру (свои точки).
+        // Флористу не нужна: у него одна точка и она уже в виджете «Текущая смена»
+        const role = currentUserData && currentUserData.role;
+        const canSeeOpenShifts = role === 'admin' || role === 'manager';
+        if (elements.openShiftsCard) {
+            elements.openShiftsCard.style.display = canSeeOpenShifts ? 'block' : 'none';
+        }
+        if (canSeeOpenShifts) {
+            loadOpenShifts();
+        }
+
         // Остатки по кассам — только для админа
         if (elements.balancesCard) {
-            elements.balancesCard.style.display = currentUserData && currentUserData.role === 'admin' ? 'block' : 'none';
+            elements.balancesCard.style.display = role === 'admin' ? 'block' : 'none';
         }
-        if (currentUserData && currentUserData.role === 'admin') {
+        if (role === 'admin') {
             loadBalances();
         }
     }
@@ -377,21 +407,30 @@
             const result = await apiRequest('/api/cash-shifts/categories');
             categoryList = result.categories || [];
 
-            // Заполняем селектор
-            if (elements.collectionCategory) {
-                elements.collectionCategory.innerHTML = '<option value="">-- Выберите категорию --</option>';
-                categoryList.forEach(cat => {
-                    const option = document.createElement('option');
-                    option.value = cat.id;
-                    option.textContent = cat.name;
-                    elements.collectionCategory.appendChild(option);
-                });
-            }
+            // Заполняем datalist для полей ввода с автодополнением/поиском
+            fillCategoryDatalist('collection-category-list');
+            fillCategoryDatalist('edit-shift-new-category-list');
 
             console.log('[CashShifts] Загружены категории:', categoryList.length);
         } catch (error) {
             console.error('[CashShifts] Ошибка загрузки категорий:', error);
         }
+    }
+
+    // === Заполнение datalist названиями категорий ===
+    function fillCategoryDatalist(datalistId) {
+        const datalist = document.getElementById(datalistId);
+        if (!datalist) return;
+        datalist.innerHTML = categoryList
+            .map(cat => `<option value="${escapeHtml(cat.name)}"></option>`)
+            .join('');
+    }
+
+    // === Найти категорию по введённому в поле названию ===
+    function findCategoryByName(name) {
+        const normalized = (name || '').trim().toLowerCase();
+        if (!normalized) return null;
+        return categoryList.find(cat => cat.name.toLowerCase() === normalized) || null;
     }
 
     // === Загрузка текущей смены ===
@@ -471,6 +510,113 @@
             shiftsHistory = [];
             renderShiftsHistory();
         }
+    }
+
+    // === Загрузка открытых смен по всем доступным точкам ===
+    async function loadOpenShifts(force = false) {
+        if (!elements.openShiftsTbody) return;
+
+        setOpenShiftsStatus(force ? 'Обновляем данные из CRM...' : 'Загрузка...');
+        if (elements.refreshOpenShiftsBtn) {
+            elements.refreshOpenShiftsBtn.disabled = true;
+        }
+
+        try {
+            const url = force ? '/api/cash-shifts/open-shifts?refresh=1' : '/api/cash-shifts/open-shifts';
+            const result = await apiRequest(url);
+            openShifts = result.shifts || [];
+            renderOpenShifts();
+
+            console.log('[CashShifts] Открытые смены загружены:', openShifts.length);
+        } catch (error) {
+            console.error('[CashShifts] Ошибка загрузки открытых смен:', error);
+            openShifts = [];
+            renderOpenShifts();
+        } finally {
+            if (elements.refreshOpenShiftsBtn) {
+                elements.refreshOpenShiftsBtn.disabled = false;
+            }
+        }
+    }
+
+    function setOpenShiftsStatus(text) {
+        if (elements.openShiftsSyncedAt) {
+            elements.openShiftsSyncedAt.textContent = text;
+        }
+    }
+
+    // === Рендер таблицы открытых смен ===
+    function renderOpenShifts() {
+        if (!elements.openShiftsTbody) return;
+
+        if (openShifts.length === 0) {
+            elements.openShiftsTbody.innerHTML = `
+                <tr>
+                    <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                        Нет открытых смен
+                    </td>
+                </tr>
+            `;
+            setOpenShiftsStatus('');
+            return;
+        }
+
+        const role = currentUserData && currentUserData.role;
+        const canEdit = role === 'admin' || role === 'manager';
+
+        elements.openShiftsTbody.innerHTML = openShifts.map(shift => {
+            const shiftTypeLabel = shift.shift_type === 'day' ? 'Дневная' : 'Ночная';
+            const openedBy = shift.opened_by_full_name || shift.florist_username || '—';
+
+            const editBtnHtml = canEdit
+                ? `<button class="btn btn-sm btn-secondary" data-edit-shift-id="${shift.id}">Исправить</button>`
+                : '';
+
+            return `
+                <tr>
+                    <td>${escapeHtml(shift.store_name)}</td>
+                    <td>${formatDateTime(shift.datetime_start)}</td>
+                    <td>${escapeHtml(openedBy)}</td>
+                    <td>${shiftTypeLabel}</td>
+                    <td>${formatMoney(shift.opening_balance)}</td>
+                    <td>${renderCrmValue(shift.cash_orders_total, shift.cash_orders_stale)}</td>
+                    <td>${formatMoney(shift.collections_total)}</td>
+                    <td>${renderCrmValue(shift.expected_balance, shift.cash_orders_stale)}</td>
+                    <td>
+                        <div style="display: flex; gap: 6px;">
+                            <button class="btn btn-sm btn-secondary" data-journal-shift-id="${shift.id}">Журнал</button>
+                            ${editBtnHtml}
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+
+        // Показываем, насколько свежие данные по продажам: они приходят из CRM
+        // и могут быть закэшированы или вовсе не получены
+        const syncTimes = openShifts
+            .map(s => s.cash_orders_synced_at)
+            .filter(Boolean)
+            .sort();
+        const anyStale = openShifts.some(s => s.cash_orders_stale);
+        if (!syncTimes.length) {
+            setOpenShiftsStatus('Продажи из CRM не получены');
+        } else {
+            setOpenShiftsStatus(
+                `Продажи из CRM на ${formatDateTime(syncTimes[0])}` + (anyStale ? ' (не по всем точкам)' : '')
+            );
+        }
+    }
+
+    // === Значение, полученное из CRM: может отсутствовать или быть устаревшим ===
+    function renderCrmValue(value, isStale) {
+        if (value == null) {
+            return `<span style="color: var(--barkhat-gray);" title="Данные из CRM не получены">—</span>`;
+        }
+        if (isStale) {
+            return `<span style="color: var(--barkhat-warning);" title="Данные из CRM устарели, нажмите «Обновить»">${formatMoney(value)}</span>`;
+        }
+        return formatMoney(value);
     }
 
     // === Загрузка остатков по точкам ===
@@ -746,9 +892,6 @@
         if (!elements.openShiftModal) return;
 
         // Сброс формы
-        if (elements.openShiftBalance) {
-            elements.openShiftBalance.value = '';
-        }
         if (elements.openShiftType) {
             elements.openShiftType.value = 'day';  // По умолчанию дневная
         }
@@ -771,20 +914,21 @@
     async function onOpenShift() {
         const storeId = elements.openShiftStore?.value;
         const shiftType = elements.openShiftType?.value || 'day';
-        const balance = parseFloat(elements.openShiftBalance?.value);
 
-        if (!storeId || !shiftType || isNaN(balance)) {
+        if (!storeId || !shiftType) {
             showNotification('Заполните все поля', 'error');
             return;
         }
 
         try {
+            // Начальный остаток не передаём: сервер берёт его из остатка последней
+            // закрытой смены точки. Ввод здесь был бы фикцией — open_shift() его
+            // игнорирует, а подмена цифры вручную стёрла бы недостачу прошлой смены
             const result = await apiRequest('/api/cash-shifts/open', {
                 method: 'POST',
                 body: JSON.stringify({
                     store_id: parseInt(storeId),
-                    shift_type: shiftType,
-                    starting_balance: balance
+                    shift_type: shiftType
                 })
             });
 
@@ -927,12 +1071,16 @@
 
     // === Обработка добавления инкассации ===
     async function onAddCollection() {
-        const categoryId = elements.collectionCategory?.value;
+        const category = findCategoryByName(elements.collectionCategory?.value);
         const amount = parseFloat(elements.collectionAmount?.value);
         const comment = elements.collectionComment?.value;
 
-        if (!categoryId || isNaN(amount)) {
-            showNotification('Заполните категорию и сумму', 'error');
+        if (!category) {
+            showNotification('Выберите категорию из списка (начните вводить название)', 'error');
+            return;
+        }
+        if (isNaN(amount)) {
+            showNotification('Заполните сумму', 'error');
             return;
         }
 
@@ -940,7 +1088,7 @@
             const result = await apiRequest(`/api/cash-shifts/${currentShift.id}/collections`, {
                 method: 'POST',
                 body: JSON.stringify({
-                    expense_category_id: parseInt(categoryId),
+                    expense_category_id: category.id,
                     amount: amount,
                     custom_comment: comment
                 })
@@ -965,9 +1113,28 @@
             const collections = result.collections || [];
 
             editingShiftId = shiftId;
+            editingShiftStatus = shift.status;
 
+            // У открытой смены фактического остатка ещё не существует — кассу
+            // пересчитывают только при закрытии. Правим начальный остаток:
+            // он проставляется автоматически от прошлой смены и может быть неверным
+            const isOpen = shift.status === 'open';
+
+            if (elements.editShiftBalanceLabel) {
+                elements.editShiftBalanceLabel.textContent = isOpen
+                    ? 'Начальный остаток в кассе (₽)'
+                    : 'Фактический остаток в кассе (₽)';
+            }
             if (elements.editShiftBalance) {
-                elements.editShiftBalance.value = shift.actual_balance ?? '';
+                elements.editShiftBalance.value = (isOpen ? shift.opening_balance : shift.actual_balance) ?? '';
+            }
+            if (elements.editShiftHint) {
+                elements.editShiftHint.textContent = isOpen
+                    ? 'Смена ещё открыта: правятся начальный остаток и суммы инкассаций. Продажи и расхождение посчитаются при закрытии.'
+                    : 'После сохранения смена будет пересчитана с учётом актуальных данных RetailCRM.';
+            }
+            if (elements.confirmEditShiftBtn) {
+                elements.confirmEditShiftBtn.textContent = isOpen ? 'Сохранить' : 'Сохранить и пересчитать';
             }
 
             if (elements.editShiftCollections) {
@@ -988,8 +1155,8 @@
 
             // Форма добавления новой инкассации
             if (elements.editShiftNewCategory) {
-                elements.editShiftNewCategory.innerHTML = '<option value="">-- Категория --</option>' +
-                    categoryList.map(cat => `<option value="${cat.id}">${cat.name}</option>`).join('');
+                elements.editShiftNewCategory.value = '';
+                fillCategoryDatalist('edit-shift-new-category-list');
             }
             if (elements.editShiftNewAmount) {
                 elements.editShiftNewAmount.value = '';
@@ -1009,18 +1176,23 @@
         if (!elements.editShiftModal) return;
         elements.editShiftModal.classList.remove('active');
         editingShiftId = null;
+        editingShiftStatus = null;
     }
 
     // === Добавление новой инкассации в редактируемую смену ===
     async function onAddEditShiftCollection() {
         if (!editingShiftId) return;
 
-        const categoryId = elements.editShiftNewCategory?.value;
+        const category = findCategoryByName(elements.editShiftNewCategory?.value);
         const amount = parseFloat(elements.editShiftNewAmount?.value);
         const comment = elements.editShiftNewComment?.value;
 
-        if (!categoryId || isNaN(amount)) {
-            showNotification('Заполните категорию и сумму', 'error');
+        if (!category) {
+            showNotification('Выберите категорию из списка (начните вводить название)', 'error');
+            return;
+        }
+        if (isNaN(amount)) {
+            showNotification('Заполните сумму', 'error');
             return;
         }
 
@@ -1028,7 +1200,7 @@
             await apiRequest(`/api/cash-shifts/${editingShiftId}/collections`, {
                 method: 'POST',
                 body: JSON.stringify({
-                    expense_category_id: parseInt(categoryId, 10),
+                    expense_category_id: category.id,
                     amount: amount,
                     custom_comment: comment
                 })
@@ -1112,9 +1284,11 @@
     async function onSaveEditShift() {
         if (!editingShiftId) return;
 
-        const actualBalance = parseFloat(elements.editShiftBalance?.value);
-        if (isNaN(actualBalance)) {
-            showNotification('Введите фактический остаток', 'error');
+        const isOpen = editingShiftStatus === 'open';
+
+        const balance = parseFloat(elements.editShiftBalance?.value);
+        if (isNaN(balance)) {
+            showNotification(isOpen ? 'Введите начальный остаток' : 'Введите фактический остаток', 'error');
             return;
         }
 
@@ -1128,16 +1302,31 @@
             });
         }
 
+        // Модалка закрывается до перезагрузки таблиц: editingShiftId обнуляется
+        // в closeEditShiftModal(), поэтому запоминаем, что редактировали
+        const savedShiftId = editingShiftId;
+
         try {
-            await apiRequest(`/api/cash-shifts/${editingShiftId}`, {
+            await apiRequest(`/api/cash-shifts/${savedShiftId}`, {
                 method: 'PUT',
-                body: JSON.stringify({
-                    actual_balance: actualBalance,
-                    collections: collections
-                })
+                body: JSON.stringify(
+                    isOpen
+                        ? { opening_balance: balance, collections: collections }
+                        : { actual_balance: balance, collections: collections }
+                )
             });
 
-            await apiRequest(`/api/cash-shifts/${editingShiftId}/reclose`, {
+            if (isOpen) {
+                // Пересчёт по CRM (/reclose) применим только к закрытым сменам:
+                // у открытой смены нет фактического остатка, от которого считать расхождение
+                showNotification('Смена исправлена', 'success');
+                closeEditShiftModal();
+                loadOpenShifts();
+                loadCurrentShift();
+                return;
+            }
+
+            await apiRequest(`/api/cash-shifts/${savedShiftId}/reclose`, {
                 method: 'POST'
             });
 
@@ -1185,6 +1374,12 @@
             hour: '2-digit',
             minute: '2-digit'
         });
+    }
+
+    function escapeHtml(str) {
+        return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
     }
 
     function showNotification(message, type = 'info') {

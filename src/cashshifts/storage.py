@@ -32,6 +32,28 @@ def get_db():
     return conn
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str):
+    """
+    Добавить колонку, если её ещё нет (идемпотентная миграция).
+
+    На проде 2 воркера gunicorn стартуют одновременно и оба выполняют
+    init_cashshifts_tables() — второй может успеть проверить PRAGMA до того,
+    как первый закоммитил ALTER. Поэтому "duplicate column name" не считаем
+    ошибкой: колонка уже создана параллельным воркером, цель достигнута.
+    """
+    cursor = conn.execute(f"PRAGMA table_info({table})")
+    existing = [row[1] for row in cursor.fetchall()]
+    if column in existing:
+        return
+
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
+
+
 def init_cashshifts_tables():
     """Инициализация таблиц кассовых смен (вызывается при старте приложения)."""
 
@@ -97,12 +119,13 @@ def init_cashshifts_tables():
         )
     """)
 
-    # Миграция: добавляем closed_by_username если таблица старая (для журнала смены)
-    cursor = conn.execute("PRAGMA table_info(cash_shifts)")
-    shift_columns = [row[1] for row in cursor.fetchall()]
-    if 'closed_by_username' not in shift_columns:
-        conn.execute("ALTER TABLE cash_shifts ADD COLUMN closed_by_username TEXT")
-        conn.commit()
+    # Миграции колонок cash_shifts:
+    #   closed_by_username — кто закрыл смену (для журнала смены)
+    #   cash_orders_synced_at — когда cash_orders_total последний раз обновляли
+    #       из RetailCRM. Нужно для таблицы «Открытые смены»: по этой метке
+    #       решаем, дёргать CRM живьём или отдать закэшированное значение.
+    _add_column_if_missing(conn, "cash_shifts", "closed_by_username", "TEXT")
+    _add_column_if_missing(conn, "cash_shifts", "cash_orders_synced_at", "TEXT")
 
     # Индексы для фильтров и поиска
     conn.execute("""
@@ -450,6 +473,39 @@ def get_open_shift(store_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def get_open_shifts(store_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:
+    """
+    Получить все открытые смены (для сводной таблицы «Открытые смены»).
+
+    Args:
+        store_ids: если задан — только по этим точкам (для manager); None — по всем (admin)
+    """
+    conn = get_db()
+
+    query = """
+        SELECT cs.*, s.name as store_name
+        FROM cash_shifts cs
+        JOIN stores s ON s.id = cs.store_id
+        WHERE cs.status = 'open'
+    """
+    params: List[Any] = []
+
+    if store_ids is not None:
+        if not store_ids:
+            conn.close()
+            return []
+        placeholders = ", ".join("?" for _ in store_ids)
+        query += f" AND cs.store_id IN ({placeholders})"
+        params.extend(store_ids)
+
+    query += " ORDER BY cs.datetime_start ASC"
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
 def get_last_closed_shift(store_id: int) -> Optional[Dict[str, Any]]:
     """Получить последнюю закрытую смену для точки (для opening_balance)."""
     conn = get_db()
@@ -518,6 +574,7 @@ def list_cash_shifts(
 
 def update_cash_shift(
     shift_id: int,
+    opening_balance: Optional[float] = None,
     actual_balance: Optional[float] = None,
     cash_orders_total: Optional[float] = None,
     collections_total: Optional[float] = None,
@@ -526,12 +583,17 @@ def update_cash_shift(
     status: Optional[str] = None,
     datetime_end: Optional[str] = None,
     closed_at: Optional[str] = None,
-    closed_by_username: Optional[str] = None
+    closed_by_username: Optional[str] = None,
+    cash_orders_synced_at: Optional[str] = None
 ) -> bool:
     """Обновить поля смены."""
 
     updates = []
     params = []
+
+    if opening_balance is not None:
+        updates.append("opening_balance = ?")
+        params.append(opening_balance)
 
     if actual_balance is not None:
         updates.append("actual_balance = ?")
@@ -568,6 +630,10 @@ def update_cash_shift(
     if closed_by_username is not None:
         updates.append("closed_by_username = ?")
         params.append(closed_by_username)
+
+    if cash_orders_synced_at is not None:
+        updates.append("cash_orders_synced_at = ?")
+        params.append(cash_orders_synced_at)
 
     if not updates:
         return True

@@ -1042,6 +1042,41 @@
                             </div>
                         </div>
 
+                        <!-- Открытые смены по всем точкам (админ/менеджер) -->
+                        <div class="card calculator-card" id="open-shifts-card" style="display: none;">
+                            <div class="card-header">
+                                <h3 class="card-title">Открытые смены</h3>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <span id="open-shifts-synced-at" style="color: var(--barkhat-gray); font-size: 13px;"></span>
+                                    <button id="refresh-open-shifts" class="btn btn-secondary btn-sm">Обновить</button>
+                                </div>
+                            </div>
+                            <div id="open-shifts-table" style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Салон</th>
+                                            <th>Открыта</th>
+                                            <th>Кто открыл</th>
+                                            <th>Тип смены</th>
+                                            <th>Начальный остаток</th>
+                                            <th>Продажи налом</th>
+                                            <th>Инкассации</th>
+                                            <th>План. остаток</th>
+                                            <th>Действия</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="open-shifts-tbody">
+                                        <tr>
+                                            <td colspan="9" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
                         <!-- История смен -->
                         <div class="card calculator-card">
                             <div class="card-header">
@@ -1135,9 +1170,13 @@
                                         </select>
                                     </div>
                                     <div class="form-group">
-                                        <label class="form-label">Начальный остаток в кассе (₽)</label>
-                                        <input type="number" id="open-shift-balance" class="form-input" min="0" step="0.01" required>
-                                        <p class="form-hint">Сколько наличных сейчас в кассе</p>
+                                        <label class="form-label">Начальный остаток в кассе</label>
+                                        <p class="form-hint">
+                                            Подставится автоматически — остаток на конец прошлой смены этой точки.
+                                            Если он не сходится с кассой, поправьте его через «Исправить» в таблице
+                                            открытых смен: вручную при открытии он не задаётся, иначе недостача
+                                            прошлой смены потерялась бы.
+                                        </p>
                                     </div>
                                 </form>
                             </div>
@@ -1212,9 +1251,12 @@
                                 <form id="add-collection-form">
                                     <div class="form-group">
                                         <label class="form-label">Категория</label>
-                                        <select id="collection-category" class="form-select" required>
+                                        <input type="text" id="collection-category" class="form-input"
+                                               list="collection-category-list" autocomplete="off"
+                                               placeholder="Начните вводить название..." required>
+                                        <datalist id="collection-category-list">
                                             <!-- Заполняется динамически -->
-                                        </select>
+                                        </datalist>
                                     </div>
                                     <div class="form-group">
                                         <label class="form-label">Сумма (₽)</label>
@@ -1249,7 +1291,7 @@
                             <div class="modal-body">
                                 <form id="edit-shift-form">
                                     <div class="form-group">
-                                        <label class="form-label">Фактический остаток в кассе (₽)</label>
+                                        <label class="form-label" id="edit-shift-balance-label">Фактический остаток в кассе (₽)</label>
                                         <input type="number" id="edit-shift-balance" class="form-input" min="0" step="0.01" required>
                                     </div>
                                     <div class="form-group">
@@ -1258,14 +1300,18 @@
                                             <!-- Заполняется динамически -->
                                         </div>
                                         <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
-                                            <select id="edit-shift-new-category" class="form-select" style="flex: 1; min-width: 160px;">
-                                                <option value="">-- Категория --</option>
-                                            </select>
+                                            <input type="text" id="edit-shift-new-category" class="form-input"
+                                                   style="flex: 1; min-width: 160px;"
+                                                   list="edit-shift-new-category-list" autocomplete="off"
+                                                   placeholder="Категория...">
+                                            <datalist id="edit-shift-new-category-list">
+                                                <!-- Заполняется динамически -->
+                                            </datalist>
                                             <input type="number" id="edit-shift-new-amount" class="form-input" style="width: 120px;" min="0" step="0.01" placeholder="Сумма">
                                             <input type="text" id="edit-shift-new-comment" class="form-input" style="flex: 1; min-width: 140px;" placeholder="Комментарий (необязательно)">
                                             <button type="button" id="add-edit-shift-collection-btn" class="btn btn-secondary btn-sm">Добавить</button>
                                         </div>
-                                        <p class="form-hint">После сохранения смена будет пересчитана с учётом актуальных данных RetailCRM.</p>
+                                        <p class="form-hint" id="edit-shift-hint">После сохранения смена будет пересчитана с учётом актуальных данных RetailCRM.</p>
                                     </div>
                                 </form>
                             </div>

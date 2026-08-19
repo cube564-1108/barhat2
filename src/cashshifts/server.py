@@ -10,9 +10,10 @@ Flask API сервер для модуля кассовых смен БАРХА�
 
 import os
 import sys
+import time
 import logging
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
 
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
@@ -36,6 +37,7 @@ from .storage import (
     # Смены
     create_cash_shift,
     get_open_shift,
+    get_open_shifts,
     get_last_closed_shift,
     get_cash_shift_by_id,
     list_cash_shifts,
@@ -148,6 +150,32 @@ def require_shift_edit_access(shift: dict):
         return
 
     raise ShiftEditForbiddenError("Роль не имеет прав на редактирование смен")
+
+
+def require_open_shift_edit_access(shift: dict):
+    """
+    Проверить право на правку ОТКРЫТОЙ смены (начальный остаток, суммы инкассаций).
+
+    Право есть у тех, кто видит таблицу «Открытые смены»: админ — по всем точкам,
+    менеджер — только по своим (user_stores). Флорист сюда не попадает намеренно:
+    начальный остаток — это цифра, от которой считается недостача по его же
+    смене, менять её себе он не должен.
+
+    Raises:
+        ShiftEditForbiddenError: Если нет прав
+    """
+    role = get_current_user_role()
+    username = get_current_username()
+
+    if role == "admin":
+        return
+
+    if role == "manager":
+        if not check_store_access(username, shift["store_id"], role):
+            raise ShiftEditForbiddenError("Нет доступа к точке этой смены")
+        return
+
+    raise ShiftEditForbiddenError("Роль не имеет прав на редактирование открытых смен")
 
 
 def error_response(message: str, status: int = 400) -> tuple:
@@ -626,20 +654,95 @@ def close_shift(shift_id: int):
 # ЭНДПОИНТЫ: РЕДАКТИРОВАНИЕ И ПОВТОРНОЕ ЗАКРЫТИЕ (ТОЛЬКО АДМИН)
 # =============================================================================
 
+def _edit_open_shift(shift: dict):
+    """
+    Поправить открытую смену: начальный остаток и суммы уже внесённых инкассаций.
+
+    Начальный остаток проставляется автоматически из остатка предыдущей закрытой
+    смены точки, и если та закрылась с ошибкой — вся текущая смена считается от
+    неверной цифры. Правка здесь чинит это, не дожидаясь закрытия.
+
+    actual_balance для открытой смены не существует (кассу ещё не пересчитывали),
+    поэтому discrepancy тут не трогаем — она появится при закрытии.
+
+    Body:
+        - opening_balance (float, опционально): новый начальный остаток
+        - collections (list, опционально): [{id, amount}, ...] — правки сумм инкассаций
+    """
+    shift_id = shift["id"]
+    require_open_shift_edit_access(shift)
+
+    data = request.get_json() or {}
+    opening_balance = data.get("opening_balance")
+    collections = data.get("collections")
+
+    if data.get("actual_balance") is not None:
+        return error_response(
+            "Фактический остаток задаётся только при закрытии смены", 400
+        )
+
+    if opening_balance is None and not collections:
+        return error_response("Нечего обновлять: укажите opening_balance и/или collections")
+
+    if collections:
+        existing_ids = {c["id"] for c in get_shift_collections(shift_id)}
+        for item in collections:
+            collection_id = item.get("id")
+            amount = item.get("amount")
+            if collection_id not in existing_ids:
+                return error_response(f"Инкассация {collection_id} не принадлежит смене {shift_id}", 404)
+            if amount is None:
+                return error_response(f"Не указана сумма для инкассации {collection_id}")
+            update_collection(collection_id, amount)
+
+    collections_total = get_collections_total(shift_id)
+    final_opening_balance = (
+        opening_balance if opening_balance is not None else shift["opening_balance"]
+    )
+
+    # cash_orders_total у открытой смены известен только если её уже
+    # синхронизировали с CRM (таблица «Открытые смены»); иначе плановый
+    # остаток посчитать не из чего — оставляем пустым до закрытия
+    cash_orders_total = shift.get("cash_orders_total")
+    expected_balance = (
+        final_opening_balance + cash_orders_total - collections_total
+        if cash_orders_total is not None else None
+    )
+
+    update_cash_shift(
+        shift_id=shift_id,
+        opening_balance=final_opening_balance,
+        collections_total=collections_total,
+        expected_balance=expected_balance
+    )
+
+    updated_shift = get_cash_shift_by_id(shift_id)
+
+    logger.info(
+        f"Открытая смена отредактирована: ID={shift_id}, "
+        f"начальный остаток={final_opening_balance:.2f}, "
+        f"инкассации={collections_total:.2f}"
+    )
+
+    return jsonify(success_response({"shift": updated_shift}))
+
+
 @cashshifts_bp.route("/<int:shift_id>", methods=["PUT"])
 @login_required
 def edit_shift(shift_id: int):
     """
-    Отредактировать закрытую смену (админ — любую; флорист — только последнюю
-    закрытую смену своей точки).
+    Отредактировать смену.
 
-    Body:
+    Закрытая смена (админ — любую; флорист — только последнюю закрытую смену
+    своей точки):
         - actual_balance (float, опционально): новый фактический остаток
         - collections (list, опционально): [{id, amount}, ...] — правки сумм инкассаций
 
     Discrepancy пересчитывается от уже сохранённого cash_orders_total. Если нужно
     учесть новые данные из CRM (например, заказ добавили в CRM задним числом) —
     после этого вызвать POST /<id>/reclose.
+
+    Открытая смена (админ; менеджер — по своим точкам) — см. _edit_open_shift.
 
     Returns:
         - shift: Обновлённые данные смены
@@ -649,8 +752,8 @@ def edit_shift(shift_id: int):
         if not shift:
             return error_response(f"Смена {shift_id} не найдена", 404)
 
-        if shift["status"] != "closed":
-            return error_response("Редактирование доступно только для закрытых смен", 409)
+        if shift["status"] == "open":
+            return _edit_open_shift(shift)
 
         require_shift_edit_access(shift)
 
@@ -996,6 +1099,161 @@ def get_open_shift_by_store(store_id: int):
         return error_response("Нет доступа к этой точке", 403)
     except Exception as e:
         logger.error(f"Ошибка /api/cash-shifts/open/{store_id}: {e}")
+        return error_response(str(e), 500)
+
+
+# =============================================================================
+# ЭНДПОИНТЫ: ОТКРЫТЫЕ СМЕНЫ ПО ВСЕМ ТОЧКАМ
+# =============================================================================
+
+# Как часто разрешено ходить в CRM за продажами одной открытой смены. Меньше
+# этого интервала повторные заходы на страницу и F5 отдают закэшированное
+# значение из cash_shifts.cash_orders_synced_at.
+OPEN_SHIFTS_CRM_TTL_SECONDS = 300
+
+# Общий потолок времени на все запросы к CRM внутри одного HTTP-запроса.
+# На проде всего 2 воркера gunicorn: без потолка 9 точек × пагинация за 30 дней
+# заняли бы оба воркера на минуты и положили сайт целиком (такое уже было).
+# Точки, на которые бюджета не хватило, отдаются с прошлым значением и
+# пометкой cash_orders_stale — пользователь видит, что число несвежее.
+OPEN_SHIFTS_CRM_BUDGET_SECONDS = 10
+
+
+def _crm_data_is_stale(shift: Dict[str, Any]) -> bool:
+    """Пора ли обновлять продажи наличными этой смены из CRM."""
+    synced_at = shift.get("cash_orders_synced_at")
+    if not synced_at or shift.get("cash_orders_total") is None:
+        return True
+    try:
+        synced_dt = datetime.strptime(synced_at, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return True
+    return datetime.now() - synced_dt > timedelta(seconds=OPEN_SHIFTS_CRM_TTL_SECONDS)
+
+
+def _sync_open_shifts_from_crm(shifts: List[Dict[str, Any]], force: bool = False) -> None:
+    """
+    Подтянуть из CRM продажи наличными для открытых смен (на месте, в shifts).
+
+    Обновляет только те смены, чьи данные протухли (или все — при force).
+    Любая ошибка по конкретной точке не роняет таблицу: смена остаётся с
+    прошлым значением, а вызывающий помечает её как устаревшую.
+    """
+    targets = [s for s in shifts if force or _crm_data_is_stale(s)]
+    if not targets:
+        return
+
+    try:
+        from .retailcrm_client import (
+            get_fast_client,
+            get_store_code_from_name,
+            CRMDeadlineExceeded,
+        )
+        client = get_fast_client()
+    except Exception as e:
+        logger.warning(f"RetailCRM недоступен для таблицы открытых смен: {e}")
+        return
+
+    deadline = time.monotonic() + OPEN_SHIFTS_CRM_BUDGET_SECONDS
+
+    for shift in targets:
+        if time.monotonic() >= deadline:
+            logger.warning(
+                f"Бюджет запросов к CRM исчерпан, смены после ID={shift['id']} "
+                f"показаны по кэшу"
+            )
+            break
+
+        try:
+            datetime_start = datetime.strptime(shift["datetime_start"], "%Y-%m-%d %H:%M:%S")
+            datetime_end = datetime.now()
+
+            cash_orders = client.get_cash_orders(
+                store_code=get_store_code_from_name(shift["store_name"]),
+                datetime_start=datetime_start,
+                datetime_end=datetime_end,
+                deadline=deadline
+            )
+        except CRMDeadlineExceeded as e:
+            # Бюджет кончился на середине пагинации — остальным точкам его
+            # тем более не хватит, дальше не идём
+            logger.warning(f"Смена ID={shift['id']}: {e}")
+            break
+        except Exception as e:
+            logger.warning(f"Смена ID={shift['id']}: не удалось получить продажи из CRM: {e}")
+            continue
+
+        cash_orders_total = sum(o["amount"] for o in cash_orders)
+        synced_at = datetime_end.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Кэшируем сами заказы — из них строится журнал открытой смены
+        clear_shift_cache(shift["id"])
+        cache_cash_orders(shift["id"], cash_orders)
+
+        update_cash_shift(
+            shift_id=shift["id"],
+            cash_orders_total=cash_orders_total,
+            cash_orders_synced_at=synced_at
+        )
+
+        shift["cash_orders_total"] = cash_orders_total
+        shift["cash_orders_synced_at"] = synced_at
+
+
+@cashshifts_bp.route("/open-shifts", methods=["GET"])
+@login_required
+def list_open_shifts():
+    """
+    Сводная таблица открытых смен по всем доступным точкам.
+
+    Админ видит все точки, остальные роли — только свои (user_stores).
+
+    Query params:
+        - refresh (1): принудительно обновить продажи из CRM, игнорируя TTL
+
+    Returns:
+        - shifts: [{..., store_name, opened_by_full_name, collections_total,
+                    cash_orders_total, expected_balance, cash_orders_stale}, ...]
+    """
+    try:
+        role = get_current_user_role()
+        username = get_current_username()
+
+        store_ids = None if role == "admin" else get_user_stores(username)
+        shifts = get_open_shifts(store_ids)
+
+        if not shifts:
+            return jsonify(success_response({"count": 0, "shifts": []}))
+
+        force = request.args.get("refresh") == "1"
+        _sync_open_shifts_from_crm(shifts, force=force)
+
+        # ФИО открывших — тем же способом, что и в журнале смены
+        usernames = {s.get("florist_username") for s in shifts}
+        usernames.discard(None)
+        full_names = get_users_full_names(list(usernames))
+
+        result = []
+        for shift in shifts:
+            collections_total = get_collections_total(shift["id"])
+            cash_orders_total = shift.get("cash_orders_total")
+
+            item = dict(shift)
+            item["opened_by_full_name"] = full_names.get(shift.get("florist_username"))
+            item["collections_total"] = collections_total
+            item["cash_orders_stale"] = _crm_data_is_stale(shift)
+            item["expected_balance"] = (
+                (shift["opening_balance"] or 0) + cash_orders_total - collections_total
+                if cash_orders_total is not None else None
+            )
+            result.append(item)
+
+        return jsonify(success_response({"count": len(result), "shifts": result}))
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/cash-shifts/open-shifts: {e}")
+        import traceback
+        traceback.print_exc()
         return error_response(str(e), 500)
 
 
