@@ -28,6 +28,9 @@
         'packaging': 'Упаковка'
     };
 
+    // Категории, которые считаются по граммам с объёмной скидкой
+    const TIERED_CATEGORIES = [CATEGORIES.STRAWBERRY, CATEGORIES.CHOCOLATE, CATEGORIES.SPRINKLES];
+
     // Дефолтный прайс-лист (для сброса и первого запуска)
     const DEFAULT_PRICE_LIST = {
         // Цветы (цена за 1 stem)
@@ -107,8 +110,47 @@
         }
     };
 
+    // === Общие хелперы ===
+
+    /**
+     * Глубокая копия — чтобы правки не задевали DEFAULT_PRICE_LIST и рецепты
+     */
+    function deepClone(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+
+    /**
+     * Экранирование для вставки в innerHTML и в атрибуты
+     */
+    function escapeHtml(str) {
+        return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
+    }
+
+    /**
+     * Проверить, что прайс-лист пригоден для расчёта (все категории на месте)
+     */
+    function isValidPriceList(data) {
+        if (!data || typeof data !== 'object') return false;
+
+        const isPriceMap = (obj) => obj && typeof obj === 'object' && !Array.isArray(obj);
+        if (!isPriceMap(data.flowers) || !isPriceMap(data.dried) || !isPriceMap(data.packaging)) {
+            return false;
+        }
+
+        const hasValidTiers = TIERED_CATEGORIES.every(category => {
+            const tiers = data[category] && data[category].tiers;
+            return Array.isArray(tiers) && tiers.length > 0 &&
+                tiers.every(t => t && typeof t.max === 'number' && typeof t.price === 'number');
+        });
+        if (!hasValidTiers) return false;
+
+        return !!data.banana && typeof data.banana.price === 'number';
+    }
+
     // Прайс-лист (загружается из localStorage или дефолтный)
-    let PRICE_LIST = { ...DEFAULT_PRICE_LIST };
+    let PRICE_LIST = deepClone(DEFAULT_PRICE_LIST);
 
     // === Функции для работы с прайс-листом в localStorage ===
 
@@ -120,13 +162,14 @@
     function loadPricelistFromStorage() {
         try {
             const saved = localStorage.getItem(PRICELIST_STORAGE_KEY);
-            if (saved) {
-                const parsed = JSON.parse(saved);
-                // Проверяем валидность
-                if (parsed.flowers && parsed.dried && parsed.packaging) {
-                    PRICE_LIST = parsed;
-                    console.log('Прайс-лист загружен из localStorage');
-                }
+            if (!saved) return;
+
+            const parsed = JSON.parse(saved);
+            if (isValidPriceList(parsed)) {
+                PRICE_LIST = parsed;
+                console.log('Прайс-лист загружен из localStorage');
+            } else {
+                console.warn('Сохранённый прайс-лист повреждён — используем исходный');
             }
         } catch (err) {
             console.error('Ошибка загрузки прайс-листа:', err);
@@ -150,7 +193,7 @@
      */
     function resetPricelistToDefault() {
         if (confirm('Сбросить прайс-лист к исходным значениям? Все изменения будут потеряны.')) {
-            PRICE_LIST = { ...DEFAULT_PRICE_LIST };
+            PRICE_LIST = deepClone(DEFAULT_PRICE_LIST);
             savePricelistToStorage();
             location.reload();
         }
@@ -160,6 +203,13 @@
 
     let bouquetItems = [];
     let savedRecipes = [];
+
+    // Счётчик id позиций: Date.now() давал дубли при быстром добавлении
+    let nextItemId = 1;
+
+    function createItemId() {
+        return nextItemId++;
+    }
 
     // === DOM элементы ===
 
@@ -191,99 +241,139 @@
     // === Функции расчёта ===
 
     /**
-     * Рассчитать цену товара с учётом объёмной скидки
+     * Найти тир объёмной скидки для количества
+     */
+    function findTier(category, quantity) {
+        const tiers = PRICE_LIST[category] && PRICE_LIST[category].tiers;
+        if (!Array.isArray(tiers) || tiers.length === 0) return null;
+        // Если количество больше последнего порога — берём самый дешёвый тир
+        return tiers.find(t => quantity <= t.max) || tiers[tiers.length - 1];
+    }
+
+    /**
+     * Рассчитать цену товара с учётом объёмной скидки.
+     * Возвращает null, если товара нет в прайс-листе (удалили / чужой рецепт).
      */
     function calculateItemPrice(item) {
         const { name, category, quantity } = item;
 
         if (category === CATEGORIES.FLOWERS || category === CATEGORIES.DRIED) {
-            return PRICE_LIST[category][name] * quantity;
+            const price = PRICE_LIST[category] && PRICE_LIST[category][name];
+            return typeof price === 'number' ? price * quantity : null;
         }
 
         if (category === CATEGORIES.BANANA) {
-            return PRICE_LIST.banana.price * quantity;
+            const price = PRICE_LIST.banana && PRICE_LIST.banana.price;
+            return typeof price === 'number' ? price * quantity : null;
         }
 
         // Товары с объёмной скидкой
-        if ([CATEGORIES.STRAWBERRY, CATEGORIES.CHOCOLATE, CATEGORIES.SPRINKLES].includes(category)) {
-            const tiers = PRICE_LIST[category].tiers;
-            const tier = tiers.find(t => quantity <= t.max);
-            return tier.price * quantity;
+        if (TIERED_CATEGORIES.includes(category)) {
+            const tier = findTier(category, quantity);
+            return tier ? tier.price * quantity : null;
         }
 
-        return 0;
+        return null;
+    }
+
+    /**
+     * Рассчитать цену упаковочной позиции.
+     * Проценты считаются от суммы материалов (без упаковки).
+     */
+    function calculatePackagingPrice(item, materialsTotal) {
+        if (item.name === 'Упаковка (8%)') {
+            return materialsTotal * 0.08;
+        }
+        if (item.name === 'Упаковка + фирм. лента') {
+            return materialsTotal * 0.08 + 34;
+        }
+        const price = PRICE_LIST.packaging && PRICE_LIST.packaging[item.name];
+        return typeof price === 'number' ? price * item.quantity : null;
     }
 
     /**
      * Получить текущую цену за единицу для товара с объёмной скидкой
      */
     function getCurrentUnitPrice(category, quantity) {
-        if ([CATEGORIES.STRAWBERRY, CATEGORIES.CHOCOLATE, CATEGORIES.SPRINKLES].includes(category)) {
-            const tiers = PRICE_LIST[category].tiers;
-            const tier = tiers.find(t => quantity <= t.max);
-            return tier.price;
+        if (TIERED_CATEGORIES.includes(category)) {
+            const tier = findTier(category, quantity);
+            return tier ? tier.price : null;
         }
         return null;
     }
 
     /**
-     * Получить информацию о следующем пороге скидки
+     * Получить информацию о следующем пороге скидки.
+     * threshold — количество, начиная с которого действует следующая цена.
      */
     function getNextTierInfo(category, quantity) {
-        if ([CATEGORIES.STRAWBERRY, CATEGORIES.CHOCOLATE, CATEGORIES.SPRINKLES].includes(category)) {
-            const tiers = PRICE_LIST[category].tiers;
-            const currentIndex = tiers.findIndex(t => quantity <= t.max);
+        if (!TIERED_CATEGORIES.includes(category)) return null;
 
-            if (currentIndex < tiers.length - 1) {
-                const nextTier = tiers[currentIndex + 1];
-                const currentTier = tiers[currentIndex];
-                return {
-                    threshold: nextTier.max === 999999 ? null : currentTier.max + 1,
-                    nextPrice: nextTier.price,
-                    currentPrice: currentTier.price,
-                    max: nextTier.max === 999999 ? '∞' : nextTier.max
-                };
-            }
-        }
-        return null;
+        const tiers = PRICE_LIST[category] && PRICE_LIST[category].tiers;
+        if (!Array.isArray(tiers)) return null;
+
+        const currentIndex = tiers.findIndex(t => quantity <= t.max);
+        if (currentIndex < 0 || currentIndex >= tiers.length - 1) return null;
+
+        const currentTier = tiers[currentIndex];
+        const nextTier = tiers[currentIndex + 1];
+
+        return {
+            threshold: currentTier.max + 1,
+            nextPrice: nextTier.price,
+            currentPrice: currentTier.price
+        };
     }
 
     /**
-     * Рассчитать итоговую стоимость букета
+     * Рассчитать итоговую стоимость букета.
+     * itemPrices — цена каждой позиции (ключ — сам объект позиции),
+     * чтобы список и итог считались из одного источника.
      */
     function calculateBouquet() {
+        const itemPrices = new Map();
+        const unknownItems = [];
+
         // 1. Считаем сумму материалов (БЕЗ упаковки)
         let materialsTotal = 0;
         bouquetItems.forEach(item => {
-            if (item.category !== CATEGORIES.PACKAGING) {
-                materialsTotal += calculateItemPrice(item);
+            if (item.category === CATEGORIES.PACKAGING) return;
+
+            const price = calculateItemPrice(item);
+            itemPrices.set(item, price);
+            if (price === null) {
+                unknownItems.push(item);
+            } else {
+                materialsTotal += price;
             }
         });
 
         // 2. Добавляем упаковку
         let packagingTotal = 0;
-        const packagingItems = bouquetItems.filter(i => i.category === CATEGORIES.PACKAGING);
+        bouquetItems.forEach(item => {
+            if (item.category !== CATEGORIES.PACKAGING) return;
 
-        packagingItems.forEach(item => {
-            if (item.name === 'Упаковка (8%)') {
-                packagingTotal += materialsTotal * 0.08;
-            } else if (item.name === 'Упаковка + фирм. лента') {
-                packagingTotal += materialsTotal * 0.08 + 34;
+            const price = calculatePackagingPrice(item, materialsTotal);
+            itemPrices.set(item, price);
+            if (price === null) {
+                unknownItems.push(item);
             } else {
-                packagingTotal += PRICE_LIST.packaging[item.name] * item.quantity;
+                packagingTotal += price;
             }
         });
 
         // 3. Итог и округление: ОКРУГЛВВЕРХ(цена;-2)-10
         // Округляем ВВЕРХ до 100, затем вычитаем 10
         const total = materialsTotal + packagingTotal;
-        const roundedTotal = Math.ceil(total / 100) * 100 - 10;
+        const roundedTotal = total > 0 ? Math.ceil(total / 100) * 100 - 10 : 0;
 
         return {
             materials: Math.round(materialsTotal),
             packaging: Math.round(packagingTotal),
             total: roundedTotal,
-            rawTotal: total
+            rawTotal: total,
+            itemPrices,
+            unknownItems
         };
     }
 
@@ -351,24 +441,33 @@
 
         switch (category) {
             case CATEGORIES.FLOWERS:
-            case CATEGORIES.DRIED:
-                hint = `Цена: ${formatCurrency(PRICE_LIST[category][productName])} за шт`;
+            case CATEGORIES.DRIED: {
+                const stemPrice = PRICE_LIST[category] && PRICE_LIST[category][productName];
+                hint = typeof stemPrice === 'number'
+                    ? `Цена: ${formatCurrency(stemPrice)} за шт`
+                    : 'Нет цены в прайс-листе';
                 break;
-            case CATEGORIES.PACKAGING:
-                const price = PRICE_LIST.packaging[productName];
-                if (price === null) {
-                    if (productName === 'Упаковка (8%)') {
-                        hint = '8% от суммы материалов';
-                    } else if (productName === 'Упаковка + фирм. лента') {
-                        hint = '8% от суммы материалов + 34 ₽';
-                    }
+            }
+            case CATEGORIES.PACKAGING: {
+                if (productName === 'Упаковка (8%)') {
+                    hint = '8% от суммы материалов';
+                } else if (productName === 'Упаковка + фирм. лента') {
+                    hint = '8% от суммы материалов + 34 ₽';
                 } else {
-                    hint = `Цена: ${formatCurrency(price)}`;
+                    const price = PRICE_LIST.packaging && PRICE_LIST.packaging[productName];
+                    hint = typeof price === 'number'
+                        ? `Цена: ${formatCurrency(price)}`
+                        : 'Нет цены в прайс-листе';
                 }
                 break;
-            case CATEGORIES.BANANA:
-                hint = `Цена: ${PRICE_LIST.banana.price} ₽/г`;
+            }
+            case CATEGORIES.BANANA: {
+                const bananaPrice = PRICE_LIST.banana && PRICE_LIST.banana.price;
+                hint = typeof bananaPrice === 'number'
+                    ? `Цена: ${bananaPrice} ₽/г`
+                    : 'Нет цены в прайс-листе';
                 break;
+            }
         }
 
         elements.priceHint.textContent = hint;
@@ -381,27 +480,28 @@
         const category = elements.categorySelect.value;
         const quantity = parseInt(elements.quantityInput.value) || 0;
 
-        if ([CATEGORIES.STRAWBERRY, CATEGORIES.CHOCOLATE, CATEGORIES.SPRINKLES].includes(category)) {
-            const unitPrice = getCurrentUnitPrice(category, quantity);
-            const nextTier = getNextTierInfo(category, quantity);
-
-            let info = `Текущая цена: ${unitPrice.toFixed(2)} ₽/г`;
-
-            if (nextTier) {
-                const gramsToNext = nextTier.threshold - quantity;
-                if (gramsToNext > 0) {
-                    info += `\nСледующий порог (${nextTier.max} г): через ${gramsToNext} г → ${nextTier.nextPrice.toFixed(2)} ₽/г`;
-                } else {
-                    info += `\n✓ Следующий порог достигнут!`;
-                }
-            } else {
-                info += '\n✓ Минимальная цена!';
-            }
-
-            elements.quantityInfo.textContent = info;
-        } else {
+        if (!TIERED_CATEGORIES.includes(category)) {
             elements.quantityInfo.textContent = '';
+            return;
         }
+
+        const unitPrice = getCurrentUnitPrice(category, quantity);
+        if (unitPrice === null) {
+            elements.quantityInfo.textContent = 'Нет цен для этой категории в прайс-листе';
+            return;
+        }
+
+        const nextTier = getNextTierInfo(category, quantity);
+        let info = `Текущая цена: ${unitPrice.toFixed(2)} ₽/г`;
+
+        if (nextTier) {
+            const gramsToNext = nextTier.threshold - quantity;
+            info += `\nСледующий порог (от ${nextTier.threshold} г): через ${gramsToNext} г → ${nextTier.nextPrice.toFixed(2)} ₽/г`;
+        } else {
+            info += '\n✓ Минимальная цена!';
+        }
+
+        elements.quantityInfo.textContent = info;
     }
 
     /**
@@ -417,7 +517,7 @@
         }
 
         const newItem = {
-            id: Date.now(),
+            id: createItemId(),
             name: productName,
             category: category,
             quantity: quantity
@@ -466,21 +566,26 @@
         elements.bouquetItems.innerHTML = '';
         elements.bouquetSummary.style.display = 'block';
 
+        const { itemPrices } = calculateBouquet();
+
         bouquetItems.forEach(item => {
-            const itemPrice = calculateItemPrice(item);
+            const itemPrice = itemPrices.get(item);
+            const priceText = itemPrice === null || itemPrice === undefined
+                ? 'нет в прайсе'
+                : formatCurrency(Math.round(itemPrice));
             const itemEl = document.createElement('div');
             itemEl.className = 'bouquet-item';
             itemEl.innerHTML = `
                 <div class="bouquet-item-info">
-                    <div class="bouquet-item-name">${item.name}</div>
-                    <div class="bouquet-item-category">${CATEGORY_LABELS[item.category]}</div>
+                    <div class="bouquet-item-name">${escapeHtml(item.name)}</div>
+                    <div class="bouquet-item-category">${escapeHtml(CATEGORY_LABELS[item.category] || item.category)}</div>
                 </div>
                 <div class="bouquet-item-quantity">
                     <button class="quantity-btn" data-action="decrease" data-id="${item.id}">−</button>
                     <input type="number" class="quantity-input-small" value="${item.quantity}" min="1" data-id="${item.id}">
                     <button class="quantity-btn" data-action="increase" data-id="${item.id}">+</button>
                 </div>
-                <div class="bouquet-item-price">${formatCurrency(Math.round(itemPrice))}</div>
+                <div class="bouquet-item-price">${priceText}</div>
                 <button class="bouquet-item-remove" data-id="${item.id}">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"/>
@@ -491,12 +596,12 @@
             elements.bouquetItems.appendChild(itemEl);
         });
 
-        // Обработчики для кнопок
-        document.querySelectorAll('.bouquet-item-remove').forEach(btn => {
+        // Обработчики для кнопок (только внутри списка букета)
+        elements.bouquetItems.querySelectorAll('.bouquet-item-remove').forEach(btn => {
             btn.addEventListener('click', () => removeItem(parseInt(btn.dataset.id)));
         });
 
-        document.querySelectorAll('.quantity-btn').forEach(btn => {
+        elements.bouquetItems.querySelectorAll('.quantity-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const id = parseInt(btn.dataset.id);
                 const item = bouquetItems.find(i => i.id === id);
@@ -509,7 +614,7 @@
             });
         });
 
-        document.querySelectorAll('.quantity-input-small').forEach(input => {
+        elements.bouquetItems.querySelectorAll('.quantity-input-small').forEach(input => {
             input.addEventListener('change', () => {
                 const id = parseInt(input.dataset.id);
                 const newQuantity = parseInt(input.value) || 1;
@@ -548,8 +653,16 @@
      * Загрузить рецепты из localStorage
      */
     function loadSavedRecipes() {
-        const saved = localStorage.getItem('barhat_bouquet_recipes');
-        savedRecipes = saved ? JSON.parse(saved) : [];
+        try {
+            const saved = localStorage.getItem('barhat_bouquet_recipes');
+            const parsed = saved ? JSON.parse(saved) : [];
+            savedRecipes = Array.isArray(parsed)
+                ? parsed.filter(r => r && r.name && Array.isArray(r.items))
+                : [];
+        } catch (err) {
+            console.error('Ошибка загрузки рецептов:', err);
+            savedRecipes = [];
+        }
         renderSavedRecipes();
     }
 
@@ -575,7 +688,7 @@
             recipeEl.className = 'recipe-item';
             recipeEl.innerHTML = `
                 <div class="recipe-info">
-                    <div class="recipe-name">${recipe.name}</div>
+                    <div class="recipe-name">${escapeHtml(recipe.name)}</div>
                     <div class="recipe-meta">${recipe.items.length} позиций • ${formatCurrency(recipe.total)}</div>
                 </div>
                 <div class="recipe-actions">
@@ -596,8 +709,8 @@
             elements.savedRecipes.appendChild(recipeEl);
         });
 
-        // Обработчики
-        document.querySelectorAll('.recipe-actions button').forEach(btn => {
+        // Обработчики (только внутри списка рецептов)
+        elements.savedRecipes.querySelectorAll('.recipe-actions button').forEach(btn => {
             btn.addEventListener('click', () => {
                 const index = parseInt(btn.dataset.index);
                 if (btn.dataset.action === 'load') {
@@ -628,7 +741,8 @@
 
         const recipe = {
             name: name,
-            items: [...bouquetItems],
+            // Глубокая копия: иначе правка количества в букете меняет сохранённый рецепт
+            items: deepClone(bouquetItems),
             total: summary.total,
             createdAt: new Date().toISOString()
         };
@@ -648,7 +762,11 @@
         const recipe = savedRecipes[index];
         if (!recipe) return;
 
-        bouquetItems = [...recipe.items];
+        // Глубокая копия + свежие id: рецепт не должен меняться вслед за букетом
+        bouquetItems = deepClone(recipe.items).map(item => ({
+            ...item,
+            id: createItemId()
+        }));
         renderBouquetItems();
         updateSummary();
     }
@@ -768,6 +886,10 @@
 
             elements.quantityGroup.style.display = 'block';
             elements.addItemBtn.style.display = 'inline-flex';
+
+            // Селект заполнен программно — событие change не сработает, обновляем сами
+            updatePriceHint(category, elements.productSelect.value);
+            updateQuantityInfo();
         });
 
         // Изменение товара
@@ -826,7 +948,7 @@
     const ADMIN_PASSWORD = 'barhat2024';
 
     // Текущий прайс-лист (редактируемый)
-    let editablePriceList = JSON.parse(JSON.stringify(PRICE_LIST));
+    let editablePriceList = deepClone(PRICE_LIST);
 
     // DOM элементы админки
     const adminElements = {
@@ -864,7 +986,7 @@
         }
 
         // Загружаем текущий прайс-лист
-        editablePriceList = JSON.parse(JSON.stringify(PRICE_LIST));
+        editablePriceList = deepClone(PRICE_LIST);
         currentAdminCategory = 'flowers';
 
         renderAdminCategories();
@@ -916,13 +1038,14 @@
                     return;
                 }
 
+                const safeName = escapeHtml(name);
                 const itemEl = document.createElement('div');
                 itemEl.className = 'admin-item';
                 itemEl.innerHTML = `
-                    <div class="admin-item-name">${name}</div>
-                    <input type="number" class="admin-item-price" value="${price}" step="0.01" data-name="${name}">
-                    <button class="btn btn-primary btn-sm admin-item-save" data-name="${name}">✓</button>
-                    <button class="admin-item-delete" data-name="${name}">
+                    <div class="admin-item-name">${safeName}</div>
+                    <input type="number" class="admin-item-price" value="${escapeHtml(price)}" step="0.01" data-name="${safeName}">
+                    <button class="btn btn-primary btn-sm admin-item-save" data-name="${safeName}">✓</button>
+                    <button class="admin-item-delete" data-name="${safeName}">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <line x1="18" y1="6" x2="6" y2="18"/>
                             <line x1="6" y1="6" x2="18" y2="18"/>
@@ -939,7 +1062,7 @@
             itemEl.className = 'admin-item';
             itemEl.style.gridColumn = '1 / -1';
             itemEl.innerHTML = `
-                <div class="admin-item-name">${getCategoryLabel(currentAdminCategory)} — объёмная скидка</div>
+                <div class="admin-item-name">${escapeHtml(getCategoryLabel(currentAdminCategory))} — объёмная скидка</div>
             `;
             adminElements.adminItemsList.appendChild(itemEl);
 
@@ -980,14 +1103,52 @@
             adminElements.adminItemsList.appendChild(itemEl);
         }
 
-        // Обработчики для кнопок
-        document.querySelectorAll('.admin-item-save').forEach(btn => {
+        // Обработчики (только внутри списка админки — класс .admin-item-delete
+        // используется и в модуле задач)
+        adminElements.adminItemsList.querySelectorAll('.admin-item-save').forEach(btn => {
             btn.addEventListener('click', () => saveItemPrice(btn));
         });
 
-        document.querySelectorAll('.admin-item-delete:not([disabled])').forEach(btn => {
+        adminElements.adminItemsList.querySelectorAll('.admin-item-delete:not([disabled])').forEach(btn => {
             btn.addEventListener('click', () => deleteItem(btn));
         });
+
+        // Правка цены применяется и без нажатия «✓» — иначе значение молча терялось
+        adminElements.adminItemsList.querySelectorAll('.admin-item-price').forEach(input => {
+            input.addEventListener('change', () => commitPriceInput(input));
+        });
+    }
+
+    /**
+     * Записать значение поля цены в редактируемый прайс-лист.
+     * Возвращает false, если значение некорректное.
+     */
+    function commitPriceInput(input) {
+        const newValue = parseFloat(input.value);
+
+        if (isNaN(newValue) || newValue < 0) {
+            alert('Некорректная цена!');
+            renderAdminItems();
+            return false;
+        }
+
+        if (input.dataset.name) {
+            editablePriceList[currentAdminCategory][input.dataset.name] = newValue;
+        } else if (input.dataset.tier !== undefined) {
+            editablePriceList[currentAdminCategory].tiers[parseInt(input.dataset.tier)].price = newValue;
+        } else if (input.dataset.special === 'banana') {
+            editablePriceList[currentAdminCategory].price = newValue;
+        }
+
+        return true;
+    }
+
+    /**
+     * Записать все видимые поля цен (страховка перед сохранением)
+     */
+    function commitAllPriceInputs() {
+        const inputs = adminElements.adminItemsList.querySelectorAll('.admin-item-price');
+        return Array.from(inputs).every(input => commitPriceInput(input));
     }
 
     /**
@@ -995,30 +1156,11 @@
      */
     function saveItemPrice(btn) {
         const input = btn.parentElement.querySelector('.admin-item-price');
-        const newValue = parseFloat(input.value);
-
-        if (isNaN(newValue) || newValue < 0) {
-            alert('Некорректная цена!');
-            input.value = input.dataset.oldValue || input.defaultValue;
-            return;
-        }
-
-        if (btn.dataset.name) {
-            // Обычный товар
-            const name = btn.dataset.name;
-            editablePriceList[currentAdminCategory][name] = newValue;
-        } else if (btn.dataset.tier !== undefined) {
-            // Товар с объёмной скидкой
-            const tierIndex = parseInt(btn.dataset.tier);
-            editablePriceList[currentAdminCategory].tiers[tierIndex].price = newValue;
-        } else if (btn.dataset.special === 'banana') {
-            // Бананы
-            editablePriceList[currentAdminCategory].price = newValue;
-        }
+        if (!input || !commitPriceInput(input)) return;
 
         // Визуальная обратная связь
-        btn.textContent = '✓';
-        setTimeout(() => btn.textContent = '✓', 1000);
+        btn.classList.add('btn-success');
+        setTimeout(() => btn.classList.remove('btn-success'), 800);
     }
 
     /**
@@ -1101,8 +1243,8 @@
             try {
                 const imported = JSON.parse(e.target.result);
 
-                // Проверяем структуру
-                if (!imported.flowers || !imported.dried || !imported.packaging) {
+                // Проверяем структуру (все категории, а не только три первые)
+                if (!isValidPriceList(imported)) {
                     throw new Error('Неверная структура прайс-листа');
                 }
 
@@ -1124,12 +1266,22 @@
      * Применить изменения прайс-листа
      */
     function applyPricelistChanges() {
+        // Подхватываем то, что набрано в полях, но не подтверждено кнопкой «✓»
+        if (!commitAllPriceInputs()) {
+            return;
+        }
+
         if (!confirm('Применить изменения прайс-листа? Калькулятор будет обновлён.')) {
             return;
         }
 
+        if (!isValidPriceList(editablePriceList)) {
+            alert('Прайс-лист неполный: проверьте цены по граммам (клубника, шоколад, посыпки, бананы).');
+            return;
+        }
+
         // Обновляем глобальный PRICE_LIST
-        PRICE_LIST = { ...editablePriceList };
+        PRICE_LIST = deepClone(editablePriceList);
 
         // Сохраняем в localStorage
         savePricelistToStorage();
@@ -1138,8 +1290,10 @@
         renderBouquetItems();
         updateSummary();
 
-        // Обновляем селекторы
+        // Обновляем селекторы и подсказки
         populateProductSelect(elements.categorySelect.value);
+        updatePriceHint(elements.categorySelect.value, elements.productSelect.value);
+        updateQuantityInfo();
 
         closeAdminModal();
         alert('Прайс-лист обновлён и сохранён!');
