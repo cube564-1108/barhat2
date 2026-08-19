@@ -7,7 +7,7 @@ RetailCRM API-клиент для модуля кассовых смен БАР�
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import requests
 
@@ -51,15 +51,35 @@ FAST_ORDER_LOOKBACK_DAYS = 7
 DEFAULT_TIMEOUT = 30
 FAST_TIMEOUT = 6
 
+# RetailCRM отдаёт и принимает даты заказов/платежей в московском времени
+# (подтверждено эмпирически: сверили paidAt реального платежа с истинным UTC
+# из HTTP-заголовка Date в ответе RetailCRM — расхождение ровно ~3 часа).
+# Весь остальной код модуля (server.py, storage.py) работает в naive UTC —
+# как datetime.now() в проде на Amvera (там же явный datetime.utcnow() в
+# auth.py) — поэтому конвертация нужна именно на границе с CRM, в обе стороны:
+# наше UTC → московское при запросе, московское от CRM → UTC при сравнении.
+# Фиксированный сдвиг вместо pytz — в РФ нет перехода на летнее время с 2014
+# года (тот же приём, что для Модульбанка, см. src/modulbank/document.py).
+_MOSCOW_TZ = timezone(timedelta(hours=3))
+
+
+def _to_moscow_naive(dt: datetime) -> datetime:
+    """naive UTC datetime → naive московское время (для фильтров, отправляемых в CRM)."""
+    return dt.replace(tzinfo=timezone.utc).astimezone(_MOSCOW_TZ).replace(tzinfo=None)
+
 
 def _parse_paid_at(paid_at: str) -> Optional[datetime]:
-    """Распарсить дату оплаты платежа в naive datetime для сравнения с окном смены."""
+    """Распарсить дату оплаты платежа (моск. время от CRM) в naive UTC для сравнения с окном смены."""
     if not paid_at:
         return None
     try:
         if "T" in paid_at:
-            return datetime.fromisoformat(paid_at.replace("Z", "+00:00")).replace(tzinfo=None)
-        return datetime.strptime(paid_at, "%Y-%m-%d %H:%M:%S")
+            # ISO8601 с явным смещением/Z — уже tz-aware, переводим в UTC как есть
+            return datetime.fromisoformat(paid_at.replace("Z", "+00:00")).astimezone(timezone.utc).replace(tzinfo=None)
+        # "YYYY-MM-DD HH:MM:SS" без смещения — формат, в котором RetailCRM v5
+        # отдаёт paidAt/createdAt, всегда московское время
+        naive_moscow = datetime.strptime(paid_at, "%Y-%m-%d %H:%M:%S")
+        return naive_moscow.replace(tzinfo=_MOSCOW_TZ).astimezone(timezone.utc).replace(tzinfo=None)
     except (ValueError, TypeError):
         return None
 
@@ -146,11 +166,13 @@ class RetailCRMClient:
         if store_code:
             params["filter[sites][]"] = [store_code]
 
+        # datetime_start/datetime_end приходят в naive UTC (см. _MOSCOW_TZ выше) —
+        # CRM же интерпретирует значения фильтра в московском времени
         if datetime_start:
-            params["filter[createdAtFrom]"] = datetime_start.strftime("%Y-%m-%d %H:%M:%S")
+            params["filter[createdAtFrom]"] = _to_moscow_naive(datetime_start).strftime("%Y-%m-%d %H:%M:%S")
 
         if datetime_end:
-            params["filter[createdAtTo]"] = datetime_end.strftime("%Y-%m-%d %H:%M:%S")
+            params["filter[createdAtTo]"] = _to_moscow_naive(datetime_end).strftime("%Y-%m-%d %H:%M:%S")
 
         # Добавляем пагинацию для получения всех заказов
         params["page"] = 1
