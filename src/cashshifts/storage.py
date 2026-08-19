@@ -596,6 +596,27 @@ def list_cash_shifts(
     return [dict(row) for row in rows]
 
 
+def delete_cash_shift(shift_id: int) -> bool:
+    """
+    Удалить смену вместе с её инкассациями и кэшем заказов из CRM.
+
+    Дочерние строки удаляем явно: ON DELETE CASCADE в схеме есть, но
+    PRAGMA foreign_keys включается не в каждом соединении, и без явного
+    удаления в БД остались бы висячие инкассации и кэш заказов.
+    Всё в одном соединении и одной транзакции — иначе при обрыве между
+    запросами смена исчезнет, а её инкассации останутся.
+    """
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM cash_collections WHERE shift_id = ?", (shift_id,))
+        conn.execute("DELETE FROM cash_orders_cache WHERE shift_id = ?", (shift_id,))
+        cursor = conn.execute("DELETE FROM cash_shifts WHERE id = ?", (shift_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
 def update_cash_shift(
     shift_id: int,
     opening_balance: Optional[float] = None,

@@ -1547,3 +1547,15 @@ body {
         padding: 16px;
     }
 }
+
+/* === Кассовые смены ===
+   Карточки страницы идут одна за другой внутри .section, а у .card /
+   .calculator-card своих внешних отступов нет — без этого правила таблицы
+   слипаются в одну сплошную простыню. margin-top (а не bottom): скрытые
+   карточки (display:none, напр. «Открытые смены» у флориста) отступ не
+   оставляют, и снизу секции не появляется лишнего хвоста. */
+
+.page[data-page="cash_shifts"] .section > .card,
+.page[data-page="cash_shifts"] .section > .calculator-card {
+    margin-top: 24px;
+}

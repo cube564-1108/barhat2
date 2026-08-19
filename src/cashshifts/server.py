@@ -42,6 +42,7 @@ from .storage import (
     get_cash_shift_by_id,
     list_cash_shifts,
     update_cash_shift,
+    delete_cash_shift,
     # Инкассации
     create_collection,
     get_shift_collections,
@@ -817,6 +818,47 @@ def edit_shift(shift_id: int):
         return error_response(str(e), 403)
     except Exception as e:
         logger.error(f"Ошибка PUT /api/cash-shifts/{shift_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return error_response(str(e), 500)
+
+
+@cashshifts_bp.route("/<int:shift_id>", methods=["DELETE"])
+@role_required("admin")
+def remove_shift(shift_id: int):
+    """
+    Удалить закрытую смену (только админ).
+
+    Удаление жёсткое: вместе со сменой уходят её инкассации и кэш наличных
+    заказов. Открытую смену удалить нельзя — сначала её надо закрыть, иначе
+    точка осталась бы с «висящей» открытой сменой в CRM-синхронизации.
+
+    Осторожно: начальный остаток следующей смены берётся из последней
+    закрытой смены точки (get_last_closed_shift). Если удалить последнюю
+    закрытую смену, следующая открытая начнётся от остатка предыдущей.
+    """
+    try:
+        shift = get_cash_shift_by_id(shift_id)
+        if not shift:
+            return error_response(f"Смена {shift_id} не найдена", 404)
+
+        if shift["status"] != "closed":
+            return error_response("Удалить можно только закрытую смену", 409)
+
+        delete_cash_shift(shift_id)
+
+        log_action(
+            current_user.username,
+            "delete_cash_shift",
+            f"id={shift_id}, точка={shift['store_id']}, "
+            f"закрыта={shift.get('closed_at')}, факт={shift.get('actual_balance')}"
+        )
+        logger.info(f"Смена удалена админом {current_user.username}: ID={shift_id}")
+
+        return jsonify(success_response())
+
+    except Exception as e:
+        logger.error(f"Ошибка DELETE /api/cash-shifts/{shift_id}: {e}")
         import traceback
         traceback.print_exc()
         return error_response(str(e), 500)

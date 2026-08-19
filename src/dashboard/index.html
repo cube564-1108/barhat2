@@ -950,95 +950,20 @@
                         <h2 class="section-title">КАССОВЫЕ СМЕНЫ</h2>
                         <p class="section-description">Учёт наличных в кассах салонов БАРХАТ</p>
 
-                        <!-- KPI плитки -->
-                        <div class="bx-kpi" style="margin: 24px 0;">
-                            <div class="card">
-                                <div class="label">Текущая смена</div>
-                                <div class="value" id="current-shift-status">—</div>
-                                <div class="sub-label" id="current-shift-time"></div>
-                            </div>
-                            <div class="card">
-                                <div class="label">Продажи наличными</div>
-                                <div class="value" id="current-shift-sales">— ₽</div>
-                            </div>
-                            <div class="card">
-                                <div class="label">Инкассации</div>
-                                <div class="value" id="current-shift-collections">— ₽</div>
-                            </div>
-                            <div class="card">
-                                <div class="label">Ожидаемый остаток</div>
-                                <div class="value" id="current-shift-expected">— ₽</div>
-                            </div>
-                        </div>
-
-                        <!-- Управление сменой -->
-                        <div class="card calculator-card">
-                            <div class="card-header">
-                                <h3 class="card-title">Текущая смена</h3>
+                        <!-- Панель действий: выбор точки + кнопки смены.
+                             Сводка по смене живёт в таблицах ниже, здесь только управление -->
+                        <div class="card calculator-card" id="shift-panel">
+                            <div style="display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap;">
+                                <!-- Выбор точки (только для админа/менеджера — у флориста точка одна и фиксирована) -->
+                                <div id="shift-store-selector-wrap" style="display: none;">
+                                    <label class="form-label" for="shift-store-selector">Точка продаж</label>
+                                    <select id="shift-store-selector" class="form-select" style="min-width: 280px;">
+                                        <option value="">-- Выберите точку --</option>
+                                    </select>
+                                </div>
                                 <div id="shift-actions" style="display: flex; gap: 12px;">
                                     <!-- Кнопки добавляются динамически -->
                                 </div>
-                            </div>
-
-                            <!-- Выбор точки (только для админа/менеджера — у флориста точка одна и фиксирована) -->
-                            <div id="shift-store-selector-wrap" style="display: none; margin-bottom: 16px;">
-                                <label class="form-label" for="shift-store-selector">Точка продаж</label>
-                                <select id="shift-store-selector" class="form-select" style="max-width: 320px;">
-                                    <option value="">-- Выберите точку --</option>
-                                </select>
-                            </div>
-
-                            <!-- Информация о текущей смене -->
-                            <div id="current-shift-info" style="display: none;">
-                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 24px;">
-                                    <div>
-                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Салон</div>
-                                        <div style="font-weight: 500; font-size: 16px;" id="shift-store-name">—</div>
-                                    </div>
-                                    <div>
-                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Тип смены</div>
-                                        <div style="font-weight: 500; font-size: 16px;" id="shift-type">—</div>
-                                    </div>
-                                    <div>
-                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Начало смены</div>
-                                        <div style="font-weight: 500; font-size: 16px;" id="shift-start-time">—</div>
-                                    </div>
-                                    <div>
-                                        <div style="color: var(--barkhat-gray); font-size: 14px;">Начальный остаток</div>
-                                        <div style="font-weight: 500; font-size: 16px;" id="shift-start-balance">— ₽</div>
-                                    </div>
-                                </div>
-
-                                <!-- Таблица инкассаций -->
-                                <div style="margin-top: 24px;">
-                                    <h4 style="margin-bottom: 12px; font-size: 16px;">Инкассации</h4>
-                                    <div id="collections-table" style="overflow-x: auto;">
-                                        <table style="width: 100%;">
-                                            <thead>
-                                                <tr>
-                                                    <th>Время</th>
-                                                    <th>Категория</th>
-                                                    <th>Сумма</th>
-                                                    <th>Комментарий</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="collections-tbody">
-                                                <tr>
-                                                    <td colspan="4" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
-                                                        Нет инкассаций
-                                                    </td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Нет открытой смены -->
-                            <div id="no-shift-info">
-                                <p style="color: var(--barkhat-gray); padding: 40px 0; text-align: center;">
-                                    Нет открытой смены. Откройте смену для начала работы.
-                                </p>
                             </div>
                         </div>
 
@@ -1114,31 +1039,6 @@
                             </div>
                         </div>
 
-                        <!-- Остаток денег в кассах по салонам (только админ) -->
-                        <div class="card calculator-card" id="balances-card" style="display: none;">
-                            <div class="card-header">
-                                <h3 class="card-title">Остаток денег в кассах</h3>
-                            </div>
-                            <div id="balances-table" style="overflow-x: auto;">
-                                <table style="width: 100%;">
-                                    <thead>
-                                        <tr>
-                                            <th>Салон</th>
-                                            <th>Фактический остаток</th>
-                                            <th>На момент</th>
-                                            <th>Статус</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="balances-tbody">
-                                        <tr>
-                                            <td colspan="4" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
-                                                Загрузка данных...
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
                     </section>
 
                     <!-- Модальное окно открытия смены -->
