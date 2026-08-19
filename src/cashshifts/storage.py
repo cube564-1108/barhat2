@@ -37,9 +37,17 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dd
     Добавить колонку, если её ещё нет (идемпотентная миграция).
 
     На проде 2 воркера gunicorn стартуют одновременно и оба выполняют
-    init_cashshifts_tables() — второй может успеть проверить PRAGMA до того,
-    как первый закоммитил ALTER. Поэтому "duplicate column name" не считаем
-    ошибкой: колонка уже создана параллельным воркером, цель достигнута.
+    init_cashshifts_tables(). Оба исхода гонки за один и тот же ALTER штатные,
+    и ни один не должен ронять старт воркера:
+
+      duplicate column name — второй воркер успел закоммитить ALTER раньше;
+      database is locked    — второй воркер держит write-лок прямо сейчас.
+
+    В обоих случаях колонку создаёт сосед, цель достигнута. Раньше второй
+    случай пробрасывался наружу: исключение вылетало из init_cashshifts_tables
+    до conn.close(), соединение утекало открытым на всю жизнь воркера и
+    блокировало запись в общую БД — вход висел на INSERT в audit_log, потому
+    что чтение при этом работало нормально. Продержалось до первого рестарта.
     """
     cursor = conn.execute(f"PRAGMA table_info({table})")
     existing = [row[1] for row in cursor.fetchall()]
@@ -50,14 +58,32 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dd
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
         conn.commit()
     except sqlite3.OperationalError as e:
-        if "duplicate column name" not in str(e).lower():
-            raise
+        message = str(e).lower()
+        if "duplicate column name" in message or "locked" in message:
+            print(f"[CashShifts] Миграцию {table}.{column} выполняет параллельный воркер: {e}")
+            return
+        raise
 
 
 def init_cashshifts_tables():
-    """Инициализация таблиц кассовых смен (вызывается при старте приложения)."""
+    """Инициализация таблиц кассовых смен (вызывается при старте приложения).
+
+    Соединение закрывается через try/finally: без него любое исключение внутри
+    (гонка миграций между воркерами, битая схема) оставляло бы соединение
+    открытым до перезапуска воркера. Открытое соединение к общей БД мешает
+    записи — а на этой же БД живут пользователи и audit_log, поэтому ценой
+    падения здесь становится неработающий вход во весь дашборд.
+    """
 
     conn = get_db()
+    try:
+        _init_cashshifts_schema(conn)
+    finally:
+        conn.close()
+
+
+def _init_cashshifts_schema(conn: sqlite3.Connection):
+    """Создание таблиц, индексов и seed-данных. Соединением владеет вызывающий."""
 
     # ========================================================================
     # 1. Точки продаж (stores)
@@ -229,8 +255,6 @@ def init_cashshifts_tables():
     # ========================================================================
     _seed_stores_if_empty(conn)
     _seed_categories_if_empty(conn)
-
-    conn.close()
 
 
 def _seed_stores_if_empty(conn: sqlite3.Connection):
