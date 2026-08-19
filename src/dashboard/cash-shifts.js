@@ -283,8 +283,9 @@
         loadCurrentShift();
         loadShiftsHistory();
 
-        // Сводка по открытым сменам — админу (все точки) и менеджеру (свои точки).
-        // Флористу не нужна: у него одна точка и одна смена, которой он и управляет
+        // Сводка по открытым сменам: админу — все точки, менеджеру и флористу —
+        // только свои. Бэкенд сам сужает выборку по user_stores, роль здесь
+        // решает лишь, показывать таблицу или нет
         if (elements.openShiftsCard) {
             elements.openShiftsCard.style.display = canSeeOpenShifts() ? 'block' : 'none';
         }
@@ -296,7 +297,7 @@
     // === Кому доступна таблица «Открытые смены» ===
     function canSeeOpenShifts() {
         const role = currentUserData && currentUserData.role;
-        return role === 'admin' || role === 'manager';
+        return role === 'admin' || role === 'manager' || role === 'florist';
     }
 
     // === API запросы ===
@@ -787,11 +788,14 @@
             showNotification('Смена открыта', 'success');
             closeOpenShiftModal();
 
-            // Синхронизируем селектор точки, чтобы сразу увидеть открытую смену в виджете
+            // Синхронизируем селектор точки, чтобы кнопки сразу относились к этой смене
             if (elements.shiftStoreSelector && currentUserData && currentUserData.role !== 'florist') {
                 elements.shiftStoreSelector.value = storeId;
             }
             loadCurrentShift();
+            if (canSeeOpenShifts()) {
+                loadOpenShifts();
+            }
 
         } catch (error) {
             console.error('[CashShifts] Ошибка открытия смены:', error);
@@ -949,6 +953,11 @@
             showNotification('Инкассация добавлена', 'success');
             closeAddCollectionModal();
             loadCurrentShift();
+            // Инкассации и плановый остаток видны только в этой таблице —
+            // без перезагрузки они останутся с прежними цифрами
+            if (canSeeOpenShifts()) {
+                loadOpenShifts();
+            }
 
         } catch (error) {
             console.error('[CashShifts] Ошибка добавления инкассации:', error);
