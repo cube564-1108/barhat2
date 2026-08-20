@@ -202,6 +202,78 @@ body {
     font-style: italic;
 }
 
+/* === Инструкция на странице модуля (свёрнутый блок) === */
+
+.module-guide {
+    background: var(--barkhat-white);
+    border: 1px solid var(--barkhat-gray-light);
+    border-radius: 12px;
+    margin: 0 0 16px 0;
+}
+
+.module-guide-summary {
+    cursor: pointer;
+    padding: 14px 18px;
+    font-family: var(--font-heading);
+    font-size: 15px;
+    color: var(--barkhat-wine);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.module-guide-summary::-webkit-details-marker {
+    display: none;
+}
+
+.module-guide-summary::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-right: 1.75px solid var(--barkhat-pink-deep);
+    border-bottom: 1.75px solid var(--barkhat-pink-deep);
+    transform: rotate(-45deg);
+    transition: transform 0.15s ease;
+    flex-shrink: 0;
+}
+
+.module-guide[open] .module-guide-summary::before {
+    transform: rotate(45deg);
+}
+
+.module-guide-body {
+    padding: 0 18px 18px 18px;
+    display: grid;
+    gap: 18px;
+}
+
+.module-guide-title {
+    font-family: var(--font-heading);
+    font-size: 14px;
+    color: var(--barkhat-wine);
+    margin: 0 0 8px 0;
+}
+
+.module-guide-list {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--barkhat-gray-dark);
+}
+
+.module-guide-note {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--barkhat-gray);
+    margin: 8px 0 0 0;
+}
+
+.module-guide-note-warn {
+    color: var(--barkhat-burgundy);
+}
+
 /* === Заглушка сводки === */
 
 .summary-placeholder {

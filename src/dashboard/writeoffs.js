@@ -14,6 +14,9 @@
     let loaded = false;
     let currentDetailsWriteoffId = null;
 
+    // Совпадает с APPROVER_ROLES в src/writeoffs/server.py — кто согласует заявки
+    const APPROVER_ROLES = ['admin', 'manager'];
+
     const STATUS_LABELS = {
         on_approval: 'На согласовании',
         processing: 'Отправляется…',
@@ -96,6 +99,8 @@
 
         elements.closeDetailsBtn?.addEventListener('click', closeDetailsModal);
         elements.detailsOverlay?.addEventListener('click', closeDetailsModal);
+
+        elements.guideApprover = document.getElementById('writeoff-guide-approver');
     }
 
     async function onPageActivated(userData) {
@@ -103,6 +108,11 @@
 
         if (elements.mappingBtn) {
             elements.mappingBtn.style.display = currentUserData?.role === 'admin' ? '' : 'none';
+        }
+
+        // Блок инструкции про согласование — только тем, кто может согласовывать
+        if (elements.guideApprover) {
+            elements.guideApprover.hidden = !APPROVER_ROLES.includes(currentUserData?.role);
         }
 
         if (!loaded) {
@@ -159,8 +169,7 @@
     }
 
     function canApprove(storeId) {
-        const role = currentUserData?.role;
-        if (role !== 'admin' && role !== 'manager') return false;
+        if (!APPROVER_ROLES.includes(currentUserData?.role)) return false;
         return storeList.some(s => s.id === storeId);
     }
 
