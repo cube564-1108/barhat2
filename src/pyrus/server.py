@@ -4,6 +4,7 @@ Pyrus API Server
 """
 
 import os
+import re
 import sys
 import time
 import shutil
@@ -391,26 +392,59 @@ def _is_embed_request():
     return bool(session.get("sso"))
 
 
-def _serve_dashboard_shell():
-    """Отдаёт index.html, помечая <html> классом embed-mode в embed-режиме.
+_ACTIVE_CLASS_RE = re.compile(r'class="(nav-item|page) active"')
 
-    Метку ставит сервер, а не JS: класс должен быть в разметке ДО первой
-    отрисовки, иначе сайдбар и шапка успевают мигнуть внутри iframe, пока
-    не ответит /api/auth/me.
+
+def _page_name_from_path(path):
+    """Имя модуля (data-page) из пути запроса: /cash-shifts → cash_shifts."""
+    slug = path.strip('/\\').lower()
+    if not slug:
+        return 'dashboard'
+    return slug.replace('-', '_')
+
+
+def _mark_active_page(html, page):
+    """Переносит класс active на страницу из URL прямо в разметке.
+
+    В index.html active жёстко проставлен «Дашборду». script.js исправляет
+    это только после ответа /api/auth/me, поэтому при перезагрузке любого
+    модуля пользователь успевал увидеть дашборд и лишь потом свою страницу.
+    """
+    if page == 'dashboard':
+        return html
+
+    target_re = re.compile(r'class="(nav-item|page)"(\s+data-page="%s")' % re.escape(page))
+    if not target_re.search(html):
+        # Страница ещё не свёрстана (заглушку создаёт JS) — оставляем как есть.
+        return html
+
+    html = _ACTIVE_CLASS_RE.sub(r'class="\1"', html)
+    return target_re.sub(r'class="\1 active"\2', html)
+
+
+def _serve_dashboard_shell():
+    """Отдаёт index.html: помечает активный модуль и embed-режим.
+
+    Метки ставит сервер, а не JS: они должны быть в разметке ДО первой
+    отрисовки, иначе внутри iframe мигают сайдбар и шапка, а при F5 на
+    любом модуле — страница «Дашборд», пока не ответит /api/auth/me.
     """
     index_path = os.path.join(DASHBOARD_DIR, 'index.html')
-    if not _is_embed_request():
-        return send_from_directory(DASHBOARD_DIR, "index.html")
+    is_embed = _is_embed_request()
 
     with open(index_path, encoding='utf-8') as f:
         html = f.read()
-    html = html.replace('<html lang="ru">', '<html lang="ru" class="embed-mode">', 1)
+
+    html = _mark_active_page(html, _page_name_from_path(request.path))
+    if is_embed:
+        html = html.replace('<html lang="ru">', '<html lang="ru" class="embed-mode">', 1)
 
     response = app.make_response(html)
     response.headers['Content-Type'] = 'text/html; charset=utf-8'
-    # Оболочка в embed-виде отличается от обычной — кэшировать её нельзя,
-    # иначе браузер подставит вариант с сайдбаром (или наоборот).
-    response.headers['Cache-Control'] = 'no-store'
+    # Оболочка зависит от URL и режима, а не только от файла на диске:
+    # embed-вид отличается от обычного, активный модуль — от пути. Кэш
+    # браузера тут подставил бы чужой вариант.
+    response.headers['Cache-Control'] = 'no-store' if is_embed else 'no-cache'
     return response
 
 

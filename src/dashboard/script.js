@@ -101,15 +101,18 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     });
 
-    // Функция для переключения страницы
-    function navigateToPage(pageName) {
+    // Функция для переключения страницы.
+    // replaceUrl=true — когда страница открывается не по клику, а по текущему URL
+    // (первая загрузка, кнопки назад/вперёд): новую запись в истории заводить
+    // нельзя, иначе «Назад» упирается в дубли того же адреса.
+    function navigateToPage(pageName, replaceUrl = false) {
         // Проверяем permissions
         // users_manage проверяется отдельно через роль admin
         if (pageName !== 'users' && !userPermissions.includes(pageName)) {
             console.warn('Нет доступа к модулю:', pageName);
             // Редирект на первую доступную страницу
             const firstAllowed = userPermissions[0] || 'dashboard';
-            navigateToPage(firstAllowed);
+            navigateToPage(firstAllowed, true);
             return;
         }
 
@@ -136,7 +139,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             // по F5) вернёт вид с сайдбаром для сессий, где embed включён
             // флагом, а не SSO.
             const newUrl = `/${pageNameToUrlSlug(pageName)}${isEmbed ? '?embed=1' : ''}`;
-            history.pushState({ page: pageName }, '', newUrl);
+            if (replaceUrl) {
+                history.replaceState({ page: pageName }, '', newUrl);
+            } else {
+                history.pushState({ page: pageName }, '', newUrl);
+            }
 
             // Загружаем данные для страницы пользователей
             if (pageName === 'users' && window.BarhatUsers) {
@@ -233,14 +240,14 @@ document.addEventListener('DOMContentLoaded', async function() {
         if (path) {
             // Проверяем есть ли доступ к запрошенной странице
             if (path === 'users' || userPermissions.includes(path)) {
-                navigateToPage(path);
+                navigateToPage(path, true);
             } else {
                 // Нет доступа - редирект на первую доступную страницу
-                navigateToPage(userPermissions[0] || 'dashboard');
+                navigateToPage(userPermissions[0] || 'dashboard', true);
             }
         } else {
             // Нет пути - открываем первую доступную страницу
-            navigateToPage(userPermissions[0] || 'dashboard');
+            navigateToPage(userPermissions[0] || 'dashboard', true);
         }
     }
 
@@ -251,9 +258,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     window.addEventListener('popstate', function(e) {
         const path = urlSlugToPageName(window.location.pathname.slice(1)); // Убираем первый /
         if (path) {
-            navigateToPage(path);
+            navigateToPage(path, true);
         } else {
-            navigateToPage(userPermissions[0] || 'dashboard');
+            navigateToPage(userPermissions[0] || 'dashboard', true);
         }
     });
 
