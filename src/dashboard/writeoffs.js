@@ -91,7 +91,7 @@
         });
         elements.storeSelect?.addEventListener('change', async () => {
             await loadCatalogForStore(parseInt(elements.storeSelect.value, 10));
-            elements.positionsRows.querySelectorAll('.writeoff-position-product').forEach(populateProductSelect);
+            elements.positionsRows.querySelectorAll('.writeoff-position-product').forEach(refreshProductInput);
         });
 
         elements.applyFiltersBtn?.addEventListener('click', loadWriteoffs);
@@ -327,16 +327,259 @@
         }
     }
 
-    function populateProductSelect(select) {
-        const previousValue = select.value;
-        select.innerHTML = currentCatalog.map(item => `
-            <option value="${item.moysklad_product_id}" data-name="${escapeHtml(item.product_name)}">
-                ${escapeHtml(item.product_name)} (остаток: ${item.quantity_available})
-            </option>
-        `).join('');
-        if (previousValue && currentCatalog.some(i => i.moysklad_product_id === previousValue)) {
-            select.value = previousValue;
+    // =========================================================================
+    // ПОИСК ТОВАРА (комбобокс «начни вводить — подскажет», как в МойСклад)
+    //
+    // Обычный <select> не годится: на складе больше сотни позиций, найти нужную
+    // прокруткой дольше, чем набрать три буквы. Ищем и по названию, и по
+    // артикулу (флористу привычнее набрать «k1»).
+    // =========================================================================
+
+    const SUGGEST_LIMIT = 50;
+
+    let suggestBox = null;      // единственный выпадающий список на весь модуль
+    let suggestInput = null;    // поле, к которому он сейчас привязан
+    let suggestItems = [];
+    let suggestIndex = -1;
+
+    function injectSuggestStyles() {
+        if (document.getElementById('writeoff-suggest-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'writeoff-suggest-styles';
+        style.textContent = `
+.writeoff-suggest {
+    position: fixed;
+    z-index: 2100; /* выше .modal (2000) — список рисуется поверх окна */
+    display: none;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--bx-white, #fff);
+    border: 1px solid var(--bx-border, #eee2ea);
+    border-radius: var(--bx-r-lg, 8px);
+    box-shadow: 0 8px 24px rgba(65, 19, 48, 0.16);
+}
+.writeoff-suggest.active { display: block; }
+.writeoff-suggest-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--bx-text, #3C3C3C);
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    justify-content: space-between;
+}
+.writeoff-suggest-item + .writeoff-suggest-item { border-top: 1px solid var(--bx-border, #eee2ea); }
+.writeoff-suggest-item.active,
+.writeoff-suggest-item:hover { background: var(--bx-pink-wash, #F3E3EE); }
+.writeoff-suggest-code { color: var(--bx-muted, #9b8f97); white-space: nowrap; }
+.writeoff-suggest-stock { color: var(--bx-text-2, #6F6F6F); white-space: nowrap; }
+.writeoff-suggest-stock.empty { color: var(--bx-down, #c0322f); }
+.writeoff-suggest-hl { background: #fff3a3; color: inherit; padding: 0; border-radius: 2px; }
+.writeoff-suggest-empty { padding: 10px 12px; font-size: 13px; color: var(--bx-muted, #9b8f97); }
+.writeoff-position-product.invalid { border-color: var(--bx-down, #c0322f); }
+`;
+        document.head.appendChild(style);
+    }
+
+    function getSuggestBox() {
+        if (suggestBox) return suggestBox;
+        injectSuggestStyles();
+        suggestBox = document.createElement('div');
+        suggestBox.className = 'writeoff-suggest';
+        // В <body>, а не в строку позиции: у .modal-body стоит overflow-y:auto,
+        // внутри него выпадающий список обрезался бы по краю окна
+        document.body.appendChild(suggestBox);
+        suggestBox.addEventListener('mousedown', (e) => {
+            // mousedown, а не click: до blur поля, иначе список успеет закрыться
+            const el = e.target.closest('.writeoff-suggest-item');
+            if (!el || !suggestInput) return;
+            e.preventDefault();
+            pickSuggestion(suggestInput, suggestItems[parseInt(el.dataset.index, 10)]);
+        });
+        window.addEventListener('resize', positionSuggestBox);
+        window.addEventListener('scroll', positionSuggestBox, true);
+        return suggestBox;
+    }
+
+    function positionSuggestBox() {
+        if (!suggestBox || !suggestInput || !suggestBox.classList.contains('active')) return;
+        const rect = suggestInput.getBoundingClientRect();
+        const below = window.innerHeight - rect.bottom;
+        suggestBox.style.left = `${rect.left}px`;
+        suggestBox.style.width = `${rect.width}px`;
+        // Не хватает места снизу — раскрываем вверх
+        if (below < 160 && rect.top > below) {
+            suggestBox.style.top = 'auto';
+            suggestBox.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+            suggestBox.style.maxHeight = `${Math.min(280, rect.top - 12)}px`;
+        } else {
+            suggestBox.style.bottom = 'auto';
+            suggestBox.style.top = `${rect.bottom + 4}px`;
+            suggestBox.style.maxHeight = `${Math.min(280, below - 12)}px`;
         }
+    }
+
+    function closeSuggestions() {
+        if (!suggestBox) return;
+        suggestBox.classList.remove('active');
+        suggestItems = [];
+        suggestIndex = -1;
+        suggestInput = null;
+    }
+
+    function matchCatalog(query) {
+        const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+        if (!terms.length) return currentCatalog.slice(0, SUGGEST_LIMIT);
+        return currentCatalog
+            .filter(item => {
+                const haystack = `${item.product_name} ${item.article || ''} ${item.code || ''}`.toLowerCase();
+                return terms.every(t => haystack.includes(t));
+            })
+            .slice(0, SUGGEST_LIMIT);
+    }
+
+    /** Подсветка совпадений: режем исходный текст на куски и экранируем каждый. */
+    function highlightMatches(text, terms) {
+        const source = String(text ?? '');
+        const lower = source.toLowerCase();
+        const ranges = [];
+        for (const term of terms) {
+            if (!term) continue;
+            let from = 0;
+            let idx = lower.indexOf(term, from);
+            while (idx !== -1) {
+                ranges.push([idx, idx + term.length]);
+                from = idx + term.length;
+                idx = lower.indexOf(term, from);
+            }
+        }
+        if (!ranges.length) return escapeHtml(source);
+
+        ranges.sort((a, b) => a[0] - b[0]);
+        const merged = [];
+        for (const range of ranges) {
+            const last = merged[merged.length - 1];
+            if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+            else merged.push([range[0], range[1]]);
+        }
+
+        let html = '';
+        let pos = 0;
+        for (const [start, end] of merged) {
+            html += escapeHtml(source.slice(pos, start));
+            html += `<mark class="writeoff-suggest-hl">${escapeHtml(source.slice(start, end))}</mark>`;
+            pos = end;
+        }
+        return html + escapeHtml(source.slice(pos));
+    }
+
+    function renderSuggestions(input) {
+        const box = getSuggestBox();
+        suggestInput = input;
+        suggestItems = matchCatalog(input.value.trim());
+        suggestIndex = suggestItems.length ? 0 : -1;
+
+        if (!currentCatalog.length) {
+            box.innerHTML = '<div class="writeoff-suggest-empty">Каталог точки не загружен</div>';
+        } else if (!suggestItems.length) {
+            box.innerHTML = '<div class="writeoff-suggest-empty">Ничего не найдено</div>';
+        } else {
+            const terms = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            box.innerHTML = suggestItems.map((item, i) => {
+                const stock = item.quantity_available;
+                // Остаток в минусе — это не ошибка, а «продажи проведены, приход нет».
+                // Списать такое можно, но флорист должен видеть, что учёт разошёлся.
+                const stockClass = stock > 0 ? '' : ' empty';
+                const title = stock > 0 ? '' : ' title="Остаток по МойСклад не больше нуля — списать можно, но учёт разошёлся"';
+                const code = item.article || item.code || '';
+                return `
+                    <div class="writeoff-suggest-item${i === suggestIndex ? ' active' : ''}" data-index="${i}">
+                        <span>
+                            ${code ? `<span class="writeoff-suggest-code">${highlightMatches(code, terms)}</span> — ` : ''}
+                            ${highlightMatches(item.product_name, terms)}
+                        </span>
+                        <span class="writeoff-suggest-stock${stockClass}"${title}>${stock}</span>
+                    </div>`;
+            }).join('');
+        }
+
+        box.classList.add('active');
+        box.scrollTop = 0;
+        positionSuggestBox();
+    }
+
+    function moveSuggestion(delta) {
+        if (!suggestBox || !suggestItems.length) return;
+        suggestIndex = (suggestIndex + delta + suggestItems.length) % suggestItems.length;
+        const nodes = suggestBox.querySelectorAll('.writeoff-suggest-item');
+        nodes.forEach((node, i) => node.classList.toggle('active', i === suggestIndex));
+        nodes[suggestIndex]?.scrollIntoView({ block: 'nearest' });
+    }
+
+    function pickSuggestion(input, item) {
+        if (!item) return;
+        input.dataset.productId = item.moysklad_product_id;
+        input.dataset.productName = item.product_name;
+        input.value = item.article ? `${item.article} — ${item.product_name}` : item.product_name;
+        input.classList.remove('invalid');
+        closeSuggestions();
+    }
+
+    /** Текст в поле есть, а товар не выбран из списка — выбор недействителен. */
+    function clearSelection(input) {
+        delete input.dataset.productId;
+        delete input.dataset.productName;
+    }
+
+    function createProductInput() {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'form-input writeoff-position-product';
+        input.placeholder = 'Товар: название или артикул';
+        input.autocomplete = 'off';
+        input.style.minWidth = '260px';
+
+        input.addEventListener('input', () => {
+            clearSelection(input);
+            input.classList.remove('invalid');
+            renderSuggestions(input);
+        });
+        input.addEventListener('focus', () => renderSuggestions(input));
+        input.addEventListener('blur', () => {
+            // Ушли из поля, не выбрав товар из списка — не оставляем текст,
+            // который выглядит как выбор, но им не является
+            if (!input.dataset.productId) input.value = '';
+            closeSuggestions();
+        });
+        input.addEventListener('keydown', (e) => {
+            const open = suggestBox && suggestBox.classList.contains('active') && suggestInput === input;
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (open) moveSuggestion(1); else renderSuggestions(input);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (open) moveSuggestion(-1);
+            } else if (e.key === 'Enter') {
+                if (open && suggestIndex >= 0) {
+                    e.preventDefault();
+                    pickSuggestion(input, suggestItems[suggestIndex]);
+                }
+            } else if (e.key === 'Escape') {
+                if (open) { e.stopPropagation(); closeSuggestions(); }
+            }
+        });
+
+        return input;
+    }
+
+    /** Каталог сменился (другая точка) — прежний выбор может быть уже недоступен. */
+    function refreshProductInput(input) {
+        const id = input.dataset.productId;
+        if (!id) return;
+        const item = currentCatalog.find(i => i.moysklad_product_id === id);
+        if (item) pickSuggestion(input, item);
+        else { clearSelection(input); input.value = ''; }
     }
 
     function createPositionRow() {
@@ -344,10 +587,7 @@
         row.className = 'writeoff-position-row';
         row.style.cssText = 'display:flex; gap:6px; margin-bottom:8px; align-items:center; flex-wrap:wrap; padding:8px; background:var(--barkhat-bg-secondary, #f7f7f7); border-radius:6px;';
 
-        const productSelect = document.createElement('select');
-        productSelect.className = 'form-select writeoff-position-product';
-        productSelect.style.minWidth = '220px';
-        populateProductSelect(productSelect);
+        const productInput = createProductInput();
 
         const qtyInput = document.createElement('input');
         qtyInput.type = 'number';
@@ -379,10 +619,11 @@
         removeBtn.textContent = '×';
         removeBtn.addEventListener('click', () => {
             if (elements.positionsRows.children.length <= 1) { alert('Нужна хотя бы одна позиция'); return; }
+            if (suggestInput && row.contains(suggestInput)) closeSuggestions();
             row.remove();
         });
 
-        row.appendChild(productSelect);
+        row.appendChild(productInput);
         row.appendChild(qtyInput);
         row.appendChild(reasonInput);
         row.appendChild(photoLabel);
@@ -405,6 +646,7 @@
     }
 
     function closeCreateModal() {
+        closeSuggestions();
         elements.modal.classList.remove('active');
         elements.overlay.classList.remove('active');
     }
@@ -412,11 +654,11 @@
     function readPositions() {
         const rows = Array.from(elements.positionsRows.querySelectorAll('.writeoff-position-row'));
         return rows.map(row => {
-            const select = row.querySelector('.writeoff-position-product');
-            const option = select.options[select.selectedIndex];
+            const input = row.querySelector('.writeoff-position-product');
             return {
-                moysklad_product_id: select.value,
-                product_name: option ? option.getAttribute('data-name') : '',
+                moysklad_product_id: input.dataset.productId || '',
+                product_name: input.dataset.productName || '',
+                inputEl: input,
                 quantity: parseFloat(row.querySelector('.writeoff-position-qty').value),
                 reason: row.querySelector('.writeoff-position-reason').value.trim() || null,
                 file: row.querySelector('.writeoff-position-photo').files[0] || null,
@@ -432,7 +674,13 @@
         if (positions.length === 0) { alert('Добавьте хотя бы одну позицию'); return; }
 
         for (const pos of positions) {
-            if (!pos.moysklad_product_id) { alert('Выберите товар во всех позициях'); return; }
+            if (!pos.moysklad_product_id) {
+                // Товар выбирается подсказкой: набранный вручную текст выбором не считается
+                pos.inputEl?.classList.add('invalid');
+                pos.inputEl?.focus();
+                alert('Выберите товар из подсказок во всех позициях');
+                return;
+            }
             if (!pos.quantity || pos.quantity <= 0) { alert('Укажите корректное количество во всех позициях'); return; }
             if (!pos.file) { alert('Приложите фото для каждой позиции — это подтверждение списания'); return; }
         }

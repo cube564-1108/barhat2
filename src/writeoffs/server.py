@@ -12,6 +12,7 @@ Flask API сервер для модуля списаний товара БАР�
 import logging
 import os
 import sys
+import time
 
 from flask import Blueprint, jsonify, request, send_from_directory
 from flask_login import current_user, login_required
@@ -86,7 +87,7 @@ def get_stores():
 @section_required("writeoffs")
 def get_catalog():
     """
-    Товары для выбора при списании — остатки склада точки (только > 0).
+    Товары для выбора при списании — весь ассортимент склада точки.
 
     Запрашивается у МойСклад напрямую (report/stock/all?filter=store=<href>),
     не из локального синка: остатки локально ни разу не были синхронизированы
@@ -96,6 +97,14 @@ def get_catalog():
     Прямой запрос, отфильтрованный по одному складу, у МойСклад быстрый
     (проверено эмпирически) и не зависит от свежести локальной синхронизации —
     остаток и так должен быть максимально актуальным на момент списания.
+
+    Позиции с остатком <= 0 НЕ отфильтровываются: у расходников и клубники
+    учёт регулярно уходит в минус (продажи проведены, приход — нет), и раньше
+    такие товары просто пропадали из списка — списать их было нельзя
+    (проверено 2026-08-20: на точке «Восход, 3» 49 из 129 позиций были <= 0,
+    в т.ч. клубника k1 с остатком -2695). Остаток отдаём как есть, решение
+    принимает фронт: отрицательный помечает, но выбрать даёт.
+
     Query params: store_id (обязателен).
     """
     store_id = request.args.get("store_id", type=int)
@@ -113,29 +122,60 @@ def get_catalog():
     except ValueError as e:
         return jsonify({"error": f"МойСклад не настроен: {e}"}), 500
 
-    response = client.get('/report/stock/all', params={
-        'filter': f'store={link["moysklad_store_href"]}',
-        'limit': 1000,
-    })
-    if response is None:
-        return jsonify({"error": "Не удалось получить остатки из МойСклад"}), 502
+    # Пагинация: сейчас на складе ~130 позиций и всё влезает в одну страницу,
+    # но молча обрезать ассортимент на 1000-й позиции нельзя — товар просто
+    # исчезнет из списка без единой ошибки. PAGE_CAP — страховка от бесконечного
+    # цикла, если МойСклад начнёт игнорировать offset.
+    # DEADLINE — жёсткий потолок на весь эндпоинт: у клиента таймаут 30 сек на
+    # запрос, и без общего дедлайна цикл мог бы занять воркер на минуты. Воркеров
+    # на бою всего два, живые запросы к внешнему API уже клали сайт целиком.
+    PAGE_SIZE = 1000
+    PAGE_CAP = 20
+    DEADLINE_SEC = 25
 
+    started = time.monotonic()
     items = []
-    for row in response.get('rows', []):
-        quantity = row.get('stock', 0) or 0
-        if quantity <= 0:
-            continue
-        product_href = row.get('meta', {}).get('href', '').split('?')[0]
-        product_id = product_href.rstrip('/').split('/')[-1] if product_href else None
-        if not product_id:
-            continue
-        items.append({
-            "moysklad_product_id": product_id,
-            "moysklad_product_href": product_href,
-            "product_name": row.get('name', ''),
-            "quantity_available": quantity,
-        })
+    offset = 0
+    for _ in range(PAGE_CAP):
+        if time.monotonic() - started > DEADLINE_SEC:
+            logger.warning("Каталог списаний: превышен дедлайн %s сек (точка %s)", DEADLINE_SEC, store_id)
+            return jsonify({"error": "МойСклад отвечает слишком долго — попробуйте ещё раз"}), 504
 
+        response = client.get('/report/stock/all', params={
+            'filter': f'store={link["moysklad_store_href"]}',
+            'limit': PAGE_SIZE,
+            'offset': offset,
+        })
+        if response is None:
+            return jsonify({"error": "Не удалось получить остатки из МойСклад"}), 502
+
+        rows = response.get('rows', [])
+        for row in rows:
+            product_href = row.get('meta', {}).get('href', '').split('?')[0]
+            product_id = product_href.rstrip('/').split('/')[-1] if product_href else None
+            if not product_id:
+                continue
+            items.append({
+                "moysklad_product_id": product_id,
+                "moysklad_product_href": product_href,
+                "product_name": row.get('name', ''),
+                # Артикул и код нужны фронту для поиска: флористу привычнее
+                # набрать «k1», чем полное название
+                "article": row.get('article') or '',
+                "code": row.get('code') or '',
+                "quantity_available": row.get('stock', 0) or 0,
+            })
+
+        if len(rows) < PAGE_SIZE:
+            break
+        offset += PAGE_SIZE
+    else:
+        # Дошли до потолка страниц — список заведомо неполный. Отдавать его молча
+        # нельзя: пропавший товар без единой ошибки — ровно тот баг, что чиним.
+        logger.error("Каталог списаний: достигнут предел страниц (%s) для точки %s", PAGE_CAP, store_id)
+        return jsonify({"error": "Не удалось получить весь каталог из МойСклад — обратитесь к админу"}), 502
+
+    items.sort(key=lambda i: i["product_name"].lower())
     return jsonify({"items": items})
 
 
