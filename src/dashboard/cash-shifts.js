@@ -566,7 +566,10 @@
     }
 
     async function onRenameCategory(categoryId, currentName) {
-        const name = prompt('Новое название категории:', currentName);
+        const name = await window.BarhatUI.prompt('Новое название категории:', currentName, {
+            title: 'Переименовать категорию',
+            confirmText: 'Сохранить',
+        });
         if (name === null) return;
         if (!name.trim()) {
             showNotification('Укажите название категории', 'error');
@@ -590,7 +593,11 @@
         const usageWarning = usage > 0
             ? `\n\nОна уже стоит в ${usage} инкассац. — там название сохранится, но выбрать её в новых инкассациях будет нельзя.`
             : '';
-        if (!confirm(`Удалить категорию «${name}»?${usageWarning}`)) return;
+        const ok = await window.BarhatUI.confirm(
+            `Категория «${name}».${usageWarning}`,
+            { title: 'Удалить категорию?', confirmText: 'Удалить', danger: true }
+        );
+        if (!ok) return;
 
         try {
             await apiRequest(`/api/cash-shifts/categories/${categoryId}`, { method: 'DELETE' });
@@ -680,11 +687,13 @@
 
             // Фильтр по дате: бэкенд принимает границы периода (date_from/date_to),
             // а не одиночную дату — выбранный день разворачиваем в сутки целиком.
-            // Сравнение идёт по datetime_start, то есть по дню открытия смены
+            // Сравнение идёт по datetime_start, то есть по дню открытия смены.
+            // Границы считаем в UTC: в базе время в UTC, а выбранный день —
+            // это день по часам сотрудника (см. dayStartUtc в datetime.js)
             const dateFilter = elements.shiftDateFilter?.value;
             if (dateFilter) {
-                params.append('date_from', `${dateFilter} 00:00:00`);
-                params.append('date_to', `${dateFilter} 23:59:59`);
+                params.append('date_from', window.BarhatTime.dayStartUtc(dateFilter));
+                params.append('date_to', window.BarhatTime.dayEndUtc(dateFilter));
             }
 
             params.append('status', 'closed');
@@ -931,12 +940,13 @@
         if (!shift) return;
 
         const store = storeList.find(s => s.id === shift.store_id);
-        const confirmed = confirm(
-            `Удалить смену от ${formatDate(shift.closed_at)} — ${store ? store.name : 'точка ' + shift.store_id}?\n\n` +
+        const confirmed = await window.BarhatUI.confirm(
+            `Смена от ${formatDate(shift.closed_at)} — ${store ? store.name : 'точка ' + shift.store_id}.\n\n` +
             `Вместе со сменой удалятся её инкассации и наличные заказы из CRM. ` +
             `Отменить удаление нельзя.\n\n` +
             `Если это последняя закрытая смена точки, следующая смена откроется ` +
-            `с остатком от предыдущей — проверьте начальный остаток.`
+            `с остатком от предыдущей — проверьте начальный остаток.`,
+            { title: 'Удалить смену?', confirmText: 'Удалить', danger: true }
         );
         if (!confirmed) return;
 
@@ -1423,28 +1433,18 @@
         }).format(amount || 0);
     }
 
+    // Даты с бэкенда приходят в UTC без указания зоны — разбор и перевод
+    // в пояс сотрудника лежит в datetime.js (window.BarhatTime).
     function formatDate(dateStr) {
-        if (!dateStr) return '—';
-        const date = new Date(dateStr);
-        return date.toLocaleDateString('ru-RU');
+        return window.BarhatTime.formatDate(dateStr);
     }
 
     function formatTime(dateStr) {
-        if (!dateStr) return '—';
-        const date = new Date(dateStr);
-        return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        return window.BarhatTime.formatTime(dateStr);
     }
 
     function formatDateTime(dateStr) {
-        if (!dateStr) return '—';
-        const date = new Date(dateStr);
-        return date.toLocaleString('ru-RU', {
-            day: '2-digit',
-            month: '2-digit',
-            year: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
+        return window.BarhatTime.formatDateTime(dateStr);
     }
 
     function escapeHtml(str) {

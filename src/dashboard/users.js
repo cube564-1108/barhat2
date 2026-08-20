@@ -11,7 +11,8 @@
         'admin': 'Полный доступ ко всем разделам, включая управление пользователями',
         'manager': 'Доступ к дашборду, качеству и калькулятору',
         'florist': 'Работает только со своей точкой продаж (кассовые смены)',
-        'florist_analyst': 'Только раздел качества сборки'
+        'florist_analyst': 'Только раздел качества сборки',
+        'sso_viewer': 'Учётка, автоматически созданная входом из БАРХАТ Пульс: просмотр всего, кроме управления пользователями, без права согласования'
     };
 
     // === Названия модулей для отображения ===
@@ -34,6 +35,13 @@
         'florist_analyst': ['quality']
     };
 
+    // Линейная иконка конверта (lucide, stroke-width 1.75 по DESIGN-SPEC)
+    const MAIL_ICON = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+            <rect x="2" y="4" width="20" height="16" rx="2"/>
+            <path d="m2 7 10 6 10-6"/>
+        </svg>`;
+
     // === Текущее состояние ===
     let usersList = [];
     let storesList = [];
@@ -55,6 +63,7 @@
         userForm: null,
         userUsername: null,
         userFullname: null,
+        userEmail: null,
         userPassword: null,
         userRole: null,
         roleHint: null,
@@ -84,6 +93,7 @@
         elements.userForm = document.getElementById('user-form');
         elements.userUsername = document.getElementById('user-username');
         elements.userFullname = document.getElementById('user-fullname');
+        elements.userEmail = document.getElementById('user-email');
         elements.userPassword = document.getElementById('user-password');
         elements.userRole = document.getElementById('user-role');
         elements.roleHint = document.getElementById('role-hint');
@@ -256,7 +266,7 @@
         const isActive = Boolean(user.is_active);
         const statusClass = isActive ? 'active' : 'inactive';
         const statusText = isActive ? 'Активен' : 'Деактивирован';
-        const createdDate = new Date(user.created_at).toLocaleDateString('ru-RU');
+        const createdDate = window.BarhatTime.formatDate(user.created_at);
 
         // Отображаемое имя (ФИО или username)
         const displayName = user.full_name || user.username;
@@ -272,6 +282,18 @@
 
         // Нельзя удалить себя
         const isCurrentUser = currentUserData && currentUserData.username === user.username;
+
+        // Email — ключ связки с порталом Пульс (src/sso.py ищет учётку по нему).
+        // Без email вход из Пульса заведёт человеку отдельную урезанную учётку,
+        // и он потеряет свою роль — предупреждаем прямо в карточке.
+        const emailLine = user.email
+            ? `<div class="user-card-permissions" title="Рабочий email (связка с Пульсом)">
+                   ${MAIL_ICON}<span>${escapeHtml(user.email)}</span>
+               </div>`
+            : `<div class="user-card-permissions" style="color: var(--barkhat-burgundy, #5A1330);"
+                    title="Вход из Пульса создаст отдельную учётку с урезанными правами">
+                   ${MAIL_ICON}<span>Email не указан — вход из Пульса не свяжется с этой учёткой</span>
+               </div>`;
 
         return `
             <div class="user-card" data-username="${user.username}">
@@ -289,6 +311,7 @@
                                 <span class="role-badge">${getRoleName(user.role)}</span>
                                 <span class="status-badge status-${statusClass}">${statusText}</span>
                             </div>
+                            ${emailLine}
                             ${permissionsList ? `
                                 <div class="user-card-permissions" title="${escapeHtml(permissionsList)}">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -348,7 +371,11 @@
             'admin': 'Администратор',
             'manager': 'Менеджер',
             'florist': 'Флорист',
-            'florist_analyst': 'Аналитик качества'
+            'florist_analyst': 'Аналитик качества',
+            // Автосозданная учётка из портала (src/sso.py). Вручную такую роль
+            // не выдают — но в списке она встречается, и без подписи выглядела
+            // как непонятное «sso_viewer».
+            'sso_viewer': 'Из Пульса'
         };
         return names[role] || role;
     }
@@ -367,6 +394,7 @@
             elements.userUsername.readOnly = true;
             elements.userUsername.disabled = true;
             elements.userFullname.value = user.full_name || '';
+            elements.userEmail.value = user.email || '';
             elements.userRole.value = user.role;
             elements.userPassword.value = '';
             elements.userPassword.required = false;
@@ -391,6 +419,7 @@
             elements.userUsername.readOnly = false;
             elements.userUsername.disabled = false;
             elements.userFullname.value = '';
+            elements.userEmail.value = '';
             elements.userRole.value = '';
             elements.userPassword.value = '';
             elements.userPassword.required = true;
@@ -533,6 +562,7 @@
     async function saveUser() {
         const username = elements.userUsername.value.trim();
         const fullName = elements.userFullname.value.trim();
+        const email = elements.userEmail.value.trim().toLowerCase();
         const password = elements.userPassword.value;
         const role = elements.userRole.value;
         const permissions = getSelectedModules(); // Берём из чекбоксов (пользователь может переопределить роль)
@@ -583,6 +613,7 @@
                 // Обновление существующего пользователя
                 const data = {
                     full_name: fullName,
+                    email,   // пустая строка = отвязать email от учётки
                     role,
                     permissions
                 };
@@ -602,7 +633,7 @@
                 response = await fetch('/api/auth/users', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, full_name: fullName, password, role, permissions }),
+                    body: JSON.stringify({ username, full_name: fullName, email, password, role, permissions }),
                     credentials: 'include'
                 });
             }
@@ -655,9 +686,12 @@
             ? 'Вы уверены, что хотите деактивировать этого пользователя? Он не сможет войти в систему.'
             : 'Вы уверены, что хотите активировать этого пользователя?';
 
-        if (!confirm(confirmText)) {
-            return;
-        }
+        const confirmed = await window.BarhatUI.confirm(confirmText, {
+            title: isActive ? 'Деактивировать пользователя?' : 'Активировать пользователя?',
+            confirmText: isActive ? 'Деактивировать' : 'Активировать',
+            danger: isActive,
+        });
+        if (!confirmed) return;
 
         try {
             const response = await fetch(`/api/auth/users/${username}/${action}`, {
@@ -681,9 +715,11 @@
 
     // === Удаление пользователя ===
     async function deleteUser(username) {
-        if (!confirm('Вы уверены, что хотите удалить этого пользователя? Это действие нельзя отменить.')) {
-            return;
-        }
+        const confirmed = await window.BarhatUI.confirm(
+            'Это действие нельзя отменить.',
+            { title: 'Удалить пользователя?', confirmText: 'Удалить', danger: true }
+        );
+        if (!confirmed) return;
 
         try {
             const response = await fetch(`/api/auth/users/${username}`, {

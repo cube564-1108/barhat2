@@ -58,8 +58,13 @@ def build_1c_payment_document(
     "bank_corr_account"}. date — "YYYY-MM-DD". Возвращает готовый текст
     документа для поля "document" в теле запроса Модульбанка.
     """
-    today = datetime.date.today()
-    now = datetime.datetime.now(_MOSCOW_TZ).time()
+    # Дату и время берём из одного московского момента. Раньше дата бралась
+    # через date.today() — то есть по поясу сервера (на Amvera это UTC), и с
+    # 00:00 до 03:00 по Москве документ уходил с вчерашней ДатойСоздания при
+    # сегодняшнем ВремениСоздания.
+    moscow_now = datetime.datetime.now(_MOSCOW_TZ)
+    today = moscow_now.date()
+    now = moscow_now.time()
     date_str = _fmt_date(date)
 
     values = {

@@ -12,6 +12,7 @@
 """
 
 import os
+import re
 import sqlite3
 import logging
 from functools import wraps
@@ -47,6 +48,50 @@ ROLE_SECTIONS = {
     # пропуск Пульса позволял бы заводить и править учётки в нашем сервисе.
     "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "abc_analysis", "writeoffs"},
 }
+
+
+# Рабочий email сотрудника — это ключ, по которому портал БАРХАТ Пульс
+# опознаёт учётку при SSO-входе (см. _find_or_create_sso_user в src/sso.py:
+# поиск идёт строго по users.email). Пока email не заполнен, вход из Пульса
+# создаёт ОТДЕЛЬНУЮ учётку с урезанной ролью sso_viewer, и человек теряет
+# свои права: именно так у управляющей перестало работать согласование
+# списаний внутри Пульса, хотя на нашем домене всё работало.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def normalize_email(raw):
+    """('  Ivan@Mail.RU ') -> 'ivan@mail.ru'; пусто -> None.
+
+    Приводим к нижнему регистру, потому что sso.py ищет по email из JWT
+    ровно так же (`.strip().lower()`) — иначе «Ivan@» и «ivan@» разъедутся
+    в две учётки, а UNIQUE-индекс по email этого не поймает.
+
+    Returns:
+        (email|None, error|None)
+    """
+    email = (raw or "").strip().lower()
+    if not email:
+        return None, None
+    if len(email) > 254 or not _EMAIL_RE.match(email):
+        return None, "Некорректный email"
+    return email, None
+
+
+def _email_taken_message(email, row):
+    """Понятный текст вместо «UNIQUE constraint failed».
+
+    Отдельно подсказываем про автосозданную учётку из Пульса — это самый
+    частый случай: человек уже заходил через портал, ему завели дубль, и
+    теперь тот же email нельзя привязать к его настоящей учётке.
+    """
+    other = row["username"]
+    if row["is_sso"]:
+        return (
+            f"Email {email} уже занят учётной записью «{other}», которая входит через Пульс. "
+            f"Если это автоматически созданный дубль (роль «Из Пульса»), удалите его и "
+            f"повторите — тогда вход из Пульса будет попадать сюда, с этой ролью и точками."
+        )
+    return f"Email {email} уже привязан к учётной записи «{other}»"
 
 
 def get_db():
@@ -585,6 +630,10 @@ def create_user():
     role = data.get("role", "")
     permissions = data.get("permissions", [])  # Список модулей
 
+    email, email_error = normalize_email(data.get("email"))
+    if email_error:
+        return jsonify({"error": email_error}), 400
+
     if role not in ROLE_SECTIONS:
         return jsonify({"error": f"Неизвестная роль. Доступны: {list(ROLE_SECTIONS)}"}), 400
     if not username:
@@ -603,10 +652,19 @@ def create_user():
 
     conn = get_db()
     try:
+        # Email занят другой учёткой — чаще всего это автосозданный аккаунт
+        # из Пульса (is_sso=1). Отдаём понятный текст, а не «UNIQUE constraint».
+        if email:
+            taken = conn.execute(
+                "SELECT username, is_sso FROM users WHERE email = ?", (email,)
+            ).fetchone()
+            if taken:
+                return jsonify({"error": _email_taken_message(email, taken)}), 409
+
         # Создаём пользователя
         conn.execute(
-            "INSERT INTO users (username, full_name, password_hash, role, is_active, created_at) VALUES (?,?,?,?,1,?)",
-            (username, full_name, generate_password_hash(password), role, datetime.utcnow().isoformat()),
+            "INSERT INTO users (username, full_name, email, password_hash, role, is_active, created_at) VALUES (?,?,?,?,?,1,?)",
+            (username, full_name, email, generate_password_hash(password), role, datetime.utcnow().isoformat()),
         )
 
         # Добавляем permissions
@@ -618,6 +676,10 @@ def create_user():
 
         conn.commit()
     except sqlite3.IntegrityError as e:
+        # Гонка с параллельным воркером либо занятый логин. Различаем по тексту:
+        # индекс на email называется idx_users_email (см. init_auth_tables).
+        if "email" in str(e).lower():
+            return jsonify({"error": f"Email {email} уже привязан к другой учётной записи"}), 409
         return jsonify({"error": "Такой логин уже существует"}), 409
     finally:
         conn.close()
@@ -655,7 +717,8 @@ def list_users():
     """Получить список всех пользователей (только для admin)"""
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, username, full_name, role, is_active, created_at FROM users ORDER BY created_at DESC"
+        "SELECT id, username, full_name, email, is_sso, role, is_active, created_at "
+        "FROM users ORDER BY created_at DESC"
     ).fetchall()
 
     # Получаем permissions для каждого пользователя
@@ -707,6 +770,28 @@ def update_user(username):
         updates.append("full_name = ?")
         params.append(full_name)
         log_details.append(f"full_name={full_name}")
+
+    # Обновление email — ключ связки с Пульсом (см. normalize_email выше).
+    # Пустая строка = отвязать (email снимается), поэтому проверяем именно
+    # наличие ключа, а не истинность значения.
+    if "email" in data:
+        email, email_error = normalize_email(data.get("email"))
+        if email_error:
+            conn.close()
+            return jsonify({"error": email_error}), 400
+
+        if email:
+            taken = conn.execute(
+                "SELECT username, is_sso FROM users WHERE email = ? AND username != ?",
+                (email, username),
+            ).fetchone()
+            if taken:
+                conn.close()
+                return jsonify({"error": _email_taken_message(email, taken)}), 409
+
+        updates.append("email = ?")
+        params.append(email)
+        log_details.append(f"email={email or '—'}")
 
     # Обновление пароля
     if data.get("password"):

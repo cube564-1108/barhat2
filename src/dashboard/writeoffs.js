@@ -152,8 +152,12 @@
             const params = new URLSearchParams();
             if (elements.filterStore.value) params.set('store_id', elements.filterStore.value);
             if (elements.filterStatus.value) params.set('status', elements.filterStatus.value);
-            if (elements.filterDateFrom.value) params.set('date_from', elements.filterDateFrom.value);
-            if (elements.filterDateTo.value) params.set('date_to', elements.filterDateTo.value);
+            // Границы периода считаем в UTC — created_at в базе хранится в UTC,
+            // а сотрудник выбирает даты по своим часам. Заодно date_to
+            // разворачивается до конца дня: раньше уходила голая дата и
+            // сравнение created_at <= '2026-08-20' отсекало весь выбранный день
+            if (elements.filterDateFrom.value) params.set('date_from', window.BarhatTime.dayStartUtc(elements.filterDateFrom.value));
+            if (elements.filterDateTo.value) params.set('date_to', window.BarhatTime.dayEndUtc(elements.filterDateTo.value));
 
             const res = await fetch(`/api/writeoffs?${params.toString()}`, { credentials: 'include' });
             const data = await res.json();
@@ -197,7 +201,7 @@
                 actions += `<button class="btn btn-sm btn-danger" data-action="cancel" data-id="${w.id}">Отменить</button>`;
             }
 
-            const createdDate = w.created_at ? w.created_at.slice(0, 16).replace('T', ' ') : '';
+            const createdDate = window.BarhatTime.formatDateTime(w.created_at, '');
 
             return `
                 <tr>
@@ -226,7 +230,11 @@
     }
 
     async function approveWriteoff(id) {
-        if (!confirm('Согласовать списание? Товар спишется в МойСклад.')) return;
+        const ok = await window.BarhatUI.confirm(
+            'Товар спишется в МойСклад. Отменить согласование будет нельзя.',
+            { title: 'Согласовать списание?', confirmText: 'Согласовать' }
+        );
+        if (!ok) return;
         try {
             const res = await fetch(`/api/writeoffs/${id}/approve`, { method: 'POST', credentials: 'include' });
             const data = await res.json();
@@ -257,7 +265,14 @@
     }
 
     async function rejectWriteoff(id) {
-        const reason = prompt('Причина отклонения (необязательно):') || '';
+        // null = нажали «Отмена». Раньше здесь было `prompt(...) || ''`, из-за
+        // чего отмена диалога всё равно отклоняла заявку с пустой причиной.
+        const answer = await window.BarhatUI.prompt('Причина отклонения (необязательно):', '', {
+            title: 'Отклонить списание',
+            confirmText: 'Отклонить',
+        });
+        if (answer === null) return;
+        const reason = answer.trim();
         try {
             const res = await fetch(`/api/writeoffs/${id}/reject`, {
                 method: 'POST',
@@ -275,7 +290,13 @@
     }
 
     async function cancelWriteoff(id) {
-        if (!confirm('Отменить свою заявку?')) return;
+        const ok = await window.BarhatUI.confirm('Заявка будет удалена.', {
+            title: 'Отменить свою заявку?',
+            confirmText: 'Отменить заявку',
+            cancelText: 'Не отменять',
+            danger: true,
+        });
+        if (!ok) return;
         try {
             const res = await fetch(`/api/writeoffs/${id}`, { method: 'DELETE', credentials: 'include' });
             const data = await res.json();
@@ -501,9 +522,9 @@
             ['Точка', storeName(writeoff.store_id)],
             ['Статус', STATUS_LABELS[writeoff.status] || writeoff.status],
             ['Создал', writeoff.created_by_full_name || writeoff.created_by],
-            ['Заведено', writeoff.created_at ? writeoff.created_at.slice(0, 16).replace('T', ' ') : '—'],
+            ['Заведено', window.BarhatTime.formatDateTimeLong(writeoff.created_at)],
         ];
-        if (writeoff.approved_by) rows.push(['Согласовал', `${writeoff.approved_by_full_name || writeoff.approved_by}, ${(writeoff.approved_at || '').slice(0, 16).replace('T', ' ')}`]);
+        if (writeoff.approved_by) rows.push(['Согласовал', `${writeoff.approved_by_full_name || writeoff.approved_by}, ${window.BarhatTime.formatDateTimeLong(writeoff.approved_at)}`]);
         if (writeoff.rejected_by) rows.push(['Отклонил', `${writeoff.rejected_by_full_name || writeoff.rejected_by}${writeoff.rejected_reason ? ': ' + writeoff.rejected_reason : ''}`]);
         if (writeoff.moysklad_error) rows.push(['Ошибка МойСклад', writeoff.moysklad_error]);
         if (writeoff.moysklad_loss_id) rows.push(['Документ МойСклад', writeoff.moysklad_loss_id]);

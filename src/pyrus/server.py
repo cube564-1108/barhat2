@@ -586,6 +586,17 @@ def serve_styles():
     """Отдаёт стили дашборда"""
     return send_from_directory(DASHBOARD_DIR, 'styles.css')
 
+@app.route('/ui-dialog.js')
+def serve_ui_dialog():
+    """Отдаёт диалоги/тосты (window.BarhatUI) — замена нативным alert/confirm,
+    которые браузер игнорирует внутри iframe Пульса."""
+    return send_from_directory(DASHBOARD_DIR, 'ui-dialog.js')
+
+@app.route('/datetime.js')
+def serve_datetime():
+    """Отдаёт утилиты форматирования дат (window.BarhatTime)"""
+    return send_from_directory(DASHBOARD_DIR, 'datetime.js')
+
 @app.route('/script.js')
 def serve_script():
     """Отдаёт основной скрипт дашборда"""

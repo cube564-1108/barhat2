@@ -191,8 +191,12 @@
     /**
      * Сбросить прайс-лист к дефолтному
      */
-    function resetPricelistToDefault() {
-        if (confirm('Сбросить прайс-лист к исходным значениям? Все изменения будут потеряны.')) {
+    async function resetPricelistToDefault() {
+        if (await window.BarhatUI.confirm('Все изменения прайс-листа будут потеряны.', {
+            title: 'Сбросить прайс-лист к исходным значениям?',
+            confirmText: 'Сбросить',
+            danger: true,
+        })) {
             PRICE_LIST = deepClone(DEFAULT_PRICE_LIST);
             savePricelistToStorage();
             location.reload();
@@ -637,10 +641,14 @@
     /**
      * Очистить весь букет
      */
-    function clearAll() {
+    async function clearAll() {
         if (bouquetItems.length === 0) return;
 
-        if (confirm('Очистить весь букет?')) {
+        if (await window.BarhatUI.confirm('Все позиции будут убраны из состава.', {
+            title: 'Очистить весь букет?',
+            confirmText: 'Очистить',
+            danger: true,
+        })) {
             bouquetItems = [];
             renderBouquetItems();
             updateSummary();
@@ -774,8 +782,12 @@
     /**
      * Удалить рецепт
      */
-    function deleteRecipe(index) {
-        if (confirm('Удалить этот рецепт?')) {
+    async function deleteRecipe(index) {
+        if (await window.BarhatUI.confirm('Рецепт будет удалён из сохранённых.', {
+            title: 'Удалить рецепт?',
+            confirmText: 'Удалить',
+            danger: true,
+        })) {
             savedRecipes.splice(index, 1);
             saveRecipesToStorage();
             renderSavedRecipes();
@@ -811,7 +823,8 @@
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = function(e) {
+        // async — внутри ждём подтверждения через BarhatUI.confirm
+        reader.onload = async function(e) {
             try {
                 const imported = JSON.parse(e.target.result);
 
@@ -828,7 +841,10 @@
                     throw new Error('Неверная структура рецептов');
                 }
 
-                if (confirm(`Импортировать ${imported.length} рецепт(ов)?`)) {
+                if (await window.BarhatUI.confirm(`Будет добавлено рецептов: ${imported.length}.`, {
+                    title: 'Импортировать рецепты?',
+                    confirmText: 'Импортировать',
+                })) {
                     savedRecipes = [...savedRecipes, ...imported];
                     saveRecipesToStorage();
                     renderSavedRecipes();
@@ -973,8 +989,11 @@
     /**
      * Открыть модальное окно админки
      */
-    function openAdminModal() {
-        const password = prompt('Введите пароль для доступа к админке:');
+    async function openAdminModal() {
+        const password = await window.BarhatUI.prompt('Введите пароль для доступа к админке:', '', {
+            title: 'Админка прайс-листа',
+            confirmText: 'Войти',
+        });
 
         if (password === null) {
             return; // Отмена
@@ -1166,14 +1185,17 @@
     /**
      * Удалить товар
      */
-    function deleteItem(btn) {
+    async function deleteItem(btn) {
         if (!btn.dataset.name) return;
 
         const name = btn.dataset.name;
 
-        if (!confirm(`Удалить "${name}" из прайс-листа?`)) {
-            return;
-        }
+        const ok = await window.BarhatUI.confirm(`Позиция «${name}» будет убрана из прайс-листа.`, {
+            title: 'Удалить позицию?',
+            confirmText: 'Удалить',
+            danger: true,
+        });
+        if (!ok) return;
 
         delete editablePriceList[currentAdminCategory][name];
         renderAdminItems();
@@ -1239,7 +1261,8 @@
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = function(e) {
+        // async — внутри ждём подтверждения через BarhatUI.confirm
+        reader.onload = async function(e) {
             try {
                 const imported = JSON.parse(e.target.result);
 
@@ -1248,7 +1271,11 @@
                     throw new Error('Неверная структура прайс-листа');
                 }
 
-                if (confirm('Загрузить этот прайс-лист? Текущие изменения будут потеряны.')) {
+                if (await window.BarhatUI.confirm('Текущие изменения будут потеряны.', {
+                    title: 'Загрузить этот прайс-лист?',
+                    confirmText: 'Загрузить',
+                    danger: true,
+                })) {
                     editablePriceList = imported;
                     renderAdminItems();
                     alert('Прайс-лист загружен! Не забудьте нажать "Сохранить и закрыть" для применения изменений.');
@@ -1265,15 +1292,17 @@
     /**
      * Применить изменения прайс-листа
      */
-    function applyPricelistChanges() {
+    async function applyPricelistChanges() {
         // Подхватываем то, что набрано в полях, но не подтверждено кнопкой «✓»
         if (!commitAllPriceInputs()) {
             return;
         }
 
-        if (!confirm('Применить изменения прайс-листа? Калькулятор будет обновлён.')) {
-            return;
-        }
+        const ok = await window.BarhatUI.confirm('Калькулятор будет обновлён.', {
+            title: 'Применить изменения прайс-листа?',
+            confirmText: 'Применить',
+        });
+        if (!ok) return;
 
         if (!isValidPriceList(editablePriceList)) {
             alert('Прайс-лист неполный: проверьте цены по граммам (клубника, шоколад, посыпки, бананы).');

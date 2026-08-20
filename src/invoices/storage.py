@@ -1413,10 +1413,15 @@ def list_invoices(
         params.append(created_from)
 
     if created_to:
-        # created_at хранит дату и время, а фильтр из формы — только дату (YYYY-MM-DD),
-        # поэтому сравниваем "меньше начала следующего дня", иначе выпадают все счета
-        # текущего дня, заведённые позже полуночи
-        query += " AND created_at < datetime(?, '+1 day')"
+        # Дашборд присылает готовую верхнюю границу с временем — конец суток
+        # по часам сотрудника, пересчитанный в UTC (dayEndUtc в datetime.js).
+        # Но голую дату (YYYY-MM-DD) поддерживаем по-прежнему: так зовут API
+        # напрямую, и сравнение created_at <= '2026-08-20' отсекло бы все
+        # счета этого дня, заведённые позже полуночи.
+        if len(created_to.strip()) == 10:
+            query += " AND created_at < datetime(?, '+1 day')"
+        else:
+            query += " AND created_at <= ?"
         params.append(created_to)
 
     if due_from:

@@ -888,6 +888,13 @@
                                     <p class="form-hint">Полное имя для отображения</p>
                                 </div>
 
+                                <!-- Рабочий email — связка с порталом БАРХАТ Пульс -->
+                                <div class="form-group">
+                                    <label class="form-label" for="user-email">Рабочий email</label>
+                                    <input type="email" id="user-email" class="form-input" placeholder="ivan@barhat.ru" autocomplete="off">
+                                    <p class="form-hint">Тот же, что в БАРХАТ Пульс. Без него вход из Пульса заведёт отдельную учётку с урезанными правами.</p>
+                                </div>
+
                                 <!-- Пароль -->
                                 <div class="form-group" id="password-group">
                                     <label class="form-label" for="user-password">Пароль</label>
@@ -1896,6 +1903,11 @@
         </main>
     </div>
 
+    <!-- ui-dialog.js подключается первым: он подменяет window.alert на тост
+         (нативные диалоги не работают внутри iframe Пульса, см. файл). -->
+    <script defer src="/ui-dialog.js"></script>
+    <!-- datetime.js — до модулей: они зовут window.BarhatTime при отрисовке -->
+    <script defer src="/datetime.js"></script>
     <script defer src="/script.js"></script>
     <script defer src="/bouquet-calculator.js"></script>
     <script defer src="/quality-report.js"></script>

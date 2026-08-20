@@ -256,8 +256,11 @@
             if (elements.filterStore.value) params.set('store_id', elements.filterStore.value);
             if (elements.filterCounterparty.value.trim()) params.set('counterparty', elements.filterCounterparty.value.trim());
             if (elements.filterPurpose.value.trim()) params.set('payment_purpose', elements.filterPurpose.value.trim());
-            if (elements.filterCreatedFrom.value) params.set('created_from', elements.filterCreatedFrom.value);
-            if (elements.filterCreatedTo.value) params.set('created_to', elements.filterCreatedTo.value);
+            // created_at в базе — UTC, а выбранные даты сотрудник понимает по
+            // своим часам: разворачиваем их в UTC-границы местных суток.
+            // due_date — календарная дата без времени, её не конвертируем.
+            if (elements.filterCreatedFrom.value) params.set('created_from', window.BarhatTime.dayStartUtc(elements.filterCreatedFrom.value));
+            if (elements.filterCreatedTo.value) params.set('created_to', window.BarhatTime.dayEndUtc(elements.filterCreatedTo.value));
             if (elements.filterDueFrom.value) params.set('due_from', elements.filterDueFrom.value);
             if (elements.filterDueTo.value) params.set('due_to', elements.filterDueTo.value);
             if (elements.filterCreatedBy.value.trim()) params.set('created_by', elements.filterCreatedBy.value.trim());
@@ -312,7 +315,7 @@
                 `;
             }
 
-            const createdDate = inv.created_at ? inv.created_at.slice(0, 16).replace('T', ' ') : '';
+            const createdDate = window.BarhatTime.formatDateTime(inv.created_at, '');
 
             return `
                 <tr>
@@ -321,7 +324,7 @@
                     <td>${escapeHtml(inv.counterparty_name || '—')}</td>
                     <td>${escapeHtml(payerName(inv.payer_id))}</td>
                     <td>${formatMoney(inv.amount)}</td>
-                    <td>${inv.due_date || '—'}</td>
+                    <td>${window.BarhatTime.formatPlainDate(inv.due_date)}</td>
                     <td>${badge}</td>
                     <td>${escapeHtml(inv.created_by_full_name || inv.created_by || '')}</td>
                     <td>${createdDate}</td>
@@ -342,7 +345,11 @@
     }
 
     async function approveInvoice(id) {
-        if (!confirm('Согласовать счёт?')) return;
+        const ok = await window.BarhatUI.confirm('Счёт будет помечен как согласованный.', {
+            title: 'Согласовать счёт?',
+            confirmText: 'Согласовать',
+        });
+        if (!ok) return;
         try {
             const res = await fetch(`/api/invoices/${id}/approve`, { method: 'POST', credentials: 'include' });
             const data = await res.json();
@@ -355,7 +362,14 @@
     }
 
     async function rejectInvoice(id) {
-        const reason = prompt('Причина отклонения (необязательно):') || '';
+        // null = нажали «Отмена». Раньше `prompt(...) || ''` отклонял счёт
+        // с пустой причиной даже при отмене диалога.
+        const answer = await window.BarhatUI.prompt('Причина отклонения (необязательно):', '', {
+            title: 'Отклонить счёт',
+            confirmText: 'Отклонить',
+        });
+        if (answer === null) return;
+        const reason = answer.trim();
         try {
             const res = await fetch(`/api/invoices/${id}/reject`, {
                 method: 'POST',
@@ -373,7 +387,13 @@
     }
 
     async function sendInvoiceToBank(invoiceId, sandbox) {
-        if (!sandbox && !confirm('Отправить платёжку в Модульбанк? Банк создаст черновик — подписывать нужно будет вручную в личном кабинете.')) return;
+        if (!sandbox) {
+            const ok = await window.BarhatUI.confirm(
+                'Банк создаст черновик — подписывать нужно будет вручную в личном кабинете.',
+                { title: 'Отправить платёжку в Модульбанк?', confirmText: 'Отправить' }
+            );
+            if (!ok) return;
+        }
         try {
             const res = await fetch(`/api/invoices/${invoiceId}/send-to-bank`, {
                 method: 'POST',
@@ -617,12 +637,12 @@
 
         const rows = [
             ['Создал', invoice.created_by_full_name || invoice.created_by],
-            ['Заведён', invoice.created_at ? invoice.created_at.slice(0, 16).replace('T', ' ') : '—'],
+            ['Заведён', window.BarhatTime.formatDateTimeLong(invoice.created_at)],
         ];
-        if (invoice.approved_by) rows.push(['Согласовал', `${invoice.approved_by_full_name || invoice.approved_by}, ${(invoice.approved_at || '').slice(0, 16).replace('T', ' ')}`]);
+        if (invoice.approved_by) rows.push(['Согласовал', `${invoice.approved_by_full_name || invoice.approved_by}, ${window.BarhatTime.formatDateTimeLong(invoice.approved_at)}`]);
         if (invoice.rejected_by) rows.push(['Отклонил', `${invoice.rejected_by_full_name || invoice.rejected_by}${invoice.rejected_reason ? ': ' + invoice.rejected_reason : ''}`]);
-        if (invoice.paid_at) rows.push(['Оплачен', invoice.paid_at.slice(0, 16).replace('T', ' ')]);
-        if (invoice.is_archived) rows.push(['В архиве с', (invoice.archived_at || '').slice(0, 16).replace('T', ' ')]);
+        if (invoice.paid_at) rows.push(['Оплачен', window.BarhatTime.formatDateTimeLong(invoice.paid_at)]);
+        if (invoice.is_archived) rows.push(['В архиве с', window.BarhatTime.formatDateTimeLong(invoice.archived_at)]);
 
         elements.detailsInfo.innerHTML = rows.map(([label, value]) =>
             `<div style="display:flex; gap:8px; padding:2px 0;"><strong style="min-width:220px;">${escapeHtml(label)}:</strong><span>${escapeHtml(String(value))}</span></div>`
@@ -764,7 +784,11 @@
     async function saveDetailsStatus() {
         if (!currentDetailsInvoiceId) return;
         const status = elements.detailsStatusSelect.value;
-        if (!confirm(`Сменить статус на «${STATUS_LABELS[status] || status}»?`)) return;
+        const ok = await window.BarhatUI.confirm(
+            `Новый статус: «${STATUS_LABELS[status] || status}».`,
+            { title: 'Сменить статус счёта?', confirmText: 'Сменить' }
+        );
+        if (!ok) return;
         try {
             const res = await fetch(`/api/invoices/${currentDetailsInvoiceId}/status`, {
                 method: 'PUT',
@@ -788,7 +812,7 @@
             return;
         }
         elements.detailsHistory.innerHTML = history.map(h => {
-            const when = (h.changed_at || '').slice(0, 16).replace('T', ' ');
+            const when = window.BarhatTime.formatDateTime(h.changed_at, '');
             const from = h.old_value !== null && h.old_value !== undefined ? escapeHtml(String(h.old_value)) : '—';
             const to = h.new_value !== null && h.new_value !== undefined ? escapeHtml(String(h.new_value)) : '—';
             return `<div style="padding:3px 0; font-size:13px;">
@@ -801,7 +825,7 @@
     function renderComments(comments) {
         elements.detailsComments.innerHTML = comments.length ? comments.map(c => `
             <div style="padding:4px 0; border-bottom:1px solid #eee;">
-                <div><strong>${escapeHtml(c.author_full_name || c.author)}</strong> <span class="form-hint">${(c.created_at || '').slice(0, 16).replace('T', ' ')}</span></div>
+                <div><strong>${escapeHtml(c.author_full_name || c.author)}</strong> <span class="form-hint">${window.BarhatTime.formatDateTime(c.created_at, '')}</span></div>
                 <div>${escapeHtml(c.message)}</div>
             </div>
         `).join('') : '<p class="form-hint">Сообщений нет</p>';
@@ -916,7 +940,12 @@
     }
 
     async function deleteAttachment(attachmentId) {
-        if (!confirm('Удалить вложение?')) return;
+        const ok = await window.BarhatUI.confirm('Файл будет удалён безвозвратно.', {
+            title: 'Удалить вложение?',
+            confirmText: 'Удалить',
+            danger: true,
+        });
+        if (!ok) return;
         try {
             const res = await fetch(`/api/invoices/attachments/${attachmentId}`, { method: 'DELETE', credentials: 'include' });
             const data = await res.json();
@@ -1080,7 +1109,10 @@
     }
 
     async function editReferenceItem(id, currentName) {
-        const name = prompt('Новое название:', currentName);
+        const name = await window.BarhatUI.prompt('Новое название:', currentName, {
+            title: 'Переименовать запись',
+            confirmText: 'Сохранить',
+        });
         if (!name || !name.trim()) return;
         try {
             const res = await fetch(`${refApiBase()}/${currentRefType}/${id}`, {
@@ -1100,7 +1132,12 @@
     }
 
     async function deactivateReferenceItem(id) {
-        if (!confirm('Удалить запись из справочника?')) return;
+        const ok = await window.BarhatUI.confirm('Запись перестанет предлагаться в формах.', {
+            title: 'Удалить запись из справочника?',
+            confirmText: 'Удалить',
+            danger: true,
+        });
+        if (!ok) return;
         try {
             const res = await fetch(`${refApiBase()}/${currentRefType}/${id}`, { method: 'DELETE', credentials: 'include' });
             const data = await res.json();
@@ -1358,7 +1395,7 @@
                 <div>
                     <div><strong>${escapeHtml(u.match_code || u.planfact_operation_id)}</strong> ${u.operation_amount ? formatMoney(u.operation_amount) : ''}</div>
                     <div class="form-hint">${escapeHtml(u.reason)}</div>
-                    <div class="form-hint">${escapeHtml((u.detected_at || '').slice(0, 16).replace('T', ' '))}</div>
+                    <div class="form-hint">${escapeHtml(window.BarhatTime.formatDateTime(u.detected_at, ''))}</div>
                 </div>
                 <button class="btn btn-sm btn-secondary" data-action="resolve" data-id="${u.id}">Разнесено вручную</button>
             </div>

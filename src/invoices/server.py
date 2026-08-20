@@ -16,7 +16,7 @@ import re
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from flask import Blueprint, jsonify, request, send_from_directory
@@ -93,6 +93,11 @@ from .storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Банк и ПланФакт живут по московскому времени; фиксированный сдвиг вместо
+# pytz — в РФ нет перехода на летнее время с 2014 года (тот же приём, что в
+# src/modulbank/document.py и src/cashshifts/retailcrm_client.py)
+_MOSCOW_TZ = timezone(timedelta(hours=3))
 
 invoices_bp = Blueprint("invoices", __name__, url_prefix="/api/invoices")
 
@@ -597,7 +602,10 @@ def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict
 
     result = client.send_invoice_payment(
         doc_num=str(invoice["id"]),
-        date=datetime.now().strftime("%Y-%m-%d"),
+        # Дата платёжки — операционный день банка, то есть Москва, а не пояс
+        # сервера: на Amvera процесс живёт в UTC и с 00:00 до 03:00 по Москве
+        # документ уходил бы вчерашним числом.
+        date=datetime.now(_MOSCOW_TZ).strftime("%Y-%m-%d"),
         amount=invoice["amount"],
         purpose=purpose,
         payer=payer_requisites,

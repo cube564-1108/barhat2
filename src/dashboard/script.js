@@ -46,14 +46,24 @@ document.addEventListener('DOMContentLoaded', async function() {
         'manager': 'Менеджер',
         'florist_analyst': 'Аналитик качества'
     };
-    document.getElementById('userRole').textContent = roleNames[currentUser.role] || currentUser.role;
+    // Пояс подписываем явно: время в модулях показывается по часам устройства,
+    // и сотруднику из другого города должно быть видно, в каком времени цифры.
+    // Подпись косметическая, а этот файл держит навигацию всего дашборда —
+    // если datetime.js почему-то не доехал, показываем роль без пояса.
+    const roleLabel = roleNames[currentUser.role] || currentUser.role;
+    const zoneSuffix = window.BarhatTime ? ` · ${window.BarhatTime.zoneLabel()}` : '';
+    document.getElementById('userRole').textContent = roleLabel + zoneSuffix;
 
     // Отправляем событие о роли пользователя для других модулей
     document.dispatchEvent(new CustomEvent('userRoleChanged', { detail: currentUser }));
 
     // Обработчик кнопки выхода
     document.getElementById('logoutBtn').addEventListener('click', async () => {
-        if (confirm('Вы уверены, что хотите выйти?')) {
+        const ok = await window.BarhatUI.confirm('Потребуется войти заново.', {
+            title: 'Выйти из дашборда?',
+            confirmText: 'Выйти',
+        });
+        if (ok) {
             try {
                 const response = await fetch('/api/auth/logout', {
                     method: 'POST',

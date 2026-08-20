@@ -12,7 +12,7 @@ import os
 import sys
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 from flask import Blueprint, jsonify, request
@@ -102,6 +102,18 @@ class ShiftEditForbiddenError(CashShiftError):
 # =============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================================================
+
+def utc_now() -> datetime:
+    """
+    Текущий момент в UTC без tzinfo — формат, в котором модуль хранит время.
+
+    Не datetime.now(): она берёт пояс машины. На Amvera это UTC, а на ноутбуке
+    разработчика — местное время, и смены получали метки на несколько часов
+    вперёд относительно `datetime('now')` в SQLite (тот всегда UTC).
+    Перевод в пояс сотрудника делает фронтенд (src/dashboard/datetime.js).
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 def get_current_user_role() -> str:
     """Получить роль текущего пользователя."""
@@ -414,7 +426,7 @@ def open_shift():
             opening_balance = 0.0
 
         # Создаём смену
-        datetime_start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        datetime_start = utc_now().strftime("%Y-%m-%d %H:%M:%S")
         florist_username = get_current_username()
 
         shift_id = create_cash_shift(
@@ -506,7 +518,7 @@ def add_collection(shift_id: int):
             return error_response(f"Категория {expense_category_id} не найдена", 404)
 
         # Создаём инкассацию
-        date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        date = utc_now().strftime("%Y-%m-%d %H:%M:%S")
         created_by = get_current_username()
 
         collection_id = create_collection(
@@ -601,7 +613,7 @@ def close_shift(shift_id: int):
 
         # Период для запроса: datetime_start смены → сейчас
         datetime_start = datetime.strptime(shift["datetime_start"], "%Y-%m-%d %H:%M:%S")
-        datetime_end = datetime.now()
+        datetime_end = utc_now()
 
         # Запрашиваем наличные заказы из CRM
         try:
@@ -924,7 +936,7 @@ def reclose_shift(shift_id: int):
         datetime_start = datetime.strptime(shift["datetime_start"], "%Y-%m-%d %H:%M:%S")
         datetime_end = (
             datetime.strptime(shift["datetime_end"], "%Y-%m-%d %H:%M:%S")
-            if shift.get("datetime_end") else datetime.now()
+            if shift.get("datetime_end") else utc_now()
         )
 
         # Запрашиваем наличные заказы из CRM
@@ -1213,7 +1225,7 @@ def _crm_data_is_stale(shift: Dict[str, Any]) -> bool:
         synced_dt = datetime.strptime(synced_at, "%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return True
-    return datetime.now() - synced_dt > timedelta(seconds=OPEN_SHIFTS_CRM_TTL_SECONDS)
+    return utc_now() - synced_dt > timedelta(seconds=OPEN_SHIFTS_CRM_TTL_SECONDS)
 
 
 def _sync_open_shifts_from_crm(shifts: List[Dict[str, Any]], force: bool = False) -> None:
@@ -1252,7 +1264,7 @@ def _sync_open_shifts_from_crm(shifts: List[Dict[str, Any]], force: bool = False
 
         try:
             datetime_start = datetime.strptime(shift["datetime_start"], "%Y-%m-%d %H:%M:%S")
-            datetime_end = datetime.now()
+            datetime_end = utc_now()
 
             cash_orders = client.get_cash_orders(
                 store_code=get_store_code_from_name(shift["store_name"]),

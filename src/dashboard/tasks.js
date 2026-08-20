@@ -264,7 +264,12 @@
     }
 
     async function deleteTask(taskId) {
-        if (!confirm('Удалить задачу?')) return;
+        const ok = await window.BarhatUI.confirm('Задача будет удалена безвозвратно.', {
+            title: 'Удалить задачу?',
+            confirmText: 'Удалить',
+            danger: true,
+        });
+        if (!ok) return;
 
         try {
             const response = await fetch(`/api/tasks/${taskId}`, {

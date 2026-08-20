@@ -365,7 +365,14 @@ def list_writeoffs(
         params.append(date_from)
 
     if date_to:
-        query += " AND created_at <= ?"
+        # Дашборд присылает конец суток по часам сотрудника, пересчитанный в
+        # UTC (dayEndUtc в datetime.js). Голую дату (YYYY-MM-DD) достраиваем до
+        # конца дня сами: created_at <= '2026-08-20' отсекло бы все заявки
+        # этого дня, заведённые позже полуночи.
+        if len(date_to.strip()) == 10:
+            query += " AND created_at < datetime(?, '+1 day')"
+        else:
+            query += " AND created_at <= ?"
         params.append(date_to)
 
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
