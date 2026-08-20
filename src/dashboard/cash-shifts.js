@@ -72,6 +72,14 @@
         editShiftNewAmount: null,
         editShiftNewComment: null,
         addEditShiftCollectionBtn: null,
+        manageCategoriesBtn: null,
+        categoriesModal: null,
+        categoriesOverlay: null,
+        closeCategoriesBtn: null,
+        closeCategoriesFooterBtn: null,
+        categoriesList: null,
+        categoryNewName: null,
+        categoryAddBtn: null,
         shiftJournalModal: null,
         shiftJournalOverlay: null,
         closeShiftJournalBtn: null,
@@ -140,6 +148,15 @@
         elements.editShiftNewAmount = document.getElementById('edit-shift-new-amount');
         elements.editShiftNewComment = document.getElementById('edit-shift-new-comment');
         elements.addEditShiftCollectionBtn = document.getElementById('add-edit-shift-collection-btn');
+
+        elements.manageCategoriesBtn = document.getElementById('manage-collection-categories-btn');
+        elements.categoriesModal = document.getElementById('collection-categories-modal');
+        elements.categoriesOverlay = document.getElementById('collection-categories-overlay');
+        elements.closeCategoriesBtn = document.getElementById('close-collection-categories-btn');
+        elements.closeCategoriesFooterBtn = document.getElementById('close-collection-categories-footer-btn');
+        elements.categoriesList = document.getElementById('collection-categories-list');
+        elements.categoryNewName = document.getElementById('collection-category-new-name');
+        elements.categoryAddBtn = document.getElementById('collection-category-add-btn');
 
         elements.shiftJournalModal = document.getElementById('shift-journal-modal');
         elements.shiftJournalOverlay = document.getElementById('shift-journal-overlay');
@@ -233,6 +250,52 @@
             elements.addEditShiftCollectionBtn.addEventListener('click', onAddEditShiftCollection);
         }
 
+        // Справочник категорий инкассации
+        if (elements.manageCategoriesBtn) {
+            elements.manageCategoriesBtn.addEventListener('click', openCategoriesModal);
+        }
+        if (elements.closeCategoriesBtn) {
+            elements.closeCategoriesBtn.addEventListener('click', closeCategoriesModal);
+        }
+        if (elements.closeCategoriesFooterBtn) {
+            elements.closeCategoriesFooterBtn.addEventListener('click', closeCategoriesModal);
+        }
+        if (elements.categoriesOverlay) {
+            elements.categoriesOverlay.addEventListener('click', closeCategoriesModal);
+        }
+        if (elements.categoryAddBtn) {
+            elements.categoryAddBtn.addEventListener('click', onAddCategory);
+        }
+        if (elements.categoryNewName) {
+            // Enter в поле названия = «Добавить»: поле вне <form>, само не сабмитит
+            elements.categoryNewName.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    onAddCategory();
+                }
+            });
+        }
+        if (elements.categoriesList) {
+            elements.categoriesList.addEventListener('click', (e) => {
+                const renameBtn = e.target.closest('[data-rename-category-id]');
+                if (renameBtn) {
+                    onRenameCategory(
+                        parseInt(renameBtn.dataset.renameCategoryId, 10),
+                        renameBtn.dataset.categoryName || ''
+                    );
+                    return;
+                }
+                const deleteBtn = e.target.closest('[data-delete-category-id]');
+                if (deleteBtn) {
+                    onDeleteCategory(
+                        parseInt(deleteBtn.dataset.deleteCategoryId, 10),
+                        deleteBtn.dataset.categoryName || '',
+                        parseInt(deleteBtn.dataset.categoryUsage || '0', 10)
+                    );
+                }
+            });
+        }
+
         // Журнал смены
         if (elements.closeShiftJournalBtn) {
             elements.closeShiftJournalBtn.addEventListener('click', closeShiftJournalModal);
@@ -291,6 +354,13 @@
         }
         if (canSeeOpenShifts()) {
             loadOpenShifts();
+        }
+
+        // Справочник категорий редактирует только админ — у остальных ролей
+        // бэкенд всё равно вернёт 403 на POST/PUT/DELETE
+        if (elements.manageCategoriesBtn) {
+            elements.manageCategoriesBtn.style.display =
+                (userData && userData.role === 'admin') ? 'inline-flex' : 'none';
         }
     }
 
@@ -397,6 +467,131 @@
         datalist.innerHTML = categoryList
             .map(cat => `<option value="${escapeHtml(cat.name)}"></option>`)
             .join('');
+    }
+
+    // =========================================================================
+    // СПРАВОЧНИК КАТЕГОРИЙ ИНКАССАЦИИ (только админ)
+    // =========================================================================
+
+    function openCategoriesModal() {
+        if (elements.categoryNewName) {
+            elements.categoryNewName.value = '';
+        }
+        loadCategoriesReference();
+        elements.categoriesModal?.classList.add('active');
+    }
+
+    function closeCategoriesModal() {
+        elements.categoriesModal?.classList.remove('active');
+    }
+
+    // Отдельный запрос от loadCategories(): здесь нужен usage_count, чтобы
+    // видеть, какие категории уже использованы в инкассациях
+    async function loadCategoriesReference() {
+        if (!elements.categoriesList) return;
+
+        elements.categoriesList.innerHTML = '<p class="form-hint">Загрузка...</p>';
+        try {
+            const result = await apiRequest('/api/cash-shifts/categories?with_usage=1');
+            renderCategoriesReference(result.categories || []);
+        } catch (error) {
+            elements.categoriesList.innerHTML = '<p class="form-hint">Ошибка загрузки</p>';
+        }
+    }
+
+    function renderCategoriesReference(categories) {
+        if (!categories.length) {
+            elements.categoriesList.innerHTML = '<p class="form-hint">Список пуст</p>';
+            return;
+        }
+
+        elements.categoriesList.innerHTML = categories.map(cat => {
+            const usage = cat.usage_count || 0;
+            const usageHint = usage > 0
+                ? `<span style="color: var(--barkhat-gray); font-size: 13px;">${usage} инкасс.</span>`
+                : '';
+            const nameAttr = escapeHtml(cat.name);
+            return `
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0;">
+                    <span style="display: flex; align-items: baseline; gap: 8px;">
+                        <span>${escapeHtml(cat.name)}</span>
+                        ${usageHint}
+                    </span>
+                    <span style="display: flex; gap: 6px;">
+                        <button class="btn btn-sm btn-secondary"
+                                data-rename-category-id="${cat.id}" data-category-name="${nameAttr}">Изменить</button>
+                        <button class="btn btn-sm btn-danger"
+                                data-delete-category-id="${cat.id}" data-category-name="${nameAttr}"
+                                data-category-usage="${usage}">Удалить</button>
+                    </span>
+                </div>
+            `;
+        }).join('');
+    }
+
+    async function onAddCategory() {
+        const name = (elements.categoryNewName?.value || '').trim();
+        if (!name) {
+            showNotification('Укажите название категории', 'error');
+            return;
+        }
+
+        try {
+            await apiRequest('/api/cash-shifts/categories', {
+                method: 'POST',
+                body: JSON.stringify({ name })
+            });
+
+            elements.categoryNewName.value = '';
+            showNotification('Категория добавлена', 'success');
+            await afterCategoryChange();
+        } catch (error) {
+            console.error('[CashShifts] Ошибка добавления категории:', error);
+        }
+    }
+
+    async function onRenameCategory(categoryId, currentName) {
+        const name = prompt('Новое название категории:', currentName);
+        if (name === null) return;
+        if (!name.trim()) {
+            showNotification('Укажите название категории', 'error');
+            return;
+        }
+
+        try {
+            await apiRequest(`/api/cash-shifts/categories/${categoryId}`, {
+                method: 'PUT',
+                body: JSON.stringify({ name: name.trim() })
+            });
+
+            showNotification('Категория переименована', 'success');
+            await afterCategoryChange();
+        } catch (error) {
+            console.error('[CashShifts] Ошибка переименования категории:', error);
+        }
+    }
+
+    async function onDeleteCategory(categoryId, name, usage) {
+        const usageWarning = usage > 0
+            ? `\n\nОна уже стоит в ${usage} инкассац. — там название сохранится, но выбрать её в новых инкассациях будет нельзя.`
+            : '';
+        if (!confirm(`Удалить категорию «${name}»?${usageWarning}`)) return;
+
+        try {
+            await apiRequest(`/api/cash-shifts/categories/${categoryId}`, { method: 'DELETE' });
+
+            showNotification('Категория удалена', 'success');
+            await afterCategoryChange();
+        } catch (error) {
+            console.error('[CashShifts] Ошибка удаления категории:', error);
+        }
+    }
+
+    // Список в модалке и datalist'ы форм инкассации живут отдельно —
+    // после любой правки обновляем оба, иначе флорист увидит старый набор
+    async function afterCategoryChange() {
+        await loadCategoriesReference();
+        await loadCategories();
     }
 
     // === Найти категорию по введённому в поле названию ===

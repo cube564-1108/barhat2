@@ -964,6 +964,10 @@
                                 <div id="shift-actions" style="display: flex; gap: 12px;">
                                     <!-- Кнопки добавляются динамически -->
                                 </div>
+                                <!-- Справочник категорий инкассации — только админу -->
+                                <button id="manage-collection-categories-btn" class="btn btn-secondary" style="display: none;">
+                                    Категории инкассации
+                                </button>
                             </div>
                         </div>
 
@@ -1171,6 +1175,40 @@
                             <div class="modal-footer">
                                 <button id="cancel-add-collection-btn" class="btn btn-secondary">Отмена</button>
                                 <button id="confirm-add-collection-btn" class="btn btn-success">Добавить</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Справочник категорий инкассации (админ) -->
+                    <div id="collection-categories-modal" class="modal">
+                        <div class="modal-overlay" id="collection-categories-overlay"></div>
+                        <div class="modal-content" style="max-width: 560px;">
+                            <div class="modal-header">
+                                <h2 class="modal-title">Категории инкассации</h2>
+                                <button id="close-collection-categories-btn" class="modal-close-btn">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="18" y1="6" x2="6" y2="18"/>
+                                        <line x1="6" y1="6" x2="18" y2="18"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="modal-body">
+                                <p class="form-hint">
+                                    Список статей, по которым флорист проводит инкассацию.
+                                    Удалённая категория пропадает из выбора, но остаётся
+                                    в уже проведённых инкассациях.
+                                </p>
+                                <div id="collection-categories-list" class="admin-items-list"></div>
+                                <div class="admin-add-item">
+                                    <div class="admin-add-form">
+                                        <input type="text" id="collection-category-new-name" class="form-input"
+                                               placeholder="Название категории" autocomplete="off">
+                                        <button id="collection-category-add-btn" class="btn btn-primary btn-sm">Добавить</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="close-collection-categories-footer-btn" class="btn btn-secondary">Закрыть</button>
                             </div>
                         </div>
                     </div>

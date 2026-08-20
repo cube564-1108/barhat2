@@ -332,45 +332,55 @@ def create_store(name: str) -> int:
     INSERT — UNIQUE(name) действует на всю таблицу, а не только на активные
     строки, иначе повторно завести ранее удалённое название невозможно
     (тот же баг был найден и исправлен в invoices.storage._ref_create).
+
+    Соединение закрывается через try/finally: имя-дубликат активной точки
+    роняет INSERT на UNIQUE(name), а незакрытое соединение с неоткатанной
+    транзакцией держит write-лок общей БД до перезапуска воркера — после
+    этого висит и вход в дашборд, и любая запись (см. init_cashshifts_tables).
     """
     conn = get_db()
-    existing = conn.execute("SELECT id, is_active FROM stores WHERE name = ?", (name,)).fetchone()
-    if existing and not existing["is_active"]:
-        conn.execute("UPDATE stores SET is_active = 1 WHERE id = ?", (existing["id"],))
-        conn.commit()
-        conn.close()
-        return existing["id"]
+    try:
+        existing = conn.execute("SELECT id, is_active FROM stores WHERE name = ?", (name,)).fetchone()
+        if existing and not existing["is_active"]:
+            conn.execute("UPDATE stores SET is_active = 1 WHERE id = ?", (existing["id"],))
+            conn.commit()
+            return existing["id"]
 
-    cursor = conn.execute("INSERT INTO stores (name, is_active) VALUES (?, 1)", (name,))
-    store_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return store_id
+        cursor = conn.execute("INSERT INTO stores (name, is_active) VALUES (?, 1)", (name,))
+        store_id = cursor.lastrowid
+        conn.commit()
+        return store_id
+    finally:
+        conn.close()
 
 
 def update_store(store_id: int, name: str) -> bool:
     """Переименовать точку продаж. Та же ловушка с "мёртвым" именем, что и в create_store."""
     conn = get_db()
-    ghost = conn.execute(
-        "SELECT id FROM stores WHERE name = ? AND id != ? AND is_active = 0",
-        (name, store_id)
-    ).fetchone()
-    if ghost:
-        conn.execute("DELETE FROM stores WHERE id = ?", (ghost["id"],))
+    try:
+        ghost = conn.execute(
+            "SELECT id FROM stores WHERE name = ? AND id != ? AND is_active = 0",
+            (name, store_id)
+        ).fetchone()
+        if ghost:
+            conn.execute("DELETE FROM stores WHERE id = ?", (ghost["id"],))
 
-    conn.execute("UPDATE stores SET name = ? WHERE id = ?", (name, store_id))
-    conn.commit()
-    conn.close()
-    return True
+        conn.execute("UPDATE stores SET name = ? WHERE id = ?", (name, store_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 def delete_store(store_id: int) -> bool:
     """Деактивировать точку продаж (мягкое удаление, is_active = 0)."""
     conn = get_db()
-    conn.execute("UPDATE stores SET is_active = 0 WHERE id = ?", (store_id,))
-    conn.commit()
-    conn.close()
-    return True
+    try:
+        conn.execute("UPDATE stores SET is_active = 0 WHERE id = ?", (store_id,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 def get_all_categories() -> List[Dict[str, Any]]:
@@ -381,6 +391,29 @@ def get_all_categories() -> List[Dict[str, Any]]:
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_categories_with_usage() -> List[Dict[str, Any]]:
+    """
+    Активные категории + сколько инкассаций на каждой (для справочника).
+
+    Считаем отдельным запросом, а не в get_all_categories: тот дёргается при
+    каждой загрузке страницы ради datalist, а счётчик нужен только в модалке
+    справочника — там админ решает, можно ли категорию удалять.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT ec.*, COUNT(cc.id) as usage_count
+            FROM expense_categories ec
+            LEFT JOIN cash_collections cc ON cc.expense_category_id = ec.id
+            WHERE ec.is_active = 1
+            GROUP BY ec.id
+            ORDER BY ec.name
+        """).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_category_by_id(category_id: int) -> Optional[Dict[str, Any]]:
@@ -901,32 +934,62 @@ def delete_user_store(username: str, store_id: int) -> bool:
 # =============================================================================
 
 def create_category(name: str) -> int:
-    """Создать категорию расхода. Возвращает ID."""
+    """
+    Создать категорию расхода. Возвращает ID.
+
+    Реактивирует ранее деактивированную запись с тем же именем вместо INSERT —
+    UNIQUE(name) действует на всю таблицу, а не только на активные строки,
+    поэтому без этого повторно завести удалённую категорию нельзя (тот же баг
+    правился в create_store выше и в invoices.storage._ref_create).
+
+    Соединение закрывается через try/finally: дубликат имени активной категории
+    роняет INSERT на UNIQUE(name), а незакрытое соединение с неоткатанной
+    транзакцией держит write-лок общей БД до перезапуска воркера — после этого
+    висит и вход в дашборд, и любая запись (см. init_cashshifts_tables).
+    """
     conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id, is_active FROM expense_categories WHERE name = ?", (name,)
+        ).fetchone()
+        if existing and not existing["is_active"]:
+            conn.execute("UPDATE expense_categories SET is_active = 1 WHERE id = ?", (existing["id"],))
+            conn.commit()
+            return existing["id"]
 
-    cursor = conn.execute(
-        "INSERT INTO expense_categories (name, is_active) VALUES (?, 1)",
-        (name,)
-    )
+        cursor = conn.execute(
+            "INSERT INTO expense_categories (name, is_active) VALUES (?, 1)",
+            (name,)
+        )
 
-    category_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+        category_id = cursor.lastrowid
+        conn.commit()
 
-    return category_id
+        return category_id
+    finally:
+        conn.close()
 
 
 def update_category(category_id: int, name: str) -> bool:
-    """Обновить название категории."""
+    """Переименовать категорию. Та же ловушка с "мёртвым" именем, что и в create_category."""
     conn = get_db()
-    conn.execute(
-        "UPDATE expense_categories SET name = ? WHERE id = ?",
-        (name, category_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        ghost = conn.execute(
+            "SELECT id FROM expense_categories WHERE name = ? AND id != ? AND is_active = 0",
+            (name, category_id)
+        ).fetchone()
+        if ghost:
+            conn.execute("DELETE FROM expense_categories WHERE id = ?", (ghost["id"],))
 
-    return True
+        conn.execute(
+            "UPDATE expense_categories SET name = ? WHERE id = ?",
+            (name, category_id)
+        )
+        conn.commit()
+
+        return True
+    finally:
+        conn.close()
 
 
 def delete_category(category_id: int) -> bool:
@@ -936,11 +999,13 @@ def delete_category(category_id: int) -> bool:
     Помечает is_active = 0 вместо удаления.
     """
     conn = get_db()
-    conn.execute(
-        "UPDATE expense_categories SET is_active = 0 WHERE id = ?",
-        (category_id,)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE expense_categories SET is_active = 0 WHERE id = ?",
+            (category_id,)
+        )
+        conn.commit()
 
-    return True
+        return True
+    finally:
+        conn.close()

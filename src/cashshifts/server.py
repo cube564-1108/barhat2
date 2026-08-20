@@ -26,6 +26,7 @@ from auth import role_required, log_action
 from .storage import (
     get_all_stores,
     get_all_categories,
+    get_categories_with_usage,
     get_store_by_id,
     get_category_by_id,
     create_store,
@@ -270,9 +271,15 @@ def remove_store(store_id):
 @cashshifts_bp.route("/categories", methods=["GET"])
 @login_required
 def get_categories():
-    """Получить список всех активных категорий расходов."""
+    """
+    Получить список активных категорий инкассации.
+
+    ?with_usage=1 — добавить usage_count (сколько инкассаций на категории).
+    Нужен только справочнику в модалке, поэтому по умолчанию не считается.
+    """
     try:
-        categories = get_all_categories()
+        with_usage = request.args.get("with_usage") in ("1", "true")
+        categories = get_categories_with_usage() if with_usage else get_all_categories()
 
         return jsonify(success_response({
             "count": len(categories),
@@ -286,63 +293,74 @@ def get_categories():
 @cashshifts_bp.route("/categories", methods=["POST"])
 @role_required("admin")
 def add_category():
-    """Создать категорию расхода (только админ)."""
+    """Создать категорию инкассации (только админ). Body: {"name": str}."""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return error_response("Название обязательно", 400)
+
     try:
-        data = request.get_json()
-        if not data or not data.get("name"):
-            return error_response("Не указано название категории")
-
-        category_id = create_category(data["name"])
-        category = get_category_by_id(category_id)
-
-        logger.info(f"Категория расхода создана: ID={category_id}, name={data['name']}")
-
-        return jsonify(success_response({"id": category_id, "category": category})), 201
+        category_id = create_category(name)
     except Exception as e:
-        logger.error(f"Ошибка POST /api/cash-shifts/categories: {e}")
-        return error_response(str(e), 500)
+        logger.error(f"Ошибка создания категории инкассации «{name}»: {e}")
+        return error_response(f"«{name}» уже есть в списке или произошла ошибка", 400)
+
+    log_action(current_user.username, "create_collection_category", name)
+    logger.info(f"Категория инкассации создана: ID={category_id}, name={name}")
+
+    return jsonify(success_response({
+        "id": category_id,
+        "category": get_category_by_id(category_id)
+    })), 201
 
 
 @cashshifts_bp.route("/categories/<int:category_id>", methods=["PUT"])
 @role_required("admin")
 def edit_category(category_id: int):
-    """Переименовать категорию расхода (только админ)."""
+    """Переименовать категорию инкассации (только админ). Body: {"name": str}."""
+    if not get_category_by_id(category_id):
+        return error_response(f"Категория {category_id} не найдена", 404)
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return error_response("Название обязательно", 400)
+
     try:
-        category = get_category_by_id(category_id)
-        if not category:
-            return error_response(f"Категория {category_id} не найдена", 404)
-
-        data = request.get_json()
-        if not data or not data.get("name"):
-            return error_response("Не указано название категории")
-
-        update_category(category_id, data["name"])
-
-        logger.info(f"Категория расхода обновлена: ID={category_id}, name={data['name']}")
-
-        return jsonify(success_response({"category": get_category_by_id(category_id)}))
+        update_category(category_id, name)
     except Exception as e:
-        logger.error(f"Ошибка PUT /api/cash-shifts/categories/{category_id}: {e}")
-        return error_response(str(e), 500)
+        logger.error(f"Ошибка переименования категории инкассации {category_id} в «{name}»: {e}")
+        return error_response(f"«{name}» уже есть в списке или произошла ошибка", 400)
+
+    log_action(current_user.username, "update_collection_category", f"{category_id}: {name}")
+    logger.info(f"Категория инкассации обновлена: ID={category_id}, name={name}")
+
+    return jsonify(success_response({"category": get_category_by_id(category_id)}))
 
 
 @cashshifts_bp.route("/categories/<int:category_id>", methods=["DELETE"])
 @role_required("admin")
 def remove_category(category_id: int):
-    """Деактивировать категорию расхода (не удаляет запись, только скрывает; только админ)."""
+    """
+    Деактивировать категорию инкассации (только админ).
+
+    Мягкое удаление: строка остаётся, поэтому уже проведённые инкассации
+    сохраняют своё название категории в журнале и в истории смен.
+    """
+    category = get_category_by_id(category_id)
+    if not category:
+        return error_response(f"Категория {category_id} не найдена", 404)
+
     try:
-        category = get_category_by_id(category_id)
-        if not category:
-            return error_response(f"Категория {category_id} не найдена", 404)
-
         delete_category(category_id)
-
-        logger.info(f"Категория расхода деактивирована: ID={category_id}")
-
-        return jsonify(success_response({"id": category_id}))
     except Exception as e:
         logger.error(f"Ошибка DELETE /api/cash-shifts/categories/{category_id}: {e}")
         return error_response(str(e), 500)
+
+    log_action(current_user.username, "delete_collection_category", f"{category_id}: {category['name']}")
+    logger.info(f"Категория инкассации деактивирована: ID={category_id}")
+
+    return jsonify(success_response({"id": category_id}))
 
 
 # =============================================================================
