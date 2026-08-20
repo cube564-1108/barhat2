@@ -72,6 +72,8 @@
         editShiftNewAmount: null,
         editShiftNewComment: null,
         addEditShiftCollectionBtn: null,
+        guideManager: null,
+        guideAdmin: null,
         manageCategoriesBtn: null,
         categoriesModal: null,
         categoriesOverlay: null,
@@ -148,6 +150,9 @@
         elements.editShiftNewAmount = document.getElementById('edit-shift-new-amount');
         elements.editShiftNewComment = document.getElementById('edit-shift-new-comment');
         elements.addEditShiftCollectionBtn = document.getElementById('add-edit-shift-collection-btn');
+
+        elements.guideManager = document.getElementById('cash-shifts-guide-manager');
+        elements.guideAdmin = document.getElementById('cash-shifts-guide-admin');
 
         elements.manageCategoriesBtn = document.getElementById('manage-collection-categories-btn');
         elements.categoriesModal = document.getElementById('collection-categories-modal');
@@ -356,11 +361,21 @@
             loadOpenShifts();
         }
 
+        const role = userData && userData.role;
+
         // Справочник категорий редактирует только админ — у остальных ролей
         // бэкенд всё равно вернёт 403 на POST/PUT/DELETE
         if (elements.manageCategoriesBtn) {
-            elements.manageCategoriesBtn.style.display =
-                (userData && userData.role === 'admin') ? 'inline-flex' : 'none';
+            elements.manageCategoriesBtn.style.display = role === 'admin' ? 'inline-flex' : 'none';
+        }
+
+        // Разделы инструкции про чужие возможности только путают: флорист не
+        // видит блок управляющего, оба не видят админский
+        if (elements.guideManager) {
+            elements.guideManager.hidden = !(role === 'manager' || role === 'admin');
+        }
+        if (elements.guideAdmin) {
+            elements.guideAdmin.hidden = role !== 'admin';
         }
     }
 
@@ -663,10 +678,13 @@
                 params.append('store_id', storeId);
             }
 
-            // Фильтр по дате
+            // Фильтр по дате: бэкенд принимает границы периода (date_from/date_to),
+            // а не одиночную дату — выбранный день разворачиваем в сутки целиком.
+            // Сравнение идёт по datetime_start, то есть по дню открытия смены
             const dateFilter = elements.shiftDateFilter?.value;
             if (dateFilter) {
-                params.append('date', dateFilter);
+                params.append('date_from', `${dateFilter} 00:00:00`);
+                params.append('date_to', `${dateFilter} 23:59:59`);
             }
 
             params.append('status', 'closed');
