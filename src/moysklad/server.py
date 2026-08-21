@@ -11,7 +11,8 @@ import os
 import sys
 import logging
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from typing import Any
 from flask import Blueprint, Flask, jsonify, request
 from flask_login import login_required
@@ -331,6 +332,26 @@ def get_stats():
 # память, потом сохранить" теряло вообще весь прогресс — сохранялось 0 записей
 # без единой ошибки, что и произошло на первом прогоне на проде.
 
+# Сколько минут без движения счётчика считаем признаком мёртвой синхронизации.
+# Одна страница — 100 заказов и пауза 0.3 с, при живом синке прогресс обновляется
+# раз в несколько секунд; 15 минут тишины означают, что поток не пережил
+# перезапуск воркера или деплой.
+SYNC_STALE_MINUTES = 15
+
+
+def _sync_log_is_stale(log: dict) -> bool:
+    """Синхронизация числится запущенной, но прогресс давно не двигался"""
+    last_tick = log.get('progress_at') or log.get('started_at')
+    if not last_tick:
+        return True
+    try:
+        # CURRENT_TIMESTAMP в SQLite пишется как UTC-строка 'YYYY-MM-DD HH:MM:SS'
+        tick = datetime.fromisoformat(str(last_tick))
+    except ValueError:
+        return True
+    return (datetime.utcnow() - tick) > timedelta(minutes=SYNC_STALE_MINUTES)
+
+
 @moysklad_bp.route('/sync', methods=['POST'])
 @role_required('admin')
 def trigger_sync():
@@ -350,17 +371,27 @@ def trigger_sync():
     """
     storage = get_db()
     last_log = storage.get_latest_sync_log('sales_orders')
-    if last_log and last_log['status'] == 'started':
+    if last_log and last_log['status'] == 'started' and not _sync_log_is_stale(last_log):
         return jsonify({
             'success': False,
             'error': 'Синхронизация уже запущена',
         })
 
+    # Прерванный синк (перезапуск воркера, деплой) навсегда оставлял бы в логе
+    # статус 'started' — кнопка блокировалась бы бесконечно. Закрываем такую
+    # запись как failed, чтобы можно было запустить заново.
+    if last_log and last_log['status'] == 'started':
+        storage.finish_sync_log(
+            last_log['id'],
+            records_count=last_log['records_count'] or 0,
+            status='failed',
+            error_message='Синхронизация прервана (перезапуск сервера)'
+        )
+
     data = request.get_json(silent=True) or {}
     max_items = data.get('max_items', 100000)
     date_from = data.get('date_from')
     if not date_from:
-        from datetime import timedelta
         date_from = (datetime.now() - timedelta(days=182)).strftime('%Y-%m-%d')
 
     def sync_in_background():
@@ -406,13 +437,23 @@ def trigger_sync():
                 if not rows:
                     break
 
-                for order in rows:
-                    storage.save_sales_order(order)
+                # Вся страница — одной транзакцией (см. save_sales_orders_batch)
+                storage.save_sales_orders_batch(rows)
                 saved_count += len(rows)
                 offset += batch_size
 
+                storage.update_sync_log_progress(log_id, saved_count)
+
                 if len(rows) < batch_size:
                     break
+
+                # Пауза между страницами. Синхронизация идёт фоновым потоком
+                # внутри воркера gunicorn, который параллельно обслуживает сайт:
+                # без паузы поток непрерывно держит GIL на разборе JSON и очередь
+                # к диску на записи, и всё остальное (авторизация, дашборд)
+                # начинает заметно тормозить. 0.3 с на страницу из 100 заказов —
+                # это ~+1.5 минуты к сорока на 28К заказов, разница незаметная.
+                time.sleep(0.3)
 
             storage.finish_sync_log(log_id, records_count=saved_count, status='completed')
 
@@ -433,16 +474,27 @@ def trigger_sync():
 @moysklad_bp.route('/sync-status', methods=['GET'])
 @login_required
 def get_sync_status():
-    """Получить статус синхронизации заказов (из sync_log — общий для всех воркеров)"""
+    """
+    Получить статус синхронизации заказов (из sync_log — общий для всех воркеров).
+
+    Читается ровно одна строка sync_log по индексу. get_stats() здесь сознательно
+    не вызывается: шесть COUNT(*) с полным сканом таблиц на каждый опрос статуса —
+    это была ощутимая часть нагрузки, тормозившей сайт во время синхронизации.
+    Прогресс пишет сам фоновый поток через update_sync_log_progress().
+    """
     storage = get_db()
     last_log = storage.get_latest_sync_log('sales_orders')
-    stats = storage.get_stats()
 
-    running = bool(last_log and last_log['status'] == 'started')
+    started = bool(last_log and last_log['status'] == 'started')
+    stale = started and _sync_log_is_stale(last_log)
+    running = started and not stale
     error = last_log['error_message'] if last_log and last_log['status'] == 'failed' else None
+    if stale:
+        # Поток не пережил перезапуск воркера — не крутим спиннер вечно
+        error = 'Синхронизация прервана (перезапуск сервера), запустите заново'
 
     if running:
-        message = f"Загружено {stats.get('sales_orders_count', 0)} заказов..."
+        message = f"Загружено {last_log['records_count'] or 0} заказов..."
     elif error:
         message = f"Ошибка: {error}"
     elif last_log:

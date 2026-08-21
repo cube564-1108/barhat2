@@ -7,6 +7,7 @@ import os
 import sqlite3
 import json
 import logging
+import threading
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
@@ -48,13 +49,22 @@ class MoySkladStorage:
     @contextmanager
     def _get_connection(self):
         """Контекст менеджер для подключения к SQLite"""
-        # timeout + WAL — на проде несколько воркеров gunicorn пишут в один файл
-        # (см. auth.py::get_db); без этого конкурентная запись во время долгой
-        # синхронизации заказов даёт "database is locked" читателям
+        # busy_timeout — на проде несколько воркеров gunicorn пишут в один файл
+        # (см. auth.py::get_db); без него конкурентная запись во время долгой
+        # синхронизации заказов даёт "database is locked" читателям.
+        #
+        # journal_mode=WAL здесь НЕ выставляется: это персистентное свойство
+        # самого файла БД, достаточно один раз в _init_db. Раньше PRAGMA шла на
+        # каждом соединении — то есть на каждый INSERT одного заказа из 28 тысяч.
+        #
+        # synchronous=NORMAL при WAL — рекомендованная связка: fsync только на
+        # чекпойнте, а не на каждой транзакции. На сетевом диске Amvera именно
+        # fsync на каждый заказ и съедал дисковую очередь, из-за чего тормозили
+        # запросы к соседним базам (/data/barhat.db — авторизация всего сайта).
         conn = sqlite3.connect(self.db_path, timeout=20)
         conn.row_factory = sqlite3.Row  # Доступ по имени колонки
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=20000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         try:
             yield conn
             conn.commit()
@@ -68,6 +78,8 @@ class MoySkladStorage:
     def _init_db(self) -> None:
         """Создание таблиц если не существуют"""
         with self._get_connection() as conn:
+            # WAL — свойство файла БД, ставится один раз при инициализации
+            conn.execute("PRAGMA journal_mode=WAL")
             cursor = conn.cursor()
 
             # Таблица товаров
@@ -273,6 +285,15 @@ class MoySkladStorage:
                 )
             ''')
 
+            # Миграция: progress_at — время последнего обновления счётчика записей.
+            # По нему видно, что синхронизация со статусом 'started' на самом деле
+            # мертва (воркер перезапустился/деплой), а не идёт — иначе такая запись
+            # блокировала бы запуск нового синка навсегда.
+            cursor.execute("PRAGMA table_info(sync_log)")
+            sync_log_cols = {row[1] for row in cursor.fetchall()}
+            if 'progress_at' not in sync_log_cols:
+                cursor.execute('ALTER TABLE sync_log ADD COLUMN progress_at TIMESTAMP')
+
             logger.info(f"БД инициализирована: {self.db_path}")
 
     def save_product(self, product: Dict, snapshot_at: Optional[datetime] = None) -> bool:
@@ -453,58 +474,115 @@ class MoySkladStorage:
             return False
 
     def save_sales_order(self, order: Dict, snapshot_at: Optional[datetime] = None) -> bool:
-        """Сохранить заказ покупателя (+ канал продаж и позиции, если раскрыты в ответе API)"""
+        """
+        Сохранить один заказ покупателя (+ канал продаж и позиции, если раскрыты в ответе API).
+
+        Для массовой загрузки используйте save_sales_orders_batch — здесь на каждый
+        заказ приходится отдельная транзакция.
+        """
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-
-                snapshot_ts = snapshot_at or datetime.now()
-                state = order.get('state', {})
-                agent = order.get('agent', {})
-                store = order.get('store', {})
-                sales_channel_id = _extract_id_from_meta(order.get('salesChannel'))
-                # rate — объект {value?, currency}, не число (мультивалютность)
-                rate = order.get('rate') or {}
-                rate_value = rate.get('value', 1.0) if isinstance(rate, dict) else rate
-
-                cursor.execute('''
-                    INSERT OR REPLACE INTO sales_orders
-                    (id, name, description, created, moment, delivered, rate, sum, vat_sum,
-                     state_id, state_name, agent_id, agent_name, store_id, store_name,
-                     applicable, sales_channel_id, raw_data, snapshot_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    order.get('id'),
-                    order.get('name'),
-                    order.get('description'),
-                    order.get('created'),
-                    order.get('moment'),
-                    order.get('delivered'),
-                    rate_value,
-                    order.get('sum', 0),
-                    order.get('vatSum', 0),
-                    state.get('id') if state else None,
-                    state.get('name') if state else None,
-                    agent.get('id') if agent else None,
-                    agent.get('name') if agent else None,
-                    store.get('id') if store else None,
-                    store.get('name') if store else None,
-                    1 if order.get('applicable') else 0,
-                    sales_channel_id,
-                    json.dumps(order, ensure_ascii=False),
-                    snapshot_ts
-                ))
-
-                positions = order.get('positions', {})
-                rows = positions.get('rows', []) if isinstance(positions, dict) else []
-                for position in rows:
-                    self._save_order_position(cursor, order.get('id'), position, snapshot_ts)
-
+                self._save_sales_order_row(cursor, order, snapshot_at or datetime.now())
                 return True
 
         except Exception as e:
             logger.error(f"Ошибка сохранения заказа {order.get('id')}: {e}")
             return False
+
+    def save_sales_orders_batch(self, orders: List[Dict], snapshot_at: Optional[datetime] = None) -> int:
+        """
+        Сохранить пачку заказов одной транзакцией. Возвращает число сохранённых.
+
+        Зачем отдельный метод: при загрузке 28К заказов вызов save_sales_order в
+        цикле означал 28К отдельных соединений, транзакций и коммитов — то есть
+        28К записей в WAL с последующими чекпойнтами на общий сетевой диск /data.
+        Страница синхронизации — 100 заказов, так что батч сокращает число
+        транзакций ровно в 100 раз.
+
+        Ошибка на одном заказе не роняет всю страницу: он пропускается с логом,
+        остальные сохраняются (SAVEPOINT на заказ).
+        """
+        if not orders:
+            return 0
+
+        saved = 0
+        snapshot_ts = snapshot_at or datetime.now()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # Явный BEGIN обязателен: без него первый SAVEPOINT сам открыл бы
+                # транзакцию, а RELEASE самого внешнего savepoint в SQLite её
+                # коммитит — получилось бы снова по коммиту на заказ, ради чего
+                # батч и затевался.
+                cursor.execute('BEGIN')
+                for order in orders:
+                    try:
+                        cursor.execute('SAVEPOINT order_save')
+                        self._save_sales_order_row(cursor, order, snapshot_ts)
+                        cursor.execute('RELEASE order_save')
+                        saved += 1
+                    except Exception as e:
+                        cursor.execute('ROLLBACK TO order_save')
+                        cursor.execute('RELEASE order_save')
+                        logger.error(f"Ошибка сохранения заказа {order.get('id')}: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения пачки заказов: {e}")
+            return saved
+
+        return saved
+
+    def _save_sales_order_row(self, cursor, order: Dict, snapshot_ts: datetime) -> None:
+        """Записать заказ и его позиции в переданный курсор (без управления транзакцией)"""
+        state = order.get('state', {})
+        agent = order.get('agent', {})
+        store = order.get('store', {})
+        sales_channel_id = _extract_id_from_meta(order.get('salesChannel'))
+        # rate — объект {value?, currency}, не число (мультивалютность)
+        rate = order.get('rate') or {}
+        rate_value = rate.get('value', 1.0) if isinstance(rate, dict) else rate
+
+        positions = order.get('positions', {})
+        rows = positions.get('rows', []) if isinstance(positions, dict) else []
+
+        # В raw_data заказа не кладём развёрнутые позиции: каждая из них и так
+        # целиком лежит в order_positions.raw_data. Дублирование удваивало объём
+        # записи на диск при синхронизации (десятки заказов в секунду × полный
+        # JSON с позициями) — ровно та нагрузка, из-за которой тормозил сайт.
+        raw_order = order
+        if rows:
+            raw_order = {k: v for k, v in order.items() if k != 'positions'}
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO sales_orders
+            (id, name, description, created, moment, delivered, rate, sum, vat_sum,
+             state_id, state_name, agent_id, agent_name, store_id, store_name,
+             applicable, sales_channel_id, raw_data, snapshot_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            order.get('id'),
+            order.get('name'),
+            order.get('description'),
+            order.get('created'),
+            order.get('moment'),
+            order.get('delivered'),
+            rate_value,
+            order.get('sum', 0),
+            order.get('vatSum', 0),
+            state.get('id') if state else None,
+            state.get('name') if state else None,
+            agent.get('id') if agent else None,
+            agent.get('name') if agent else None,
+            store.get('id') if store else None,
+            store.get('name') if store else None,
+            1 if order.get('applicable') else 0,
+            sales_channel_id,
+            json.dumps(raw_order, ensure_ascii=False),
+            snapshot_ts
+        ))
+
+        for position in rows:
+            self._save_order_position(cursor, order.get('id'), position, snapshot_ts)
 
     def _save_order_position(self, cursor, order_id: str, position: Dict, snapshot_ts: datetime) -> None:
         """Сохранить позицию заказа (вызывается изнутри save_sales_order, использует его соединение)"""
@@ -890,6 +968,23 @@ class MoySkladStorage:
         except Exception as e:
             logger.error(f"Ошибка обновления log записи: {e}")
 
+    def update_sync_log_progress(self, log_id: int, records_count: int) -> None:
+        """
+        Обновить счётчик обработанных записей у идущей синхронизации.
+
+        Нужен, чтобы /sync-status показывал прогресс, не вызывая get_stats():
+        там шесть COUNT(*) подряд, в том числе по order_positions (46К+ строк),
+        а фронтенд опрашивал статус каждые пару секунд все сорок минут синка.
+        """
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    'UPDATE sync_log SET records_count = ?, progress_at = CURRENT_TIMESTAMP WHERE id = ?',
+                    (records_count, log_id)
+                )
+        except Exception as e:
+            logger.error(f"Ошибка обновления прогресса синхронизации: {e}")
+
     def get_latest_sync_log(self, entity_type: Optional[str] = None) -> Optional[Dict]:
         """
         Получить последнюю запись лога синхронизации (опционально — по типу сущности).
@@ -963,9 +1058,42 @@ class MoySkladStorage:
             return {}
 
 
+_storage_cache: Dict[str, MoySkladStorage] = {}
+_storage_cache_lock = threading.Lock()
+
+
 def get_storage(db_path: Optional[str] = None) -> MoySkladStorage:
-    """Factory function для получения хранилища"""
-    return MoySkladStorage(db_path)
+    """
+    Factory function для получения хранилища (один инстанс на путь к БД).
+
+    Кэш здесь не микрооптимизация: `MoySkladStorage.__init__` вызывает
+    `_init_db()`, а это ~10 CREATE TABLE IF NOT EXISTS, 13 CREATE INDEX
+    IF NOT EXISTS и несколько PRAGMA table_info-миграций. Без кэша весь этот
+    набор DDL выполнялся на КАЖДЫЙ вызов get_storage(): на каждый HTTP-запрос
+    к любому /api/moysklad/*, в том числе на опрос /sync-status раз в пару
+    секунд во время сорокаминутной синхронизации. Именно это (вместе с fsync
+    на каждый заказ) и подтормаживало весь сайт — /data общий для barhat.db,
+    pyrus.db и moysklad.db.
+
+    Инстанс не хранит состояния кроме db_path, соединение к SQLite создаётся
+    на каждый вызов — делиться им между потоками gthread безопасно.
+    """
+    resolved = db_path or os.getenv('MOYSKLAD_DB_PATH', 'data/moysklad.db')
+
+    # In-memory БД у каждого вызова своя — кэшировать нельзя
+    if resolved == ':memory:':
+        return MoySkladStorage(resolved)
+
+    cached = _storage_cache.get(resolved)
+    if cached is not None:
+        return cached
+
+    with _storage_cache_lock:
+        cached = _storage_cache.get(resolved)
+        if cached is None:
+            cached = MoySkladStorage(resolved)
+            _storage_cache[resolved] = cached
+        return cached
 
 
 if __name__ == "__main__":

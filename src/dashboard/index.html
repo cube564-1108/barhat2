@@ -777,8 +777,12 @@
                             <button id="applyAbcFilters" class="btn btn-primary">Применить</button>
                             <button id="resetAbcFilters" class="btn btn-secondary">Сбросить</button>
                             <button id="syncMoyskladData" class="btn btn-accent">
-                                <span class="btn-text">🔄 Синхронизировать с МойСклад</span>
-                                <span class="btn-spinner hidden" style="margin-left: 8px;">⏳</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                                    <polyline points="21 3 21 9 15 9"/>
+                                </svg>
+                                <span class="btn-text">Синхронизировать с МойСклад</span>
                             </button>
                             <div id="abcSyncStatus" class="update-status hidden"></div>
                         </div>
@@ -810,19 +814,17 @@
                                 <table style="width: 100%;">
                                     <thead>
                                         <tr>
-                                            <th>#</th>
+                                            <th class="num">#</th>
                                             <th>Товар</th>
-                                            <th>Выручка</th>
-                                            <th>Доля</th>
-                                            <th>Накопительно</th>
+                                            <th class="num">Выручка</th>
+                                            <th class="num">Доля</th>
+                                            <th class="num">Накопительно</th>
                                             <th>Класс</th>
                                         </tr>
                                     </thead>
                                     <tbody id="abcTableBody">
                                         <tr>
-                                            <td colspan="6" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
-                                                Загрузка данных...
-                                            </td>
+                                            <td colspan="6" class="abc-empty">Загрузка данных...</td>
                                         </tr>
                                     </tbody>
                                 </table>

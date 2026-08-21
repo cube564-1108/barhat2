@@ -82,8 +82,10 @@ def update_entity(entity: str, fetcher, storage, max_items: int = 10000):
             'stock': storage.save_stocks,
             'stores': storage.save_stores,
             'folders': lambda folders: sum(1 for f in folders if storage.save_folder(f)),  # список папок
-            'sales_orders': lambda orders: sum(1 for o in orders if storage.save_sales_order(o)),
-            'demands': lambda demands: sum(1 for d in demands if storage.save_sales_order(d)),  # временно через sales_orders
+            # Батчем, а не по одному заказу: у позаказной записи на каждый заказ
+            # приходится своя транзакция и свой fsync (см. save_sales_orders_batch)
+            'sales_orders': storage.save_sales_orders_batch,
+            'demands': storage.save_sales_orders_batch,  # временно через sales_orders
             'counterparties': lambda cps: sum(1 for c in cps if storage.save_counterparty(c)),
             'sales_channels': storage.save_sales_channels,
         }.get(entity)

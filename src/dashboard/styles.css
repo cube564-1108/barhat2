@@ -1631,3 +1631,94 @@ body {
 .page[data-page="cash_shifts"] .section > .calculator-card {
     margin-top: 24px;
 }
+
+/* === KPI-плитки (DESIGN-SPEC §5) ===
+   Класс .bx-kpi стоял в разметке ABC-анализа и «Качества», но в CSS его не было
+   вообще — плитки выпадали в вертикальный столбик из голых карточек без сетки,
+   подписей и типографики. */
+
+.bx-kpi {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+}
+
+.bx-kpi .card {
+    background: var(--bx-white);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 18px 20px;
+}
+
+.bx-kpi .label {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: var(--bx-text-2);
+    margin-bottom: 8px;
+}
+
+.bx-kpi .value {
+    font-family: var(--bx-font-head);
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--bx-wine);
+}
+
+/* === ABC-анализ === */
+
+/* Карточки страницы — по спеке: белые, граница --bx-border, радиус 16px
+   (общие .card / .calculator-card дашборда пока на 12px и розовой границе;
+   переопределяем точечно, только для нового модуля) */
+
+.page[data-page="abc_analysis"] .section > .card,
+.page[data-page="abc_analysis"] .section > .calculator-card {
+    margin-top: 24px;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+}
+
+.page[data-page="abc_analysis"] .card-title {
+    font-family: var(--bx-font-head);
+    color: var(--bx-wine);
+}
+
+/* Классы A / B / C. Цвета — из палитры спеки: A = «хорошо» (--bx-up),
+   B = фирменный розовый, C = вторичный текст. Заливка задаётся здесь, а не
+   восьмизначным hex с альфой, склеенным в JS. */
+
+.abc-badge {
+    display: inline-block;
+    min-width: 22px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--bx-r-sm);
+}
+
+.abc-badge--a { background: #e3f2e9; color: var(--bx-up); }
+.abc-badge--b { background: var(--bx-pink-wash); color: var(--bx-pink-deep); }
+.abc-badge--c { background: #efeaef; color: var(--bx-text-2); }
+
+/* Числовые колонки таблицы — вправо, моноширинные цифры, чтобы разряды
+   выстраивались столбиком (DESIGN-SPEC §6, таблицы) */
+
+.page[data-page="abc_analysis"] td.num,
+.page[data-page="abc_analysis"] th.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.abc-empty {
+    text-align: center;
+    color: var(--bx-text-2);
+    padding: 20px;
+}
+
+.abc-error {
+    text-align: center;
+    color: var(--bx-down);
+    padding: 20px;
+}

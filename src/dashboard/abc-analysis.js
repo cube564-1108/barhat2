@@ -48,6 +48,28 @@
         }
     }
 
+    // Период по умолчанию — последний месяц. Пустой период означал бы выборку по
+    // всей базе (46К+ позиций заказов, GROUP BY без границ по дате) на каждое
+    // открытие страницы; месяц — и осмысленный отчётный горизонт, и лёгкий запрос.
+    const DEFAULT_PERIOD_DAYS = 30;
+
+    function applyDefaultPeriod() {
+        const to = new Date();
+        const from = new Date();
+        from.setDate(from.getDate() - DEFAULT_PERIOD_DAYS);
+
+        const fromEl = document.getElementById('abcDateFrom');
+        const toEl = document.getElementById('abcDateTo');
+        if (fromEl) fromEl.value = toIsoDate(from);
+        if (toEl) toEl.value = toIsoDate(to);
+    }
+
+    function toIsoDate(date) {
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${date.getFullYear()}-${month}-${day}`;
+    }
+
     /**
      * Загрузка данных ABC-анализа
      */
@@ -61,7 +83,7 @@
         if (dateTo) url.searchParams.set('date_to', dateTo);
         if (channelId) url.searchParams.set('channel_id', channelId);
 
-        const tbody = document.getElementById('abcTableBody');
+        showTableMessage('Загрузка данных...', 'abc-empty');
 
         try {
             const response = await fetch(url, { credentials: 'include' });
@@ -69,9 +91,7 @@
 
             if (!result.success) {
                 console.error('Ошибка ABC-анализа:', result.error);
-                if (tbody) {
-                    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--barkhat-wine);">Ошибка: ${result.error}</td></tr>`;
-                }
+                showTableMessage('Ошибка: ' + result.error, 'abc-error');
                 return;
             }
 
@@ -79,10 +99,17 @@
             renderAbcKpis(result.data);
         } catch (error) {
             console.error('Ошибка загрузки ABC-анализа:', error);
-            if (tbody) {
-                tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--barkhat-wine);">Ошибка сети: ${error.message}</td></tr>`;
-            }
+            showTableMessage('Ошибка сети: ' + error.message, 'abc-error');
         }
+    }
+
+    /**
+     * Сообщение вместо таблицы (загрузка / пусто / ошибка)
+     */
+    function showTableMessage(text, className) {
+        const tbody = document.getElementById('abcTableBody');
+        if (!tbody) return;
+        tbody.innerHTML = `<tr><td colspan="6" class="${className}">${escapeHtml(text)}</td></tr>`;
     }
 
     /**
@@ -93,22 +120,25 @@
         if (!tbody) return;
 
         if (rows.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">Нет данных за выбранный период</td></tr>`;
+            showTableMessage('Нет данных за выбранный период', 'abc-empty');
             return;
         }
 
-        const classColors = { A: '#2E7D32', B: '#B26FA1', C: '#6F6F6F' };
-
-        tbody.innerHTML = rows.map((row, index) => `
+        // Имя товара приходит из МойСклад и попадает в innerHTML — экранируем.
+        // Класс A/B/C сводим к одному из трёх известных значений, чтобы в имя
+        // CSS-класса не подставилось произвольное содержимое ответа.
+        tbody.innerHTML = rows.map((row, index) => {
+            const cls = ['A', 'B', 'C'].includes(row.abc_class) ? row.abc_class : 'C';
+            return `
             <tr>
-                <td>${index + 1}</td>
-                <td>${row.assortment_name || '—'}</td>
-                <td>${formatMoney(row.revenue)}</td>
-                <td>${row.share_pct}%</td>
-                <td>${row.cumulative_pct}%</td>
-                <td><span class="status-badge" style="background: ${classColors[row.abc_class]}20; color: ${classColors[row.abc_class]};">${row.abc_class}</span></td>
-            </tr>
-        `).join('');
+                <td class="num">${index + 1}</td>
+                <td>${escapeHtml(row.assortment_name || '—')}</td>
+                <td class="num">${formatMoney(row.revenue)}</td>
+                <td class="num">${formatPercent(row.share_pct)}</td>
+                <td class="num">${formatPercent(row.cumulative_pct)}</td>
+                <td><span class="abc-badge abc-badge--${cls.toLowerCase()}">${cls}</span></td>
+            </tr>`;
+        }).join('');
     }
 
     /**
@@ -129,21 +159,35 @@
         return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(value || 0) + ' ₽';
     }
 
+    function formatPercent(value) {
+        return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(value || 0) + '%';
+    }
+
+    function escapeHtml(str) {
+        return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
+    }
+
     /**
      * Синхронизация данных из МойСклад
      */
+    // Синхронизация 28К заказов идёт ~40 минут фоновым потоком внутри того же
+    // воркера, что обслуживает сайт. Опрос статуса раз в 2 секунды всё это время
+    // сам был заметной нагрузкой, поэтому интервал — 10 секунд: прогресс всё
+    // равно обновляется медленно.
+    const SYNC_POLL_MS = 10000;
+
     async function syncMoyskladData() {
         const btn = document.getElementById('syncMoyskladData');
         const btnText = btn.querySelector('.btn-text');
-        const spinner = btn.querySelector('.btn-spinner');
         const statusEl = document.getElementById('abcSyncStatus');
 
         btn.disabled = true;
         btnText.textContent = 'Синхронизация...';
-        spinner.classList.remove('hidden');
         statusEl.classList.remove('hidden');
         statusEl.className = 'update-status';
-        statusEl.textContent = '⏳ Запуск синхронизации...';
+        statusEl.textContent = 'Запуск синхронизации...';
 
         try {
             const response = await fetch('/api/moysklad/sync', {
@@ -156,9 +200,8 @@
             const result = await response.json();
 
             if (!result.success) {
-                statusEl.textContent = '❌ Ошибка: ' + result.error;
-                statusEl.classList.add('error');
-                resetSyncButton(btn, btnText, spinner);
+                setSyncStatus(statusEl, 'Ошибка: ' + result.error, 'error');
+                resetSyncButton(btn, btnText);
                 return;
             }
 
@@ -167,42 +210,44 @@
                     const statusRes = await fetch('/api/moysklad/sync-status', { credentials: 'include' });
                     const statusData = await statusRes.json();
 
-                    if (statusData.success) {
-                        const status = statusData.status;
+                    if (!statusData.success) return;
 
-                        if (status.running) {
-                            statusEl.textContent = `⏳ ${status.message || 'Синхронизация...'}`;
-                        } else {
-                            clearInterval(checkInterval);
+                    const status = statusData.status;
 
-                            if (status.error) {
-                                statusEl.textContent = '❌ Ошибка: ' + status.error;
-                                statusEl.classList.add('error');
-                            } else {
-                                statusEl.textContent = '✅ ' + status.message;
-                                statusEl.classList.add('success');
-                                setTimeout(loadAbcData, 500);
-                            }
-
-                            resetSyncButton(btn, btnText, spinner);
-                            setTimeout(() => statusEl.classList.add('hidden'), 5000);
-                        }
+                    if (status.running) {
+                        statusEl.textContent = status.message || 'Синхронизация...';
+                        return;
                     }
+
+                    clearInterval(checkInterval);
+
+                    if (status.error) {
+                        setSyncStatus(statusEl, 'Ошибка: ' + status.error, 'error');
+                    } else {
+                        setSyncStatus(statusEl, status.message, 'success');
+                        setTimeout(loadAbcData, 500);
+                    }
+
+                    resetSyncButton(btn, btnText);
+                    setTimeout(() => statusEl.classList.add('hidden'), 5000);
                 } catch (e) {
                     console.error('Ошибка проверки статуса синхронизации:', e);
                 }
-            }, 2000);
+            }, SYNC_POLL_MS);
         } catch (error) {
-            statusEl.textContent = '❌ Ошибка: ' + error.message;
-            statusEl.classList.add('error');
-            resetSyncButton(btn, btnText, spinner);
+            setSyncStatus(statusEl, 'Ошибка: ' + error.message, 'error');
+            resetSyncButton(btn, btnText);
         }
     }
 
-    function resetSyncButton(btn, btnText, spinner) {
+    function setSyncStatus(statusEl, text, kind) {
+        statusEl.textContent = text;
+        statusEl.classList.add(kind);
+    }
+
+    function resetSyncButton(btn, btnText) {
         btn.disabled = false;
-        btnText.textContent = '🔄 Синхронизировать с МойСклад';
-        spinner.classList.add('hidden');
+        btnText.textContent = 'Синхронизировать с МойСклад';
     }
 
     /**
@@ -216,8 +261,7 @@
         if (applyBtn) applyBtn.addEventListener('click', loadAbcData);
         if (resetBtn) {
             resetBtn.addEventListener('click', function() {
-                document.getElementById('abcDateFrom').value = '';
-                document.getElementById('abcDateTo').value = '';
+                applyDefaultPeriod();
                 document.getElementById('abcChannel').value = '';
                 loadAbcData();
             });
@@ -229,6 +273,9 @@
             mutations.forEach(function(mutation) {
                 if (mutation.target.classList.contains('active') &&
                     mutation.target.getAttribute('data-page') === 'abc_analysis') {
+                    if (!document.getElementById('abcDateFrom').value) {
+                        applyDefaultPeriod();
+                    }
                     loadChannels();
                     loadAbcData();
                 }

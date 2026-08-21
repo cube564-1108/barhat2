@@ -27,3 +27,57 @@
   --font-heading: 'Vollkorn', Georgia, serif;                          /* заголовки, с засечками */
   --font-body:    'Inter', 'PT Sans', system-ui, -apple-system, sans-serif; /* текст (фолбэк MaximaEF-Light) */
 }
+
+/**
+ * Неймспейс --bx-* из DESIGN-SPEC.md §1 — обязателен для всех новых модулей.
+ *
+ * Цвета те же, что в --barkhat-* выше, набор полнее (тёмные оттенки, фоны,
+ * границы, семантика трендов, радиусы). Старые модули остаются на --barkhat-*,
+ * новый код пишется на --bx-*; здесь оба неймспейса просто сосуществуют, чтобы
+ * не переписывать существующую вёрстку ради переименования переменных.
+ *
+ * Значения синхронизированы с DESIGN-SPEC.md — менять только там и здесь вместе.
+ */
+:root {
+  /* Тёмные (винный «бархат») */
+  --bx-darkest:      #130810;
+  --bx-dark:         #1e0d1b;
+  --bx-wine:         #411330;  /* ГЛАВНЫЙ тёмный: шапки, числа, заголовки */
+  --bx-primary:      #4a1942;
+  --bx-medium:       #6b2660;
+  --bx-accent:       #8b3a7d;
+
+  /* Розовые */
+  --bx-pink-deep:    #B26FA1;
+  --bx-pink:         #D19CC2;
+  --bx-pink-bright:  #E1A4C9;
+  --bx-pink-light:   #E4C2DD;
+  --bx-pink-wash:    #F3E3EE;
+
+  /* Светлые фоны */
+  --bx-bg:           #faf4f9;
+  --bx-bg-2:         #f5e8f3;
+  --bx-white:        #ffffff;
+
+  /* Текст и линии */
+  --bx-text:         #3C3C3C;
+  --bx-text-2:       #6F6F6F;
+  --bx-muted:        #9b8f97;
+  --bx-border:       #eee2ea;
+  --bx-scroll:       #d1b8ce;
+
+  /* Семантика (тренды/статусы) */
+  --bx-up:           #0a7d3f;
+  --bx-down:         #c0322f;
+
+  /* Градиенты */
+  --bx-grad-header:  linear-gradient(135deg, #411330 0%, #B26FA1 100%);
+  --bx-grad-accent:  linear-gradient(135deg, #E1A4C9 0%, #B26FA1 100%);
+
+  /* Скругления */
+  --bx-r-sm: 4px;  --bx-r-md: 6px;  --bx-r-lg: 8px;  --bx-r-xl: 12px;  --bx-r-2xl: 16px;
+
+  /* Шрифты */
+  --bx-font-head: 'Vollkorn', Georgia, serif;
+  --bx-font-body: 'Inter', 'PT Sans', system-ui, -apple-system, sans-serif;
+}
