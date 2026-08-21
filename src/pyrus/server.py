@@ -194,9 +194,13 @@ except Exception as e:
 
 # Регистрируем blueprint МойСклад (ABC-анализ товаров)
 try:
-    from moysklad.server import moysklad_bp
+    from moysklad.server import moysklad_bp, start_sync_scheduler
     app.register_blueprint(moysklad_bp)
     logger.info("Blueprint МойСклад зарегистрирован")
+    # Инкрементальная синхронизация заказов идёт сама, раз в 30 минут.
+    # Планировщик стартует в каждом воркере, но прогон делает один — за это
+    # отвечает лок в БД (moysklad/storage.py::try_acquire_sync_lock).
+    start_sync_scheduler()
 except ImportError as e:
     logger.warning(f"Не удалось импортировать blueprint МойСклад: {e}")
 except Exception as e:

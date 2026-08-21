@@ -11,10 +11,10 @@
 
     document.addEventListener('userRoleChanged', function(e) {
         isAdmin = e.detail && e.detail.role === 'admin';
-        const syncBtn = document.getElementById('syncMoyskladData');
-        if (syncBtn) {
-            syncBtn.style.display = isAdmin ? '' : 'none';
-        }
+        ['syncMoyskladData', 'fullResyncMoysklad'].forEach(function(id) {
+            const btn = document.getElementById(id);
+            if (btn) btn.style.display = isAdmin ? '' : 'none';
+        });
     });
 
     /**
@@ -172,19 +172,29 @@
     /**
      * Синхронизация данных из МойСклад
      */
-    // Синхронизация 28К заказов идёт ~40 минут фоновым потоком внутри того же
-    // воркера, что обслуживает сайт. Опрос статуса раз в 2 секунды всё это время
-    // сам был заметной нагрузкой, поэтому интервал — 10 секунд: прогресс всё
-    // равно обновляется медленно.
-    const SYNC_POLL_MS = 10000;
+    // Инкрементальный прогон укладывается в секунды (тянет только заказы,
+    // изменившиеся с прошлого раза), поэтому опрашиваем часто. Полный прогон —
+    // это ~40 минут, и там частый опрос сам становится заметной нагрузкой,
+    // так что интервал у режимов разный.
+    const SYNC_POLL_MS = { incremental: 2000, full: 10000 };
 
-    async function syncMoyskladData() {
-        const btn = document.getElementById('syncMoyskladData');
+    // Сколько ждём появления нашего прогона, прежде чем решить, что запуститься
+    // он не смог (лок держит планировщик или другой админ)
+    const START_TIMEOUT_MS = 60000;
+
+    const SYNC_BUTTONS = {
+        incremental: { id: 'syncMoyskladData', idle: 'Обновить данные', busy: 'Обновление...' },
+        full: { id: 'fullResyncMoysklad', idle: 'Полная пересинхронизация', busy: 'Синхронизация...' },
+    };
+
+    async function runSync(mode) {
+        const config = SYNC_BUTTONS[mode];
+        const btn = document.getElementById(config.id);
         const btnText = btn.querySelector('.btn-text');
         const statusEl = document.getElementById('abcSyncStatus');
 
-        btn.disabled = true;
-        btnText.textContent = 'Синхронизация...';
+        setButtonsDisabled(true);
+        btnText.textContent = config.busy;
         statusEl.classList.remove('hidden');
         statusEl.className = 'update-status';
         statusEl.textContent = 'Запуск синхронизации...';
@@ -194,25 +204,42 @@
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
+                body: JSON.stringify({ mode: mode })
             });
 
             const result = await response.json();
 
             if (!result.success) {
                 setSyncStatus(statusEl, 'Ошибка: ' + result.error, 'error');
-                resetSyncButton(btn, btnText);
+                resetSyncButton(btn, btnText, config);
                 return;
             }
 
+            // Инкремент отрабатывает за пару секунд, и первый опрос статуса мог
+            // застать ещё не стартовавший прогон: сервер отдал бы прошлый
+            // завершённый лог, а страница показала бы ложное «готово» на старых
+            // данных. Ждём лога, начавшегося после нашего запуска.
+            const prevLogId = result.prev_log_id || 0;
+            const startedAt = Date.now();
+
             const checkInterval = setInterval(async () => {
                 try {
-                    const statusRes = await fetch('/api/moysklad/sync-status', { credentials: 'include' });
-                    const statusData = await statusRes.json();
+                    const status = await fetchSyncStatus();
+                    if (!status) return;
 
-                    if (!statusData.success) return;
-
-                    const status = statusData.status;
+                    if ((status.log_id || 0) <= prevLogId) {
+                        // Прогон может вообще не начаться: лок держит планировщик
+                        // или другой админ. Не ждём вечно — иначе кнопка залипает.
+                        if (Date.now() - startedAt > START_TIMEOUT_MS) {
+                            clearInterval(checkInterval);
+                            setSyncStatus(statusEl, 'Синхронизация уже выполняется, данные скоро обновятся', 'success');
+                            resetSyncButton(btn, btnText, config);
+                            setTimeout(() => statusEl.classList.add('hidden'), 5000);
+                            return;
+                        }
+                        statusEl.textContent = 'Запуск синхронизации...';
+                        return;
+                    }
 
                     if (status.running) {
                         statusEl.textContent = status.message || 'Синхронизация...';
@@ -228,15 +255,60 @@
                         setTimeout(loadAbcData, 500);
                     }
 
-                    resetSyncButton(btn, btnText);
+                    renderFreshness(status.last_success);
+                    resetSyncButton(btn, btnText, config);
                     setTimeout(() => statusEl.classList.add('hidden'), 5000);
                 } catch (e) {
                     console.error('Ошибка проверки статуса синхронизации:', e);
                 }
-            }, SYNC_POLL_MS);
+            }, SYNC_POLL_MS[mode]);
         } catch (error) {
             setSyncStatus(statusEl, 'Ошибка: ' + error.message, 'error');
-            resetSyncButton(btn, btnText);
+            resetSyncButton(btn, btnText, config);
+        }
+    }
+
+    async function fetchSyncStatus() {
+        const response = await fetch('/api/moysklad/sync-status', { credentials: 'include' });
+        const data = await response.json();
+        return data.success ? data.status : null;
+    }
+
+    /**
+     * Отметка свежести данных. Синхронизация идёт по расписанию сама, поэтому
+     * важно не «когда нажимали кнопку», а насколько отчёт отстаёт от МойСклад.
+     */
+    function renderFreshness(lastSuccess) {
+        const el = document.getElementById('abcSyncFreshness');
+        if (!el) return;
+
+        const date = window.BarhatTime ? window.BarhatTime.parse(lastSuccess) : null;
+        if (!date) {
+            el.textContent = '';
+            return;
+        }
+
+        const minutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+        let ago;
+        if (minutes < 1) {
+            ago = 'только что';
+        } else if (minutes < 60) {
+            ago = `${minutes} мин назад`;
+        } else if (minutes < 60 * 24) {
+            ago = `${Math.floor(minutes / 60)} ч назад`;
+        } else {
+            ago = window.BarhatTime.formatDateTimeLong(lastSuccess);
+        }
+
+        el.textContent = `Данные обновлены: ${ago}. Синхронизация выполняется автоматически каждые 30 минут.`;
+    }
+
+    async function loadFreshness() {
+        try {
+            const status = await fetchSyncStatus();
+            if (status) renderFreshness(status.last_success);
+        } catch (e) {
+            console.error('Ошибка загрузки статуса синхронизации:', e);
         }
     }
 
@@ -245,9 +317,16 @@
         statusEl.classList.add(kind);
     }
 
-    function resetSyncButton(btn, btnText) {
-        btn.disabled = false;
-        btnText.textContent = 'Синхронизировать с МойСклад';
+    function setButtonsDisabled(disabled) {
+        Object.values(SYNC_BUTTONS).forEach(function(config) {
+            const btn = document.getElementById(config.id);
+            if (btn) btn.disabled = disabled;
+        });
+    }
+
+    function resetSyncButton(btn, btnText, config) {
+        setButtonsDisabled(false);
+        btnText.textContent = config.idle;
     }
 
     /**
@@ -257,6 +336,7 @@
         const applyBtn = document.getElementById('applyAbcFilters');
         const resetBtn = document.getElementById('resetAbcFilters');
         const syncBtn = document.getElementById('syncMoyskladData');
+        const fullResyncBtn = document.getElementById('fullResyncMoysklad');
 
         if (applyBtn) applyBtn.addEventListener('click', loadAbcData);
         if (resetBtn) {
@@ -266,7 +346,23 @@
                 loadAbcData();
             });
         }
-        if (syncBtn) syncBtn.addEventListener('click', syncMoyskladData);
+        if (syncBtn) syncBtn.addEventListener('click', () => runSync('incremental'));
+        if (fullResyncBtn) {
+            fullResyncBtn.addEventListener('click', async function() {
+                // Нативный confirm внутри iframe Пульса молча игнорируется —
+                // кнопка выглядела бы сломанной. Диалоги только через BarhatUI.
+                const message = 'Все заказы за 6 месяцев будут перечитаны заново. '
+                    + 'Это занимает десятки минут и нагружает сайт. '
+                    + 'Обычно достаточно кнопки «Обновить данные».';
+                const ok = window.BarhatUI
+                    ? await window.BarhatUI.confirm(message, {
+                        title: 'Полная пересинхронизация',
+                        confirmText: 'Запустить',
+                    })
+                    : true;
+                if (ok) runSync('full');
+            });
+        }
 
         // Загружаем данные при активации страницы ABC-анализа
         const observer = new MutationObserver(function(mutations) {
@@ -278,6 +374,7 @@
                     }
                     loadChannels();
                     loadAbcData();
+                    loadFreshness();
                 }
             });
         });

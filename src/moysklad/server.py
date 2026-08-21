@@ -8,12 +8,13 @@ cashshifts_bp / invoices_bp. Ниже также есть standalone-режим 
 """
 
 import os
+import re
 import sys
 import logging
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 from flask import Blueprint, Flask, jsonify, request
 from flask_login import login_required
 from dotenv import load_dotenv
@@ -338,6 +339,35 @@ def get_stats():
 # перезапуск воркера или деплой.
 SYNC_STALE_MINUTES = 15
 
+# --- Инкрементальная синхронизация ---
+#
+# Раньше каждый прогон качал все заказы за последние 6 месяцев (filter=created>=...),
+# то есть ~28К заказов и 20–40 минут — при том, что реально изменились из них единицы.
+# Теперь основной режим — incremental: filter=updated>=<курсор>. У заказа, которому
+# сменили статус на «Выполнен», обновляется updated, так что ABC-анализ видит его так же,
+# как раньше. Полный прогон остался для первичного наполнения и еженедельной сверки.
+#
+# Курсор хранится ровно в том виде, в каком updated приходит из API, то есть в часовом
+# поясе аккаунта МойСклад. Это сознательно: прод на Amvera живёт в UTC, и любая попытка
+# сравнить локальное время сервера с временем МС промахнулась бы на 3 часа, молча теряя
+# заказы. Максимум из загруженных строк такой ошибки не допускает по построению.
+ORDERS_SYNC_LOCK = 'orders_sync'
+SYNC_CURSOR_KEY = 'orders_updated_cursor'
+FULL_SYNC_AT_KEY = 'orders_full_sync_at'
+CURSOR_BOOTSTRAP_KEY = 'orders_cursor_bootstrap_done'
+
+# Лок берётся на прогон и продлевается после каждой страницы. TTL нужен на случай,
+# когда держатель умер вместе с воркером (деплой) и release не позвал никто.
+ORDERS_SYNC_LOCK_TTL = 20 * 60
+
+# Заказ, изменённый в момент прогона, может не попасть в уже пройденные страницы —
+# поэтому следующий прогон стартует чуть раньше курсора. Повторы безопасны:
+# сохранение идёт через INSERT OR REPLACE.
+CURSOR_OVERLAP_MINUTES = 15
+
+FULL_SYNC_PERIOD_DAYS = 182
+MS_DATETIME_FORMATS = ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S')
+
 
 def _sync_log_is_stale(log: dict) -> bool:
     """Синхронизация числится запущенной, но прогресс давно не двигался"""
@@ -352,58 +382,89 @@ def _sync_log_is_stale(log: dict) -> bool:
     return (datetime.utcnow() - tick) > timedelta(minutes=SYNC_STALE_MINUTES)
 
 
-@moysklad_bp.route('/sync', methods=['POST'])
-@role_required('admin')
-def trigger_sync():
+def _parse_ms_datetime(value: str):
+    """Разобрать дату МойСклад ('2026-08-21 14:30:00.000'); None, если формат чужой"""
+    if not value:
+        return None
+    for fmt in MS_DATETIME_FORMATS:
+        try:
+            return datetime.strptime(str(value), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _shift_ms_datetime(value: str, minutes: int) -> str:
+    """Сдвинуть дату МойСклад назад на minutes (для overlap курсора)"""
+    parsed = _parse_ms_datetime(value)
+    if not parsed:
+        return str(value)
+    return (parsed - timedelta(minutes=minutes)).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _get_sync_cursor(storage) -> Optional[str]:
     """
-    Запустить синхронизацию данных из МойСклад (склады, папки, каналы продаж,
-    заказы покупателей с позициями) в фоновом потоке.
+    Курсор инкрементальной синхронизации; None — инкремент невозможен.
 
-    По умолчанию грузятся заказы за последние 6 месяцев (created >= сейчас - 6 мес) —
-    полная история на момент внедрения ABC-анализа составила 75К+ заказов (~110 мин
-    синхронизации), 6 месяцев покрывают 28К заказов (~40 мин) и достаточно для
-    большинства отчётов. Явный date_from переопределяет период, max_items — жёсткий
-    потолок на случай, если период всё равно окажется огромным.
+    Если курсора ещё нет (первый запуск после внедрения), но база уже наполнена
+    прошлым полным синком — берём максимум updated прямо из неё. Иначе пришлось бы
+    гонять полный 40-минутный прогон ради данных, которые уже лежат на диске.
+    """
+    cursor = storage.get_sync_state(SYNC_CURSOR_KEY)
+    if cursor:
+        return cursor
 
-    Body params:
-        - date_from (str): нижняя граница created, формат YYYY-MM-DD (по умолчанию — 6 месяцев назад)
-        - max_items (int): максимум заказов для загрузки (default 100000)
+    # Попытка ровно одна: MAX(json_extract(...)) — это полный скан sales_orders
+    # с разбором JSON каждой строки. Если json_extract недоступен или поля нет,
+    # без маркера планировщик гонял бы этот скан каждые 30 минут вхолостую.
+    if storage.get_sync_state(CURSOR_BOOTSTRAP_KEY):
+        return None
+
+    bootstrap = storage.get_max_order_updated()
+    storage.set_sync_state(CURSOR_BOOTSTRAP_KEY, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
+    if bootstrap:
+        storage.set_sync_state(SYNC_CURSOR_KEY, bootstrap)
+        logger.info(f"Курсор синхронизации восстановлен из БД: {bootstrap}")
+    return bootstrap
+
+
+def _sync_orders(mode: str = 'incremental', date_from: str = None, max_items: int = 100000) -> dict:
+    """
+    Один прогон синхронизации заказов. Лок должен быть уже захвачен вызывающим.
+
+    mode:
+        incremental — заказы с updated >= курсора (обычный режим, секунды)
+        full        — заказы с created >= date_from (первичное наполнение и сверка)
+
+    Заказы сохраняются постранично, а не одним блоком в конце: при 28К заказов и
+    прогоне на полчаса любое прерывание процесса (зависший запрос, перезапуск
+    воркера) при схеме «сначала весь список в память» теряло вообще весь прогресс —
+    сохранялось 0 записей без единой ошибки, что и произошло на первом прогоне на проде.
     """
     storage = get_db()
-    last_log = storage.get_latest_sync_log('sales_orders')
-    if last_log and last_log['status'] == 'started' and not _sync_log_is_stale(last_log):
-        return jsonify({
-            'success': False,
-            'error': 'Синхронизация уже запущена',
-        })
 
-    # Прерванный синк (перезапуск воркера, деплой) навсегда оставлял бы в логе
-    # статус 'started' — кнопка блокировалась бы бесконечно. Закрываем такую
-    # запись как failed, чтобы можно было запустить заново.
-    if last_log and last_log['status'] == 'started':
-        storage.finish_sync_log(
-            last_log['id'],
-            records_count=last_log['records_count'] or 0,
-            status='failed',
-            error_message='Синхронизация прервана (перезапуск сервера)'
-        )
+    cursor_value = _get_sync_cursor(storage) if mode == 'incremental' else None
+    if mode == 'incremental' and not cursor_value:
+        # Синхронизировать «с прошлого раза» не от чего — нужен полный прогон
+        logger.info("Курсор синхронизации отсутствует — переключаемся на полный прогон")
+        mode = 'full'
 
-    data = request.get_json(silent=True) or {}
-    max_items = data.get('max_items', 100000)
-    date_from = data.get('date_from')
-    if not date_from:
-        date_from = (datetime.now() - timedelta(days=182)).strftime('%Y-%m-%d')
+    if mode == 'full' and not date_from:
+        date_from = (datetime.now() - timedelta(days=FULL_SYNC_PERIOD_DAYS)).strftime('%Y-%m-%d')
 
-    def sync_in_background():
-        storage = get_db()
-        log_id = storage.start_sync_log('sales_orders')
-        saved_count = 0
-        try:
-            from .fetcher import get_fetcher
-            from .client import get_client
-            fetcher = get_fetcher()
-            client = get_client()
+    log_id = storage.start_sync_log('sales_orders')
+    saved_count = 0
+    max_updated = None
 
+    try:
+        from .fetcher import get_fetcher
+        from .client import get_client
+        fetcher = get_fetcher()
+        client = get_client()
+
+        # Справочники — только при полном прогоне. Склады, папки и каналы продаж
+        # меняются раз в месяц, тянуть их каждые полчаса ради ABC незачем.
+        if mode == 'full':
             for entity, label in [
                 ('stores', 'складов'),
                 ('folders', 'папок'),
@@ -419,55 +480,153 @@ def trigger_sync():
                 }[entity]
                 save_method(items)
 
-            # Заказы — постранично: сохраняем каждую страницу сразу после
-            # загрузки, а не всё скопом в конце (см. комментарий выше блока)
-            offset = 0
-            batch_size = 100  # МойСклад не разворачивает positions.rows при limit > 100
-            while saved_count < max_items:
-                response = client.get_sales_orders(
-                    limit=batch_size,
-                    offset=offset,
-                    filter={'filter': f'created>={date_from} 00:00:00'},
-                    expand='positions,positions.assortment,state'
-                )
-                if response is None:
-                    raise Exception('Ошибка запроса заказов к МойСклад API')
+        if mode == 'incremental':
+            since = _shift_ms_datetime(cursor_value, CURSOR_OVERLAP_MINUTES)
+            query_filter = {'filter': f'updated>={since}', 'order': 'updated,asc'}
+        else:
+            query_filter = {'filter': f'created>={date_from} 00:00:00', 'order': 'created,asc'}
+        # order задан явно: при offset-пагинации по меняющимся данным без
+        # фиксированного порядка заказ может «переехать» между страницами и
+        # выпасть из выборки целиком.
 
-                rows = response.get('rows', [])
-                if not rows:
-                    break
+        offset = 0
+        batch_size = 100  # МойСклад не разворачивает positions.rows при limit > 100
+        while saved_count < max_items:
+            response = client.get_sales_orders(
+                limit=batch_size,
+                offset=offset,
+                filter=query_filter,
+                expand='positions,positions.assortment,state'
+            )
+            if response is None:
+                raise Exception('Ошибка запроса заказов к МойСклад API')
 
-                # Вся страница — одной транзакцией (см. save_sales_orders_batch)
-                storage.save_sales_orders_batch(rows)
-                saved_count += len(rows)
-                offset += batch_size
+            rows = response.get('rows', [])
+            if not rows:
+                break
 
-                storage.update_sync_log_progress(log_id, saved_count)
+            # Вся страница — одной транзакцией (см. save_sales_orders_batch)
+            storage.save_sales_orders_batch(rows)
+            saved_count += len(rows)
+            offset += batch_size
 
-                if len(rows) < batch_size:
-                    break
+            page_max_updated = max((r.get('updated') or '' for r in rows), default='')
+            if page_max_updated > (max_updated or ''):
+                max_updated = page_max_updated
 
-                # Пауза между страницами. Синхронизация идёт фоновым потоком
-                # внутри воркера gunicorn, который параллельно обслуживает сайт:
-                # без паузы поток непрерывно держит GIL на разборе JSON и очередь
-                # к диску на записи, и всё остальное (авторизация, дашборд)
-                # начинает заметно тормозить. 0.3 с на страницу из 100 заказов —
-                # это ~+1.5 минуты к сорока на 28К заказов, разница незаметная.
-                time.sleep(0.3)
+            # В инкрементальном режиме страницы отсортированы по updated возрастанию,
+            # поэтому курсор можно двигать сразу: всё до max_updated уже сохранено, и
+            # обрыв на середине не заставит начинать сначала. В полном режиме порядок
+            # по created, updated немонотонен — курсор ставим только по успеху.
+            if mode == 'incremental' and max_updated:
+                storage.set_sync_state(SYNC_CURSOR_KEY, max_updated)
 
-            storage.finish_sync_log(log_id, records_count=saved_count, status='completed')
+            storage.update_sync_log_progress(log_id, saved_count)
+            storage.renew_sync_lock(ORDERS_SYNC_LOCK, ORDERS_SYNC_LOCK_TTL)
 
-        except Exception as e:
-            storage.finish_sync_log(log_id, records_count=saved_count, status='failed', error_message=str(e))
-            logger.error(f"Ошибка синхронизации МойСклад: {e}")
+            if len(rows) < batch_size:
+                break
 
-    thread = threading.Thread(target=sync_in_background)
-    thread.daemon = True
+            # Пауза между страницами. Синхронизация идёт фоновым потоком
+            # внутри воркера gunicorn, который параллельно обслуживает сайт:
+            # без паузы поток непрерывно держит GIL на разборе JSON и очередь
+            # к диску на записи, и всё остальное (авторизация, дашборд)
+            # начинает заметно тормозить.
+            time.sleep(0.3)
+
+        if mode == 'full':
+            if max_updated:
+                storage.set_sync_state(SYNC_CURSOR_KEY, max_updated)
+            storage.set_sync_state(FULL_SYNC_AT_KEY, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
+
+        storage.finish_sync_log(log_id, records_count=saved_count, status='completed')
+        logger.info(f"Синхронизация заказов ({mode}) завершена: {saved_count} заказов")
+        return {'mode': mode, 'saved': saved_count}
+
+    except Exception as e:
+        storage.finish_sync_log(log_id, records_count=saved_count, status='failed', error_message=str(e))
+        logger.error(f"Ошибка синхронизации МойСклад ({mode}): {e}")
+        raise
+
+
+def _run_orders_sync(mode: str = 'incremental', date_from: str = None, max_items: int = 100000) -> bool:
+    """
+    Прогон под локом. False — синхронизация уже идёт (в этом или соседнем воркере).
+    """
+    storage = get_db()
+    if not storage.try_acquire_sync_lock(ORDERS_SYNC_LOCK, ORDERS_SYNC_LOCK_TTL):
+        logger.info("Синхронизация заказов уже идёт — пропускаем запуск")
+        return False
+
+    try:
+        _sync_orders(mode=mode, date_from=date_from, max_items=max_items)
+    except Exception:
+        pass  # уже залогировано и записано в sync_log
+    finally:
+        storage.release_sync_lock(ORDERS_SYNC_LOCK)
+
+    return True
+
+
+@moysklad_bp.route('/sync', methods=['POST'])
+@role_required('admin')
+def trigger_sync():
+    """
+    Запустить синхронизацию заказов из МойСклад в фоновом потоке.
+
+    Body params:
+        - mode (str): incremental (по умолчанию, секунды) | full (полный ресинк, десятки минут)
+        - date_from (str): нижняя граница created для full, YYYY-MM-DD (по умолчанию — 6 месяцев назад)
+        - max_items (int): максимум заказов для загрузки (default 100000)
+
+    Полная история на момент внедрения ABC-анализа — 75К+ заказов (~110 мин), 6 месяцев
+    покрывают 28К заказов (~40 мин) и достаточно для большинства отчётов.
+    """
+    storage = get_db()
+    last_log = storage.get_latest_sync_log('sales_orders')
+
+    # Прерванный синк (перезапуск воркера, деплой) навсегда оставлял бы в логе
+    # статус 'started' — статус на странице показывал бы вечный спиннер.
+    # Закрываем такую запись как failed. Защита от параллельного запуска — не здесь,
+    # а на локе внутри _run_orders_sync: проверка статуса гоночная по своей природе.
+    if last_log and last_log['status'] == 'started' and _sync_log_is_stale(last_log):
+        storage.finish_sync_log(
+            last_log['id'],
+            records_count=last_log['records_count'] or 0,
+            status='failed',
+            error_message='Синхронизация прервана (перезапуск сервера)'
+        )
+
+    data = request.get_json(silent=True) or {}
+    mode = 'full' if data.get('mode') == 'full' else 'incremental'
+    date_from = data.get('date_from')
+
+    # date_from уходит в строку фильтра запроса к МойСклад — принимаем только
+    # календарную дату, а не произвольный текст из тела запроса
+    if date_from and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(date_from)):
+        return error_response('date_from должен быть в формате YYYY-MM-DD')
+
+    try:
+        max_items = int(data.get('max_items', 100000))
+    except (TypeError, ValueError):
+        return error_response('max_items должен быть числом')
+    max_items = max(1, min(max_items, 1000000))
+
+    def sync_in_background():
+        _run_orders_sync(mode=mode, date_from=date_from, max_items=max_items)
+
+    thread = threading.Thread(target=sync_in_background, daemon=True)
     thread.start()
 
     return jsonify({
         'success': True,
-        'message': 'Синхронизация запущена',
+        'message': 'Полная пересинхронизация запущена' if mode == 'full' else 'Синхронизация запущена',
+        'mode': mode,
+        # id лога на момент запуска: инкрементальный прогон укладывается в пару
+        # секунд, поэтому первый же опрос статуса мог застать ещё не начавшийся
+        # синк, увидеть прошлый завершённый лог и отрапортовать ложное «готово».
+        # Фронтенд ждёт лога с id больше этого.
+        'prev_log_id': last_log['id'] if last_log else 0,
     })
 
 
@@ -502,15 +661,117 @@ def get_sync_status():
     else:
         message = ''
 
+    # last_success — время последнего успешного прогона, а не последнего вообще:
+    # именно оно отвечает на вопрос «насколько свежие данные в отчёте».
+    last_success = storage.get_latest_sync_log('sales_orders', status='completed')
+
     return jsonify({
         'success': True,
         'status': {
             'running': running,
             'error': error,
             'message': message,
+            'log_id': last_log['id'] if last_log else 0,
             'last_sync': last_log['finished_at'] if last_log else None,
+            'last_success': last_success['finished_at'] if last_success else None,
         }
     })
+
+
+# ========== Планировщик: синхронизация без участия человека ==========
+#
+# Интервал 30 минут: инкрементальный прогон за это время набирает считанные заказы,
+# то есть одну страницу и несколько секунд работы — нагрузки на сайт практически нет.
+SCHEDULER_INTERVAL_SECONDS = 30 * 60
+
+# Задержка перед первым прогоном: на старте воркера и так идут миграции и прогрев,
+# добавлять туда же сетевые запросы к МойСклад незачем.
+SCHEDULER_START_DELAY_SECONDS = 120
+
+# Инкремент по updated не видит заказы, удалённые в МойСклад: у удалённой записи
+# ничего не обновляется, её просто больше нет в выдаче. Полный прогон раз в неделю
+# приводит локальную базу в соответствие с источником.
+FULL_RESYNC_INTERVAL_DAYS = 7
+
+# Полный прогон — это десятки минут фоновой нагрузки, поэтому только ночью.
+# Прод живёт в UTC, салоны — в UTC+5/+7, так что 21:00–23:59 UTC это глубокая ночь
+# и в Москве, и на востоке.
+FULL_RESYNC_NIGHT_HOURS_UTC = (21, 22, 23)
+
+_scheduler_started = False
+
+
+def _full_resync_due(storage) -> bool:
+    """Пора ли гнать еженедельный полный прогон"""
+    last_full = storage.get_sync_state(FULL_SYNC_AT_KEY)
+    if not last_full:
+        return True
+    parsed = _parse_ms_datetime(last_full)
+    if not parsed:
+        return True
+    return (datetime.utcnow() - parsed) > timedelta(days=FULL_RESYNC_INTERVAL_DAYS)
+
+
+def _scheduled_mode(storage) -> Optional[str]:
+    """
+    Какой прогон запускать сейчас; None — не запускать ничего.
+
+    Полный прогон допускается только ночью: если базу ещё ни разу не наполняли,
+    сорокаминутный синк, стартовавший днём в разгар работы салонов, положил бы сайт.
+    """
+    night = datetime.utcnow().hour in FULL_RESYNC_NIGHT_HOURS_UTC
+
+    if not _get_sync_cursor(storage):
+        return 'full' if night else None
+
+    if night and _full_resync_due(storage):
+        return 'full'
+
+    return 'incremental'
+
+
+def _scheduler_loop():
+    """Фоновый цикл синхронизации (по одному в каждом воркере, работает — один)"""
+    time.sleep(SCHEDULER_START_DELAY_SECONDS)
+
+    while True:
+        try:
+            mode = _scheduled_mode(get_db())
+            if mode:
+                # Лок внутри _run_orders_sync решает две задачи разом: не даёт двум
+                # воркерам гнать один и тот же прогон и не даёт планировщику влезть
+                # в ручную синхронизацию, запущенную админом с дашборда.
+                _run_orders_sync(mode=mode)
+        except Exception as e:
+            logger.error(f"Ошибка планировщика синхронизации МойСклад: {e}")
+
+        time.sleep(SCHEDULER_INTERVAL_SECONDS)
+
+
+def start_sync_scheduler() -> None:
+    """
+    Запустить фоновую синхронизацию заказов.
+
+    Вызывается из pyrus/server.py после регистрации blueprint. Отключается
+    переменной MOYSKLAD_SYNC_SCHEDULER=0 (локальная разработка: не хочется, чтобы
+    каждый запуск сервера лез в боевой МойСклад).
+    """
+    global _scheduler_started
+
+    if os.getenv('MOYSKLAD_SYNC_SCHEDULER', '1') != '1':
+        logger.info("Планировщик синхронизации МойСклад отключён (MOYSKLAD_SYNC_SCHEDULER=0)")
+        return
+
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+
+    thread = threading.Thread(target=_scheduler_loop, daemon=True, name='moysklad-sync-scheduler')
+    thread.start()
+    logger.info(
+        f"Планировщик синхронизации МойСклад запущен "
+        f"(интервал {SCHEDULER_INTERVAL_SECONDS // 60} мин)"
+    )
 
 
 # ========== Синхронизация каталога товаров (для справочников) ==========

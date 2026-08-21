@@ -8,7 +8,7 @@ import sqlite3
 import json
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 from dotenv import load_dotenv
@@ -353,6 +353,17 @@ class MoySkladStorage:
             # блокировала бы запуск нового синка навсегда.
             _add_column_if_missing(conn, 'sync_log', 'progress_at', 'TIMESTAMP')
 
+            # Состояние синхронизации: курсор инкрементального синка и локи.
+            # Отдельная key-value таблица, а не колонки в sync_log: значения живут
+            # дольше отдельного прогона (курсор переживает и обрыв, и перезапуск).
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sync_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             logger.info(f"БД инициализирована: {self.db_path}")
 
     def save_product(self, product: Dict, snapshot_at: Optional[datetime] = None) -> bool:
@@ -639,6 +650,17 @@ class MoySkladStorage:
             json.dumps(raw_order, ensure_ascii=False),
             snapshot_ts
         ))
+
+        # Позиции заказа переписываем целиком, а не дополняем: INSERT OR REPLACE
+        # обновляет только те строки, что пришли, и позиция, удалённая из заказа
+        # в МойСклад, оставалась в локальной базе навсегда — продолжая считаться
+        # выручкой в ABC-анализе. При инкрементальной синхронизации заказ приезжает
+        # повторно на каждую правку, так что расхождение только копилось бы.
+        #
+        # Условие if rows: страница без expand=positions (или заказ без позиций)
+        # не должна стирать уже загруженные позиции.
+        if rows:
+            cursor.execute('DELETE FROM order_positions WHERE order_id = ?', (order.get('id'),))
 
         for position in rows:
             self._save_order_position(cursor, order.get('id'), position, snapshot_ts)
@@ -1044,9 +1066,14 @@ class MoySkladStorage:
         except Exception as e:
             logger.error(f"Ошибка обновления прогресса синхронизации: {e}")
 
-    def get_latest_sync_log(self, entity_type: Optional[str] = None) -> Optional[Dict]:
+    def get_latest_sync_log(
+        self,
+        entity_type: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> Optional[Dict]:
         """
-        Получить последнюю запись лога синхронизации (опционально — по типу сущности).
+        Получить последнюю запись лога синхронизации (опционально — по типу сущности
+        и статусу; status='completed' отвечает на вопрос «когда данные были свежими»).
 
         Читается из общей таблицы sync_log (файл на диске), а не из памяти процесса —
         в отличие от in-memory статуса, одинаково видна из любого воркера gunicorn
@@ -1056,18 +1083,129 @@ class MoySkladStorage:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                query = 'SELECT * FROM sync_log'
+                conditions = []
+                params: List[Any] = []
                 if entity_type:
-                    cursor.execute(
-                        'SELECT * FROM sync_log WHERE entity_type = ? ORDER BY id DESC LIMIT 1',
-                        (entity_type,)
-                    )
-                else:
-                    cursor.execute('SELECT * FROM sync_log ORDER BY id DESC LIMIT 1')
+                    conditions.append('entity_type = ?')
+                    params.append(entity_type)
+                if status:
+                    conditions.append('status = ?')
+                    params.append(status)
+                if conditions:
+                    query += ' WHERE ' + ' AND '.join(conditions)
+                query += ' ORDER BY id DESC LIMIT 1'
+
+                cursor.execute(query, params)
                 row = cursor.fetchone()
                 return dict(row) if row else None
         except Exception as e:
             logger.error(f"Ошибка получения лога синхронизации: {e}")
             return None
+
+    # ========== Состояние синхронизации (курсор, локи) ==========
+
+    def get_max_order_updated(self) -> Optional[str]:
+        """
+        Максимальный `updated` среди уже загруженных заказов (формат и часовой
+        пояс МойСклад, как он пришёл из API).
+
+        Нужен ровно один раз — чтобы стартовать инкрементальную синхронизацию на
+        базе, наполненной старым полным синком, не гоняя полный прогон заново.
+        Отдельной колонки updated в sales_orders нет, поэтому достаём из raw_data;
+        json_extract есть не во всякой сборке SQLite, отсюда мягкий отказ.
+        """
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT MAX(json_extract(raw_data, '$.updated')) AS max_updated FROM sales_orders"
+                ).fetchone()
+                return row['max_updated'] if row else None
+        except Exception as e:
+            logger.warning(f"Не удалось вычислить максимальный updated по заказам: {e}")
+            return None
+
+    def get_sync_state(self, key: str) -> Optional[str]:
+        """Прочитать значение из sync_state (None, если ключа нет)"""
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute('SELECT value FROM sync_state WHERE key = ?', (key,)).fetchone()
+                return row['value'] if row else None
+        except Exception as e:
+            logger.error(f"Ошибка чтения sync_state[{key}]: {e}")
+            return None
+
+    def set_sync_state(self, key: str, value: str) -> None:
+        """Записать значение в sync_state"""
+        try:
+            with self._get_connection() as conn:
+                conn.execute('''
+                    INSERT INTO sync_state (key, value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                ''', (key, value))
+        except Exception as e:
+            logger.error(f"Ошибка записи sync_state[{key}]: {e}")
+
+    def try_acquire_sync_lock(self, name: str, ttl_seconds: int) -> bool:
+        """
+        Захватить лок с таймаутом. True — лок наш, False — держит кто-то другой.
+
+        Зачем: на проде 2 воркера gunicorn, и в каждом крутится свой планировщик
+        (см. server.py::_scheduler_loop). Проверка "статус последнего sync_log ==
+        started" для этого не годится — между чтением статуса и стартом потока
+        есть окно, в которое влезает второй воркер, и оба качают одно и то же.
+        Здесь захват — один UPDATE ... WHERE, то есть атомарен на уровне SQLite.
+
+        В value лежит время истечения лока: держатель мог умереть вместе с воркером
+        (деплой, OOM) и никогда не позвать release — по TTL лок освободится сам.
+        Долгий прогон обязан продлевать лок через renew_sync_lock.
+        """
+        key = f'lock:{name}'
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        expires = (datetime.utcnow() + timedelta(seconds=ttl_seconds)).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with self._get_connection() as conn:
+                # Первый заход: строки ещё нет. INSERT OR IGNORE ставит заведомо
+                # истёкший срок, чтобы UPDATE ниже отработал по общему правилу.
+                conn.execute(
+                    "INSERT OR IGNORE INTO sync_state (key, value, updated_at) VALUES (?, '', CURRENT_TIMESTAMP)",
+                    (key,)
+                )
+                cursor = conn.execute('''
+                    UPDATE sync_state
+                    SET value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE key = ? AND (value = '' OR value < ?)
+                ''', (expires, key, now))
+                # Формат времени фиксированной ширины — лексикографическое
+                # сравнение строк совпадает с хронологическим
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка захвата лока {name}: {e}")
+            return False
+
+    def renew_sync_lock(self, name: str, ttl_seconds: int) -> None:
+        """Продлить свой лок (вызывать по ходу долгого прогона)"""
+        expires = (datetime.utcnow() + timedelta(seconds=ttl_seconds)).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    'UPDATE sync_state SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?',
+                    (expires, f'lock:{name}')
+                )
+        except Exception as e:
+            logger.error(f"Ошибка продления лока {name}: {e}")
+
+    def release_sync_lock(self, name: str) -> None:
+        """Освободить лок"""
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE sync_state SET value = '', updated_at = CURRENT_TIMESTAMP WHERE key = ?",
+                    (f'lock:{name}',)
+                )
+        except Exception as e:
+            logger.error(f"Ошибка освобождения лока {name}: {e}")
 
     def get_stats(self) -> Dict:
         """Получить статистику БД"""
