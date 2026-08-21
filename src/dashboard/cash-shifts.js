@@ -19,6 +19,10 @@
     let editingShiftStatus = null;  // 'open' | 'closed' — от него зависит, что правим
     let openShifts = [];  // Открытые смены по всем доступным точкам
 
+    // Сколько строк инкассаций тянем за раз. Итоги по салонам лимит не трогает —
+    // их считает бэкенд отдельным запросом по всему периоду
+    const COLLECTIONS_LIMIT = 200;
+
     // === DOM элементы ===
     const elements = {
         cashShiftsNav: null,
@@ -33,6 +37,14 @@
         refreshOpenShiftsBtn: null,
         shiftDateFilter: null,
         applyDateFilterBtn: null,
+        collectionsStoreFilter: null,
+        collectionsDateFrom: null,
+        collectionsDateTo: null,
+        applyCollectionsFilterBtn: null,
+        resetCollectionsFilterBtn: null,
+        collectionsSummary: null,
+        collectionsTbody: null,
+        collectionsHint: null,
         // Модальные окна
         openShiftModal: null,
         openShiftOverlay: null,
@@ -107,6 +119,15 @@
         elements.refreshOpenShiftsBtn = document.getElementById('refresh-open-shifts');
         elements.shiftDateFilter = document.getElementById('shift-date-filter');
         elements.applyDateFilterBtn = document.getElementById('apply-date-filter');
+
+        elements.collectionsStoreFilter = document.getElementById('collections-store-filter');
+        elements.collectionsDateFrom = document.getElementById('collections-date-from');
+        elements.collectionsDateTo = document.getElementById('collections-date-to');
+        elements.applyCollectionsFilterBtn = document.getElementById('apply-collections-filter');
+        elements.resetCollectionsFilterBtn = document.getElementById('reset-collections-filter');
+        elements.collectionsSummary = document.getElementById('collections-summary');
+        elements.collectionsTbody = document.getElementById('collections-tbody');
+        elements.collectionsHint = document.getElementById('collections-hint');
 
         // Модальные окна
         elements.openShiftModal = document.getElementById('open-shift-modal');
@@ -230,6 +251,19 @@
             elements.applyDateFilterBtn.addEventListener('click', loadShiftsHistory);
         }
 
+        // Фильтры таблицы инкассаций
+        if (elements.applyCollectionsFilterBtn) {
+            elements.applyCollectionsFilterBtn.addEventListener('click', loadCollections);
+        }
+        if (elements.resetCollectionsFilterBtn) {
+            elements.resetCollectionsFilterBtn.addEventListener('click', () => {
+                if (elements.collectionsStoreFilter) elements.collectionsStoreFilter.value = '';
+                if (elements.collectionsDateFrom) elements.collectionsDateFrom.value = '';
+                if (elements.collectionsDateTo) elements.collectionsDateTo.value = '';
+                loadCollections();
+            });
+        }
+
         // Выбор точки для просмотра текущей смены (админ/менеджер)
         if (elements.shiftStoreSelector) {
             elements.shiftStoreSelector.addEventListener('change', () => {
@@ -350,6 +384,7 @@
         loadCategories();
         loadCurrentShift();
         loadShiftsHistory();
+        loadCollections();
 
         // Сводка по открытым сменам: админу — все точки, менеджеру и флористу —
         // только свои. Бэкенд сам сужает выборку по user_stores, роль здесь
@@ -450,6 +485,24 @@
                         option.textContent = store.name;
                         elements.shiftStoreSelector.appendChild(option);
                     });
+                }
+            }
+
+            // Фильтр салонов в таблице инкассаций. Флористу он не нужен —
+            // точка одна, и бэкенд всё равно отдаёт только её инкассации
+            if (elements.collectionsStoreFilter) {
+                const isFlorist = currentUserData && currentUserData.role === 'florist';
+                elements.collectionsStoreFilter.style.display = isFlorist ? 'none' : '';
+                if (!isFlorist) {
+                    const selected = elements.collectionsStoreFilter.value;
+                    elements.collectionsStoreFilter.innerHTML = '<option value="">Все салоны</option>';
+                    storeList.forEach(store => {
+                        const option = document.createElement('option');
+                        option.value = store.id;
+                        option.textContent = store.name;
+                        elements.collectionsStoreFilter.appendChild(option);
+                    });
+                    elements.collectionsStoreFilter.value = selected;
                 }
             }
 
@@ -821,6 +874,99 @@
         return formatMoney(value);
     }
 
+    // =========================================================================
+    // ИНКАССАЦИИ ПО САЛОНАМ
+    // =========================================================================
+
+    // === Загрузка инкассаций (все смены доступных пользователю салонов) ===
+    async function loadCollections() {
+        if (!elements.collectionsTbody) return;
+
+        try {
+            const params = new URLSearchParams();
+
+            const storeId = elements.collectionsStoreFilter?.value;
+            if (storeId) {
+                params.append('store_id', storeId);
+            }
+
+            // Границы периода считаем так же, как в истории смен: в базе время
+            // в UTC, а выбранная дата — день по часам сотрудника
+            const dateFrom = elements.collectionsDateFrom?.value;
+            const dateTo = elements.collectionsDateTo?.value;
+            if (dateFrom) {
+                params.append('date_from', window.BarhatTime.dayStartUtc(dateFrom));
+            }
+            if (dateTo) {
+                params.append('date_to', window.BarhatTime.dayEndUtc(dateTo));
+            }
+            params.append('limit', String(COLLECTIONS_LIMIT));
+
+            const result = await apiRequest(`/api/cash-shifts/collections?${params}`);
+            renderCollections(
+                result.collections || [],
+                result.by_store || [],
+                result.total || 0
+            );
+
+            console.log('[CashShifts] Инкассации загружены:', (result.collections || []).length);
+        } catch (error) {
+            console.error('[CashShifts] Ошибка загрузки инкассаций:', error);
+            renderCollections([], [], 0);
+        }
+    }
+
+    // === Рендер таблицы инкассаций ===
+    function renderCollections(collections, byStore, total) {
+        if (!elements.collectionsTbody) return;
+
+        if (collections.length === 0) {
+            elements.collectionsTbody.innerHTML = `
+                <tr>
+                    <td colspan="5" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                        Нет инкассаций за выбранный период
+                    </td>
+                </tr>
+            `;
+        } else {
+            elements.collectionsTbody.innerHTML = collections.map(c => `
+                <tr>
+                    <td>${formatDateTime(c.date)}</td>
+                    <td>${escapeHtml(c.store_name || '—')}</td>
+                    <td>${formatMoney(c.amount)}</td>
+                    <td>${escapeHtml(c.category_name || '—')}</td>
+                    <td>${escapeHtml(c.created_by_full_name || c.created_by || '—')}</td>
+                </tr>
+            `).join('');
+        }
+
+        // Итоги по салонам считает бэкенд по всему периоду, а не по показанным
+        // строкам: таблица обрезана лимитом, суммы — нет
+        if (elements.collectionsSummary) {
+            const pills = byStore.map(row => `
+                <span style="display: inline-flex; gap: 6px; align-items: baseline; padding: 6px 12px;
+                             border-radius: 999px; background: var(--barkhat-bg); font-size: 13px;">
+                    <span>${escapeHtml(row.store_name || 'Салон ' + row.store_id)}</span>
+                    <strong>${formatMoney(row.total)}</strong>
+                    <span style="color: var(--barkhat-gray);">${row.count}</span>
+                </span>
+            `).join('');
+            const totalPill = byStore.length
+                ? `<span style="display: inline-flex; gap: 6px; align-items: baseline; padding: 6px 12px;
+                                border-radius: 999px; background: var(--barkhat-bg); font-size: 13px;">
+                       <span>Итого</span><strong>${formatMoney(total)}</strong>
+                   </span>`
+                : '';
+            elements.collectionsSummary.innerHTML = totalPill + pills;
+        }
+
+        if (elements.collectionsHint) {
+            elements.collectionsHint.textContent = collections.length >= COLLECTIONS_LIMIT
+                ? `Показаны последние ${COLLECTIONS_LIMIT} инкассаций — сузьте период, чтобы увидеть остальные. Суммы по салонам посчитаны за весь период.`
+                : '';
+        }
+    }
+
     // === Рендер кнопок действий ===
     function renderShiftActions() {
         if (!elements.shiftActions) return;
@@ -955,6 +1101,8 @@
 
             showNotification('Смена удалена', 'success');
             loadShiftsHistory();
+            // Инкассации удалённой смены исчезли вместе с ней
+            loadCollections();
             if (canSeeOpenShifts()) {
                 loadOpenShifts();
             }
@@ -1176,6 +1324,7 @@
             showNotification('Инкассация добавлена', 'success');
             closeAddCollectionModal();
             loadCurrentShift();
+            loadCollections();
             // Инкассации и плановый остаток видны только в этой таблице —
             // без перезагрузки они останутся с прежними цифрами
             if (canSeeOpenShifts()) {
@@ -1407,6 +1556,7 @@
                 closeEditShiftModal();
                 loadOpenShifts();
                 loadCurrentShift();
+                loadCollections();
                 return;
             }
 
@@ -1417,6 +1567,7 @@
             showNotification('Смена исправлена и пересчитана', 'success');
             closeEditShiftModal();
             loadShiftsHistory();
+            loadCollections();
 
         } catch (error) {
             console.error('[CashShifts] Ошибка исправления смены:', error);

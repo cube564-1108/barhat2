@@ -48,6 +48,8 @@ from .storage import (
     create_collection,
     get_shift_collections,
     get_collections_total,
+    list_collections,
+    get_collections_by_store,
     update_collection,
     # Кэш заказов
     cache_cash_orders,
@@ -1353,6 +1355,88 @@ def list_open_shifts():
         logger.error(f"Ошибка /api/cash-shifts/open-shifts: {e}")
         import traceback
         traceback.print_exc()
+        return error_response(str(e), 500)
+
+
+# =============================================================================
+# ЭНДПОИНТЫ: ИНКАССАЦИИ ПО САЛОНАМ
+# =============================================================================
+
+@cashshifts_bp.route("/collections", methods=["GET"])
+@login_required
+def list_all_collections():
+    """
+    Сводная таблица инкассаций по салонам (все смены, не только открытые).
+
+    Админ видит все точки, остальные роли — только свои (user_stores), как и в
+    остальных выборках модуля. Роль здесь ничего не решает: выборку сужает
+    бэкенд, фронтенд только отображает.
+
+    Query params:
+        - store_id (int, опционально): только по одной точке
+        - date_from / date_to (str, опционально): границы периода по дате
+          инкассации в UTC ('YYYY-MM-DD HH:MM:SS'), как хранится в БД
+        - limit (int, опционально): максимум строк (default 200, максимум 1000)
+        - offset (int, опционально)
+
+    Returns:
+        - collections: [{id, date, store_name, amount, category_name,
+                         created_by, created_by_full_name, custom_comment}, ...]
+        - by_store: [{store_id, store_name, count, total}, ...] — итоги за период
+        - total: сумма всех инкассаций за период (не только показанных строк)
+    """
+    try:
+        store_id = request.args.get("store_id", type=int)
+        date_from = request.args.get("date_from")
+        date_to = request.args.get("date_to")
+        limit = min(request.args.get("limit", 200, type=int), 1000)
+        offset = request.args.get("offset", 0, type=int)
+
+        role = get_current_user_role()
+        username = get_current_username()
+
+        if store_id:
+            require_store_access(store_id)
+            store_ids = [store_id]
+        else:
+            store_ids = None if role == "admin" else get_user_stores(username)
+
+        collections = list_collections(
+            store_ids=store_ids,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            offset=offset
+        )
+        by_store = get_collections_by_store(
+            store_ids=store_ids,
+            date_from=date_from,
+            date_to=date_to
+        )
+
+        # ФИО авторов — тем же способом, что и в журнале смены
+        usernames = {c.get("created_by") for c in collections}
+        usernames.discard(None)
+        full_names = get_users_full_names(list(usernames))
+
+        result = []
+        for c in collections:
+            item = dict(c)
+            item["created_by_full_name"] = full_names.get(c.get("created_by"))
+            result.append(item)
+
+        return jsonify(success_response({
+            "count": len(result),
+            "limit": limit,
+            "collections": result,
+            "by_store": by_store,
+            "total": sum(row["total"] for row in by_store)
+        }))
+
+    except StoreAccessError:
+        return error_response("Нет доступа к указанной точке", 403)
+    except Exception as e:
+        logger.error(f"Ошибка /api/cash-shifts/collections: {e}")
         return error_response(str(e), 500)
 
 

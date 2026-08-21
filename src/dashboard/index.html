@@ -972,6 +972,7 @@
                                     <p class="module-guide-note">Категорию инкассации нужно выбрать из подсказки: начните вводить название и нажмите на нужную строку. Своё название не сохранится — форма попросит выбрать из списка.</p>
                                     <p class="module-guide-note">На салоне может быть только одна открытая смена. Пока прошлая не закрыта, новая не откроется.</p>
                                     <p class="module-guide-note">Начальный остаток не сходится с кассой — не закрывайте на глаз, попросите управляющего поправить его кнопкой «Исправить» в таблице «Открытые смены».</p>
+                                    <p class="module-guide-note">Все проведённые инкассации вашего салона видны внизу страницы в таблице «Инкассации по салонам» — с датой, суммой, статьёй и автором.</p>
                                     <p class="module-guide-note">Ошиблись при закрытии — <strong>«Исправить»</strong> в строке своей последней закрытой смены: правятся фактический остаток и суммы инкассаций, можно добавить забытую. Смена пересчитается заново. Более ранние смены правит администратор.</p>
                                 </div>
 
@@ -982,6 +983,7 @@
                                         <li>Продажи приходят из RetailCRM и сохраняются на время. Время последних данных указано над таблицей, <strong>«Обновить»</strong> — запросить заново.</li>
                                         <li><strong>«Исправить»</strong> у открытой смены — начальный остаток и суммы уже внесённых инкассаций, можно добавить пропущенную. Фактический остаток здесь не задаётся: касса пересчитывается только при закрытии.</li>
                                         <li><strong>«Журнал»</strong> по любой смене — кто открыл и закрыл, все наличные заказы из CRM и все инкассации с авторами и комментариями.</li>
+                                    <li><strong>«Инкассации по салонам»</strong> — все инкассации ваших салонов подряд: дата, салон, сумма, статья и кто провёл. Фильтры — салон и период, над таблицей — итоги по каждому салону за выбранный период.</li>
                                         <li>Салон выбирается в списке вверху страницы — от него зависят кнопки смены и «История смен».</li>
                                     </ul>
                                     <p class="module-guide-note">Закрытые смены вы не правите: флорист исправляет последнюю смену своего салона, всё остальное — администратор.</p>
@@ -1111,6 +1113,45 @@
                                     </tbody>
                                 </table>
                             </div>
+                        </div>
+
+                        <!-- Инкассации по салонам: все инкассации из всех смен,
+                             доступных пользователю, с итогами по каждому салону -->
+                        <div class="card calculator-card" id="collections-card">
+                            <div class="card-header">
+                                <h3 class="card-title">Инкассации по салонам</h3>
+                                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                                    <select id="collections-store-filter" class="form-select" style="width: 220px;">
+                                        <option value="">Все салоны</option>
+                                    </select>
+                                    <input type="date" id="collections-date-from" class="form-input" style="width: 150px;" title="Период с">
+                                    <input type="date" id="collections-date-to" class="form-input" style="width: 150px;" title="Период по">
+                                    <button id="apply-collections-filter" class="btn btn-secondary btn-sm">Применить</button>
+                                    <button id="reset-collections-filter" class="btn btn-secondary btn-sm">Сбросить</button>
+                                </div>
+                            </div>
+                            <div id="collections-summary" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;"></div>
+                            <div id="collections-table" style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Дата инкассации</th>
+                                            <th>Салон</th>
+                                            <th>Сумма инкассации</th>
+                                            <th>Статья инкассации</th>
+                                            <th>Кто сделал инкассацию</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="collections-tbody">
+                                        <tr>
+                                            <td colspan="5" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                Загрузка данных...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="form-hint" id="collections-hint" style="margin-top: 8px;"></p>
                         </div>
 
                     </section>

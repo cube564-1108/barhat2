@@ -791,6 +791,128 @@ def get_collections_total(shift_id: int) -> float:
     return result["total"] if result else 0.0
 
 
+def _build_collections_filter(
+    store_ids: Optional[List[int]],
+    date_from: Optional[str],
+    date_to: Optional[str]
+) -> Optional[tuple]:
+    """
+    Собрать WHERE и параметры для выборок по инкассациям.
+
+    Возвращает None, если store_ids — пустой список: у пользователя нет ни одной
+    доступной точки, и выборка заведомо пуста (без этого условие `IN ()` было бы
+    синтаксически битым).
+    """
+    conditions = ["1=1"]
+    params: List[Any] = []
+
+    if store_ids is not None:
+        if not store_ids:
+            return None
+        placeholders = ", ".join("?" for _ in store_ids)
+        conditions.append(f"cs.store_id IN ({placeholders})")
+        params.extend(store_ids)
+
+    if date_from:
+        conditions.append("cc.date >= ?")
+        params.append(date_from)
+
+    if date_to:
+        conditions.append("cc.date <= ?")
+        params.append(date_to)
+
+    return " AND ".join(conditions), params
+
+
+def list_collections(
+    store_ids: Optional[List[int]] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    """
+    Инкассации по всем сменам (сводная таблица по салонам).
+
+    Салон берём через смену: у самой инкассации точки нет, она принадлежит смене.
+
+    Args:
+        store_ids: если задан — только эти точки; None — все (админ)
+        date_from/date_to: границы периода по дате инкассации (UTC, как в БД)
+    """
+    built = _build_collections_filter(store_ids, date_from, date_to)
+    if built is None:
+        return []
+    where, params = built
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                cc.id,
+                cc.shift_id,
+                cc.date,
+                cc.amount,
+                cc.custom_comment,
+                cc.created_by,
+                ec.name as category_name,
+                cs.store_id,
+                s.name as store_name
+            FROM cash_collections cc
+            JOIN cash_shifts cs ON cs.id = cc.shift_id
+            LEFT JOIN stores s ON s.id = cs.store_id
+            LEFT JOIN expense_categories ec ON ec.id = cc.expense_category_id
+            WHERE {where}
+            ORDER BY cc.date DESC, cc.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset]
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_collections_by_store(
+    store_ids: Optional[List[int]] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Итоги инкассаций по салонам за период.
+
+    Считается отдельным запросом, а не сложением строк из list_collections:
+    та выборка обрезана по limit, и суммы по салонам разошлись бы с реальными.
+    """
+    built = _build_collections_filter(store_ids, date_from, date_to)
+    if built is None:
+        return []
+    where, params = built
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                cs.store_id,
+                s.name as store_name,
+                COUNT(cc.id) as count,
+                COALESCE(SUM(cc.amount), 0) as total
+            FROM cash_collections cc
+            JOIN cash_shifts cs ON cs.id = cc.shift_id
+            LEFT JOIN stores s ON s.id = cs.store_id
+            WHERE {where}
+            GROUP BY cs.store_id, s.name
+            ORDER BY total DESC
+            """,
+            params
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def update_collection(collection_id: int, amount: float) -> bool:
     """Обновить сумму инкассации."""
     conn = get_db()
