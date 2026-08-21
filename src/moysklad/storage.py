@@ -776,8 +776,13 @@ class MoySkladStorage:
 
         Returns:
             Список товаров с полями: assortment_id, assortment_name, revenue,
-            share_pct, cumulative_pct, abc_class — отсортирован по убыванию revenue.
+            orders_count, quantity, share_pct, cumulative_pct, abc_class —
+            отсортирован по убыванию revenue.
             Суммы переведены из копеек (родной формат МойСклад) в рубли.
+
+            orders_count — в скольких заказах товар встретился (спрос), quantity —
+            сколько штук продано. Разные вещи: 100 роз могут уйти одним заказом
+            и ста разными, и для закупки это принципиально разные ситуации.
         """
         try:
             with self._get_connection() as conn:
@@ -789,7 +794,9 @@ class MoySkladStorage:
                     SELECT
                         op.assortment_id,
                         op.assortment_name,
-                        SUM(op.sum) / 100.0 AS revenue
+                        SUM(op.sum) / 100.0 AS revenue,
+                        COUNT(DISTINCT op.order_id) AS orders_count,
+                        SUM(op.quantity) AS quantity
                     FROM order_positions op
                     JOIN sales_orders so ON so.id = op.order_id
                     WHERE so.state_name = 'Выполнен'

@@ -109,7 +109,7 @@
     function showTableMessage(text, className) {
         const tbody = document.getElementById('abcTableBody');
         if (!tbody) return;
-        tbody.innerHTML = `<tr><td colspan="6" class="${className}">${escapeHtml(text)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="${className}">${escapeHtml(text)}</td></tr>`;
     }
 
     /**
@@ -133,6 +133,8 @@
             <tr>
                 <td class="num">${index + 1}</td>
                 <td>${escapeHtml(row.assortment_name || '—')}</td>
+                <td class="num">${formatCount(row.orders_count)}</td>
+                <td class="num">${formatCount(row.quantity)}</td>
                 <td class="num">${formatMoney(row.revenue)}</td>
                 <td class="num">${formatPercent(row.share_pct)}</td>
                 <td class="num">${formatPercent(row.cumulative_pct)}</td>
@@ -157,6 +159,12 @@
 
     function formatMoney(value) {
         return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(value || 0) + ' ₽';
+    }
+
+    // Штуки бывают дробными: цветы продаются поштучно, а лента и упаковка —
+    // метрами и долями рулона
+    function formatCount(value) {
+        return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(value || 0);
     }
 
     function formatPercent(value) {

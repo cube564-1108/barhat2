@@ -98,10 +98,21 @@ def main():
     revenue = sum(r['revenue'] for r in abc)
     check('выручка ABC без удалённой позиции', revenue == 1500.0, f'получено {revenue}')
 
+    # --- Заказы и штуки в разрезе товара ---
+    # Те же розы во втором заказе: заказов должно стать 2, штук — 3 + 5
+    storage.save_sales_orders_batch([order('ord-2', '2026-08-21 12:00:00.000', [
+        {'id': 'pos-3', 'assortment_id': 'a-1', 'name': 'Розы', 'quantity': 5, 'price': 50000},
+    ])])
+
+    roses = next(r for r in storage.get_abc_analysis() if r['assortment_id'] == 'a-1')
+    check('количество заказов по товару', roses['orders_count'] == 2, f"получено {roses['orders_count']}")
+    check('количество штук по товару', roses['quantity'] == 8, f"получено {roses['quantity']}")
+    check('выручка не изменилась от новых колонок', roses['revenue'] == 4000.0, f"получено {roses['revenue']}")
+
     # --- Bootstrap курсора из уже загруженных заказов ---
     max_updated = storage.get_max_order_updated()
     check('максимальный updated берётся из raw_data',
-          max_updated == '2026-08-21 11:00:00.000', f'получено {max_updated}')
+          max_updated == '2026-08-21 12:00:00.000', f'получено {max_updated}')
 
     print()
     if failures:
