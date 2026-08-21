@@ -161,6 +161,57 @@ def main() -> int:
     print(f'  батч: {batch_time:.2f} c | по одному: {single_time:.2f} c | выигрыш x{speedup:.1f}')
     check('батч быстрее позаказной записи', speedup > 1.5, f'x{speedup:.1f}')
 
+    print('\n9. Гонка миграций между воркерами')
+    # На проде 2 воркера gunicorn стартуют одновременно и оба гонят _init_db с
+    # одними и теми же ALTER TABLE. Раньше проигравший падал с "duplicate column
+    # name"/"database is locked", и исключение вылетало наружу через get_storage.
+    import threading
+
+    race_db = os.path.join(tmp_dir, 'race.db')
+    # "Старая" БД, как на проде до деплоя: полная схема текущего кода минус те
+    # колонки, что добавляются миграциями. Строим её из самой схемы, а не руками,
+    # чтобы тест не разошёлся с реальным CREATE TABLE.
+    MoySkladStorage(race_db)
+    old = sqlite3.connect(race_db)
+    old.execute('PRAGMA journal_mode=DELETE')  # прод-база до WAL — жёсткий вариант гонки
+    old.execute('DROP INDEX IF EXISTS idx_sales_orders_created')
+    old.execute('DROP INDEX IF EXISTS idx_sales_orders_channel_id')
+    for table, column in [('sales_orders', 'created'),
+                          ('sales_orders', 'sales_channel_id'),
+                          ('sync_log', 'progress_at')]:
+        old.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
+    old.commit()
+    old.close()
+
+    errors = []
+    barrier = threading.Barrier(4)
+
+    def init_worker():
+        try:
+            barrier.wait()
+            MoySkladStorage(race_db)
+        except Exception as e:
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=init_worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    check('4 параллельных воркера мигрировали без падений', not errors, '; '.join(errors[:2]))
+
+    conn = sqlite3.connect(race_db)
+    so_cols = {r[1] for r in conn.execute('PRAGMA table_info(sales_orders)')}
+    sl_cols = {r[1] for r in conn.execute('PRAGMA table_info(sync_log)')}
+    idx = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    conn.close()
+    check('колонка created добавлена', 'created' in so_cols)
+    check('колонка sales_channel_id добавлена', 'sales_channel_id' in so_cols)
+    check('колонка progress_at добавлена', 'progress_at' in sl_cols)
+    check('индекс по created создан', 'idx_sales_orders_created' in idx)
+    check('индекс по sales_channel_id создан', 'idx_sales_orders_channel_id' in idx)
+
     print('\n' + ('ВСЁ ПРОШЛО' if not failures else f'ПРОВАЛЕНО: {failures}'))
     return 1 if failures else 0
 

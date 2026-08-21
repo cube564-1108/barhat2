@@ -25,6 +25,57 @@ def _extract_id_from_meta(obj: Optional[Dict]) -> Optional[str]:
     return href.rsplit('/', 1)[-1] if href else None
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    ddl: str,
+    index_sql: Optional[str] = None,
+) -> None:
+    """
+    Добавить колонку, если её ещё нет (идемпотентная миграция).
+
+    Паттерн скопирован с cashshifts/storage.py::_add_column_if_missing, где он уже
+    отработал по реальному инциденту: на проде 2 воркера gunicorn стартуют
+    одновременно, оба видят «колонки нет» и оба выполняют один и тот же ALTER.
+    Штатных исхода гонки два, и ни один не должен ронять воркер:
+
+      duplicate column name — сосед успел закоммитить ALTER раньше;
+      database is locked    — сосед держит write-лок прямо сейчас.
+
+    В обоих случаях колонку создаёт сосед, цель достигнута. Здесь это особенно
+    важно потому, что исключение из _init_db вылетает наружу через __init__ и
+    get_storage(), то есть падал бы любой запрос к /api/moysklad/*.
+
+    index_sql (если передан) выполняется всегда, а не только при успешном ALTER:
+    колонку мог создать сосед, а индекс к ней — ещё нет.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    if column not in existing:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            message = str(e).lower()
+            if "duplicate column name" not in message and "locked" not in message:
+                raise
+            logger.info(f"Миграцию {table}.{column} выполняет параллельный воркер: {e}")
+
+    if not index_sql:
+        return
+
+    try:
+        conn.execute(index_sql)
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        message = str(e).lower()
+        # "no such column" — сосед ещё не закоммитил свой ALTER; индекс создаст он же
+        if "locked" not in message and "no such column" not in message:
+            raise
+        logger.info(f"Индекс для {table}.{column} создаёт параллельный воркер: {e}")
+
+
 class MoySkladStorage:
     """
     Хранилище данных МойСклад в SQLite
@@ -78,8 +129,19 @@ class MoySkladStorage:
     def _init_db(self) -> None:
         """Создание таблиц если не существуют"""
         with self._get_connection() as conn:
-            # WAL — свойство файла БД, ставится один раз при инициализации
-            conn.execute("PRAGMA journal_mode=WAL")
+            # WAL — свойство файла БД, ставится один раз при инициализации.
+            #
+            # Переключение журнала требует эксклюзивной блокировки и, в отличие от
+            # обычной записи, НЕ ждёт по busy_timeout: если в этот момент базу
+            # держит второй воркер gunicorn (оба стартуют одновременно), PRAGMA
+            # падает с "database is locked" — и роняла бы весь _init_db, а значит
+            # любой запрос к /api/moysklad/*. Проиграть гонку здесь безобидно:
+            # либо база уже в WAL, либо её переключает сосед.
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as e:
+                logger.info(f"journal_mode=WAL выставляет параллельный воркер: {e}")
+
             cursor = conn.cursor()
 
             # Таблица товаров
@@ -188,16 +250,16 @@ class MoySkladStorage:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sales_orders_snapshot_at ON sales_orders(snapshot_at)')
 
             # Миграция: колонки, добавленные позже создания таблицы
-            cursor.execute("PRAGMA table_info(sales_orders)")
-            sales_orders_cols = {row[1] for row in cursor.fetchall()}
-            if 'sales_channel_id' not in sales_orders_cols:
-                cursor.execute('ALTER TABLE sales_orders ADD COLUMN sales_channel_id TEXT')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sales_orders_channel_id ON sales_orders(sales_channel_id)')
-            if 'created' not in sales_orders_cols:
-                # customerorder.created — дата создания заказа, используется как "дата продажи"
-                # для ABC-анализа (see get_abc_analysis); изначально не сохранялась
-                cursor.execute('ALTER TABLE sales_orders ADD COLUMN created TIMESTAMP')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sales_orders_created ON sales_orders(created)')
+            _add_column_if_missing(
+                conn, 'sales_orders', 'created', 'TIMESTAMP',
+                # customerorder.created — дата создания заказа, используется как "дата
+                # продажи" для ABC-анализа (см. get_abc_analysis); изначально не сохранялась
+                index_sql='CREATE INDEX IF NOT EXISTS idx_sales_orders_created ON sales_orders(created)'
+            )
+            _add_column_if_missing(
+                conn, 'sales_orders', 'sales_channel_id', 'TEXT',
+                index_sql='CREATE INDEX IF NOT EXISTS idx_sales_orders_channel_id ON sales_orders(sales_channel_id)'
+            )
 
             # Таблица каналов продаж (справочник)
             cursor.execute('''
@@ -289,10 +351,7 @@ class MoySkladStorage:
             # По нему видно, что синхронизация со статусом 'started' на самом деле
             # мертва (воркер перезапустился/деплой), а не идёт — иначе такая запись
             # блокировала бы запуск нового синка навсегда.
-            cursor.execute("PRAGMA table_info(sync_log)")
-            sync_log_cols = {row[1] for row in cursor.fetchall()}
-            if 'progress_at' not in sync_log_cols:
-                cursor.execute('ALTER TABLE sync_log ADD COLUMN progress_at TIMESTAMP')
+            _add_column_if_missing(conn, 'sync_log', 'progress_at', 'TIMESTAMP')
 
             logger.info(f"БД инициализирована: {self.db_path}")
 
