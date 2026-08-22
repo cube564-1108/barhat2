@@ -37,15 +37,11 @@ print("=" * 60)
 from .storage import get_storage
 from .client import get_client
 
-# Импортируем модуль отчета о качестве
-import sys
-import os
-scripts_path = os.path.join(os.path.dirname(__file__), '../../scripts')
-sys.path.insert(0, scripts_path)
-
-# ИСПОЛЬЗУЕМ НОВУЮ ВЕРСИЮ (без кэша)
-import quality_report_v2 as quality_report
-print(f"Using quality_report_v2 (cache-free version)")
+# Отчёт о качестве сборки. Раньше он жил в scripts/ и импортировался через
+# подмешивание scripts/ в sys.path — рядом лежали две версии одного модуля, и
+# по коду было не понять, какая работает в проде. Теперь это обычный модуль
+# пакета, а scripts/quality_report_v2.py — тонкая обёртка над ним.
+from . import quality as quality_report
 
 load_dotenv()
 
@@ -274,6 +270,11 @@ with app.app_context():
 # Инициализация хранилища
 db_path = os.getenv('PYRUS_DB_PATH', 'data/pyrus.db')
 storage = get_storage(db_path)
+
+# Витрина отчёта по качеству. Собирается один раз при старте процесса и только
+# если пуста (первый деплой после появления таблицы) — делать это в обработчике
+# запроса нельзя: инициализация на каждом запросе уже клала сайт.
+quality_report.ensure_projection()
 
 
 def _disk_free_info():
@@ -670,52 +671,10 @@ def serve_vendor(filename):
     return response
 
 
-@app.route('/debug/module', methods=['GET'])
-def debug_module():
-    """Отладка: какой модуль quality_report загружен"""
-    return jsonify({
-        'module_file': quality_report.__file__,
-        'module_name': quality_report.__name__,
-        'get_all_tasks_doc': quality_report.get_all_tasks.__doc__,
-        'test_call': len(quality_report.get_all_tasks())
-    })
-
-
-@app.route('/debug/report', methods=['GET'])
-def debug_report():
-    """Отладка: прямой вызов generate_report"""
-    report = quality_report.generate_report()
-    return jsonify({
-        'module_file': quality_report.__file__,
-        'total_tasks': report['total_tasks'],
-        'salons_count': len(report['salons'])
-    })
-
-
-@app.route('/debug/report-v2', methods=['GET'])
-def debug_report_v2():
-    """Отладка: использование НОВОЙ версии модуля"""
-    import importlib
-    import sys
-    import os
-
-    # Принудительно перезагружаем модуль
-    scripts_path = os.path.join(os.path.dirname(__file__), '../../scripts')
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-
-    # Импортируем новую версию
-    import quality_report_v2
-
-    report = quality_report_v2.generate_report()
-    return jsonify({
-        'module': 'quality_report_v2 (NEW)',
-        'module_file': quality_report_v2.__file__,
-        'total_tasks': report['total_tasks'],
-        'salons_count': len(report['salons']),
-        'expected': 232,
-        'match': report['total_tasks'] == 232
-    })
+# Отладочные эндпоинты /debug/module, /debug/report и /debug/report-v2 убраны:
+# они были открыты без авторизации, и каждый вызов запускал полный отчёт по
+# базе. Любой аноним мог этим занять оба воркера. Проверить, что модуль жив,
+# теперь можно только авторизованным — через /api/quality.
 
 
 @app.route('/api/pyrus/forms', methods=['GET'])
@@ -932,6 +891,7 @@ def get_quality_history():
 
 
 @app.route('/api/quality/salon-history', methods=['GET'])
+@section_required('quality')
 def get_salon_history():
     """
     Получить историю качества по салону
@@ -965,6 +925,7 @@ def get_salon_history():
 
 
 @app.route('/api/quality/salon-order-types', methods=['GET'])
+@section_required('quality')
 def get_salon_order_types():
     """
     Получить разбивку по видам заказа для салона
@@ -1003,6 +964,7 @@ def get_salon_order_types():
 
 
 @app.route('/api/quality/salon-florists', methods=['GET'])
+@section_required('quality')
 def get_salon_florists():
     """
     Получить статистику по флористам салона
@@ -1041,6 +1003,7 @@ def get_salon_florists():
 
 
 @app.route('/api/quality/data-coverage', methods=['GET'])
+@section_required('quality')
 def get_data_coverage():
     """
     Получить информацию о полноте данных по датам
@@ -1050,76 +1013,22 @@ def get_data_coverage():
         - date_to: Конечная дата (YYYY-MM-DD)
         - granularity: 'day' (default) или 'month'
 
-    Возвращает количество задач за каждый период
+    Возвращает количество оценок за каждый период — по нему видно дыры в
+    загруженной истории.
     """
     try:
-        import sqlite3
-        import json
-        from collections import defaultdict
-
-        date_from = request.args.get('date_from')
-        date_to = request.args.get('date_to')
-        granularity = request.args.get('granularity', 'day')
-
-        conn = sqlite3.connect(DB_PATH, timeout=20)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=20000")
-        cursor = conn.cursor()
-
-        # Получаем все уникальные задачи
-        cursor.execute('''
-            SELECT raw_data
-            FROM tasks t1
-            WHERE form_id = 1327961
-              AND snapshot_at = (
-                SELECT MAX(snapshot_at)
-                FROM tasks t2
-                WHERE t2.form_id = t1.form_id AND t2.task_id = t1.task_id
-              )
-        ''')
-
-        # Считаем задачи по датам
-        date_counts = defaultdict(int)
-
-        for row in cursor.fetchall():
-            try:
-                data = json.loads(row['raw_data'])
-                for field in data.get('fields', []):
-                    if field.get('id') == 1:
-                        date_val = field.get('value')
-                        if date_val:
-                            key = date_val[:7] if granularity == 'month' else date_val
-                            date_counts[key] += 1
-                        break
-            except:
-                pass
-
-        conn.close()
-
-        # Фильтрация по датам если указаны
-        filtered = {}
-        for date, count in sorted(date_counts.items()):
-            if date_from and date < date_from:
-                continue
-            if date_to and date > date_to:
-                continue
-            filtered[date] = count
-
-        # Статистика
-        total_tasks = sum(filtered.values())
-        date_range = {
-            'from': min(filtered.keys()) if filtered else None,
-            'to': max(filtered.keys()) if filtered else None
-        }
+        # Эндпоинт всегда отвечал 500: здесь использовалась переменная DB_PATH,
+        # которой в модуле нет (есть db_path), — NameError на каждом вызове.
+        # Заодно перестал читать всю таблицу tasks: считает по витрине.
+        coverage = quality_report.get_data_coverage(
+            request.args.get('date_from'),
+            request.args.get('date_to'),
+            request.args.get('granularity', 'day')
+        )
 
         return jsonify({
             'success': True,
-            'data': {
-                'total_tasks': total_tasks,
-                'date_range': date_range,
-                'days_with_data': len(filtered),
-                'coverage': filtered
-            }
+            'data': coverage
         })
 
     except Exception as e:
@@ -1140,17 +1049,38 @@ def get_data_coverage():
 # и вернуть чистый дефолт (running=False) — ложное "готово" посреди загрузки.
 # Тот же инцидент уже был в синхронизации МойСклада.
 #
-# Задачи грузятся окнами по датам, а не одним запросом: Pyrus ограничивает
-# item_count реестра 20 000 записями (client.py), а история формы качества —
-# почти 100 000 задач. Каждое окно сохраняется сразу после загрузки, поэтому
-# обрыв процесса теряет одно окно, а не весь прогресс.
+# Задачи грузятся окнами по датам и страницами внутри окна. Окно — точка, с
+# которой прогон можно продолжить после обрыва; страница ограничивает объём
+# ответа Pyrus (20 000 задач в одном ответе — это ~100 МБ JSON в памяти воркера)
+# и сохраняется сразу, так что обрыв теряет страницу, а не весь прогресс.
 
-QUALITY_FORM_ID = 1327961
+QUALITY_FORM_ID = quality_report.QUALITY_FORM_ID
 
 # Если фоновый поток не обновлял heartbeat дольше этого времени, считаем
 # загрузку мёртвой (упал воркер) и разрешаем запустить новую — иначе запись
 # в статусе 'started' блокировала бы кнопку до перезапуска сервиса.
 SYNC_STALE_MINUTES = 15
+
+# Лок прогона. Проверки "последний sync_log в статусе started" мало: между
+# чтением статуса и стартом потока есть окно, в которое влезает второй воркер
+# (их два, и в каждом крутится свой планировщик) — и оба тянут одно и то же.
+# Срок жизни совпадает с SYNC_STALE_MINUTES, чтобы лок и статус в интерфейсе
+# не расходились: иначе кнопка показывала бы "готово", а запуск отбивался локом.
+QUALITY_SYNC_LOCK = 'pyrus-quality-sync'
+QUALITY_SYNC_LOCK_TTL = SYNC_STALE_MINUTES * 60
+
+# Размер страницы реестра. Раньше запрашивалось сразу item_count=20000 без
+# item_offset: окно с бо́льшим числом задач молча обрезалось, а ответ на 20 тысяч
+# задач — это ~100 МБ JSON в памяти воркера. Теперь страницами, и каждая
+# сохраняется сразу — память ограничена, прогресс виден, обрыв теряет страницу.
+REGISTER_PAGE_SIZE = 2000
+
+# Автоматическая подкачка свежих оценок. Владелец работает один — руками
+# нажимать «Обновить» никто не должен. Отключается PYRUS_SYNC_SCHEDULER=0
+# (локальная разработка: не хочется, чтобы каждый запуск лез в боевой Pyrus).
+SCHEDULER_INTERVAL_SECONDS = int(os.getenv('PYRUS_SYNC_INTERVAL_MINUTES', '60')) * 60
+SCHEDULER_DAYS = int(os.getenv('PYRUS_SYNC_DAYS', '7'))
+_scheduler_started = False
 
 
 def _sync_status_payload(log_row):
@@ -1195,21 +1125,37 @@ def _sync_status_payload(log_row):
     }
 
 
-def _fetch_register_window(client, form_id, start_iso, end_iso):
-    """Загрузить реестр формы за одно окно дат"""
-    response = client.session.get(
-        f'{client.api_url}forms/{form_id}/register',
-        headers={'Authorization': f'Bearer {client.access_token}'},
-        params={
-            'include_archived': 'y',
-            'item_count': 20000,
-            'created_after': start_iso,
-            'created_before': end_iso
-        },
-        # без таймаута зависший Pyrus держал бы поток вечно, а запись в
-        # sync_log — в статусе 'started'
-        timeout=(10, 180)
-    )
+def _fetch_register_page(client, form_id, start_iso, end_iso, offset):
+    """
+    Загрузить одну страницу реестра формы за окно дат.
+
+    401 обрабатывается отдельно: токен Pyrus живёт около часа, и длинная
+    загрузка истории его переживала — запрос уходил мимо client.request() с его
+    переавторизацией, так что весь прогон падал на середине.
+    """
+    def _request():
+        return client.session.get(
+            f'{client.api_url}forms/{form_id}/register',
+            headers={'Authorization': f'Bearer {client.access_token}'},
+            params={
+                'include_archived': 'y',
+                'item_count': REGISTER_PAGE_SIZE,
+                'item_offset': offset,
+                'created_after': start_iso,
+                'created_before': end_iso
+            },
+            # без таймаута зависший Pyrus держал бы поток вечно, а запись в
+            # sync_log — в статусе 'started'
+            timeout=(10, 180)
+        )
+
+    response = _request()
+
+    if response.status_code == 401:
+        logger.info("Токен Pyrus истёк, переавторизуемся")
+        if not client.authenticate():
+            raise Exception('Ошибка авторизации: не удалось обновить токен')
+        response = _request()
 
     if response.status_code != 200:
         raise Exception(f'Ошибка API: {response.status_code}')
@@ -1239,20 +1185,52 @@ def _import_tasks_background(log_id, start_date, end_date, step_days):
             cursor_date = window_end + timedelta(days=1)
 
         for index, (window_start, window_end) in enumerate(windows, 1):
-            tasks = _fetch_register_window(
-                client,
-                QUALITY_FORM_ID,
-                window_start.strftime('%Y-%m-%dT00:00:00Z'),
-                window_end.strftime('%Y-%m-%dT23:59:59Z')
-            )
-            total_saved += storage.save_tasks(QUALITY_FORM_ID, tasks)
+            offset = 0
+            seen_ids = set()
 
-            storage.update_sync_log(
-                log_id,
-                f'Период {window_start:%d.%m.%Y}–{window_end:%d.%m.%Y} '
-                f'({index}/{len(windows)}): загружено {total_saved} задач',
-                total_saved
-            )
+            while True:
+                tasks = _fetch_register_page(
+                    client,
+                    QUALITY_FORM_ID,
+                    window_start.strftime('%Y-%m-%dT00:00:00Z'),
+                    window_end.strftime('%Y-%m-%dT23:59:59Z'),
+                    offset
+                )
+
+                if not tasks:
+                    break
+
+                # Страховка от бесконечного цикла: если Pyrus проигнорирует
+                # item_offset и вернёт ту же страницу, условие «пришла полная
+                # страница» будет выполняться вечно
+                page_ids = {task.get('id') for task in tasks}
+                if page_ids and page_ids <= seen_ids:
+                    logger.warning(
+                        f"Pyrus вернул повторную страницу реестра на offset={offset} "
+                        f"— прекращаем пагинацию окна"
+                    )
+                    break
+                seen_ids |= page_ids
+
+                # Сначала сырые задачи, следом витрина отчёта — обе операции
+                # пачкой, по одной транзакции на страницу
+                total_saved += storage.save_tasks(QUALITY_FORM_ID, tasks)
+                quality_report.upsert_tasks(tasks)
+
+                storage.update_sync_log(
+                    log_id,
+                    f'Период {window_start:%d.%m.%Y}–{window_end:%d.%m.%Y} '
+                    f'({index}/{len(windows)}): загружено {total_saved} задач',
+                    total_saved
+                )
+                # Лок живёт SYNC_STALE_MINUTES — длинную загрузку продлеваем,
+                # иначе второй воркер решит, что прогон умер, и начнёт свой
+                storage.renew_sync_lock(QUALITY_SYNC_LOCK, QUALITY_SYNC_LOCK_TTL)
+
+                if len(tasks) < REGISTER_PAGE_SIZE:
+                    break
+
+                offset += REGISTER_PAGE_SIZE
 
         storage.finish_sync_log(
             log_id,
@@ -1272,34 +1250,89 @@ def _import_tasks_background(log_id, start_date, end_date, step_days):
             error_message=str(e),
             message=f'Ошибка после {total_saved} задач'
         )
+    finally:
+        storage.release_sync_lock(QUALITY_SYNC_LOCK)
 
 
-def _start_import(job, start_date, end_date, step_days):
-    """Проверить, что загрузка не идёт, и запустить фоновый поток"""
+def _launch_import(job, start_date, end_date, step_days):
+    """
+    Захватить лок и запустить фоновую загрузку.
+
+    Returns:
+        (запущено ли, payload для ответа)
+    """
     import threading
 
-    last_log = storage.get_latest_sync_log()
-    if _sync_status_payload(last_log)['running']:
-        return jsonify({
+    if not storage.try_acquire_sync_lock(QUALITY_SYNC_LOCK, QUALITY_SYNC_LOCK_TTL):
+        return False, {
             'success': False,
             'error': 'Обновление уже запущено',
-            'status': _sync_status_payload(last_log)
-        })
+            'status': _sync_status_payload(storage.get_latest_sync_log())
+        }
 
     log_id = storage.start_sync_log(job=job, message='Запуск обновления...')
 
     thread = threading.Thread(
         target=_import_tasks_background,
-        args=(log_id, start_date, end_date, step_days)
+        args=(log_id, start_date, end_date, step_days),
+        daemon=True,
+        name='pyrus-quality-import'
     )
-    thread.daemon = True
     thread.start()
 
-    return jsonify({
+    return True, {
         'success': True,
         'message': 'Обновление запущено',
         'status': _sync_status_payload(storage.get_latest_sync_log())
-    })
+    }
+
+
+def _start_import(job, start_date, end_date, step_days):
+    """HTTP-обёртка над _launch_import"""
+    _, payload = _launch_import(job, start_date, end_date, step_days)
+    return jsonify(payload)
+
+
+def _scheduler_loop():
+    """Раз в SCHEDULER_INTERVAL_SECONDS подтягивать оценки за последние дни"""
+    from datetime import timedelta
+
+    while True:
+        # Пауза в начале, а не в конце: при деплое воркеры перезапускаются, и
+        # синхронизация не должна стартовать одновременно со сборкой
+        time.sleep(SCHEDULER_INTERVAL_SECONDS)
+
+        try:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=SCHEDULER_DAYS)
+            started, payload = _launch_import(
+                'scheduled', start_date, end_date, step_days=SCHEDULER_DAYS
+            )
+            if not started:
+                logger.info("Плановая синхронизация Pyrus пропущена: прогон уже идёт")
+        except Exception as e:
+            logger.error(f"Ошибка планировщика синхронизации Pyrus: {e}")
+
+
+def start_quality_scheduler():
+    """Запустить фоновую подкачку оценок качества"""
+    global _scheduler_started
+
+    if os.getenv('PYRUS_SYNC_SCHEDULER', '1') != '1':
+        logger.info("Планировщик синхронизации Pyrus отключён (PYRUS_SYNC_SCHEDULER=0)")
+        return
+
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+
+    import threading
+    thread = threading.Thread(target=_scheduler_loop, daemon=True, name='pyrus-quality-scheduler')
+    thread.start()
+    logger.info(
+        f"Планировщик синхронизации Pyrus запущен "
+        f"(каждые {SCHEDULER_INTERVAL_SECONDS // 60} мин, период {SCHEDULER_DAYS} дн.)"
+    )
 
 
 @app.route('/api/pyrus/update', methods=['POST'])
@@ -1315,12 +1348,17 @@ def trigger_update():
         from datetime import datetime, timedelta
 
         data = request.get_json(silent=True) or {}
-        days = int(data.get('days', 7))
+        # Верхняя граница — три года: дальше уходить бессмысленно (форма
+        # заведена в 2023-м), а случайная опечатка не запустит прогон на
+        # десятилетия. Ниже единицы период не имеет смысла.
+        days = max(1, min(int(data.get('days', 7)), 1100))
 
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
-        return _start_import('update', start_date, end_date, step_days=7)
+        # Окно загрузки не длиннее месяца: границы окон — это точки, с которых
+        # прогон можно продолжить после обрыва
+        return _start_import('update', start_date, end_date, step_days=min(days, 30))
 
     except Exception as e:
         logger.error(f"Ошибка запуска обновления: {e}")
@@ -1351,7 +1389,7 @@ def trigger_backfill():
         data = request.get_json(silent=True) or {}
         date_from = data.get('date_from', '2026-01-01')
         date_to = data.get('date_to')
-        step_days = int(data.get('step_days', 7))
+        step_days = max(1, min(int(data.get('step_days', 30)), 90))
 
         start_date = datetime.strptime(date_from, '%Y-%m-%d')
         end_date = datetime.strptime(date_to, '%Y-%m-%d') if date_to else datetime.now()
@@ -1372,12 +1410,43 @@ def trigger_backfill():
 
 
 @app.route('/api/pyrus/update-status', methods=['GET'])
+@section_required('quality')
 def get_update_status():
     """Получить статус обновления"""
     return jsonify({
         'success': True,
         'status': _sync_status_payload(storage.get_latest_sync_log())
     })
+
+
+@app.route('/api/quality/rebuild', methods=['POST'])
+@role_required('admin')
+def rebuild_quality_projection():
+    """
+    Пересобрать витрину оценок из уже загруженных задач.
+
+    Нужен после изменения списка видов заказа или разбора полей формы: витрина
+    хранит уже разложенные значения, и старые строки сами не обновятся.
+    Отдельный эндпоинт, потому что на этом тарифе Amvera нет консоли — разовые
+    операции над боевой базой делаются только по HTTP.
+    """
+    try:
+        return jsonify({
+            'success': True,
+            'data': quality_report.rebuild_projection()
+        })
+    except Exception as e:
+        logger.error(f"Ошибка пересборки витрины качества: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# Планировщик стартует в каждом воркере, но прогон делает один — за это
+# отвечает лок в БД (QUALITY_SYNC_LOCK). Вызов внизу файла, потому что
+# start_quality_scheduler определён выше по коду, а не в начале модуля.
+start_quality_scheduler()
 
 
 @app.errorhandler(404)

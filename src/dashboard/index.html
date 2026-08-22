@@ -602,9 +602,19 @@
                             </div>
                             <button id="applyQualityFilters" class="btn btn-primary">Применить</button>
                             <button id="resetQualityFilters" class="btn btn-secondary">Сбросить</button>
+                            <div class="filter-group">
+                                <label class="form-label">Загрузить из Pyrus:</label>
+                                <select id="qualitySyncPeriod" class="form-input" style="width: 190px;">
+                                    <option value="7">за последнюю неделю</option>
+                                    <option value="30">за последний месяц</option>
+                                    <option value="90">за 3 месяца</option>
+                                    <option value="365">за год</option>
+                                    <option value="1100">всю историю</option>
+                                </select>
+                            </div>
                             <button id="updatePyrusData" class="btn btn-accent">
-                                <span class="btn-text">🔄 Обновить данные</span>
-                                <span class="btn-spinner hidden" style="margin-left: 8px;">⏳</span>
+                                <span class="btn-text">Обновить данные</span>
+                                <span class="btn-spinner hidden" style="margin-left: 8px;">…</span>
                             </button>
                             <div id="updateStatus" class="update-status hidden"></div>
                         </div>

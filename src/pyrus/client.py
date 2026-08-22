@@ -57,6 +57,11 @@ class PyrusClient:
         self.api_url: str = "https://api.pyrus.com/v4/"
         self.files_url: Optional[str] = None
 
+        # Таймаут по умолчанию на все запросы (соединение, чтение). Без него
+        # зависший внешний API держит воркер gunicorn до бесконечности — на
+        # этом проекте так уже дважды ложился прод.
+        self.timeout = (10, 60)
+
     def authenticate(self) -> bool:
         """
         Авторизация через POST /auth
@@ -73,7 +78,8 @@ class PyrusClient:
                     'login': self.login,
                     'security_key': self.security_key
                 },
-                headers={'Content-Type': 'application/json'}
+                headers={'Content-Type': 'application/json'},
+                timeout=self.timeout
             )
 
             response.raise_for_status()
@@ -134,6 +140,8 @@ class PyrusClient:
         # Если есть json в kwargs — сериализуем
         if 'json' in kwargs:
             kwargs['data'] = json.dumps(kwargs.pop('json'), ensure_ascii=False)
+
+        kwargs.setdefault('timeout', self.timeout)
 
         try:
             response = self.session.request(method, url, **kwargs)

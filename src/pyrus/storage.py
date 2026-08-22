@@ -7,7 +7,7 @@ import os
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 from dotenv import load_dotenv
@@ -45,8 +45,18 @@ class PyrusStorage:
         # параллельный запрос получил бы "database is locked" вместо очереди.
         conn = sqlite3.connect(self.db_path, timeout=20)
         conn.row_factory = sqlite3.Row  # Доступ по имени колонки
-        conn.execute("PRAGMA journal_mode=WAL")
+        # journal_mode здесь больше не выставляется: это персистентное свойство
+        # файла БД, и переключать его на каждом соединении — лишняя запись на
+        # общий диск /data при каждом запросе. Ставится один раз в _init_db.
+        #
+        # busy_timeout и synchronous, наоборот, живут в соединении и нужны
+        # каждому: без первого параллельный запрос получает "database is locked"
+        # вместо очереди, а synchronous=NORMAL в паре с WAL даёт fsync только на
+        # чекпойнте, а не на каждой транзакции — на сетевом диске Amvera именно
+        # fsync съедал дисковую очередь и тормозил соседние базы, включая
+        # авторизацию всего сайта.
         conn.execute("PRAGMA busy_timeout=20000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         try:
             yield conn
             conn.commit()
@@ -60,6 +70,17 @@ class PyrusStorage:
     def _init_db(self) -> None:
         """Создание таблиц если не существуют"""
         with self._get_connection() as conn:
+            # Переключение журнала требует эксклюзивной блокировки и, в отличие
+            # от обычной записи, НЕ ждёт по busy_timeout: если базу в этот момент
+            # держит второй воркер gunicorn (оба стартуют одновременно), PRAGMA
+            # падает с "database is locked" и уронила бы весь _init_db. Проиграть
+            # гонку здесь безобидно — либо база уже в WAL, либо её переключает
+            # сосед.
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as e:
+                logger.info(f"journal_mode=WAL выставляет параллельный воркер: {e}")
+
             cursor = conn.cursor()
 
             # Таблица форм (метаданные)
@@ -135,6 +156,52 @@ class PyrusStorage:
                 )
             ''')
 
+            # Служебное key-value: курсоры синхронизации и локи прогонов.
+            # Лок нужен потому, что на Amvera 2 воркера gunicorn и в каждом
+            # крутится свой планировщик — без него оба качали бы одно и то же.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sync_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Витрина оценок качества: поля формы, разложенные по колонкам.
+            #
+            # Раньше отчёт на каждый запрос читал всю таблицу tasks (97 тыс.
+            # строк с полным JSON, ~500 МБ) и парсил её в Python — только чтобы
+            # посчитать средние. Здесь те же данные лежат готовыми к GROUP BY,
+            # одна строка на задачу. Заполняется при синхронизации, полностью
+            # пересобирается из latest_tasks (см. quality.rebuild_projection).
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS quality_scores (
+                    task_id INTEGER PRIMARY KEY,
+                    form_id INTEGER NOT NULL,
+                    task_date TEXT,
+                    salon TEXT,
+                    florist TEXT,
+                    category TEXT,
+                    cat_group TEXT,
+                    max_score INTEGER,
+                    total_score INTEGER,
+                    order_id TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_quality_date
+                ON quality_scores(task_date)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_quality_salon_date
+                ON quality_scores(salon, task_date)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_quality_florist_date
+                ON quality_scores(florist, task_date)
+            ''')
+
             # Миграция: колонки для отслеживания прогресса фоновых загрузок.
             # Статус обновления раньше жил в памяти процесса, но на Amvera 2
             # воркера gunicorn — опрос статуса мог попасть на воркер, который
@@ -203,84 +270,150 @@ class PyrusStorage:
         snapshot_at: Optional[datetime] = None
     ) -> bool:
         """
-        Сохранить задачу с историчностью
+        Сохранить одну задачу (отдельная транзакция).
 
-        Args:
-            form_id: ID формы
-            task: Данные задачи из Pyrus API
-            snapshot_at: Время снапшота (если None, текущее время)
+        Для загрузки из Pyrus использовать save_tasks(): пачкой это на порядки
+        быстрее, потому что там одно соединение и один commit на всю пачку.
+        """
+        return self.save_tasks(form_id, [task], snapshot_at=snapshot_at) == 1
+
+    def save_tasks(
+        self,
+        form_id: int,
+        tasks: List[Dict],
+        snapshot_at: Optional[datetime] = None
+    ) -> int:
+        """
+        Сохранить пачку задач за одну транзакцию.
+
+        Раньше здесь был цикл по save_task(), а тот на КАЖДУЮ задачу открывал
+        своё соединение, гонял PRAGMA journal_mode/busy_timeout, делал два INSERT
+        и commit (то есть fsync) и закрывался. На 16 тысячах задач это 16 тысяч
+        транзакций — синхронизация занимала минуты и на всё это время забивала
+        общий диск /data, отчего тормозил весь сайт. Ровно ту же ошибку чинили
+        в синхронизации МойСклада.
+
+        Второе: снапшот в tasks пишется, только если у задачи изменился
+        last_modified. UNIQUE(form_id, task_id, snapshot_at) от дублей не спасал
+        (snapshot_at у каждой записи свой), поэтому каждый прогон складывал в
+        базу полную копию всех задач — 97 тыс. строк на 16 тыс. задач и 543 МБ
+        файла. Повторная синхронизация неизменившегося периода теперь не пишет
+        вообще ничего.
 
         Returns:
-            True если успешно
+            Количество обработанных задач
         """
+        if not tasks:
+            return 0
+
+        snapshot_ts = snapshot_at or datetime.now()
+        processed = 0
+        changed = 0
+
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                snapshot_ts = snapshot_at or datetime.now()
-                task_id = task.get('id')
-                last_modified = task.get('last_modified_date') or task.get('created_date')
+                # Явный BEGIN обязателен: без него первый SAVEPOINT сам открыл бы
+                # транзакцию, а RELEASE самого внешнего savepoint в SQLite её
+                # коммитит — получился бы снова коммит на задачу, ради чего батч
+                # и затевался. На этих граблях уже стояли в МойСкладе.
+                cursor.execute('BEGIN')
 
-                # Сохраняем в историю (tasks)
-                cursor.execute('''
-                    INSERT OR IGNORE INTO tasks
-                    (form_id, task_id, title, description, author_id, author_name,
-                     created_at, finished_at, last_modified, current_step, status,
-                     raw_data, snapshot_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    form_id,
-                    task_id,
-                    task.get('title'),
-                    task.get('description'),
-                    self._extract_author_id(task),
-                    self._extract_author_name(task),
-                    task.get('created_date'),
-                    task.get('finished_date'),
-                    last_modified,
-                    self._extract_step_name(task),
-                    self._determine_status(task),
-                    json.dumps(task, ensure_ascii=False),
-                    snapshot_ts
-                ))
+                # Что уже лежит в базе — одним запросом, а не SELECT на задачу
+                known = {
+                    row['task_id']: row['last_modified']
+                    for row in cursor.execute(
+                        'SELECT task_id, last_modified FROM latest_tasks WHERE form_id = ?',
+                        (form_id,)
+                    )
+                }
 
-                # Обновляем актуальное состояние (latest_tasks)
-                cursor.execute('''
-                    INSERT OR REPLACE INTO latest_tasks
-                    (form_id, task_id, title, status, last_modified, raw_data, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (
-                    form_id,
-                    task_id,
-                    task.get('title'),
-                    self._determine_status(task),
-                    last_modified,
-                    json.dumps(task, ensure_ascii=False)
-                ))
-
-                return True
+                for task in tasks:
+                    # SAVEPOINT: битая задача откатывает только себя, а не всю
+                    # пачку — иначе одна кривая запись стоила бы целого окна
+                    try:
+                        cursor.execute('SAVEPOINT task_save')
+                        if self._save_task_row(cursor, form_id, task, snapshot_ts, known):
+                            changed += 1
+                        cursor.execute('RELEASE task_save')
+                        processed += 1
+                    except Exception as e:
+                        cursor.execute('ROLLBACK TO task_save')
+                        cursor.execute('RELEASE task_save')
+                        logger.error(f"Ошибка сохранения задачи {task.get('id')}: {e}")
 
         except Exception as e:
-            logger.error(f"Ошибка сохранения задачи {task.get('id')}: {e}")
-            return False
+            logger.error(f"Ошибка сохранения пачки задач формы {form_id}: {e}")
+            return processed
 
-    def save_tasks(self, form_id: int, tasks: List[Dict]) -> int:
+        logger.info(
+            f"Обработано {processed}/{len(tasks)} задач формы {form_id} "
+            f"(изменилось: {changed})"
+        )
+        return processed
+
+    def _save_task_row(
+        self,
+        cursor,
+        form_id: int,
+        task: Dict,
+        snapshot_ts: datetime,
+        known: Dict[int, Any]
+    ) -> bool:
         """
-        Сохранить несколько задач
-
-        Args:
-            form_id: ID формы
-            tasks: Список задач
+        Записать задачу переданным курсором (транзакцией управляет вызывающий).
 
         Returns:
-            Количество сохранённых задач
+            True, если задача новая или изменилась (была запись в базу)
         """
-        count = 0
-        for task in tasks:
-            if self.save_task(form_id, task):
-                count += 1
-        logger.info(f"Сохранено {count}/{len(tasks)} задач формы {form_id}")
-        return count
+        task_id = task.get('id')
+        last_modified = task.get('last_modified_date') or task.get('created_date')
+
+        # Не менялась с прошлой синхронизации — ни снапшота, ни перезаписи
+        if task_id in known and known[task_id] == last_modified:
+            return False
+
+        raw_json = json.dumps(task, ensure_ascii=False)
+        status = self._determine_status(task)
+
+        cursor.execute('''
+            INSERT OR IGNORE INTO tasks
+            (form_id, task_id, title, description, author_id, author_name,
+             created_at, finished_at, last_modified, current_step, status,
+             raw_data, snapshot_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            form_id,
+            task_id,
+            task.get('title'),
+            task.get('description'),
+            self._extract_author_id(task),
+            self._extract_author_name(task),
+            task.get('created_date'),
+            task.get('finished_date'),
+            last_modified,
+            self._extract_step_name(task),
+            status,
+            raw_json,
+            snapshot_ts
+        ))
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO latest_tasks
+            (form_id, task_id, title, status, last_modified, raw_data, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (
+            form_id,
+            task_id,
+            task.get('title'),
+            status,
+            last_modified,
+            raw_json
+        ))
+
+        known[task_id] = last_modified
+        return True
 
     def _extract_author_id(self, task: Dict) -> Optional[int]:
         """
@@ -546,6 +679,62 @@ class PyrusStorage:
         except Exception as e:
             logger.error(f"Ошибка получения последней синхронизации: {e}")
             return None
+
+    # ===== Локи прогонов =====
+    #
+    # Проверки «статус последнего sync_log == started» для этого не хватает:
+    # между чтением статуса и стартом потока есть окно, в которое влезает второй
+    # воркер (их на Amvera два, и в каждом свой планировщик) — и оба качают одно
+    # и то же. Захват здесь — один UPDATE ... WHERE, атомарный на уровне SQLite.
+    # В value лежит время истечения: держатель мог умереть вместе с воркером
+    # (деплой, OOM) и не позвать release — по TTL лок освободится сам.
+
+    def try_acquire_sync_lock(self, name: str, ttl_seconds: int) -> bool:
+        """Захватить лок. True — лок наш, False — держит кто-то другой"""
+        key = f'lock:{name}'
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        expires = (datetime.utcnow() + timedelta(seconds=ttl_seconds)).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sync_state (key, value, updated_at)"
+                    " VALUES (?, '', CURRENT_TIMESTAMP)",
+                    (key,)
+                )
+                # Формат времени фиксированной ширины — лексикографическое
+                # сравнение строк совпадает с хронологическим
+                cursor = conn.execute('''
+                    UPDATE sync_state
+                    SET value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE key = ? AND (value = '' OR value < ?)
+                ''', (expires, key, now))
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка захвата лока {name}: {e}")
+            return False
+
+    def renew_sync_lock(self, name: str, ttl_seconds: int) -> None:
+        """Продлить свой лок (вызывать по ходу долгого прогона)"""
+        expires = (datetime.utcnow() + timedelta(seconds=ttl_seconds)).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    'UPDATE sync_state SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?',
+                    (expires, f'lock:{name}')
+                )
+        except Exception as e:
+            logger.error(f"Ошибка продления лока {name}: {e}")
+
+    def release_sync_lock(self, name: str) -> None:
+        """Освободить лок"""
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE sync_state SET value = '', updated_at = CURRENT_TIMESTAMP WHERE key = ?",
+                    (f'lock:{name}',)
+                )
+        except Exception as e:
+            logger.error(f"Ошибка освобождения лока {name}: {e}")
 
     def get_stats(self) -> Dict:
         """Получить статистику БД"""

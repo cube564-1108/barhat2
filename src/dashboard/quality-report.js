@@ -9,6 +9,28 @@
     const API_BASE = window.location.origin;
     let salonHistoryChart = null;
 
+    /**
+     * Экранирование для вставки в HTML.
+     *
+     * Кавычка обязательна: названия салонов и имена флористов подставлялись в
+     * onclick="showSalonHistory('${name}')" как есть, и апостроф в названии
+     * ломал кнопку целиком. Ту же дырку уже чинили в четырёх других модулях
+     * дашборда.
+     */
+    function escapeHtml(str) {
+        return String(str ?? '').replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
+    }
+
+    function notifyError(message) {
+        if (window.BarhatUI) {
+            window.BarhatUI.toast(message, 'error');
+        } else {
+            console.error(message);
+        }
+    }
+
     // Цветовая палитра бренда
     const COLORS = [
         '#411330', // --barkhat-wine
@@ -93,6 +115,8 @@
         const sorted = Object.entries(salons)
             .sort((a, b) => b[1].total.count - a[1].total.count);
 
+        // Название салона уходит в data-атрибут, а обработчик висит на tbody:
+        // так имя не попадает в исполняемый код и кавычки в нём безопасны
         tbody.innerHTML = sorted.map(([name, stats]) => {
             const cat14Text = stats.cat14.count > 0
                 ? `${stats.cat14.avg_score.toFixed(1)} (${stats.cat14.count})`
@@ -100,25 +124,26 @@
             const cat18Text = stats.cat18.count > 0
                 ? `${stats.cat18.avg_score.toFixed(1)} (${stats.cat18.count})`
                 : '-';
+            const salonAttr = escapeHtml(name);
 
             return `
                 <tr>
-                    <td><strong>${name}</strong></td>
+                    <td><strong>${escapeHtml(name)}</strong></td>
                     <td>${cat14Text}</td>
                     <td>${cat18Text}</td>
                     <td>${stats.total.count}</td>
                     <td>
-                        <button class="btn btn-secondary btn-sm" onclick="showSalonHistory('${name}')">
+                        <button class="btn btn-secondary btn-sm" data-salon-action="history" data-salon="${salonAttr}">
                             Динамика
                         </button>
                     </td>
                     <td>
-                        <button class="btn btn-accent btn-sm" onclick="showSalonOrderTypes('${name}')">
+                        <button class="btn btn-accent btn-sm" data-salon-action="order-types" data-salon="${salonAttr}">
                             По видам
                         </button>
                     </td>
                     <td>
-                        <button class="btn btn-primary btn-sm" onclick="showSalonFlorists('${name}')">
+                        <button class="btn btn-primary btn-sm" data-salon-action="florists" data-salon="${salonAttr}">
                             По флористам
                         </button>
                     </td>
@@ -128,9 +153,24 @@
     }
 
     /**
+     * Один обработчик на всю таблицу вместо инлайновых onclick
+     */
+    function onSalonsTableClick(event) {
+        const button = event.target.closest('[data-salon-action]');
+        if (!button) return;
+
+        const salon = button.dataset.salon;
+        const action = button.dataset.salonAction;
+
+        if (action === 'history') showSalonHistory(salon);
+        else if (action === 'order-types') showSalonOrderTypes(salon);
+        else if (action === 'florists') showSalonFlorists(salon);
+    }
+
+    /**
      * Показать историю салона
      */
-    window.showSalonHistory = async function(salonName) {
+    async function showSalonHistory(salonName) {
         const modal = document.getElementById('salonHistoryModal');
         const title = document.getElementById('salonModalTitle');
 
@@ -145,7 +185,7 @@
 
             if (!result.success) {
                 console.error('History API error:', result.error);
-                alert(`Ошибка загрузки данных: ${result.error}`);
+                notifyError(`Ошибка загрузки данных: ${result.error}`);
                 return;
             }
 
@@ -153,14 +193,14 @@
             updateSalonHistoryChart(result.data, salonName);
         } catch (error) {
             console.error('History fetch error:', error);
-            alert(`Ошибка сети: ${error.message}`);
+            notifyError(`Ошибка сети: ${error.message}`);
         }
-    };
+    }
 
     /**
      * Показать виды заказа для салона
      */
-    window.showSalonOrderTypes = async function(salonName) {
+    async function showSalonOrderTypes(salonName) {
         const modal = document.getElementById('salonOrderTypesModal');
         const title = document.getElementById('orderTypesModalTitle');
         const tbody = document.getElementById('orderTypesTableBody');
@@ -184,7 +224,7 @@
 
             if (!result.success) {
                 console.error('Order types API error:', result.error);
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--barkhat-wine);">Ошибка: ${result.error}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--barkhat-wine);">Ошибка: ${escapeHtml(result.error)}</td></tr>`;
                 return;
             }
 
@@ -192,14 +232,14 @@
             updateOrderTypesTable(result.data.order_types);
         } catch (error) {
             console.error('Order types fetch error:', error);
-            tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--barkhat-wine);">Ошибка сети: ${error.message}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--barkhat-wine);">Ошибка сети: ${escapeHtml(error.message)}</td></tr>`;
         }
-    };
+    }
 
     /**
      * Показать флористов салона
      */
-    window.showSalonFlorists = async function(salonName) {
+    async function showSalonFlorists(salonName) {
         const modal = document.getElementById('salonFloristsModal');
         const title = document.getElementById('floristsModalTitle');
         const tbody = document.getElementById('floristsTableBody');
@@ -223,7 +263,7 @@
 
             if (!result.success) {
                 console.error('Florists API error:', result.error);
-                tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--barkhat-wine);">Ошибка: ${result.error}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--barkhat-wine);">Ошибка: ${escapeHtml(result.error)}</td></tr>`;
                 return;
             }
 
@@ -231,9 +271,9 @@
             updateFloristsTable(result.data.florists);
         } catch (error) {
             console.error('Florists fetch error:', error);
-            tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--barkhat-wine);">Ошибка сети: ${error.message}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--barkhat-wine);">Ошибка сети: ${escapeHtml(error.message)}</td></tr>`;
         }
-    };
+    }
 
     /**
      * Обновить таблицу видов заказа
@@ -251,7 +291,7 @@
 
             return `
                 <tr ${rowStyle}>
-                    <td>${item.order_type}</td>
+                    <td>${escapeHtml(item.order_type)}</td>
                     <td>${avgScore}</td>
                     <td>${item.max_score}</td>
                     <td>${count}</td>
@@ -283,7 +323,7 @@
 
             return `
                 <tr>
-                    <td><strong>${f.florist}</strong></td>
+                    <td><strong>${escapeHtml(f.florist)}</strong></td>
                     <td>${cat14Text}</td>
                     <td>${cat18Text}</td>
                 </tr>
@@ -448,74 +488,80 @@
     }
 
     /**
-     * Обновление данных из Pyrus
+     * Обновление данных из Pyrus.
+     *
+     * Период берётся из выпадающего списка: раньше кнопка всегда просила ровно
+     * 7 дней, и догрузить историю можно было только запросом к
+     * /api/pyrus/backfill руками — из интерфейса она не пополнялась.
      */
     async function updatePyrusData() {
         const btn = document.getElementById('updatePyrusData');
         const btnText = btn.querySelector('.btn-text');
         const spinner = btn.querySelector('.btn-spinner');
         const statusEl = document.getElementById('updateStatus');
+        const periodEl = document.getElementById('qualitySyncPeriod');
+        const days = parseInt(periodEl && periodEl.value, 10) || 7;
+
+        const idleLabel = btnText.textContent;
+        let checkInterval = null;
+
+        function finish() {
+            if (checkInterval) clearInterval(checkInterval);
+            btn.disabled = false;
+            btnText.textContent = idleLabel;
+            spinner.classList.add('hidden');
+        }
 
         btn.disabled = true;
         btnText.textContent = 'Обновление...';
         spinner.classList.remove('hidden');
         statusEl.classList.remove('hidden');
         statusEl.className = 'update-status';
-        statusEl.textContent = '⏳ Запуск обновления...';
+        statusEl.textContent = 'Запуск обновления...';
 
         try {
-            // Запускаем обновление
             const response = await fetch(`${API_BASE}/api/pyrus/update`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ days: 7 })
+                body: JSON.stringify({ days })
             });
 
             const result = await response.json();
 
             if (!result.success) {
-                statusEl.textContent = '❌ Ошибка: ' + result.error;
+                statusEl.textContent = 'Ошибка: ' + result.error;
                 statusEl.classList.add('error');
+                finish();
                 return;
             }
 
             // Проверяем статус каждые 2 секунды
-            const checkInterval = setInterval(async () => {
+            checkInterval = setInterval(async () => {
                 try {
                     const statusRes = await fetch(`${API_BASE}/api/pyrus/update-status`);
                     const statusData = await statusRes.json();
 
-                    if (statusData.success) {
-                        const status = statusData.status;
+                    if (!statusData.success) return;
 
-                        if (status.running) {
-                            statusEl.textContent = `⏳ ${status.message || 'Обновление...'}`;
-                        } else {
-                            clearInterval(checkInterval);
+                    const status = statusData.status;
 
-                            if (status.error) {
-                                statusEl.textContent = '❌ Ошибка: ' + status.error;
-                                statusEl.classList.add('error');
-                            } else {
-                                statusEl.textContent = '✅ ' + status.message;
-                                statusEl.classList.add('success');
-
-                                // Перезагружаем данные
-                                setTimeout(() => {
-                                    loadQualityData();
-                                }, 500);
-                            }
-
-                            btn.disabled = false;
-                            btnText.textContent = '🔄 Обновить данные';
-                            spinner.classList.add('hidden');
-
-                            // Скрываем статус через 5 секунд
-                            setTimeout(() => {
-                                statusEl.classList.add('hidden');
-                            }, 5000);
-                        }
+                    if (status.running) {
+                        statusEl.textContent = status.message || 'Обновление...';
+                        return;
                     }
+
+                    finish();
+
+                    if (status.error) {
+                        statusEl.textContent = 'Ошибка: ' + status.error;
+                        statusEl.classList.add('error');
+                    } else {
+                        statusEl.textContent = status.message;
+                        statusEl.classList.add('success');
+                        setTimeout(loadQualityData, 500);
+                    }
+
+                    setTimeout(() => statusEl.classList.add('hidden'), 5000);
                 } catch (e) {
                     console.error('Status check error:', e);
                 }
@@ -523,11 +569,9 @@
 
         } catch (error) {
             console.error('Update error:', error);
-            statusEl.textContent = '❌ Ошибка: ' + error.message;
+            statusEl.textContent = 'Ошибка: ' + error.message;
             statusEl.classList.add('error');
-            btn.disabled = false;
-            btnText.textContent = '🔄 Обновить данные';
-            spinner.classList.add('hidden');
+            finish();
         }
     }
 
@@ -554,6 +598,13 @@
 
         if (updateBtn) {
             updateBtn.addEventListener('click', updatePyrusData);
+        }
+
+        // Кнопки в строках таблицы салонов — через делегирование, потому что
+        // строки перерисовываются на каждый запрос
+        const salonsTable = document.getElementById('qualitySalonsTable');
+        if (salonsTable) {
+            salonsTable.addEventListener('click', onSalonsTableClick);
         }
 
         // Кнопка закрытия модального окна
