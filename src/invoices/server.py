@@ -764,8 +764,24 @@ def download_attachment(attachment_id):
     invoice = get_invoice_by_id(attachment["invoice_id"])
     if not invoice or not user_can_access_invoice(invoice, current_user.username, current_user.role):
         return jsonify({"error": "Нет доступа к этому вложению"}), 403
+
+    directory = os.path.abspath(ATTACHMENTS_DIR)
+    # Файл может отсутствовать, если его залили, когда вложения складывались
+    # мимо постоянного диска (см. ATTACHMENT_DIRS в app.py): запись в БД есть,
+    # файла нет. Без явной проверки send_from_directory поднимает NotFound, и
+    # общий обработчик 404 отвечает "Endpoint not found" — по такому ответу
+    # кажется, что сломан маршрут, а не потерян файл.
+    if not os.path.exists(os.path.join(directory, attachment["stored_filename"])):
+        logger.error(
+            "Вложение %s (%s) есть в БД, но файла нет в %s",
+            attachment_id, attachment["original_filename"], directory
+        )
+        return jsonify({
+            "error": "Файл вложения не найден на диске — загрузите его заново"
+        }), 404
+
     return send_from_directory(
-        os.path.abspath(ATTACHMENTS_DIR),
+        directory,
         attachment["stored_filename"],
         download_name=attachment["original_filename"],
     )

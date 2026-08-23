@@ -607,8 +607,22 @@ def download_attachment(attachment_id):
     _, writeoff = _writeoff_for_position(attachment["position_id"])
     if not writeoff or not _require_store_access(writeoff["store_id"]):
         return jsonify({"error": "Нет доступа к этой точке"}), 403
+
+    directory = os.path.abspath(ATTACHMENTS_DIR)
+    # См. такую же проверку в invoices/server.py: файла может не быть, если он
+    # попал на эфемерный диск сборки. Без неё общий обработчик 404 отвечает
+    # "Endpoint not found", и это читается как сломанный маршрут.
+    if not os.path.exists(os.path.join(directory, attachment["stored_filename"])):
+        logger.error(
+            "Вложение %s (%s) есть в БД, но файла нет в %s",
+            attachment_id, attachment["original_filename"], directory
+        )
+        return jsonify({
+            "error": "Файл вложения не найден на диске — загрузите его заново"
+        }), 404
+
     return send_from_directory(
-        os.path.abspath(ATTACHMENTS_DIR),
+        directory,
         attachment["stored_filename"],
         download_name=attachment["original_filename"],
     )

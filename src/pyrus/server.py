@@ -357,11 +357,28 @@ def health_check():
             'wal_mb': round(os.path.getsize(wal) / 1024 / 1024, 2) if os.path.exists(wal) else 0,
         }
 
+    # Папки вложений живут по тем же правилам, что и базы: если путь не на
+    # /data, файлы стираются каждой сборкой, а записи о них остаются в БД —
+    # и счёт открывается, а вложение к нему «не находится».
+    attachments = {}
+    for name, path in (
+        ('invoices', os.environ.get('INVOICE_ATTACHMENTS_DIR', 'invoice_attachments')),
+        ('writeoffs', os.environ.get('WRITEOFF_ATTACHMENTS_DIR', 'writeoff_attachments')),
+    ):
+        full = os.path.abspath(path)
+        attachments[name] = {
+            'path': full,
+            'exists': os.path.isdir(full),
+            'persistent': full.startswith('/data'),
+            'files': len(os.listdir(full)) if os.path.isdir(full) else 0,
+        }
+
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
         'database': db_path,
         'databases': databases,
+        'attachments': attachments,
         'disk': _disk_free_info(),
         'write_test': _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
     })
