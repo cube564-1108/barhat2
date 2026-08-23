@@ -1002,6 +1002,39 @@ def get_salon_florists():
         }), 500
 
 
+@app.route('/api/quality/salon-assessment', methods=['GET'])
+@section_required('quality')
+def get_salon_assessment():
+    """
+    Текстовый разбор качества по каждому салону за период.
+
+    Query params:
+        - date_from: Начальная дата (YYYY-MM-DD)
+        - date_to: Конечная дата (YYYY-MM-DD)
+
+    Разбор возвращается сразу по всем салонам: он нужен, чтобы одним взглядом
+    увидеть, где в сети что проседает, а по одному салону за запрос это было бы
+    N обращений вместо одного.
+    """
+    try:
+        assessment = quality_report.get_salons_assessment(
+            request.args.get('date_from'),
+            request.args.get('date_to')
+        )
+
+        return jsonify({
+            'success': True,
+            'data': assessment
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка /api/quality/salon-assessment: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @app.route('/api/quality/data-coverage', methods=['GET'])
 @section_required('quality')
 def get_data_coverage():

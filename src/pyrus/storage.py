@@ -202,6 +202,30 @@ class PyrusStorage:
                 ON quality_scores(florist, task_date)
             ''')
 
+            # Баллы по отдельным критериям формы (0/1/2): аккуратность упаковки,
+            # техника сборки и т.д. Итоговая оценка — их сумма, но по ней не
+            # понять, ЧТО именно проседает в салоне. Салон и дата продублированы
+            # сюда намеренно: разбор группирует по ним, и без дубля каждый запрос
+            # тянул бы JOIN с quality_scores.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS quality_criteria_scores (
+                    task_id INTEGER NOT NULL,
+                    criterion_id INTEGER NOT NULL,
+                    salon TEXT,
+                    task_date TEXT,
+                    score INTEGER,
+                    PRIMARY KEY (task_id, criterion_id)
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_quality_criteria_salon_date
+                ON quality_criteria_scores(salon, task_date)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_quality_criteria_date
+                ON quality_criteria_scores(task_date)
+            ''')
+
             # Миграция: колонки для отслеживания прогресса фоновых загрузок.
             # Статус обновления раньше жил в памяти процесса, но на Amvera 2
             # воркера gunicorn — опрос статуса мог попасть на воркер, который

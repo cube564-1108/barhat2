@@ -54,6 +54,10 @@
 
         console.log(`Loading quality data: ${url}`);
 
+        // Разбор грузится своим запросом и независимо от таблицы: если отчёт
+        // отвалится, блок покажет свою ошибку, а не останется в «Загрузка…»
+        loadAssessment();
+
         try {
             const response = await fetch(url);
             const result = await response.json();
@@ -150,6 +154,115 @@
                 </tr>
             `;
         }).join('');
+    }
+
+    /**
+     * Разбор по салонам: что проседает, что получается, куда движется.
+     *
+     * Отдельный запрос, а не часть /api/quality: таблица салонов должна
+     * появиться сразу, а разбор считается по витрине критериев и может
+     * подождать лишние миллисекунды.
+     */
+    async function loadAssessment() {
+        const box = document.getElementById('qualityAssessment');
+        if (!box) return;
+
+        const dateFrom = document.getElementById('qualityDateFrom').value;
+        const dateTo = document.getElementById('qualityDateTo').value;
+
+        const url = new URL(`${API_BASE}/api/quality/salon-assessment`);
+        if (dateFrom) url.searchParams.set('date_from', dateFrom);
+        if (dateTo) url.searchParams.set('date_to', dateTo);
+
+        try {
+            const response = await fetch(url);
+            const result = await response.json();
+
+            if (!result.success) {
+                box.innerHTML = `<p class="bx-assess__caption">Ошибка: ${escapeHtml(result.error)}</p>`;
+                return;
+            }
+
+            renderAssessment(result.data);
+        } catch (error) {
+            box.innerHTML = `<p class="bx-assess__caption">Ошибка сети: ${escapeHtml(error.message)}</p>`;
+        }
+    }
+
+    function renderDelta(delta) {
+        if (delta === null || delta === undefined) return '';
+
+        // Тренды по DESIGN-SPEC: стрелки ▲ ▼, зелёный рост, красное падение
+        const abs = Math.abs(delta).toFixed(1).replace('.', ',');
+        if (Math.abs(delta) < 1) {
+            return `<span class="bx-assess__delta bx-assess__delta--flat">без изменений</span>`;
+        }
+        const dir = delta > 0 ? 'up' : 'down';
+        const arrow = delta > 0 ? '▲' : '▼';
+        return `<span class="bx-assess__delta bx-assess__delta--${dir}">${arrow} ${abs} п.п.</span>`;
+    }
+
+    function renderAssessment(data) {
+        const box = document.getElementById('qualityAssessment');
+        if (!box) return;
+
+        const salons = data.salons || [];
+
+        if (salons.length === 0) {
+            box.innerHTML = '<p class="bx-assess__caption">За выбранный период оценок нет.</p>';
+            return;
+        }
+
+        const items = salons.map(s => {
+            let modifier = '';
+            if (!s.reliable) modifier = 'bx-assess__item--weak';
+            else if (s.problems.length === 0) modifier = 'bx-assess__item--good';
+            else if (s.problems.some(p => p.kind === 'salon')) modifier = 'bx-assess__item--bad';
+
+            const tags = []
+                .concat(s.strengths.map(c =>
+                    `<span class="bx-badge bx-badge--good">${escapeHtml(c.name)} · ${fmt(c.percent)}%</span>`))
+                .concat(s.problems.map(c =>
+                    `<span class="bx-badge bx-badge--bad">${escapeHtml(c.name)} · ${fmt(c.percent)}%</span>`))
+                .join('');
+
+            return `
+                <div class="bx-assess__item ${modifier}">
+                    <div class="bx-assess__head">
+                        <span class="bx-assess__salon">${escapeHtml(s.salon)}</span>
+                        <span class="bx-assess__value">${fmt(s.percent)}%</span>
+                        ${renderDelta(s.delta)}
+                        <span class="bx-assess__count">${s.count} ${pluralScores(s.count)}</span>
+                    </div>
+                    <p class="bx-assess__text">${escapeHtml(s.summary)}</p>
+                    <div class="bx-assess__tags">${tags}</div>
+                </div>
+            `;
+        }).join('');
+
+        const network = data.network || {};
+        const weakest = (network.criteria || []).slice(0, 3)
+            .map(c => `${escapeHtml(c.name)} — ${fmt(c.percent)}%`)
+            .join(', ');
+
+        const networkBlock = weakest
+            ? `<div class="bx-assess__network">
+                   По сети в целом ${fmt(network.percent)}% от максимума.
+                   Самые слабые критерии: ${weakest}.
+               </div>`
+            : '';
+
+        box.innerHTML = items + networkBlock;
+    }
+
+    function fmt(value) {
+        return Number(value).toFixed(1).replace('.', ',');
+    }
+
+    function pluralScores(n) {
+        if (n % 10 === 1 && n % 100 !== 11) return 'оценка';
+        if (n % 10 >= 2 && n % 10 <= 4 && !(n % 100 >= 12 && n % 100 <= 14)) return 'оценки';
+        return 'оценок';
     }
 
     /**

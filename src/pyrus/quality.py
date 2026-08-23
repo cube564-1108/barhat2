@@ -18,7 +18,7 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,37 @@ FIELD_SALON = 10        # Салон
 FIELD_TOTAL_SCORE = 18  # Итоговая оценка
 
 _MAX_SCORE_DEFAULT = 14
+
+# Критерии оценки: балл 0/1/2 по каждому, итоговая оценка — их сумма.
+# Названия в родительном/именительном виде, пригодном для подстановки в текст.
+CRITERIA = {
+    7: 'соответствие каталогу',
+    8: 'аккуратность упаковки',
+    11: 'оформление клубники',
+    13: 'техника сборки',
+    14: 'клубника отделена плёнкой',
+    15: 'вложение материалов',
+    16: 'фотография',
+    20: 'обработка цветка',
+    23: 'свежесть компонентов',
+}
+
+CRITERION_MAX = 2
+
+# Набор применимых критериев зависит от вида заказа, и в форме это выражено тем,
+# заполнено поле или нет. У «Клубничного букета» «Обработка цветка» заполнена в
+# 66 оценках из 8462 — критерий неприменим, и в этих редких случаях стоит 0.
+# Считать такие нули провалом нельзя, поэтому критерий попадает в разбор, только
+# если заполнен хотя бы у половины оценок выборки.
+CRITERION_COVERAGE_MIN = 0.5
+
+# Ниже этого числа оценок выводы по салону считаются ненадёжными
+ASSESSMENT_MIN_SAMPLE = 15
+# Порог «сильной стороны» и «проседания» в процентах от максимума
+STRONG_PERCENT = 97.0
+WEAK_PERCENT = 90.0
+# Отставание/опережение сети, начиная с которого это стоит называть вслух
+NETWORK_GAP_PP = 5.0
 
 # Пересборка витрины делается один раз на процесс, а не на запрос: инициализация
 # на каждом запросе — одна из причин, по которым фоновая работа уже клала сайт.
@@ -139,7 +170,39 @@ def extract_task_data(task: Dict) -> Optional[Dict]:
         'category': category,
         'order_id': str(order_id) if order_id is not None else None,
         'total_score': total_score,
+        'criteria': extract_criteria(task),
     }
+
+
+def extract_criteria(task: Dict) -> Dict[int, int]:
+    """
+    Достать баллы по отдельным критериям.
+
+    Отсутствие поля означает «критерий неприменим к этому виду заказа» — такие
+    критерии в результат не попадают, чтобы не путать их с нулевым баллом.
+    """
+    scores = {}
+
+    for field in task.get('fields', []):
+        field_id = field.get('id')
+        if field_id not in CRITERIA:
+            continue
+
+        value = field.get('value')
+        if not isinstance(value, dict):
+            continue
+
+        names = value.get('choice_names')
+        if not names:
+            continue
+
+        raw = str(names[0]).strip()
+        if not raw.isdigit():
+            continue
+
+        scores[field_id] = int(raw)
+
+    return scores
 
 
 # ===== Витрина =====
@@ -159,6 +222,7 @@ def _upsert_rows(cursor, tasks: List[Dict]) -> Tuple[int, int]:
             # Задача могла попасть в витрину раньше, а потом у неё убрали
             # оценку — тогда её надо убрать и из отчёта
             cursor.execute('DELETE FROM quality_scores WHERE task_id = ?', (task_id,))
+            cursor.execute('DELETE FROM quality_criteria_scores WHERE task_id = ?', (task_id,))
             skipped += 1
             continue
 
@@ -179,6 +243,17 @@ def _upsert_rows(cursor, tasks: List[Dict]) -> Tuple[int, int]:
             parsed['total_score'],
             parsed['order_id'],
         ))
+
+        # Критерии переписываем целиком: оценку могли исправить и снять балл,
+        # а INSERT OR REPLACE обновил бы только пришедшие строки
+        cursor.execute('DELETE FROM quality_criteria_scores WHERE task_id = ?', (task_id,))
+        for criterion_id, score in parsed['criteria'].items():
+            cursor.execute('''
+                INSERT INTO quality_criteria_scores
+                (task_id, criterion_id, salon, task_date, score)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (task_id, criterion_id, parsed['salon'], parsed['date'], score))
+
         saved += 1
 
     return saved, skipped
@@ -233,6 +308,9 @@ def rebuild_projection() -> Dict:
                 continue
 
         cursor.execute('DELETE FROM quality_scores WHERE form_id = ?', (QUALITY_FORM_ID,))
+        # Таблица критериев обслуживает только форму качества, поэтому чистится
+        # целиком — отдельной колонки form_id в ней нет
+        cursor.execute('DELETE FROM quality_criteria_scores')
         saved, skipped = _upsert_rows(cursor, tasks)
         conn.commit()
 
@@ -270,13 +348,16 @@ def ensure_projection() -> None:
             scores = conn.execute(
                 'SELECT COUNT(*) FROM quality_scores WHERE form_id = ?', (QUALITY_FORM_ID,)
             ).fetchone()[0]
+            # Пустая таблица критериев при заполненной quality_scores — это
+            # деплой, добавивший разбор по критериям к уже собранной витрине
+            criteria = conn.execute('SELECT COUNT(*) FROM quality_criteria_scores').fetchone()[0]
             tasks = conn.execute(
                 'SELECT COUNT(*) FROM latest_tasks WHERE form_id = ?', (QUALITY_FORM_ID,)
             ).fetchone()[0]
         finally:
             conn.close()
 
-        if scores == 0 and tasks > 0:
+        if (scores == 0 or criteria == 0) and tasks > 0:
             from .storage import get_storage
             store = get_storage()
             if store.try_acquire_sync_lock('quality-projection', 600):
@@ -646,6 +727,325 @@ def get_salon_florists(
         'salon': salon_name,
         'period': {'from': date_from, 'to': date_to},
         'florists': florists,
+    }
+
+
+def _previous_period(date_from: Optional[str], date_to: Optional[str]):
+    """
+    Предыдущий период той же длины — с ним сравнивается динамика.
+
+    Возвращает (from, to) или (None, None), если период не задан целиком:
+    сравнивать «всю историю» не с чем.
+    """
+    if not date_from or not date_to:
+        return None, None
+
+    try:
+        start = date.fromisoformat(date_from)
+        end = date.fromisoformat(date_to)
+    except ValueError:
+        return None, None
+
+    if end < start:
+        return None, None
+
+    length = (end - start).days + 1
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=length - 1)
+    return prev_start.isoformat(), prev_end.isoformat()
+
+
+def _salon_levels(conn, date_from: Optional[str], date_to: Optional[str]) -> Dict[str, Dict]:
+    """Уровень качества салона: доля набранных баллов от максимума"""
+    where, params = _date_filter(date_from, date_to)
+    rows = conn.execute(f'''
+        SELECT salon, COUNT(*) AS cnt,
+               SUM(total_score) AS got, SUM(max_score) AS possible
+        FROM quality_scores
+        WHERE {where}
+        GROUP BY salon
+    ''', params).fetchall()
+
+    return {
+        row['salon']: {
+            'count': row['cnt'],
+            # Процент, а не средний балл: у видов заказа разный максимум (14 и
+            # 18), и усреднять сырые баллы между ними некорректно
+            'percent': round((row['got'] or 0) / row['possible'] * 100, 1) if row['possible'] else 0.0,
+        }
+        for row in rows
+    }
+
+
+def _criteria_stats(conn, date_from: Optional[str], date_to: Optional[str]):
+    """
+    Баллы по критериям в разрезе салонов и по сети целиком.
+
+    Returns:
+        (по салонам {salon: {criterion_id: {...}}}, по сети {criterion_id: {...}})
+    """
+    where = []
+    params: list = []
+    if date_from:
+        where.append('task_date >= ?')
+        params.append(date_from)
+    if date_to:
+        where.append('task_date <= ?')
+        params.append(date_to)
+    clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+
+    rows = conn.execute(f'''
+        SELECT salon, criterion_id, COUNT(*) AS cnt, SUM(score) AS got
+        FROM quality_criteria_scores
+        {clause}
+        GROUP BY salon, criterion_id
+    ''', params).fetchall()
+
+    by_salon: Dict[str, Dict[int, Dict]] = {}
+    network: Dict[int, Dict] = {}
+
+    for row in rows:
+        criterion_id = row['criterion_id']
+        if criterion_id not in CRITERIA:
+            continue
+
+        cnt = row['cnt']
+        got = row['got'] or 0
+        possible = cnt * CRITERION_MAX
+
+        by_salon.setdefault(row['salon'], {})[criterion_id] = {
+            'count': cnt,
+            'got': got,
+            'percent': round(got / possible * 100, 1) if possible else 0.0,
+        }
+
+        agg = network.setdefault(criterion_id, {'count': 0, 'got': 0})
+        agg['count'] += cnt
+        agg['got'] += got
+
+    for criterion_id, agg in network.items():
+        possible = agg['count'] * CRITERION_MAX
+        agg['percent'] = round(agg['got'] / possible * 100, 1) if possible else 0.0
+
+    return by_salon, network
+
+
+def _applicable_criteria(salon_criteria: Dict[int, Dict], sample: int) -> List[Dict]:
+    """
+    Отобрать критерии, по которым вообще можно судить о салоне.
+
+    Критерий, заполненный у меньшинства оценок, к этим видам заказа неприменим
+    (например «обработка цветка» для клубничного букета) — и редкие нули в таком
+    поле означают «не оценивалось», а не провал.
+    """
+    if sample <= 0:
+        return []
+
+    result = []
+    for criterion_id, stats in salon_criteria.items():
+        if stats['count'] < sample * CRITERION_COVERAGE_MIN:
+            continue
+        result.append({
+            'criterion_id': criterion_id,
+            'name': CRITERIA[criterion_id],
+            'count': stats['count'],
+            'percent': stats['percent'],
+            # Сколько баллов салон потерял на этом критерии — по нему сортируем
+            # проблемы: важнее не самый низкий процент, а самая большая потеря
+            'lost_points': stats['count'] * CRITERION_MAX - stats['got'],
+        })
+    return result
+
+
+def _plural_ru(number: int, one: str, few: str, many: str) -> str:
+    """Согласовать существительное с числом (1 оценка, 2 оценки, 5 оценок)"""
+    if number % 10 == 1 and number % 100 != 11:
+        return one
+    if 2 <= number % 10 <= 4 and not 12 <= number % 100 <= 14:
+        return few
+    return many
+
+
+def _num(value: float, digits: int = 1) -> str:
+    """Число с запятой в качестве разделителя — как принято в остальном дашборде"""
+    return f'{value:.{digits}f}'.replace('.', ',')
+
+
+def _build_summary(level: Dict, delta, strengths, problems, sample: int, has_criteria: bool) -> str:
+    """Собрать связное описание салона из посчитанных чисел"""
+    parts = [f"Качество {_num(level['percent'])}% от максимума"]
+
+    if delta is not None:
+        if abs(delta) < 1:
+            parts.append('на уровне прошлого периода')
+        elif delta > 0:
+            parts.append(f'это на {_num(abs(delta))} п.п. лучше прошлого периода')
+        else:
+            parts.append(f'это на {_num(abs(delta))} п.п. хуже прошлого периода')
+
+    text = ', '.join(parts) + '.'
+
+    if sample < ASSESSMENT_MIN_SAMPLE:
+        return text + (
+            f' Всего {sample} {_plural_ru(sample, "оценка", "оценки", "оценок")} — '
+            f'для выводов маловато.'
+        )
+
+    # Витрина критериев может быть ещё не собрана (первый запуск после деплоя).
+    # Молчать об этом нельзя: иначе вывод «заметных провалов нет» читался бы
+    # как результат разбора, хотя разбирать было нечего
+    if not has_criteria:
+        return text + ' Разбор по критериям пока недоступен — данные обновляются.'
+
+    # Сильные стороны делим на «лучше, чем у остальных» и «просто хорошо».
+    # Без этого у всех салонов в сильных оказывались одни и те же критерии,
+    # которые у сети под 100%, и разбор переставал что-либо различать.
+    ahead = [s for s in strengths if (s['vs_network'] or 0) >= 2]
+    if ahead:
+        text += ' Сильнее сети: ' + ', '.join(
+            f"{s['name']} (+{_num(s['vs_network'])} п.п.)" for s in ahead
+        ) + '.'
+    elif strengths:
+        text += ' Уверенно держат: ' + ', '.join(s['name'] for s in strengths) + '.'
+
+    if not problems:
+        return text + ' Заметных провалов нет.'
+
+    worst = problems[0]
+    tail = ''
+    if worst['kind'] == 'salon' and worst['vs_network'] is not None:
+        tail = f", на {_num(abs(worst['vs_network']))} п.п. ниже сети"
+    text += f" Слабее всего — {worst['name']} ({_num(worst['percent'])}%{tail})."
+
+    others = problems[1:]
+    if others:
+        text += ' Ещё проседает: ' + ', '.join(p['name'] for p in others) + '.'
+
+    # Отдельно проговариваем, что проблема не салонная: чинить надо процесс или
+    # обучение, а не разговаривать с конкретной точкой
+    common = [p['name'] for p in problems if p['kind'] == 'network']
+    if common and len(common) == len(problems):
+        text += ' Это общие для сети слабые места, а не особенность салона.'
+    elif common:
+        text += f' По сети «{common[0]}» проседает у всех.'
+
+    return text
+
+
+def get_salons_assessment(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
+) -> Dict:
+    """
+    Текстовый разбор качества по каждому салону за период.
+
+    Считается правилами из уже посчитанных чисел — без обращения к внешним
+    сервисам, поэтому отвечает мгновенно и одинаково на одних и тех же данных.
+    Разбор по всем салонам делается одним проходом: открывать его салон за
+    салоном означало бы N запросов вместо двух.
+    """
+    prev_from, prev_to = _previous_period(date_from, date_to)
+
+    conn = _connect()
+    try:
+        levels = _salon_levels(conn, date_from, date_to)
+        prev_levels = _salon_levels(conn, prev_from, prev_to) if prev_from else {}
+        by_salon, network = _criteria_stats(conn, date_from, date_to)
+    finally:
+        conn.close()
+
+    salons = []
+
+    for salon, level in levels.items():
+        sample = level['count']
+        criteria = _applicable_criteria(by_salon.get(salon, {}), sample)
+
+        for item in criteria:
+            net = network.get(item['criterion_id'], {}).get('percent')
+            item['network_percent'] = net
+            item['vs_network'] = round(item['percent'] - net, 1) if net is not None else None
+
+        # Сильные стороны: либо почти идеально, либо заметно лучше сети
+        strengths = [
+            c for c in criteria
+            if c['percent'] >= STRONG_PERCENT
+            or (c['vs_network'] is not None and c['vs_network'] >= NETWORK_GAP_PP)
+        ]
+        # Сначала то, чем салон выделяется на фоне сети, и только потом просто
+        # высокий процент — иначе в «сильных» у всех подряд одно и то же
+        strengths.sort(key=lambda c: (-(c['vs_network'] or 0), -c['percent']))
+
+        # Проблемы: либо низкий процент сам по себе, либо отставание от сети.
+        # Критерий, попавший в сильные стороны, проблемой быть не может: если
+        # салон заметно лучше сети, ругать его не за что даже при невысоком
+        # проценте — слаба сеть целиком, и это видно в общем блоке
+        strong_ids = {c['criterion_id'] for c in strengths}
+        problems = [
+            c for c in criteria
+            if c['criterion_id'] not in strong_ids
+            and (
+                c['percent'] < WEAK_PERCENT
+                or (c['vs_network'] is not None and c['vs_network'] <= -NETWORK_GAP_PP)
+            )
+        ]
+        problems.sort(key=lambda c: (-c['lost_points'], c['percent']))
+
+        for item in problems:
+            # Отделяем личную проблему салона от общей беды сети: во втором
+            # случае разбираться надо не с салоном, а с процессом или обучением
+            if item['vs_network'] is not None and item['vs_network'] <= -NETWORK_GAP_PP:
+                item['kind'] = 'salon'
+            elif item['percent'] < WEAK_PERCENT:
+                item['kind'] = 'network'
+            else:
+                item['kind'] = 'salon'
+
+        prev = prev_levels.get(salon)
+        delta = None
+        if prev and prev['count'] > 0:
+            delta = round(level['percent'] - prev['percent'], 1)
+
+        top_strengths = strengths[:3]
+        top_problems = problems[:3]
+
+        salons.append({
+            'salon': salon,
+            'count': sample,
+            'percent': level['percent'],
+            'delta': delta,
+            'previous_percent': prev['percent'] if prev else None,
+            'reliable': sample >= ASSESSMENT_MIN_SAMPLE,
+            'strengths': top_strengths,
+            'problems': top_problems,
+            'summary': _build_summary(
+                level, delta, top_strengths, top_problems, sample, bool(criteria)
+            ),
+        })
+
+    # Худшие сверху: разбор нужен, чтобы браться за проблемы, а не любоваться
+    # лидерами. Салоны без надёжной выборки уходят в конец
+    salons.sort(key=lambda s: (not s['reliable'], s['percent']))
+
+    return {
+        'period': {'from': date_from, 'to': date_to},
+        'previous_period': {'from': prev_from, 'to': prev_to},
+        'network': {
+            'percent': round(
+                sum(l['percent'] * l['count'] for l in levels.values())
+                / sum(l['count'] for l in levels.values()), 1
+            ) if levels else 0.0,
+            'criteria': [
+                {
+                    'criterion_id': cid,
+                    'name': CRITERIA[cid],
+                    'percent': stats['percent'],
+                    'count': stats['count'],
+                }
+                for cid, stats in sorted(network.items(), key=lambda x: x[1]['percent'])
+                if cid in CRITERIA
+            ],
+        },
+        'salons': salons,
     }
 
 
