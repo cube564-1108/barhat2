@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import importlib
 import shutil
 import sqlite3
 import logging
@@ -359,13 +360,20 @@ def health_check():
 
     # Папки вложений живут по тем же правилам, что и базы: если путь не на
     # /data, файлы стираются каждой сборкой, а записи о них остаются в БД —
-    # и счёт открывается, а вложение к нему «не находится».
+    # и счёт открывается, а вложение к нему «не находится». Пути спрашиваем
+    # у самих модулей, а не собираем заново: показывать надо ровно ту папку,
+    # в которую они пишут.
     attachments = {}
-    for name, path in (
-        ('invoices', os.environ.get('INVOICE_ATTACHMENTS_DIR', 'invoice_attachments')),
-        ('writeoffs', os.environ.get('WRITEOFF_ATTACHMENTS_DIR', 'writeoff_attachments')),
+    for name, module_path in (
+        ('invoices', 'invoices.storage'),
+        ('writeoffs', 'writeoffs.storage'),
     ):
-        full = os.path.abspath(path)
+        try:
+            module = importlib.import_module(module_path)
+            full = os.path.abspath(module.ATTACHMENTS_DIR)
+        except Exception as e:
+            attachments[name] = {'error': f'{type(e).__name__}: {e}'}
+            continue
         attachments[name] = {
             'path': full,
             'exists': os.path.isdir(full),

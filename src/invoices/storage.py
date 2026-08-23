@@ -18,6 +18,8 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional
 
+from storage_paths import resolve as resolve_data_path
+
 from .seed_data import EXPENSE_CATEGORIES
 
 logger = logging.getLogger(__name__)
@@ -25,9 +27,10 @@ logger = logging.getLogger(__name__)
 # Путь к БД из переменной окружения или дефолт — та же база, что у auth/cashshifts
 DB_PATH = os.environ.get("BARHAT_DB_PATH", "barhat.db")
 
-# Куда сохранять вложения (скрины/сканы счетов). Отдельная переменная окружения,
-# чтобы не зависеть от того, где смонтирован постоянный диск на Amvera.
-ATTACHMENTS_DIR = os.environ.get("INVOICE_ATTACHMENTS_DIR", "invoice_attachments")
+# Куда сохранять вложения (скрины/сканы счетов). Путь берём из storage_paths,
+# а не из os.environ напрямую: относительный дефолт клал файлы в /app, и они
+# стирались каждой сборкой Amvera — запись в БД оставалась, а файла не было.
+ATTACHMENTS_DIR = resolve_data_path("INVOICE_ATTACHMENTS_DIR", "invoice_attachments")
 
 ALLOWED_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".pdf"}
 MAX_ATTACHMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ

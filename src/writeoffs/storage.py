@@ -11,6 +11,8 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional
 
+from storage_paths import resolve as resolve_data_path
+
 logger = logging.getLogger(__name__)
 
 STATUSES = ("on_approval", "processing", "sent", "failed", "rejected", "cancelled")
@@ -18,9 +20,9 @@ STATUSES = ("on_approval", "processing", "sent", "failed", "rejected", "cancelle
 # Путь к БД из переменной окружения или дефолт — та же база, что у auth/cashshifts/invoices
 DB_PATH = os.environ.get("BARHAT_DB_PATH", "barhat.db")
 
-# Куда сохранять вложения (фото списанного товара). Отдельная переменная окружения,
-# чтобы не зависеть от того, где смонтирован постоянный диск на Amvera.
-ATTACHMENTS_DIR = os.environ.get("WRITEOFF_ATTACHMENTS_DIR", "writeoff_attachments")
+# Куда сохранять вложения (фото списанного товара). Путь берём из storage_paths —
+# см. комментарий там: относительный дефолт означал потерю файлов на каждой сборке.
+ATTACHMENTS_DIR = resolve_data_path("WRITEOFF_ATTACHMENTS_DIR", "writeoff_attachments")
 
 ALLOWED_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 MAX_ATTACHMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ
