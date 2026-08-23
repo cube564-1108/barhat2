@@ -9,6 +9,16 @@
     const API_BASE = window.location.origin;
     let salonHistoryChart = null;
 
+    // Загрузка из Pyrus и чистка базы закрыты role_required('admin') на сервере.
+    // Прячем кнопки и на клиенте, иначе остальные роли жмут их и получают отказ.
+    document.addEventListener('userRoleChanged', function(e) {
+        const isAdmin = e.detail && e.detail.role === 'admin';
+        ['updatePyrusData', 'compactPyrusHistory', 'qualitySyncGroup'].forEach(function(id) {
+            const el = document.getElementById(id);
+            if (el) el.style.display = isAdmin ? '' : 'none';
+        });
+    });
+
     /**
      * Экранирование для вставки в HTML.
      *
@@ -33,12 +43,12 @@
 
     // Цветовая палитра бренда
     const COLORS = [
-        '#411330', // --barkhat-wine
-        '#D19CC2', // --barkhat-pink
-        '#E1A4C9', // --barkhat-pink-bright
-        '#E4C2DD', // --barkhat-pink-light
-        '#B26FA1', // --barkhat-pink-deep
-        '#6F6F6F', // --barkhat-gray
+        '#411330', // --bx-wine
+        '#D19CC2', // --bx-pink
+        '#E1A4C9', // --bx-pink-bright
+        '#E4C2DD', // --bx-pink-light
+        '#B26FA1', // --bx-pink-deep
+        '#6F6F6F', // --bx-text-2
     ];
 
     /**
@@ -337,7 +347,7 @@
 
             if (!result.success) {
                 console.error('Order types API error:', result.error);
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--barkhat-wine);">Ошибка: ${escapeHtml(result.error)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" class="quality-error">Ошибка: ${escapeHtml(result.error)}</td></tr>`;
                 return;
             }
 
@@ -345,7 +355,7 @@
             updateOrderTypesTable(result.data.order_types);
         } catch (error) {
             console.error('Order types fetch error:', error);
-            tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--barkhat-wine);">Ошибка сети: ${escapeHtml(error.message)}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="4" class="quality-error">Ошибка сети: ${escapeHtml(error.message)}</td></tr>`;
         }
     }
 
@@ -376,7 +386,7 @@
 
             if (!result.success) {
                 console.error('Florists API error:', result.error);
-                tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--barkhat-wine);">Ошибка: ${escapeHtml(result.error)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="3" class="quality-error">Ошибка: ${escapeHtml(result.error)}</td></tr>`;
                 return;
             }
 
@@ -384,7 +394,7 @@
             updateFloristsTable(result.data.florists);
         } catch (error) {
             console.error('Florists fetch error:', error);
-            tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--barkhat-wine);">Ошибка сети: ${escapeHtml(error.message)}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="3" class="quality-error">Ошибка сети: ${escapeHtml(error.message)}</td></tr>`;
         }
     }
 
@@ -400,10 +410,10 @@
             const count = item.count > 0 ? item.count : '—';
 
             // Цвет для строк с данными
-            const rowStyle = item.count > 0 ? '' : 'style="color: var(--barkhat-gray);"';
+            const rowClass = item.count > 0 ? '' : 'class="quality-empty-row"';
 
             return `
-                <tr ${rowStyle}>
+                <tr ${rowClass}>
                     <td>${escapeHtml(item.order_type)}</td>
                     <td>${avgScore}</td>
                     <td>${item.max_score}</td>
@@ -421,7 +431,7 @@
         if (!tbody) return;
 
         if (florists.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--barkhat-gray);">Нет данных</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="3" class="quality-empty">Нет данных</td></tr>`;
             return;
         }
 
@@ -608,12 +618,75 @@
      * /api/pyrus/backfill руками — из интерфейса она не пополнялась.
      */
     async function updatePyrusData() {
-        const btn = document.getElementById('updatePyrusData');
-        const btnText = btn.querySelector('.btn-text');
-        const spinner = btn.querySelector('.btn-spinner');
-        const statusEl = document.getElementById('updateStatus');
         const periodEl = document.getElementById('qualitySyncPeriod');
         const days = parseInt(periodEl && periodEl.value, 10) || 7;
+
+        await runBackgroundJob({
+            buttonId: 'updatePyrusData',
+            busyLabel: 'Обновление...',
+            startText: 'Запуск обновления...',
+            url: `${API_BASE}/api/pyrus/update`,
+            body: { days },
+            onDone: () => setTimeout(loadQualityData, 500),
+        });
+    }
+
+    /**
+     * Разовое обслуживание базы: снести устаревшие копии задач и сжать файл.
+     *
+     * Сначала показываем, сколько именно лишнего накопилось, и только потом
+     * спрашиваем подтверждение — операция необратимая.
+     */
+    async function compactPyrusHistory() {
+        let stats;
+        try {
+            const res = await fetch(`${API_BASE}/api/pyrus/history-stats`);
+            const result = await res.json();
+            if (!result.success) {
+                notifyError('Не удалось получить статистику: ' + result.error);
+                return;
+            }
+            stats = result.data;
+        } catch (error) {
+            notifyError('Ошибка сети: ' + error.message);
+            return;
+        }
+
+        if (stats.redundant_rows === 0) {
+            window.BarhatUI
+                ? window.BarhatUI.toast('База уже без лишних копий', 'success')
+                : null;
+            return;
+        }
+
+        const confirmed = await window.BarhatUI.confirm(
+            `В истории задач ${stats.redundant_rows} устаревших копий из ${stats.total_rows} ` +
+            `(${fmt(stats.redundant_percent)}%). Размер базы — ${stats.db_mb} МБ.\n\n` +
+            'Оставим по одной, самой свежей записи на задачу, и сожмём файл. ' +
+            'Отчёты и текущие данные не пострадают. Продолжить?'
+        );
+        if (!confirmed) return;
+
+        await runBackgroundJob({
+            buttonId: 'compactPyrusHistory',
+            busyLabel: 'Очистка...',
+            startText: 'Запуск очистки...',
+            url: `${API_BASE}/api/pyrus/compact-history`,
+            body: { vacuum: true },
+        });
+    }
+
+    /**
+     * Запустить фоновую операцию и вести её статус до конца.
+     *
+     * Загрузка из Pyrus и чистка базы делят и лок, и запись прогресса в
+     * sync_log, поэтому и опрос статуса у них общий — дублировать этот цикл
+     * второй раз смысла нет.
+     */
+    async function runBackgroundJob({ buttonId, busyLabel, startText, url, body, onDone }) {
+        const btn = document.getElementById(buttonId);
+        const btnText = btn.querySelector('.btn-text');
+        const statusEl = document.getElementById('updateStatus');
 
         const idleLabel = btnText.textContent;
         let checkInterval = null;
@@ -622,21 +695,19 @@
             if (checkInterval) clearInterval(checkInterval);
             btn.disabled = false;
             btnText.textContent = idleLabel;
-            spinner.classList.add('hidden');
         }
 
         btn.disabled = true;
-        btnText.textContent = 'Обновление...';
-        spinner.classList.remove('hidden');
+        btnText.textContent = busyLabel;
         statusEl.classList.remove('hidden');
         statusEl.className = 'update-status';
-        statusEl.textContent = 'Запуск обновления...';
+        statusEl.textContent = startText;
 
         try {
-            const response = await fetch(`${API_BASE}/api/pyrus/update`, {
+            const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ days })
+                body: JSON.stringify(body || {})
             });
 
             const result = await response.json();
@@ -648,7 +719,6 @@
                 return;
             }
 
-            // Проверяем статус каждые 2 секунды
             checkInterval = setInterval(async () => {
                 try {
                     const statusRes = await fetch(`${API_BASE}/api/pyrus/update-status`);
@@ -659,7 +729,7 @@
                     const status = statusData.status;
 
                     if (status.running) {
-                        statusEl.textContent = status.message || 'Обновление...';
+                        statusEl.textContent = status.message || busyLabel;
                         return;
                     }
 
@@ -671,7 +741,7 @@
                     } else {
                         statusEl.textContent = status.message;
                         statusEl.classList.add('success');
-                        setTimeout(loadQualityData, 500);
+                        if (onDone) onDone();
                     }
 
                     setTimeout(() => statusEl.classList.add('hidden'), 5000);
@@ -681,7 +751,7 @@
             }, 2000);
 
         } catch (error) {
-            console.error('Update error:', error);
+            console.error('Background job error:', error);
             statusEl.textContent = 'Ошибка: ' + error.message;
             statusEl.classList.add('error');
             finish();
@@ -711,6 +781,11 @@
 
         if (updateBtn) {
             updateBtn.addEventListener('click', updatePyrusData);
+        }
+
+        const compactBtn = document.getElementById('compactPyrusHistory');
+        if (compactBtn) {
+            compactBtn.addEventListener('click', compactPyrusHistory);
         }
 
         // Кнопки в строках таблицы салонов — через делегирование, потому что

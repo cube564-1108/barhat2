@@ -1733,11 +1733,54 @@ body {
     display: none;
 }
 
-/* === Качество сборки: разбор по салонам === */
+/* === Качество сборки === */
 
-/* Блок текстовых выводов по каждому салону. Оформление по DESIGN-SPEC:
-   белые карточки, винные заголовки Vollkorn, тренды стрелками ▲ ▼ и
-   цветными пилюлями, без эмодзи. */
+/* Страница приведена к DESIGN-SPEC теми же точечными переопределениями, что и
+   ABC-анализ: общие .card / .calculator-card дашборда пока на 12px и розовой
+   границе, спека требует 16px и --bx-border. Трогаем только эту страницу —
+   переписывать весь старый дашборд отдельная задача. */
+
+.page[data-page="quality"] .section > .card,
+.page[data-page="quality"] .section > .calculator-card {
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+}
+
+.page[data-page="quality"] .card-title {
+    font-family: var(--bx-font-head);
+    color: var(--bx-wine);
+}
+
+/* Числовые колонки — вправо и моноширинными цифрами, чтобы разряды
+   выстраивались столбиком (DESIGN-SPEC §6) */
+
+.page[data-page="quality"] td.num,
+.page[data-page="quality"] th.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.quality-empty {
+    text-align: center;
+    color: var(--bx-text-2);
+    padding: 20px;
+}
+
+.quality-error {
+    text-align: center;
+    color: var(--bx-down);
+    padding: 20px;
+}
+
+/* Вид заказа, который салон за период ни разу не собирал — приглушаем,
+   но из таблицы не убираем: отсутствие тоже информация */
+.quality-empty-row {
+    color: var(--bx-text-2);
+}
+
+/* Разбор по салонам.
+   Блок текстовых выводов: белые карточки, винные заголовки Vollkorn,
+   тренды стрелками ▲ ▼ и цветными пилюлями, без эмодзи. */
 
 .bx-assess {
     display: grid;

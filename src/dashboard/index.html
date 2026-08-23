@@ -602,9 +602,9 @@
                             </div>
                             <button id="applyQualityFilters" class="btn btn-primary">Применить</button>
                             <button id="resetQualityFilters" class="btn btn-secondary">Сбросить</button>
-                            <div class="filter-group">
-                                <label class="form-label">Загрузить из Pyrus:</label>
-                                <select id="qualitySyncPeriod" class="form-input" style="width: 190px;">
+                            <div class="filter-group" id="qualitySyncGroup">
+                                <label class="form-label" for="qualitySyncPeriod">Загрузить из Pyrus:</label>
+                                <select id="qualitySyncPeriod" class="form-select" style="width: 190px;">
                                     <option value="7">за последнюю неделю</option>
                                     <option value="30">за последний месяц</option>
                                     <option value="90">за 3 месяца</option>
@@ -613,8 +613,16 @@
                                 </select>
                             </div>
                             <button id="updatePyrusData" class="btn btn-accent">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                                    <polyline points="21 3 21 9 15 9"/>
+                                </svg>
                                 <span class="btn-text">Обновить данные</span>
-                                <span class="btn-spinner hidden" style="margin-left: 8px;">…</span>
+                            </button>
+                            <button id="compactPyrusHistory" class="btn btn-secondary"
+                                    title="Удалить из базы устаревшие копии задач и сжать файл. Разовое обслуживание, отчёты не затрагивает.">
+                                <span class="btn-text">Очистить базу</span>
                             </button>
                             <div id="updateStatus" class="update-status hidden"></div>
                         </div>
@@ -668,7 +676,7 @@
                                     </thead>
                                     <tbody id="qualitySalonsTable">
                                         <tr>
-                                            <td colspan="5" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                            <td colspan="5" style="text-align: center; color: var(--bx-text-2); padding: 20px;">
                                                 Загрузка данных...
                                             </td>
                                         </tr>
@@ -724,7 +732,7 @@
                                             </thead>
                                             <tbody id="orderTypesTableBody">
                                                 <tr>
-                                                    <td colspan="4" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                    <td colspan="4" style="text-align: center; color: var(--bx-text-2); padding: 20px;">
                                                         Загрузка данных...
                                                     </td>
                                                 </tr>
@@ -760,7 +768,7 @@
                                             </thead>
                                             <tbody id="floristsTableBody">
                                                 <tr>
-                                                    <td colspan="3" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                                    <td colspan="3" style="text-align: center; color: var(--bx-text-2); padding: 20px;">
                                                         Загрузка данных...
                                                     </td>
                                                 </tr>

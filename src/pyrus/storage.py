@@ -4,6 +4,8 @@ Pyrus Data Storage
 """
 
 import os
+import time
+import shutil
 import sqlite3
 import json
 import logging
@@ -703,6 +705,166 @@ class PyrusStorage:
         except Exception as e:
             logger.error(f"Ошибка получения последней синхронизации: {e}")
             return None
+
+    # ===== Обслуживание истории задач =====
+    #
+    # До перехода на пачечную запись каждая синхронизация складывала в tasks
+    # полную копию всех задач: UNIQUE(form_id, task_id, snapshot_at) от дублей
+    # не спасал, потому что snapshot_at был свой у каждой записи. В боевой базе
+    # от этого осталось много лишних снапшотов, и это чистый расход диска —
+    # отчёты читают витрину, а не историю.
+    #
+    # Чистим до одного, самого свежего снапшота на задачу: latest_tasks и
+    # витрины от этого не зависят, а /api/pyrus/tasks с фильтром по датам
+    # продолжает работать, просто история версий схлопывается.
+
+    def count_task_history_duplicates(self) -> Dict:
+        """Посчитать, сколько лишних снапшотов лежит в tasks (без изменений)"""
+        try:
+            with self._get_connection() as conn:
+                total = conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+                unique = conn.execute(
+                    'SELECT COUNT(*) FROM (SELECT 1 FROM tasks GROUP BY form_id, task_id)'
+                ).fetchone()[0]
+
+                redundant = total - unique
+                return {
+                    'total_rows': total,
+                    'unique_tasks': unique,
+                    'redundant_rows': redundant,
+                    # Доля лишних строк, а не оценка освобождаемых мегабайт:
+                    # в базе кроме tasks лежат latest_tasks, витрины и индексы,
+                    # поэтому пересчёт доли строк в мегабайты завышал бы вдвое
+                    # (на боевом слепке: оценка 432 МБ против реальных 220)
+                    'redundant_percent': round(redundant / total * 100, 1) if total else 0.0,
+                    # Реальный размер на диске (файл + WAL), а не page_count:
+                    # иначе статистика и отчёт о выполненной чистке показывали
+                    # бы разные числа при непустом журнале
+                    'db_mb': self.database_size_mb(),
+                }
+        except Exception as e:
+            logger.error(f"Ошибка подсчёта дублей истории: {e}")
+            raise
+
+    def compact_task_history(
+        self,
+        batch_size: int = 2000,
+        pause: float = 0.15,
+        max_rows: int = 200000,
+        progress=None
+    ) -> Dict:
+        """
+        Удалить все снапшоты задач, кроме самого свежего по каждой задаче.
+
+        Удаление идёт пачками с паузой: разом снести десятки тысяч строк —
+        значит надолго занять единственный диск /data, на котором лежит и база
+        авторизации, то есть подвесить весь сайт. За один вызов чистится не
+        больше max_rows строк, остаток возвращается в 'remaining'.
+        """
+        deleted = 0
+
+        try:
+            with self._get_connection() as conn:
+                # Оконная функция вместо коррелированного подзапроса: тот пришлось
+                # бы выполнять на каждую пачку заново по всей таблице
+                doomed = [
+                    row[0] for row in conn.execute('''
+                        SELECT id FROM (
+                            SELECT id, ROW_NUMBER() OVER (
+                                PARTITION BY form_id, task_id
+                                ORDER BY snapshot_at DESC, id DESC
+                            ) AS rn
+                            FROM tasks
+                        )
+                        WHERE rn > 1
+                        LIMIT ?
+                    ''', (max_rows,))
+                ]
+
+                total = len(doomed)
+                if not total:
+                    return {'deleted': 0, 'remaining': 0}
+
+                for start in range(0, total, batch_size):
+                    chunk = doomed[start:start + batch_size]
+                    placeholders = ','.join('?' * len(chunk))
+                    conn.execute(f'DELETE FROM tasks WHERE id IN ({placeholders})', chunk)
+                    conn.commit()
+                    deleted += len(chunk)
+
+                    if progress:
+                        progress(deleted, total)
+
+                    # Пауза отдаёт диск и GIL остальному сайту
+                    if pause:
+                        time.sleep(pause)
+
+                # Без чекпойнта удалённые страницы остаются в WAL, и файл журнала
+                # разрастается вместо того, чтобы освободить место
+                conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+
+                remaining = conn.execute('''
+                    SELECT COUNT(*) FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY form_id, task_id
+                            ORDER BY snapshot_at DESC, id DESC
+                        ) AS rn
+                        FROM tasks
+                    )
+                    WHERE rn > 1
+                ''').fetchone()[0]
+
+                return {'deleted': deleted, 'remaining': remaining}
+
+        except Exception as e:
+            logger.error(f"Ошибка чистки истории задач: {e}")
+            raise
+
+    def vacuum(self) -> Dict:
+        """
+        Сжать файл базы после чистки.
+
+        Удаление строк освобождает страницы внутри файла, но не отдаёт место
+        файловой системе — это делает только VACUUM. Он переписывает базу
+        целиком во временный файл, поэтому требует места примерно в размер
+        базы и держит эксклюзивную блокировку всё время работы.
+        """
+        before = self.database_size_mb()
+
+        free_mb = shutil.disk_usage(os.path.dirname(self.db_path) or '.').free / 1024 / 1024
+        if free_mb < before * 2:
+            raise RuntimeError(
+                f'Недостаточно места для VACUUM: свободно {free_mb:.0f} МБ, '
+                f'нужно от {before * 2:.0f} МБ'
+            )
+
+        # isolation_level=None — VACUUM нельзя выполнить внутри транзакции,
+        # а обычное соединение модуля sqlite3 открывает её неявно
+        conn = sqlite3.connect(self.db_path, timeout=60, isolation_level=None)
+        try:
+            conn.execute('PRAGMA busy_timeout=60000')
+            started = time.monotonic()
+            conn.execute('VACUUM')
+            seconds = round(time.monotonic() - started, 2)
+        finally:
+            conn.close()
+
+        after = self.database_size_mb()
+        return {
+            'before_mb': before,
+            'after_mb': after,
+            'freed_mb': round(before - after, 2),
+            'seconds': seconds,
+        }
+
+    def database_size_mb(self) -> float:
+        """Размер файла базы вместе с журналом WAL"""
+        total = 0
+        for suffix in ('', '-wal'):
+            path = self.db_path + suffix
+            if os.path.exists(path):
+                total += os.path.getsize(path)
+        return round(total / 1024 / 1024, 2)
 
     # ===== Локи прогонов =====
     #

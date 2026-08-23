@@ -1477,6 +1477,112 @@ def get_update_status():
     })
 
 
+def _compact_history_background(log_id, run_vacuum):
+    """Фоновая чистка истории задач с прогрессом в sync_log"""
+    try:
+        def progress(done, total):
+            storage.update_sync_log(
+                log_id, f'Удалено {done} из {total} лишних снапшотов', done
+            )
+            storage.renew_sync_lock(QUALITY_SYNC_LOCK, QUALITY_SYNC_LOCK_TTL)
+
+        before = storage.database_size_mb()
+        result = storage.compact_task_history(progress=progress)
+
+        message = f"Удалено {result['deleted']} снапшотов"
+        if result['remaining']:
+            # За один прогон чистим ограниченное число строк, чтобы не занимать
+            # диск часами: остаток снимается повторным запуском
+            message += f", осталось {result['remaining']} — запустите ещё раз"
+
+        if run_vacuum and not result['remaining']:
+            storage.update_sync_log(log_id, 'Сжатие файла базы (VACUUM)...', result['deleted'])
+            storage.renew_sync_lock(QUALITY_SYNC_LOCK, QUALITY_SYNC_LOCK_TTL)
+            vac = storage.vacuum()
+            message += f", база {vac['before_mb']} → {vac['after_mb']} МБ"
+        else:
+            message += f", база {before} → {storage.database_size_mb()} МБ"
+
+        storage.finish_sync_log(
+            log_id, forms_count=0, tasks_count=result['deleted'],
+            status='completed', message=message
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка чистки истории задач: {e}")
+        storage.finish_sync_log(
+            log_id, forms_count=0, tasks_count=0,
+            status='failed', error_message=str(e), message='Чистка прервана'
+        )
+    finally:
+        storage.release_sync_lock(QUALITY_SYNC_LOCK)
+
+
+@app.route('/api/pyrus/history-stats', methods=['GET'])
+@role_required('admin')
+def get_history_stats():
+    """Сколько лишних снапшотов накопилось в истории задач (ничего не меняет)"""
+    try:
+        return jsonify({'success': True, 'data': storage.count_task_history_duplicates()})
+    except Exception as e:
+        logger.error(f"Ошибка /api/pyrus/history-stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pyrus/compact-history', methods=['POST'])
+@role_required('admin')
+def trigger_compact_history():
+    """
+    Удалить из истории задач все снапшоты, кроме последнего по каждой задаче.
+
+    Разовое обслуживание после перехода на пачечную запись: старые прогоны
+    оставили в базе полные копии всех задач. Отчёты историю не читают, так что
+    это чистое освобождение диска.
+
+    Body params:
+        - vacuum: сжать файл базы после чистки (default: true)
+
+    Идёт в фоне под тем же локом, что и синхронизация: одновременно тянуть
+    задачи из Pyrus и переписывать ту же таблицу — плохая идея.
+    """
+    import threading
+
+    data = request.get_json(silent=True) or {}
+    run_vacuum = bool(data.get('vacuum', True))
+
+    if not storage.try_acquire_sync_lock(QUALITY_SYNC_LOCK, QUALITY_SYNC_LOCK_TTL):
+        return jsonify({
+            'success': False,
+            'error': 'База сейчас занята синхронизацией — попробуйте позже',
+            'status': _sync_status_payload(storage.get_latest_sync_log())
+        })
+
+    # Всё, что может упасть ПОСЛЕ захвата лока, — под своим try: снимать лок в
+    # общем обработчике нельзя, иначе ошибка до захвата освободила бы чужой лок
+    # и запустила бы вторую операцию поверх идущей
+    try:
+        log_id = storage.start_sync_log(job='compact', message='Чистка истории задач...')
+
+        thread = threading.Thread(
+            target=_compact_history_background,
+            args=(log_id, run_vacuum),
+            daemon=True,
+            name='pyrus-compact-history'
+        )
+        thread.start()
+
+        return jsonify({
+            'success': True,
+            'message': 'Чистка запущена',
+            'status': _sync_status_payload(storage.get_latest_sync_log())
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка запуска чистки истории: {e}")
+        storage.release_sync_lock(QUALITY_SYNC_LOCK)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/quality/rebuild', methods=['POST'])
 @role_required('admin')
 def rebuild_quality_projection():
