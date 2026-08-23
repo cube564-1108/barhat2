@@ -58,6 +58,7 @@
         elements.filterDueFrom = document.getElementById('invoices-filter-due-from');
         elements.filterDueTo = document.getElementById('invoices-filter-due-to');
         elements.filterStore = document.getElementById('invoices-filter-store');
+        elements.filterPayer = document.getElementById('invoices-filter-payer');
         elements.filterStatus = document.getElementById('invoices-status-filter');
         elements.filterCreatedBy = document.getElementById('invoices-filter-created-by');
         elements.filterArchived = document.getElementById('invoices-filter-archived');
@@ -228,6 +229,8 @@
                 vatList.map(v => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join('');
             elements.filterStore.innerHTML = '<option value="">Все</option>' +
                 storeList.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+            elements.filterPayer.innerHTML = '<option value="">Все</option>' +
+                payerList.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
         } catch (e) {
             console.error('Ошибка загрузки справочников:', e);
         }
@@ -241,6 +244,7 @@
         elements.filterDueFrom.value = '';
         elements.filterDueTo.value = '';
         elements.filterStore.value = '';
+        elements.filterPayer.value = '';
         elements.filterStatus.value = '';
         elements.filterCreatedBy.value = '';
         elements.filterArchived.checked = false;
@@ -254,6 +258,7 @@
             const params = new URLSearchParams();
             if (elements.filterStatus.value) params.set('status', elements.filterStatus.value);
             if (elements.filterStore.value) params.set('store_id', elements.filterStore.value);
+            if (elements.filterPayer.value) params.set('payer_id', elements.filterPayer.value);
             if (elements.filterCounterparty.value.trim()) params.set('counterparty', elements.filterCounterparty.value.trim());
             if (elements.filterPurpose.value.trim()) params.set('payment_purpose', elements.filterPurpose.value.trim());
             // created_at в базе — UTC, а выбранные даты сотрудник понимает по

@@ -1347,6 +1347,7 @@ def list_invoices(
     status: Optional[str] = None,
     store_id: Optional[int] = None,
     city_id: Optional[int] = None,
+    payer_id: Optional[int] = None,
     created_by: Optional[str] = None,
     counterparty: Optional[str] = None,
     payment_purpose: Optional[str] = None,
@@ -1398,6 +1399,12 @@ def list_invoices(
     if city_id:
         query += " AND city_id = ?"
         params.append(city_id)
+
+    # На кого выставлен счёт (юрлицо/ИП Бархата) — поле payer_id самого счёта,
+    # а не строк распределения, поэтому фильтр прямой, без подзапроса.
+    if payer_id:
+        query += " AND payer_id = ?"
+        params.append(payer_id)
 
     if created_by:
         query += " AND created_by = ?"

@@ -216,7 +216,7 @@ def get_invoices():
     """
     Список счетов с фильтрами.
 
-    Query params: status, store_id, city_id, created_by, counterparty,
+    Query params: status, store_id, city_id, payer_id, created_by, counterparty,
     payment_purpose, created_from, created_to, due_from, due_to, archived,
     limit, offset
     """
@@ -236,6 +236,7 @@ def get_invoices():
         status=status,
         store_id=request.args.get("store_id", type=int),
         city_id=request.args.get("city_id", type=int),
+        payer_id=request.args.get("payer_id", type=int),
         created_by=request.args.get("created_by"),
         counterparty=request.args.get("counterparty"),
         payment_purpose=request.args.get("payment_purpose"),
