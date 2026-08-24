@@ -37,8 +37,8 @@ login_manager = LoginManager()
 # Роли и какие разделы им доступны.
 # Меняйте под свои реальные разделы дашборда.
 ROLE_SECTIONS = {
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "abc_analysis", "writeoffs"},
-    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "writeoffs"},
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "abc_analysis", "writeoffs", "courier_payouts"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "writeoffs", "courier_payouts"},
     "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
     # Пользователи, залогиненные через SSO из портала БАРХАТ Пульс (см. src/sso.py).
@@ -46,7 +46,7 @@ ROLE_SECTIONS = {
     # все входящие через портал получают один и тот же набор — всё, КРОМЕ
     # управления пользователями. Админку через внешний JWT не открываем, иначе
     # пропуск Пульса позволял бы заводить и править учётки в нашем сервисе.
-    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "abc_analysis", "writeoffs"},
+    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "abc_analysis", "writeoffs", "courier_payouts"},
 }
 
 
@@ -315,6 +315,7 @@ ALL_MODULES = [
     'abc_analysis',   # ABC-анализ товаров
     'users_manage',   # Управление пользователями
     'writeoffs',      # Списания товара
+    'courier_payouts',  # Оплата курьерам
 ]
 
 # Модули, доступные пользователям, вошедшим через SSO из портала БАРХАТ Пульс.
@@ -329,6 +330,7 @@ SSO_MODULES = [
     'invoices',
     'abc_analysis',
     'writeoffs',
+    'courier_payouts',
 ]
 
 
@@ -453,6 +455,9 @@ def init_auth_tables():
 
     # Догрузка права на модуль writeoffs (списания товара)
     migrate_new_module_permissions("writeoffs", ["admin", "manager", "florist"])
+
+    # Догрузка права на модуль courier_payouts (оплата курьерам)
+    migrate_new_module_permissions("courier_payouts", ["admin", "manager"])
 
     # Догрузка прав SSO-пользователям: первые из них были заведены, когда
     # sso_viewer имел доступ только к "quality" (см. SSO_MODULES выше).

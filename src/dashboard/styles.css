@@ -1877,6 +1877,13 @@ body {
     border: 1px solid #fde68a;
 }
 
+/* Нейтральный бейдж (DESIGN-SPEC §6): пометка без оценки — например,
+   «Служба» у курьера-агрегатора в отчёте по оплате курьерам */
+.bx-badge--muted {
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--bx-text-2, #6F6F6F);
+}
+
 /* Общий срез по сети — под списком салонов, мелким кеглем */
 .bx-assess__network {
     margin-top: 4px;

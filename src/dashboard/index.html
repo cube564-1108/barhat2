@@ -104,6 +104,16 @@
                         </svg>
                         <span>ABC-анализ товаров</span>
                     </a>
+                    <a href="/courier-payouts" class="nav-item" data-page="courier_payouts">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M10 17h4V5H2v12h3"/>
+                            <path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/>
+                            <circle cx="7.5" cy="17.5" r="2.5"/>
+                            <circle cx="17.5" cy="17.5" r="2.5"/>
+                        </svg>
+                        <span>Оплата курьерам</span>
+                    </a>
                 </div>
 
                 <!-- Качество -->
@@ -870,6 +880,168 @@
                             </div>
                         </div>
                     </section>
+                </div>
+
+                <!-- Оплата курьерам -->
+                <div class="page" data-page="courier_payouts">
+                    <section class="section">
+                        <h2 class="section-title">ОПЛАТА КУРЬЕРАМ</h2>
+                        <p class="section-description">Сумма поля «Себестоимость доставки» по выполненным заказам, период — по дате доставки. Данные из RetailCRM</p>
+
+                        <!-- Фильтры -->
+                        <div class="quality-filters" style="display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; align-items: flex-end;">
+                            <div class="filter-group">
+                                <label class="form-label">Дата доставки с:</label>
+                                <input type="date" id="courierDateFrom" class="form-input" style="width: 150px;">
+                            </div>
+                            <div class="filter-group">
+                                <label class="form-label">по:</label>
+                                <input type="date" id="courierDateTo" class="form-input" style="width: 150px;">
+                            </div>
+                            <div class="filter-group">
+                                <label class="form-label">Город:</label>
+                                <select id="courierCity" class="form-select" style="width: 200px;">
+                                    <option value="">Все города</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label class="module-checkbox" style="margin-bottom: 8px;">
+                                    <input type="checkbox" id="courierOnlyOwn" checked>
+                                    <span>Только свои курьеры</span>
+                                </label>
+                            </div>
+                            <button id="applyCourierFilters" class="btn btn-primary">Применить</button>
+                            <button id="resetCourierFilters" class="btn btn-secondary">Сбросить</button>
+                            <button id="exportCourierReport" class="btn btn-secondary">
+                                <span class="btn-text">Скачать CSV</span>
+                            </button>
+                            <button id="syncCourierData" class="btn btn-accent">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                                    <polyline points="21 3 21 9 15 9"/>
+                                </svg>
+                                <span class="btn-text">Обновить данные</span>
+                            </button>
+                            <button id="loadCourierPeriod" class="btn btn-secondary"
+                                    title="Догрузить в отчёт выбранный период целиком (нужно, если период старше загруженных данных)">
+                                <span class="btn-text">Догрузить период</span>
+                            </button>
+                            <button id="manageCouriers" class="btn btn-secondary"
+                                    title="Отметить, кто из списка курьеров — служба доставки, а кто свой">
+                                <span class="btn-text">Справочник курьеров</span>
+                            </button>
+                            <div id="courierSyncStatus" class="update-status hidden"></div>
+                        </div>
+
+                        <!-- Свежесть данных: синхронизация идёт по расписанию сама -->
+                        <div id="courierSyncFreshness" class="abc-freshness"></div>
+
+                        <!-- KPI плитки -->
+                        <div class="bx-kpi" style="margin: 24px 0;">
+                            <div class="card">
+                                <div class="label">К выплате за период</div>
+                                <div class="value" id="courierTotalSum">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Курьеров в отчёте</div>
+                                <div class="value" id="courierTotalCouriers">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Доставок</div>
+                                <div class="value" id="courierTotalOrders">-</div>
+                            </div>
+                            <div class="card">
+                                <div class="label">Без курьера в CRM</div>
+                                <div class="value" id="courierNoCourier">-</div>
+                            </div>
+                        </div>
+
+                        <!-- Таблица курьеров -->
+                        <div class="card calculator-card">
+                            <h3 class="card-title">Курьеры</h3>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th class="num">#</th>
+                                            <th>Курьер</th>
+                                            <th>Город</th>
+                                            <th class="num">Доставок</th>
+                                            <th class="num">Сумма к оплате</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="courierTableBody">
+                                        <tr>
+                                            <td colspan="6" class="abc-empty">Загрузка данных...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- Расшифровка выплаты по заказам -->
+                <div id="courier-orders-modal" class="modal">
+                    <div class="modal-overlay" id="courier-orders-modal-overlay"></div>
+                    <div class="modal-content" style="max-width: 900px;">
+                        <div class="modal-header">
+                            <h3 class="modal-title" id="courierOrdersTitle">Заказы курьера</h3>
+                            <button class="modal-close-btn" id="closeCourierOrdersModal" aria-label="Закрыть">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                     stroke-width="1.75" stroke-linecap="round">
+                                    <line x1="18" y1="6" x2="6" y2="18"/>
+                                    <line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="modal-body">
+                            <div style="overflow-x: auto; max-height: 60vh;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Заказ</th>
+                                            <th>Дата доставки</th>
+                                            <th>Город</th>
+                                            <th>Адрес доставки</th>
+                                            <th class="num">Себестоимость</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="courierOrdersBody">
+                                        <tr><td colspan="5" class="abc-empty">Загрузка...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Справочник курьеров: кто свой, а кто служба доставки -->
+                <div id="courier-refs-modal" class="modal">
+                    <div class="modal-overlay" id="courier-refs-modal-overlay"></div>
+                    <div class="modal-content" style="max-width: 640px;">
+                        <div class="modal-header">
+                            <h3 class="modal-title">Справочник курьеров</h3>
+                            <button class="modal-close-btn" id="closeCourierRefsModal" aria-label="Закрыть">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                     stroke-width="1.75" stroke-linecap="round">
+                                    <line x1="18" y1="6" x2="6" y2="18"/>
+                                    <line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="section-description" style="margin-top: 0;">
+                                Отмеченные — службы доставки и агрегаторы. Они скрыты из отчёта,
+                                пока включён фильтр «только свои курьеры».
+                            </p>
+                            <div id="courierRefsList" style="max-height: 55vh; overflow-y: auto;">
+                                <p class="empty-state">Загрузка...</p>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Управление пользователями (только для admin) -->
@@ -2009,5 +2181,6 @@
     <script defer src="/abc-analysis.js"></script>
     <script defer src="/tasks.js"></script>
     <script defer src="/writeoffs.js"></script>
+    <script defer src="/courier-payouts.js"></script>
 </body>
 </html>

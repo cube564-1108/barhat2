@@ -24,13 +24,14 @@
         'invoices': 'Счета на оплату',
         'writeoffs': 'Списания товара',
         'abc_analysis': 'ABC-анализ товаров',
+        'courier_payouts': 'Оплата курьерам',
         'users_manage': 'Управление пользователями'
     };
 
     // === Пресеты permissions для ролей ===
     const ROLE_PERMISSIONS = {
-        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'writeoffs', 'abc_analysis', 'users_manage'],
-        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'writeoffs'],
+        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'writeoffs', 'abc_analysis', 'courier_payouts', 'users_manage'],
+        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'writeoffs', 'courier_payouts'],
         'florist': ['cash_shifts', 'writeoffs'],
         'florist_analyst': ['quality']
     };

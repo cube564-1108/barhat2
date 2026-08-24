@@ -213,6 +213,20 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint списаний товара: {e}")
 
+# Регистрируем blueprint оплаты курьерам (RetailCRM)
+try:
+    from couriers.server import couriers_bp, start_sync_scheduler as start_couriers_sync_scheduler
+    app.register_blueprint(couriers_bp)
+    logger.info("Blueprint оплаты курьерам зарегистрирован")
+    # Заказы по дате доставки подтягиваются сами раз в 30 минут. Планировщик
+    # стартует в каждом воркере, но прогон делает один — за это отвечает лок
+    # в БД (couriers/storage.py::try_acquire_sync_lock).
+    start_couriers_sync_scheduler()
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint оплаты курьерам: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint оплаты курьерам: {e}")
+
 # Регистрируем blueprint задач дашборда
 try:
     from tasks.server import tasks_bp
@@ -256,6 +270,16 @@ with app.app_context():
         logger.warning(f"Не удалось импортировать модуль задач дашборда: {e}")
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц задач дашборда: {e}")
+
+    # Инициализация таблиц оплаты курьерам
+    try:
+        from couriers.storage import init_couriers_tables
+        init_couriers_tables()
+        logger.info("Таблицы оплаты курьерам инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль оплаты курьерам: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц оплаты курьерам: {e}")
 
     # Инициализация таблиц списаний товара
     try:
@@ -609,6 +633,19 @@ def abc_analysis_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/courier-payouts')
+def courier_payouts_page():
+    """Страница оплаты курьерам"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return _serve_dashboard_shell()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /courier-payouts: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 # === Static File Routes ===
 
 @app.route('/styles.css')
@@ -672,6 +709,11 @@ def serve_tasks():
 def serve_writeoffs():
     """Отдаёт скрипт раздела списаний товара"""
     return send_from_directory(DASHBOARD_DIR, 'writeoffs.js')
+
+@app.route('/courier-payouts.js')
+def serve_courier_payouts():
+    """Отдаёт скрипт раздела оплаты курьерам"""
+    return send_from_directory(DASHBOARD_DIR, 'courier-payouts.js')
 
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):

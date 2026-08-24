@@ -229,6 +229,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'invoices': 'СЧЕТА НА ОПЛАТУ',
             'writeoffs': 'СПИСАНИЯ ТОВАРА',
             'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
+            'courier_payouts': 'ОПЛАТА КУРЬЕРАМ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'
         };
