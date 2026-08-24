@@ -1524,9 +1524,49 @@ def list_invoices(
 
     conn = get_db()
     rows = conn.execute(query, params).fetchall()
+    invoices = [dict(row) for row in rows]
+    _attach_line_items(conn, invoices)
     conn.close()
 
-    return [dict(row) for row in rows]
+    return invoices
+
+
+def _attach_line_items(conn: sqlite3.Connection, invoices: List[Dict[str, Any]]):
+    """
+    Дописать в каждый счёт его строки распределения с названиями салона
+    и статьи расхода.
+
+    Одним запросом на всю страницу, а не по запросу на счёт: на сотне
+    счетов это была бы сотня лишних обращений к базе на каждую загрузку
+    списка — ровно тот случай, из-за которого «сайт тормозит».
+    """
+    for invoice in invoices:
+        invoice["line_items"] = []
+    if not invoices:
+        return
+
+    by_id = {invoice["id"]: invoice for invoice in invoices}
+    placeholders = ",".join("?" * len(by_id))
+    # Салоны живут в таблице модуля кассовых смен (та же база). Если модуль
+    # почему-то не поднялся, таблицы нет — тогда отдаём строки без названия
+    # салона, но список счетов не роняем.
+    store_name = "s.name AS store_name" if _table_exists(conn, "stores") else "NULL AS store_name"
+    store_join = "LEFT JOIN stores s ON s.id = li.store_id" if _table_exists(conn, "stores") else ""
+    rows = conn.execute(
+        f"""
+        SELECT li.id, li.invoice_id, li.store_id, li.expense_category_id, li.amount,
+               {store_name}, c.name AS category_name
+        FROM invoice_line_items li
+        {store_join}
+        LEFT JOIN invoice_expense_categories c ON c.id = li.expense_category_id
+        WHERE li.invoice_id IN ({placeholders})
+        ORDER BY li.id
+        """,
+        tuple(by_id)
+    ).fetchall()
+
+    for row in rows:
+        by_id[row["invoice_id"]]["line_items"].append(dict(row))
 
 
 def approve_invoice(invoice_id: int, approved_by: str) -> bool:

@@ -48,6 +48,7 @@
     function init() {
         elements.tbody = document.getElementById('invoices-tbody');
         if (!elements.tbody) return; // Страницы нет в DOM — модуль не нужен
+        elements.thead = document.getElementById('invoices-thead');
 
         elements.createBtn = document.getElementById('create-invoice-btn');
         elements.manageReferencesBtn = document.getElementById('manage-references-btn');
@@ -340,42 +341,105 @@
         return categoryList.find(c => c.id === id)?.name || `#${id}`;
     }
 
+    // Колонки таблицы описаны одним массивом: из него строятся и шапка,
+    // и строки, и colspan пустого состояния. Иначе раскрывающаяся строка
+    // распределения разъезжается с прибитой в HTML шапкой.
+    const INVOICE_COLUMNS = [
+        { key: 'number', label: 'Номер', render: inv => escapeHtml(inv.invoice_number || '') },
+        { key: 'city', label: 'Город', render: inv => escapeHtml(cityName(inv.city_id)) },
+        { key: 'counterparty', label: 'Контрагент', render: inv => escapeHtml(inv.counterparty_name || '—') },
+        { key: 'payer', label: 'На кого выставлен', render: inv => escapeHtml(payerName(inv.payer_id)) },
+        { key: 'amount', label: 'Сумма', render: inv => formatMoney(inv.amount) },
+        { key: 'allocation', label: 'Распределение', render: renderAllocationCell },
+        { key: 'due_date', label: 'Оплата (план)', render: inv => window.BarhatTime.formatPlainDate(inv.due_date) },
+        { key: 'status', label: 'Статус', render: renderStatusBadge },
+        { key: 'created_by', label: 'Создал', render: inv => escapeHtml(inv.created_by_full_name || inv.created_by || '') },
+        { key: 'created_at', label: 'Заведён', render: inv => window.BarhatTime.formatDateTime(inv.created_at, '') },
+        { key: 'actions', label: 'Действия', nowrap: true, render: renderRowActions },
+    ];
+
+    function renderStatusBadge(inv) {
+        const colors = STATUS_COLORS[inv.status] || { bg: '#eee', color: '#333' };
+        return `<span class="status-badge" style="background:${colors.bg}; color:${colors.color};">`
+             + `${escapeHtml(STATUS_LABELS[inv.status] || inv.status)}</span>`;
+    }
+
+    function renderRowActions(inv) {
+        let actions = `<button class="btn btn-sm btn-secondary" data-action="details" data-id="${inv.id}">Детали</button>`;
+        if (currentUserData?.role === 'admin' && inv.status === 'on_approval') {
+            actions += `
+                <button class="btn btn-sm btn-success" data-action="approve" data-id="${inv.id}">Согласовать</button>
+                <button class="btn btn-sm btn-danger" data-action="reject" data-id="${inv.id}">Отклонить</button>
+            `;
+        }
+        return actions;
+    }
+
+    function renderAllocationCell(inv) {
+        const items = inv.line_items || [];
+        if (!items.length) return '<span class="form-hint">не распределён</span>';
+        const label = items.length === 1
+            ? `${escapeHtml(items[0].store_name || 'салон ' + items[0].store_id)}`
+            : `${items.length} ${pluralRows(items.length)}`;
+        return `<button type="button" class="btn btn-sm btn-secondary" data-action="toggle-allocation"
+                        data-id="${inv.id}" aria-expanded="false">▸ ${label}</button>`;
+    }
+
+    function pluralRows(n) {
+        const mod10 = n % 10, mod100 = n % 100;
+        if (mod10 === 1 && mod100 !== 11) return 'строка';
+        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'строки';
+        return 'строк';
+    }
+
+    function renderAllocationRow(inv) {
+        const items = inv.line_items || [];
+        if (!items.length) return '';
+        const rows = items.map(item => `
+            <tr>
+                <td>${escapeHtml(item.store_name || 'салон ' + item.store_id)}</td>
+                <td>${escapeHtml(item.category_name || 'статья ' + item.expense_category_id)}</td>
+                <td style="text-align:right;">${formatMoney(item.amount)}</td>
+            </tr>
+        `).join('');
+        return `
+            <tr class="invoice-allocation-row" data-allocation-for="${inv.id}" style="display:none;">
+                <td colspan="${INVOICE_COLUMNS.length}" style="background:#faf4f9;">
+                    <table style="width:auto; min-width:420px;">
+                        <thead>
+                            <tr>
+                                <th>Салон</th>
+                                <th>Статья расхода</th>
+                                <th style="text-align:right;">Сумма</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </td>
+            </tr>
+        `;
+    }
+
+    function renderInvoicesHead() {
+        if (!elements.thead) return;
+        elements.thead.innerHTML = '<tr>' +
+            INVOICE_COLUMNS.map(col => `<th>${escapeHtml(col.label)}</th>`).join('') +
+            '</tr>';
+    }
+
     function renderInvoices(invoices) {
+        renderInvoicesHead();
+
         if (invoices.length === 0) {
-            elements.tbody.innerHTML = `<tr><td colspan="10" style="text-align:center; color: var(--barkhat-gray); padding:20px;">Счетов нет</td></tr>`;
+            elements.tbody.innerHTML = `<tr><td colspan="${INVOICE_COLUMNS.length}" style="text-align:center; color: var(--barkhat-gray); padding:20px;">Счетов нет</td></tr>`;
             return;
         }
 
-        const isAdmin = currentUserData?.role === 'admin';
-
         elements.tbody.innerHTML = invoices.map(inv => {
-            const colors = STATUS_COLORS[inv.status] || { bg: '#eee', color: '#333' };
-            const badge = `<span class="status-badge" style="background:${colors.bg}; color:${colors.color};">${STATUS_LABELS[inv.status] || inv.status}</span>`;
-
-            let actions = `<button class="btn btn-sm btn-secondary" data-action="details" data-id="${inv.id}">Детали</button>`;
-            if (isAdmin && inv.status === 'on_approval') {
-                actions += `
-                    <button class="btn btn-sm btn-success" data-action="approve" data-id="${inv.id}">Согласовать</button>
-                    <button class="btn btn-sm btn-danger" data-action="reject" data-id="${inv.id}">Отклонить</button>
-                `;
-            }
-
-            const createdDate = window.BarhatTime.formatDateTime(inv.created_at, '');
-
-            return `
-                <tr>
-                    <td>${escapeHtml(inv.invoice_number || '')}</td>
-                    <td>${escapeHtml(cityName(inv.city_id))}</td>
-                    <td>${escapeHtml(inv.counterparty_name || '—')}</td>
-                    <td>${escapeHtml(payerName(inv.payer_id))}</td>
-                    <td>${formatMoney(inv.amount)}</td>
-                    <td>${window.BarhatTime.formatPlainDate(inv.due_date)}</td>
-                    <td>${badge}</td>
-                    <td>${escapeHtml(inv.created_by_full_name || inv.created_by || '')}</td>
-                    <td>${createdDate}</td>
-                    <td style="white-space: nowrap;">${actions}</td>
-                </tr>
-            `;
+            const cells = INVOICE_COLUMNS.map(col =>
+                `<td${col.nowrap ? ' style="white-space: nowrap;"' : ''}>${col.render(inv)}</td>`
+            ).join('');
+            return `<tr>${cells}</tr>` + renderAllocationRow(inv);
         }).join('');
 
         elements.tbody.querySelectorAll('button[data-action]').forEach(btn => {
@@ -385,8 +449,18 @@
                 if (action === 'details') openDetailsModal(id);
                 if (action === 'approve') approveInvoice(id);
                 if (action === 'reject') rejectInvoice(id);
+                if (action === 'toggle-allocation') toggleAllocation(id, btn);
             });
         });
+    }
+
+    function toggleAllocation(invoiceId, btn) {
+        const row = elements.tbody.querySelector(`tr[data-allocation-for="${invoiceId}"]`);
+        if (!row) return;
+        const shown = row.style.display !== 'none';
+        row.style.display = shown ? 'none' : '';
+        btn.setAttribute('aria-expanded', String(!shown));
+        btn.textContent = (shown ? '▸ ' : '▾ ') + btn.textContent.slice(2);
     }
 
     async function approveInvoice(id) {

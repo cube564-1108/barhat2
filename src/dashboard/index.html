@@ -1733,23 +1733,12 @@
 
                             <div style="overflow-x: auto;">
                                 <table style="width: 100%;">
-                                    <thead>
-                                        <tr>
-                                            <th>Номер</th>
-                                            <th>Город</th>
-                                            <th>Контрагент</th>
-                                            <th>На кого выставлен</th>
-                                            <th>Сумма</th>
-                                            <th>Оплата (план)</th>
-                                            <th>Статус</th>
-                                            <th>Создал</th>
-                                            <th>Заведён</th>
-                                            <th>Действия</th>
-                                        </tr>
-                                    </thead>
+                                    <!-- Шапку рисует invoices.js из INVOICE_COLUMNS —
+                                         там же, где строки, иначе колонки разъезжаются -->
+                                    <thead id="invoices-thead"></thead>
                                     <tbody id="invoices-tbody">
                                         <tr>
-                                            <td colspan="10" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                                            <td colspan="99" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                                                 Загрузка данных...
                                             </td>
                                         </tr>
