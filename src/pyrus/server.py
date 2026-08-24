@@ -364,12 +364,23 @@ def health_check():
     на эфемерный /app (см. комментарий про пути в app.py), — посмотреть их
     отсюда. Пустой размер у боевой базы = данные потерялись при сборке.
     """
-    databases = {}
-    for name, path in (
+    db_targets = [
         ('pyrus', db_path),
         ('barhat', os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
         ('moysklad', os.environ.get('MOYSKLAD_DB_PATH', 'moysklad.db')),
-    ):
+    ]
+
+    # Путь спрашиваем у самого модуля, а не собираем заново из env: couriers
+    # резолвит его через storage_paths, и показывать надо ровно тот файл,
+    # в который модуль пишет.
+    try:
+        from couriers.storage import DB_PATH as couriers_db_path
+        db_targets.append(('couriers', couriers_db_path))
+    except Exception as e:
+        logger.warning(f"Не удалось получить путь базы курьеров для /health: {e}")
+
+    databases = {}
+    for name, path in db_targets:
         exists = os.path.exists(path)
         wal = path + '-wal'
         databases[name] = {
