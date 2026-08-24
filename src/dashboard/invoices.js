@@ -12,6 +12,7 @@
     let cityList = [];
     let payerList = [];
     let vatList = [];
+    let counterpartyList = [];
     let loaded = false;
     let currentDetailsInvoiceId = null;
     let currentDetailsInvoice = null;
@@ -75,6 +76,9 @@
         elements.payerSelect = document.getElementById('invoice-payer');
         elements.vatSelect = document.getElementById('invoice-vat');
         elements.counterpartyInput = document.getElementById('invoice-counterparty');
+        elements.counterpartyPicker = document.getElementById('invoice-counterparty-picker');
+        elements.counterpartySource = document.getElementById('invoice-counterparty-source');
+        elements.innDatalist = document.getElementById('invoice-inn-list');
         elements.amountInput = document.getElementById('invoice-amount');
         elements.purposeInput = document.getElementById('invoice-purpose');
         elements.commentInput = document.getElementById('invoice-comment');
@@ -142,6 +146,17 @@
         elements.cancelBtn?.addEventListener('click', closeCreateModal);
         elements.overlay?.addEventListener('click', closeCreateModal);
         elements.confirmBtn?.addEventListener('click', submitInvoice);
+
+        elements.counterpartyPicker?.addEventListener('change', () => {
+            const picked = counterpartyList.find(c => String(c.id) === elements.counterpartyPicker.value);
+            if (picked) applyCounterparty(picked, 'выбран в справочнике');
+        });
+        // Подстановка по ИНН — на blur, а не на каждый символ: пока номер
+        // недонабран, он совпадает с чужим началом и поля прыгали бы.
+        elements.innInput?.addEventListener('blur', autofillByInn);
+        [elements.counterpartyInput, elements.kppInput, elements.bankNameInput,
+         elements.bankBikInput, elements.bankAccountInput, elements.bankCorrAccountInput]
+            .forEach(input => input?.addEventListener('input', clearCounterpartySource));
         elements.addLineItemBtn?.addEventListener('click', () => {
             elements.lineItemsRows.appendChild(createLineItemRow(null, elements.lineItemsTotal));
             updateLineItemsTotal(elements.lineItemsRows, elements.lineItemsTotal);
@@ -211,18 +226,21 @@
 
     async function loadDictionaries() {
         try {
-            const [storesRes, categoriesRes, citiesRes, payersRes, vatRes] = await Promise.all([
+            const [storesRes, categoriesRes, citiesRes, payersRes, vatRes, counterpartiesRes] = await Promise.all([
                 fetch('/api/invoices/stores', { credentials: 'include' }),
                 fetch('/api/invoices/categories', { credentials: 'include' }),
                 fetch('/api/invoices/cities', { credentials: 'include' }),
                 fetch('/api/invoices/payers', { credentials: 'include' }),
                 fetch('/api/invoices/vat-options', { credentials: 'include' }),
+                fetch('/api/invoices/counterparties', { credentials: 'include' }),
             ]);
             storeList = (await storesRes.json()).stores || [];
             categoryList = (await categoriesRes.json()).categories || [];
             cityList = (await citiesRes.json()).cities || [];
             payerList = (await payersRes.json()).payers || [];
             vatList = (await vatRes.json())['vat-options'] || [];
+            counterpartyList = (await counterpartiesRes.json()).counterparties || [];
+            fillCounterpartyControls();
 
             elements.citySelect.innerHTML = cityList.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
             elements.payerSelect.innerHTML = payerList.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
@@ -487,6 +505,85 @@
         })).filter(i => i.amount > 0);
     }
 
+    // =========================================================================
+    // Подстановка реквизитов из справочника контрагентов
+    // =========================================================================
+
+    function onlyDigits(value) {
+        return String(value ?? '').replace(/\D/g, '');
+    }
+
+    function counterpartyLabel(cp) {
+        const parts = [cp.name];
+        if (cp.inn) parts.push(`ИНН ${cp.inn}`);
+        // Хвост счёта — единственное, чем различаются записи одного юрлица
+        // с несколькими расчётными счетами
+        if (cp.bank_account) parts.push(`р/с …${String(cp.bank_account).slice(-4)}`);
+        return parts.join(' · ');
+    }
+
+    function fillCounterpartyControls() {
+        if (elements.counterpartyPicker) {
+            elements.counterpartyPicker.innerHTML =
+                '<option value="">Выбрать и заполнить реквизиты…</option>' +
+                counterpartyList.map(c =>
+                    `<option value="${c.id}">${escapeHtml(counterpartyLabel(c))}</option>`
+                ).join('');
+        }
+        if (elements.innDatalist) {
+            elements.innDatalist.innerHTML = counterpartyList
+                .filter(c => c.inn)
+                .map(c => `<option value="${escapeHtml(c.inn)}">${escapeHtml(c.name)}</option>`)
+                .join('');
+        }
+    }
+
+    async function reloadCounterparties() {
+        try {
+            const res = await fetch('/api/invoices/counterparties', { credentials: 'include' });
+            if (!res.ok) return;
+            counterpartyList = (await res.json()).counterparties || [];
+            fillCounterpartyControls();
+        } catch (e) {
+            console.error('Ошибка обновления справочника контрагентов:', e);
+        }
+    }
+
+    function applyCounterparty(cp, reason) {
+        elements.counterpartyInput.value = cp.name || '';
+        elements.innInput.value = cp.inn || '';
+        elements.kppInput.value = cp.kpp || '';
+        elements.bankNameInput.value = cp.bank_name || '';
+        elements.bankBikInput.value = cp.bank_bik || '';
+        elements.bankAccountInput.value = cp.bank_account || '';
+        elements.bankCorrAccountInput.value = cp.bank_corr_account || '';
+
+        const warning = cp.inn_looks_invalid ? ' ИНН выглядит некорректно — проверьте.' : '';
+        setCounterpartySource(`Реквизиты из справочника (${reason}).${warning}`);
+    }
+
+    function autofillByInn() {
+        const inn = onlyDigits(elements.innInput.value);
+        if (!inn) return;
+        // Подставляем, только если совпадение ровно одно: у юрлица бывает
+        // несколько расчётных счетов, и угадывать за пользователя нельзя
+        const matches = counterpartyList.filter(c => c.inn === inn);
+        if (matches.length !== 1) return;
+        // Не затираем то, что человек уже ввёл руками
+        if (elements.bankAccountInput.value.trim() || elements.counterpartyInput.value.trim()) return;
+        applyCounterparty(matches[0], 'найден по ИНН');
+    }
+
+    function setCounterpartySource(text) {
+        if (!elements.counterpartySource) return;
+        elements.counterpartySource.textContent = text || '';
+    }
+
+    function clearCounterpartySource() {
+        setCounterpartySource('');
+        if (elements.counterpartyPicker) elements.counterpartyPicker.value = '';
+    }
+
     function openCreateModal(sourceInvoice = null) {
         // Копирование счёта (см. handleDetailsAction 'copy') — переносит
         // всё, кроме файла, суммы и разнесения по проектам/статьям: это
@@ -510,6 +607,8 @@
         elements.lineItemsRows.innerHTML = '';
         elements.lineItemsTotal.textContent = '';
         elements.attachmentsInput.value = '';
+        clearCounterpartySource();
+        if (sourceInvoice) setCounterpartySource('Реквизиты скопированы из счёта ' + (sourceInvoice.invoice_number || ''));
 
         elements.modal.classList.add('active');
         elements.overlay.classList.add('active');
@@ -578,6 +677,9 @@
 
             closeCreateModal();
             await loadInvoices();
+            // Счёт мог завести нового контрагента — обновляем список, иначе
+            // в следующей форме его ещё не будет до перезагрузки страницы
+            await reloadCounterparties();
         } catch (e) {
             console.error('Ошибка создания счёта:', e);
             alert('Ошибка создания счёта');

@@ -1780,12 +1780,21 @@
                                     <select id="invoice-payer" class="form-select"></select>
                                 </div>
                                 <div class="form-group">
+                                    <label class="form-label">Контрагент из справочника</label>
+                                    <select id="invoice-counterparty-picker" class="form-select">
+                                        <option value="">Выбрать и заполнить реквизиты…</option>
+                                    </select>
+                                    <p class="form-hint">Заполнит семь полей ниже. Всё останется доступным для правки.</p>
+                                </div>
+                                <div class="form-group">
                                     <label class="form-label">ИНН контрагента</label>
-                                    <input type="text" id="invoice-inn" class="form-input">
+                                    <input type="text" id="invoice-inn" class="form-input" list="invoice-inn-list" autocomplete="off">
+                                    <datalist id="invoice-inn-list"></datalist>
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">Наименование контрагента</label>
                                     <input type="text" id="invoice-counterparty" class="form-input" placeholder="Название компании / ИП">
+                                    <p id="invoice-counterparty-source" class="form-hint"></p>
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">Расчётный счёт контрагента</label>
