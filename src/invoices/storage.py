@@ -1836,13 +1836,46 @@ def _clean_counterparty_values(values: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
+def counterparty_requisite_warnings(item: Dict[str, Any]) -> List[str]:
+    """
+    Претензии к реквизитам по длине. Все четыре номера в РФ фиксированной
+    длины, так что опечатка ловится арифметикой без всяких справочников.
+
+    Реальные находки в боевом справочнике (2026-08-24): БИК из 8 знаков
+    (потерян ведущий ноль — классика выгрузки в Excel) и БИК из 10 знаков
+    (лишняя цифра). Такой счёт банк развернёт уже после отправки платёжки,
+    поэтому лучше подсветить в справочнике заранее.
+    """
+    warnings: List[str] = []
+    inn = item.get("inn")
+    if inn and len(inn) not in (10, 12):
+        warnings.append(f"ИНН из {len(inn)} цифр — должно быть 10 (юрлицо) или 12 (ИП/физлицо)")
+
+    kpp = item.get("kpp")
+    if kpp and len(kpp) != 9:
+        warnings.append(f"КПП из {len(kpp)} цифр — должно быть 9")
+
+    bik = item.get("bank_bik")
+    if bik and len(bik) != 9:
+        warnings.append(f"БИК из {len(bik)} цифр — должно быть 9")
+
+    account = item.get("bank_account")
+    if account and len(account) != 20:
+        warnings.append(f"Расчётный счёт из {len(account)} цифр — должно быть 20")
+
+    corr = item.get("bank_corr_account")
+    if corr and len(corr) != 20:
+        warnings.append(f"Корр. счёт из {len(corr)} цифр — должно быть 20")
+
+    return warnings
+
+
 def _counterparty_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
-    """
-    Запись справочника + подсказка для интерфейса: ИНН неправильной длины.
-    10 знаков — юрлицо, 12 — ИП, всё остальное — опечатка при вводе счёта,
-    её видно только глазами (отчёт Фазы 2 нашёл две такие на 29 счетов).
-    """
+    """Запись справочника + разбор реквизитов на очевидные опечатки."""
     item = dict(row)
+    item["requisite_warnings"] = counterparty_requisite_warnings(item)
+    # Оставлено отдельным полем: форма счёта показывает короткое
+    # предупреждение именно про ИНН рядом с подставленными реквизитами
     inn = item.get("inn")
     item["inn_looks_invalid"] = bool(inn) and len(inn) not in (10, 12)
     return item

@@ -51,6 +51,16 @@
 
         elements.createBtn = document.getElementById('create-invoice-btn');
         elements.manageReferencesBtn = document.getElementById('manage-references-btn');
+        elements.manageCounterpartiesBtn = document.getElementById('manage-counterparties-btn');
+
+        elements.counterpartiesModal = document.getElementById('invoice-counterparties-modal');
+        elements.counterpartiesOverlay = document.getElementById('invoice-counterparties-overlay');
+        elements.closeCounterpartiesBtn = document.getElementById('close-invoice-counterparties-btn');
+        elements.closeCounterpartiesFooterBtn = document.getElementById('close-invoice-counterparties-footer-btn');
+        elements.counterpartiesSearch = document.getElementById('counterparties-search');
+        elements.counterpartiesList = document.getElementById('counterparties-list');
+        elements.counterpartyForm = document.getElementById('counterparty-edit-form');
+        elements.counterpartyNewBtn = document.getElementById('counterparty-new-btn');
 
         elements.filterCounterparty = document.getElementById('invoices-filter-counterparty');
         elements.filterPurpose = document.getElementById('invoices-filter-purpose');
@@ -177,6 +187,13 @@
         elements.detailsSaveStatusBtn?.addEventListener('click', saveDetailsStatus);
         elements.detailsSendCommentBtn?.addEventListener('click', sendDetailsComment);
 
+        elements.manageCounterpartiesBtn?.addEventListener('click', openCounterpartiesModal);
+        elements.closeCounterpartiesBtn?.addEventListener('click', closeCounterpartiesModal);
+        elements.closeCounterpartiesFooterBtn?.addEventListener('click', closeCounterpartiesModal);
+        elements.counterpartiesOverlay?.addEventListener('click', closeCounterpartiesModal);
+        elements.counterpartiesSearch?.addEventListener('input', renderCounterparties);
+        elements.counterpartyNewBtn?.addEventListener('click', () => showCounterpartyForm(null));
+
         elements.manageReferencesBtn?.addEventListener('click', openReferencesModal);
         elements.closeReferencesBtn?.addEventListener('click', closeReferencesModal);
         elements.closeReferencesFooterBtn?.addEventListener('click', closeReferencesModal);
@@ -213,12 +230,16 @@
             loaded = true;
         }
 
+        // Правка справочника — только админ (как и остальные справочники модуля).
+        // Подстановка реквизитов в форме счёта при этом доступна всем.
         if (currentUserData?.role === 'admin') {
             elements.manageReferencesBtn.style.display = '';
             elements.openPlanfactBtn.style.display = '';
+            if (elements.manageCounterpartiesBtn) elements.manageCounterpartiesBtn.style.display = '';
         } else {
             elements.manageReferencesBtn.style.display = 'none';
             elements.openPlanfactBtn.style.display = 'none';
+            if (elements.manageCounterpartiesBtn) elements.manageCounterpartiesBtn.style.display = 'none';
         }
 
         await loadInvoices();
@@ -535,6 +556,186 @@
                 .filter(c => c.inn)
                 .map(c => `<option value="${escapeHtml(c.inn)}">${escapeHtml(c.name)}</option>`)
                 .join('');
+        }
+    }
+
+    // =========================================================================
+    // Справочник контрагентов: список, правка, мягкое удаление
+    // =========================================================================
+
+    const COUNTERPARTY_FORM_FIELDS = [
+        { key: 'name', label: 'Наименование', required: true },
+        { key: 'inn', label: 'ИНН' },
+        { key: 'kpp', label: 'КПП' },
+        { key: 'bank_account', label: 'Расчётный счёт' },
+        { key: 'bank_bik', label: 'БИК' },
+        { key: 'bank_name', label: 'Банк' },
+        { key: 'bank_corr_account', label: 'Корр. счёт' },
+    ];
+
+    function openCounterpartiesModal() {
+        elements.counterpartiesSearch.value = '';
+        hideCounterpartyForm();
+        renderCounterparties();
+        elements.counterpartiesModal.classList.add('active');
+        elements.counterpartiesOverlay.classList.add('active');
+    }
+
+    function closeCounterpartiesModal() {
+        elements.counterpartiesModal.classList.remove('active');
+        elements.counterpartiesOverlay.classList.remove('active');
+    }
+
+    function renderCounterparties() {
+        const needle = (elements.counterpartiesSearch.value || '').trim().toLowerCase();
+        const digits = onlyDigits(needle);
+        const visible = counterpartyList.filter(c => {
+            if (!needle) return true;
+            if ((c.name || '').toLowerCase().includes(needle)) return true;
+            if (!digits) return false;
+            return (c.inn || '').includes(digits) || (c.bank_account || '').includes(digits);
+        });
+
+        if (!visible.length) {
+            elements.counterpartiesList.innerHTML =
+                `<p class="form-hint">${counterpartyList.length ? 'Ничего не найдено' : 'Справочник пуст'}</p>`;
+            return;
+        }
+
+        const problems = visible.filter(c => c.requisite_warnings?.length).length;
+        const summary = problems
+            ? `<p class="form-hint">Записей: ${visible.length}. С вопросами к реквизитам: ${problems}.</p>`
+            : `<p class="form-hint">Записей: ${visible.length}.</p>`;
+
+        elements.counterpartiesList.innerHTML = summary + visible.map(c => {
+            const warnings = (c.requisite_warnings || []).map(w =>
+                `<div style="color:#721c24; font-size:12px;">${escapeHtml(w)}</div>`
+            ).join('');
+            const requisites = [
+                c.inn ? `ИНН ${escapeHtml(c.inn)}` : null,
+                c.kpp ? `КПП ${escapeHtml(c.kpp)}` : null,
+                c.bank_account ? `р/с ${escapeHtml(c.bank_account)}` : null,
+                c.bank_bik ? `БИК ${escapeHtml(c.bank_bik)}` : null,
+            ].filter(Boolean).join(' · ');
+
+            return `
+                <div class="admin-item" style="display:flex; align-items:flex-start; gap:12px;">
+                    <div style="flex:1; min-width:0;">
+                        <div><strong>${escapeHtml(c.name)}</strong></div>
+                        <div class="form-hint">${requisites || 'реквизиты не заполнены'}</div>
+                        ${c.bank_name ? `<div class="form-hint">${escapeHtml(c.bank_name)}</div>` : ''}
+                        ${warnings}
+                    </div>
+                    <div style="display:flex; gap:6px; flex-shrink:0;">
+                        <button class="btn btn-sm btn-secondary" data-cp-action="edit" data-id="${c.id}">Изменить</button>
+                        <button class="btn btn-sm btn-danger" data-cp-action="delete" data-id="${c.id}">Удалить</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        elements.counterpartiesList.querySelectorAll('button[data-cp-action]').forEach(btn => {
+            const id = parseInt(btn.getAttribute('data-id'), 10);
+            const action = btn.getAttribute('data-cp-action');
+            btn.addEventListener('click', () => {
+                if (action === 'edit') showCounterpartyForm(counterpartyList.find(c => c.id === id));
+                if (action === 'delete') removeCounterparty(id);
+            });
+        });
+    }
+
+    function showCounterpartyForm(counterparty) {
+        const cp = counterparty || {};
+        elements.counterpartyForm.style.display = '';
+        elements.counterpartyForm.innerHTML = `
+            <h4 style="margin:16px 0 8px;">${cp.id ? 'Изменить контрагента' : 'Новый контрагент'}</h4>
+            ${COUNTERPARTY_FORM_FIELDS.map(f => `
+                <div class="form-group">
+                    <label class="form-label">${escapeHtml(f.label)}${f.required ? ' *' : ''}</label>
+                    <input type="text" class="form-input" data-cp-field="${f.key}"
+                           value="${escapeHtml(cp[f.key] || '')}">
+                </div>
+            `).join('')}
+            <div style="display:flex; gap:8px;">
+                <button type="button" class="btn btn-success btn-sm" data-cp-form="save">Сохранить</button>
+                <button type="button" class="btn btn-secondary btn-sm" data-cp-form="cancel">Отмена</button>
+            </div>
+        `;
+        elements.counterpartyForm.querySelector('[data-cp-form="save"]')
+            .addEventListener('click', () => saveCounterparty(cp.id));
+        elements.counterpartyForm.querySelector('[data-cp-form="cancel"]')
+            .addEventListener('click', hideCounterpartyForm);
+        elements.counterpartyForm.scrollIntoView({ block: 'nearest' });
+    }
+
+    function hideCounterpartyForm() {
+        elements.counterpartyForm.style.display = 'none';
+        elements.counterpartyForm.innerHTML = '';
+    }
+
+    function readCounterpartyForm() {
+        const values = {};
+        elements.counterpartyForm.querySelectorAll('[data-cp-field]').forEach(input => {
+            values[input.getAttribute('data-cp-field')] = input.value.trim() || null;
+        });
+        return values;
+    }
+
+    async function saveCounterparty(counterpartyId) {
+        const values = readCounterpartyForm();
+        if (!values.name) {
+            window.BarhatUI.alert('Укажите наименование контрагента', 'error');
+            return;
+        }
+        const url = counterpartyId
+            ? `/api/invoices/counterparties/${counterpartyId}`
+            : '/api/invoices/counterparties';
+        try {
+            const res = await fetch(url, {
+                method: counterpartyId ? 'PUT' : 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(values),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                window.BarhatUI.alert(data.error || 'Не удалось сохранить контрагента', 'error');
+                return;
+            }
+            await reloadCounterparties();
+            hideCounterpartyForm();
+            renderCounterparties();
+            window.BarhatUI.alert('Контрагент сохранён');
+        } catch (e) {
+            console.error('Ошибка сохранения контрагента:', e);
+            window.BarhatUI.alert('Ошибка сохранения контрагента', 'error');
+        }
+    }
+
+    async function removeCounterparty(counterpartyId) {
+        const cp = counterpartyList.find(c => c.id === counterpartyId);
+        const confirmed = await window.BarhatUI.confirm(
+            `Убрать «${cp ? cp.name : counterpartyId}» из справочника? Счета и их реквизиты останутся на месте.`,
+            { title: 'Удаление контрагента', confirmText: 'Убрать', danger: true }
+        );
+        if (!confirmed) return;
+
+        try {
+            const res = await fetch(`/api/invoices/counterparties/${counterpartyId}`, {
+                method: 'DELETE',
+                credentials: 'include',
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                window.BarhatUI.alert(data.error || 'Не удалось удалить контрагента', 'error');
+                return;
+            }
+            await reloadCounterparties();
+            hideCounterpartyForm();
+            renderCounterparties();
+        } catch (e) {
+            console.error('Ошибка удаления контрагента:', e);
+            window.BarhatUI.alert('Ошибка удаления контрагента', 'error');
         }
     }
 

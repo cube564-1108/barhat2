@@ -1665,6 +1665,7 @@
                                 <h3 class="card-title">Список счетов</h3>
                                 <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                                     <button id="manage-references-btn" class="btn btn-secondary">Справочники</button>
+                                    <button id="manage-counterparties-btn" class="btn btn-secondary">Контрагенты</button>
                                     <button id="open-planfact-btn" class="btn btn-secondary">ПланФакт</button>
                                     <button id="create-invoice-btn" class="btn btn-primary">+ Создать счёт</button>
                                 </div>
@@ -1939,6 +1940,33 @@
                             </div>
                             <div class="modal-footer">
                                 <button id="close-invoice-references-footer-btn" class="btn btn-secondary">Закрыть</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модалка справочника контрагентов: правка реквизитов, мягкое удаление -->
+                    <div class="modal" id="invoice-counterparties-modal">
+                        <div class="modal-overlay" id="invoice-counterparties-overlay"></div>
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3 class="modal-title">Контрагенты</h3>
+                                <button class="modal-close-btn" id="close-invoice-counterparties-btn">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <p class="form-hint">
+                                    Заполняется сам при создании счёта с новыми реквизитами.
+                                    Правка здесь не меняет уже выставленные счета — в них своя копия реквизитов.
+                                </p>
+                                <div class="admin-add-form" style="margin-bottom:12px;">
+                                    <input type="text" id="counterparties-search" class="form-input"
+                                           placeholder="Поиск по названию, ИНН или счёту" autocomplete="off">
+                                    <button id="counterparty-new-btn" class="btn btn-primary btn-sm">+ Добавить</button>
+                                </div>
+                                <div id="counterparties-list"></div>
+                                <div id="counterparty-edit-form" style="display:none;"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button id="close-invoice-counterparties-footer-btn" class="btn btn-secondary">Закрыть</button>
                             </div>
                         </div>
                     </div>
