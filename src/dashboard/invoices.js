@@ -77,6 +77,7 @@
         elements.counterpartyInput = document.getElementById('invoice-counterparty');
         elements.amountInput = document.getElementById('invoice-amount');
         elements.purposeInput = document.getElementById('invoice-purpose');
+        elements.commentInput = document.getElementById('invoice-comment');
         elements.innInput = document.getElementById('invoice-inn');
         elements.bankBikInput = document.getElementById('invoice-bank-bik');
         elements.bankAccountInput = document.getElementById('invoice-bank-account');
@@ -498,6 +499,7 @@
         elements.counterpartyInput.value = sourceInvoice?.counterparty_name || '';
         elements.amountInput.value = '';
         elements.purposeInput.value = sourceInvoice?.payment_purpose || '';
+        elements.commentInput.value = sourceInvoice?.comment || '';
         elements.innInput.value = sourceInvoice?.counterparty_inn || '';
         elements.bankBikInput.value = sourceInvoice?.counterparty_bank_bik || '';
         elements.bankAccountInput.value = sourceInvoice?.counterparty_bank_account || '';
@@ -546,6 +548,7 @@
             due_date: dueDate,
             amount: amount,
             payment_purpose: purpose,
+            comment: elements.commentInput.value.trim() || null,
             vat_id: elements.vatSelect.value ? parseInt(elements.vatSelect.value, 10) : null,
             counterparty_name: elements.counterpartyInput.value.trim() || null,
             counterparty_inn: elements.innInput.value.trim() || null,
@@ -745,6 +748,10 @@
                 <textarea id="edit-field-purpose" class="form-input" rows="2" ${disabled}>${escapeHtml(invoice.payment_purpose || '')}</textarea>
             </div>
             <div class="form-group">
+                <label class="form-label">Комментарий</label>
+                <textarea id="edit-field-comment" class="form-input" rows="2" ${disabled}>${escapeHtml(invoice.comment || '')}</textarea>
+            </div>
+            <div class="form-group">
                 <label class="form-label">Планируемая дата оплаты</label>
                 <input type="date" id="edit-field-due-date" class="form-input" value="${invoice.due_date || ''}" ${disabled}>
             </div>
@@ -767,6 +774,7 @@
             counterparty_bank_corr_account: document.getElementById('edit-field-corr-account').value.trim() || null,
             amount: parseFloat(document.getElementById('edit-field-amount').value),
             payment_purpose: document.getElementById('edit-field-purpose').value.trim(),
+            comment: document.getElementById('edit-field-comment').value.trim() || null,
             due_date: document.getElementById('edit-field-due-date').value,
         };
         try {

@@ -168,6 +168,11 @@ def init_invoices_tables():
             counterparty_bank_corr_account TEXT,
             amount REAL NOT NULL CHECK (amount > 0),
             payment_purpose TEXT NOT NULL,
+            -- Свободный комментарий к счёту. Не путать с таблицей
+            -- invoice_comments — там переписка по счёту (автор, время, много
+            -- записей); это поле — свойство самого документа, заполняется при
+            -- создании. В банк не уходит: в платёжку идёт payment_purpose.
+            comment TEXT,
             due_date TEXT,
             status TEXT NOT NULL DEFAULT 'on_approval' CHECK (status IN ('on_approval','approved','rejected','sent_to_bank','paid')),
             is_archived INTEGER NOT NULL DEFAULT 0,
@@ -193,6 +198,9 @@ def init_invoices_tables():
     # (см. её докстринг — на проде несколько gunicorn-воркеров стартуют
     # параллельно и могут столкнуться на "duplicate column name").
     _ensure_invoice_bank_columns(conn)
+
+    # Поле «Комментарий» (план 2026-08-24, Фаза 1) — добавлено позже остальных.
+    _ensure_invoice_comment_column(conn)
 
     # ========================================================================
     # 4. Распределение по проектам/статьям (invoice_line_items)
@@ -422,6 +430,30 @@ def _ensure_invoice_bank_columns(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE invoices ADD COLUMN counterparty_kpp TEXT")
         if not _column_exists(conn, "invoices", "bank_send_error"):
             conn.execute("ALTER TABLE invoices ADD COLUMN bank_send_error TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _ensure_invoice_comment_column(conn: sqlite3.Connection):
+    """
+    Добивка поля invoices.comment — свободный комментарий к счёту
+    (план 2026-08-24, Фаза 1).
+
+    Блокировка та же, что в _ensure_invoice_bank_columns: ADD COLUMN дёшев,
+    но два gunicorn-воркера на проде стартуют параллельно и без BEGIN
+    IMMEDIATE падают на "duplicate column name".
+    """
+    if not _table_exists(conn, "invoices"):
+        return
+    if _column_exists(conn, "invoices", "comment"):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not _column_exists(conn, "invoices", "comment"):
+            conn.execute("ALTER TABLE invoices ADD COLUMN comment TEXT")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1063,6 +1095,7 @@ def create_invoice(
     counterparty_bank_account: Optional[str] = None,
     counterparty_bank_corr_account: Optional[str] = None,
     due_date: Optional[str] = None,
+    comment: Optional[str] = None,
     line_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
@@ -1088,14 +1121,14 @@ def create_invoice(
         INSERT INTO invoices (
             city_id, payer_id, vat_id, counterparty_name, counterparty_inn, counterparty_kpp,
             counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
-            counterparty_bank_corr_account, amount, payment_purpose, due_date,
+            counterparty_bank_corr_account, amount, payment_purpose, comment, due_date,
             created_by, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'on_approval')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'on_approval')
         """,
         (
             city_id, payer_id, vat_id, counterparty_name, counterparty_inn, counterparty_kpp,
             counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
-            counterparty_bank_corr_account, amount, payment_purpose, due_date,
+            counterparty_bank_corr_account, amount, payment_purpose, comment, due_date,
             created_by,
         )
     )
@@ -1241,7 +1274,7 @@ def get_invoice_comments(invoice_id: int) -> List[Dict[str, Any]]:
 _EDITABLE_INVOICE_FIELDS = (
     "city_id", "payer_id", "vat_id", "counterparty_name", "counterparty_inn", "counterparty_kpp",
     "counterparty_bank_name", "counterparty_bank_bik", "counterparty_bank_account",
-    "counterparty_bank_corr_account", "amount", "payment_purpose", "due_date",
+    "counterparty_bank_corr_account", "amount", "payment_purpose", "comment", "due_date",
 )
 
 
@@ -1579,3 +1612,157 @@ def set_invoice_archived(invoice_id: int, archived: bool, changed_by: str = "sys
         add_invoice_history(invoice_id, changed_by, "is_archived",
                              "1" if was_archived else "0", "1" if archived else "0")
     return True
+
+
+# =============================================================================
+# СПРАВОЧНИК КОНТРАГЕНТОВ (план 2026-08-24)
+# =============================================================================
+
+def normalize_inn(value: Optional[str]) -> Optional[str]:
+    """
+    ИНН к сравнимому виду — только цифры. Реквизиты вводились руками год,
+    и один и тот же контрагент встречается как "6670123456", "ИНН 6670123456"
+    и "6670 123 456"; без нормализации это три разных контрагента.
+    """
+    if not value:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return digits or None
+
+
+def normalize_account(value: Optional[str]) -> Optional[str]:
+    """Расчётный/корр. счёт к сравнимому виду — только цифры (пробелы в 20 знаках)."""
+    if not value:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return digits or None
+
+
+def normalize_counterparty_name(value: Optional[str]) -> Optional[str]:
+    """
+    Название к сравнимому виду: схлопнутые пробелы, единые кавычки, нижний
+    регистр. Нужно только для поиска дублей — на экран идёт исходное название.
+    """
+    if not value:
+        return None
+    text = str(value).replace("«", '"').replace("»", '"').replace("'", '"')
+    text = " ".join(text.split()).strip(' "').lower()
+    return text or None
+
+
+def counterparty_data_report(examples_limit: int = 20) -> Dict[str, Any]:
+    """
+    Отчёт по качеству реквизитов в истории счетов — Фаза 2 плана 2026-08-24.
+    Смотрим ДО создания справочника: бэкфилл мусора хуже, чем пустые поля,
+    потому что подставленный неверный расчётный счёт — это деньги не туда.
+
+    Ничего не меняет, только считает.
+    """
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT id, invoice_number, created_at, counterparty_name, counterparty_inn,
+               counterparty_kpp, counterparty_bank_name, counterparty_bank_bik,
+               counterparty_bank_account, counterparty_bank_corr_account
+        FROM invoices
+        ORDER BY id
+        """
+    ).fetchall()
+    conn.close()
+
+    total = len(rows)
+    without_inn = 0
+    without_account = 0
+    full_requisites = 0
+    inn_lengths: Dict[int, int] = {}
+
+    pairs: Dict[tuple, Dict[str, Any]] = {}          # (инн, счёт) -> сводка
+    names_by_inn: Dict[str, Dict[str, int]] = {}     # инн -> {название: сколько счетов}
+    accounts_by_inn: Dict[str, set] = {}             # инн -> {счета}
+    inns_by_name: Dict[str, set] = {}                # нормализованное имя -> {инн}
+    no_inn_names: Dict[str, int] = {}                # название без ИНН -> сколько счетов
+
+    for row in rows:
+        inn = normalize_inn(row["counterparty_inn"])
+        account = normalize_account(row["counterparty_bank_account"])
+        raw_name = (row["counterparty_name"] or "").strip()
+        name_key = normalize_counterparty_name(raw_name)
+
+        if not inn:
+            without_inn += 1
+            if raw_name:
+                no_inn_names[raw_name] = no_inn_names.get(raw_name, 0) + 1
+        else:
+            inn_lengths[len(inn)] = inn_lengths.get(len(inn), 0) + 1
+            names_by_inn.setdefault(inn, {})
+            if raw_name:
+                names_by_inn[inn][raw_name] = names_by_inn[inn].get(raw_name, 0) + 1
+            accounts_by_inn.setdefault(inn, set())
+            if account:
+                accounts_by_inn[inn].add(account)
+
+        if not account:
+            without_account += 1
+
+        if all(row[f] for f in ("counterparty_name", "counterparty_inn", "counterparty_bank_name",
+                                "counterparty_bank_bik", "counterparty_bank_account",
+                                "counterparty_bank_corr_account")):
+            full_requisites += 1
+
+        if name_key and inn:
+            inns_by_name.setdefault(name_key, set()).add(inn)
+
+        if inn and account:
+            key = (inn, account)
+            entry = pairs.setdefault(key, {"inn": inn, "account": account, "invoices": 0,
+                                           "names": set(), "last_invoice": None})
+            entry["invoices"] += 1
+            if raw_name:
+                entry["names"].add(raw_name)
+            entry["last_invoice"] = row["invoice_number"]
+
+    # Конфликт: один ИНН — несколько написаний названия. Дубли вида
+    # 'ООО "Ромашка"' / 'ООО Ромашка' склеятся в справочнике по паре
+    # (ИНН, счёт), но в карточке нужно выбрать одно написание.
+    name_conflicts = [
+        {"inn": inn, "variants": sorted(names.keys()), "invoices": sum(names.values())}
+        for inn, names in names_by_inn.items()
+        if len(names) > 1
+    ]
+    # Один ИНН — несколько расчётных счетов. Это НЕ ошибка (у юрлица легально
+    # несколько счетов), но каждая пара станет отдельной записью справочника.
+    multi_account = [
+        {"inn": inn, "accounts": len(accounts)}
+        for inn, accounts in accounts_by_inn.items()
+        if len(accounts) > 1
+    ]
+    # Одно название — разные ИНН. Обычно опечатка в ИНН, смотреть руками.
+    inn_conflicts = [
+        {"name": name, "inns": sorted(inns)}
+        for name, inns in inns_by_name.items()
+        if len(inns) > 1
+    ]
+    # ИНН неправильной длины: 10 — юрлицо, 12 — ИП, всё остальное — опечатка.
+    bad_length = {str(length): count for length, count in sorted(inn_lengths.items())
+                  if length not in (10, 12)}
+
+    return {
+        "invoices_total": total,
+        "invoices_without_inn": without_inn,
+        "invoices_without_account": without_account,
+        "invoices_with_full_requisites": full_requisites,
+        "counterparties_expected": len(pairs),
+        "unique_inn": len(names_by_inn),
+        "inn_length_anomalies": bad_length,
+        "name_conflicts_count": len(name_conflicts),
+        "name_conflicts": sorted(name_conflicts, key=lambda x: -x["invoices"])[:examples_limit],
+        "multi_account_inn_count": len(multi_account),
+        "multi_account_inn": sorted(multi_account, key=lambda x: -x["accounts"])[:examples_limit],
+        "inn_conflicts_count": len(inn_conflicts),
+        "inn_conflicts": inn_conflicts[:examples_limit],
+        "no_inn_names_count": len(no_inn_names),
+        "no_inn_names": sorted(
+            ({"name": name, "invoices": count} for name, count in no_inn_names.items()),
+            key=lambda x: -x["invoices"]
+        )[:examples_limit],
+    }

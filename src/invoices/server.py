@@ -75,6 +75,7 @@ from .storage import (
     set_invoice_archived,
     get_invoice_line_items,
     set_invoice_line_items,
+    counterparty_data_report,
     add_invoice_attachment,
     get_invoice_attachments,
     get_attachment_by_id,
@@ -344,6 +345,9 @@ def edit_invoice(invoice_id):
         if field in data:
             changes[field] = data[field]
 
+    if "comment" in data:
+        changes["comment"] = (data["comment"] or "").strip() or None
+
     if not changes:
         return jsonify({"error": "Нет полей для изменения"}), 400
 
@@ -444,6 +448,7 @@ def add_invoice():
             counterparty_bank_account=data.get("counterparty_bank_account"),
             counterparty_bank_corr_account=data.get("counterparty_bank_corr_account"),
             due_date=due_date,
+            comment=(data.get("comment") or "").strip() or None,
             line_items=line_items,
         )
     except sqlite3.IntegrityError:
@@ -1183,3 +1188,17 @@ def get_planfact_categories():
     if categories is None:
         return jsonify({"error": "Не удалось получить статьи из ПланФакт"}), 502
     return jsonify({"categories": categories})
+
+
+@invoices_bp.route("/counterparties/data-report", methods=["GET"])
+@role_required("admin")
+def counterparties_data_report():
+    """
+    Отчёт по качеству реквизитов контрагентов в истории счетов —
+    Фаза 2 плана 2026-08-24, смотрим ДО наполнения справочника.
+
+    Только чтение. Эндпоинт, а не скрипт, потому что на этом тарифе Amvera
+    нет доступа к консоли контейнера — разовые операции с боевой базой
+    делаются HTTP-ручками.
+    """
+    return jsonify(counterparty_data_report())
