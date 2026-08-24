@@ -1,0 +1,2167 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Согласование счетов v2 — прототип</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Vollkorn:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bx-darkest:#130810; --bx-dark:#1e0d1b; --bx-wine:#411330; --bx-primary:#4a1942;
+  --bx-medium:#6b2660; --bx-accent:#8b3a7d;
+  --bx-pink-deep:#B26FA1; --bx-pink:#D19CC2; --bx-pink-bright:#E1A4C9;
+  --bx-pink-light:#E4C2DD; --bx-pink-wash:#F3E3EE;
+  --bx-bg:#faf4f9; --bx-bg-2:#f5e8f3; --bx-white:#fff;
+  --bx-text:#3C3C3C; --bx-text-2:#6F6F6F; --bx-muted:#9b8f97;
+  --bx-border:#eee2ea; --bx-scroll:#d1b8ce;
+  --bx-up:#0a7d3f; --bx-down:#c0322f;
+  --bx-grad-header:linear-gradient(135deg,#411330 0%,#B26FA1 100%);
+  --bx-grad-accent:linear-gradient(135deg,#E1A4C9 0%,#B26FA1 100%);
+  --bx-r-sm:4px; --bx-r-md:6px; --bx-r-lg:8px; --bx-r-xl:12px; --bx-r-2xl:16px;
+  --bx-font-head:'Vollkorn',Georgia,serif;
+  --bx-font-body:'Inter','PT Sans',system-ui,-apple-system,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bx-bg);color:var(--bx-text);font-family:var(--bx-font-body);
+  -webkit-font-smoothing:antialiased;font-size:14px}
+h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700;margin:0}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bx-scroll);border-radius:4px}
+
+.bx-page{width:100%;max-width:1400px;margin:0 auto;padding:32px}
+@media(max-width:768px){.bx-page{padding:16px}}
+
+/* ---------- Шапка ---------- */
+.bx-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
+  background:var(--bx-grad-header);color:#fff;border-radius:var(--bx-r-2xl);padding:28px 32px;margin-bottom:20px}
+.bx-header__left{display:flex;align-items:center;gap:16px;min-width:0}
+.bx-header__icon{flex:0 0 auto;width:44px;height:44px;display:flex;align-items:center;justify-content:center;
+  border-radius:var(--bx-r-xl);background:rgba(255,255,255,.15)}
+.bx-header__title{font-size:30px;line-height:1.1;letter-spacing:-.01em;color:#fff;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.bx-header__subtitle{color:rgba(255,255,255,.70);font-size:14px;margin:4px 0 0}
+.bx-header__actions{flex:0 0 auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bx-header__count{font-family:var(--bx-font-body);font-size:12px;font-weight:600;background:rgba(255,255,255,.18);
+  border-radius:9999px;padding:4px 12px;letter-spacing:0}
+@media(max-width:768px){.bx-header{padding:20px;flex-direction:column}.bx-header__title{font-size:22px}}
+
+/* ---------- Карточка / KPI ---------- */
+.bx-card{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:18px}
+.bx-card__title{font-family:var(--bx-font-head);font-weight:600;font-size:15.5px;color:var(--bx-wine);margin:0}
+.bx-card__caption{color:var(--bx-muted);font-size:12px;margin:2px 0 12px}
+
+.kpi-grid{display:grid;gap:12px;grid-template-columns:repeat(4,1fr);margin-bottom:16px}
+@media(max-width:1000px){.kpi-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.kpi-grid{grid-template-columns:1fr}}
+.kpi{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:16px;
+  cursor:pointer;text-align:left;font-family:inherit;transition:border-color .15s,box-shadow .15s}
+.kpi:hover{border-color:var(--bx-pink);box-shadow:0 2px 10px rgba(65,19,48,.06)}
+.kpi--active{border-color:var(--bx-wine);box-shadow:0 0 0 2px rgba(65,19,48,.10)}
+.kpi__label{font-size:11.5px;color:var(--bx-muted);text-transform:uppercase;letter-spacing:.03em;line-height:1.2}
+.kpi__value{font-weight:700;font-size:28px;color:var(--bx-wine);margin:6px 0 4px;line-height:1;
+  font-variant-numeric:tabular-nums lining-nums;letter-spacing:-.01em}
+.kpi__unit{font-size:14px;color:var(--bx-text-2);font-weight:500;margin-left:4px}
+.kpi__sub{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px}
+.kpi__sub--down{color:var(--bx-down)} .kpi__sub--up{color:var(--bx-up)} .kpi__sub--flat{color:var(--bx-muted)}
+
+/* ---------- Панель фильтров ---------- */
+.filters{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);
+  padding:14px 16px;margin-bottom:16px}
+.filters__bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.filters__left{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.filters__toggle{display:inline-flex;align-items:center;gap:8px;background:none;border:none;cursor:pointer;
+  font-family:var(--bx-font-head);font-weight:600;font-size:15.5px;color:var(--bx-wine);padding:0}
+.filters__body{display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--bx-border)}
+.filters--open .filters__body{display:block}
+.filters__grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+@media(max-width:1100px){.filters__grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:620px){.filters__grid{grid-template-columns:1fr}}
+.filters__foot{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;background:rgba(228,194,221,.4);color:var(--bx-wine);
+  border:1px solid var(--bx-pink-light);border-radius:9999px;padding:3px 6px 3px 10px;font-size:11.5px}
+.chip button{background:none;border:none;cursor:pointer;color:var(--bx-wine);line-height:0;padding:2px;border-radius:50%}
+.chip button:hover{background:rgba(65,19,48,.10)}
+.switch{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--bx-text);cursor:pointer}
+
+/* ---------- Табы ---------- */
+.bx-tabs{display:inline-flex;flex-wrap:wrap;gap:4px;padding:4px;border-radius:var(--bx-r-xl);
+  background:rgba(228,194,221,.15)}
+.bx-tab{padding:8px 16px;font-size:14px;border-radius:var(--bx-r-lg);color:var(--bx-wine);
+  text-decoration:none;cursor:pointer;white-space:nowrap;border:none;background:none;font-family:inherit;transition:background .15s}
+.bx-tab:hover{background:rgba(228,194,221,.25)}
+.bx-tab--active{background:var(--bx-wine);color:#fff;font-weight:500}
+
+/* ---------- Бейджи ---------- */
+.bx-badge{display:inline-block;border-radius:9999px;padding:2px 10px;font-size:11px;font-weight:500;white-space:nowrap}
+.b-onappr{background:#fffbeb;color:#b45309;border:1px solid #fde68a}
+.b-rework{background:rgba(228,194,221,.4);color:#411330;border:1px solid var(--bx-pink-light)}
+.b-appr{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0}
+.b-bank{background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe}
+.b-paid{background:#411330;color:#fff}
+.b-rej{background:rgba(0,0,0,.05);color:#6F6F6F}
+.b-arch{background:rgba(0,0,0,.05);color:#6F6F6F;border:1px dashed #cfc4cb}
+.b-over{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}
+.b-today{background:#fffbeb;color:#b45309;border:1px solid #fde68a}
+.b-warn{background:#fffbeb;color:#b45309;border:1px solid #fde68a}
+
+/* ---------- Кнопки ---------- */
+.bx-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 16px;
+  border-radius:var(--bx-r-xl);border:none;cursor:pointer;font-size:14px;font-weight:600;
+  background:var(--bx-wine);color:#fff;transition:opacity .15s;font-family:inherit}
+.bx-btn:disabled{opacity:.5;cursor:default}
+.bx-btn:hover:not(:disabled){opacity:.92}
+.bx-btn--ghost{background:transparent;color:var(--bx-wine);border:1px solid var(--bx-border)}
+.bx-btn--ghost-light{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.25)}
+.bx-btn--ok{background:var(--bx-up)}
+.bx-btn--danger{background:var(--bx-down)}
+.bx-btn--sm{padding:6px 12px;font-size:12.5px;border-radius:var(--bx-r-lg)}
+
+/* ---------- Поля ---------- */
+.bx-input,.bx-select,.bx-textarea{width:100%;padding:10px 14px;border-radius:var(--bx-r-xl);
+  border:1px solid #e5e7eb;font-size:14px;color:#1f2937;outline:none;font-family:inherit;background:#fff;
+  transition:box-shadow .15s,border-color .15s}
+.bx-input:focus,.bx-select:focus,.bx-textarea:focus{border-color:var(--bx-pink-deep);box-shadow:0 0 0 3px rgba(178,111,161,.15)}
+.bx-input::placeholder,.bx-textarea::placeholder{color:#cbd5e1}
+.bx-input--bad{border-color:#fbbf24;background:#fffdf5}
+.bx-textarea{resize:vertical;min-height:64px}
+.field{margin-bottom:12px}
+.field__label{display:block;font-size:11.5px;color:var(--bx-muted);text-transform:uppercase;
+  letter-spacing:.03em;margin-bottom:5px}
+.field__label span{color:var(--bx-down)}
+.field__err{font-size:11.5px;color:#b45309;margin-top:4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+@media(max-width:720px){.grid2,.grid3{grid-template-columns:1fr}}
+
+/* ---------- Секции формы ---------- */
+.sect{border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);margin-bottom:14px;overflow:hidden}
+.sect__head{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;
+  padding:13px 16px;background:#fdfbfd;border:none;cursor:pointer;font-family:inherit;text-align:left}
+.sect__title{font-family:var(--bx-font-head);font-weight:600;font-size:15px;color:var(--bx-wine)}
+.sect__body{padding:16px;display:none;border-top:1px solid var(--bx-border)}
+.sect--open .sect__body{display:block}
+.sect__chev{transition:transform .15s;color:var(--bx-muted)}
+.sect--open .sect__chev{transform:rotate(180deg)}
+
+/* ---------- Распределение ---------- */
+.arow{display:grid;grid-template-columns:1fr 1fr 150px 36px;gap:8px;align-items:center;margin-bottom:8px}
+@media(max-width:720px){.arow{grid-template-columns:1fr 1fr;grid-template-areas:none}}
+.arow__del{background:none;border:1px solid var(--bx-border);border-radius:var(--bx-r-lg);cursor:pointer;
+  color:var(--bx-muted);height:38px;display:flex;align-items:center;justify-content:center}
+.arow__del:hover{color:var(--bx-down);border-color:#fecaca}
+.alloc-total{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:10px 12px;border-radius:var(--bx-r-xl);background:var(--bx-bg);font-size:13px;margin-top:6px}
+.alloc-total b{font-variant-numeric:tabular-nums}
+.alloc-total--ok{background:#ecfdf5;color:#047857}
+.alloc-total--bad{background:#fffbeb;color:#b45309}
+
+/* ---------- Очередь (split-view) ---------- */
+.queue{display:grid;grid-template-columns:330px 1fr;gap:12px;align-items:start}
+@media(max-width:1100px){.queue{grid-template-columns:1fr}}
+.queue__list{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);
+  padding:8px;max-height:74vh;overflow:auto}
+.qitem{width:100%;text-align:left;border:1px solid transparent;background:none;font-family:inherit;
+  border-radius:var(--bx-r-xl);padding:12px;cursor:pointer;display:block;margin-bottom:4px;transition:background .12s,border-color .12s}
+.qitem:hover{background:var(--bx-bg)}
+.qitem--active{background:var(--bx-bg-2);border-color:var(--bx-pink-light)}
+.qitem__top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.qitem__cp{font-weight:600;color:var(--bx-wine);font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qitem__amt{font-weight:700;font-variant-numeric:tabular-nums;color:var(--bx-wine);font-size:13.5px;white-space:nowrap}
+.qitem__meta{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:6px;
+  font-size:11.5px;color:var(--bx-muted)}
+.queue__pane{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start}
+@media(max-width:1400px){.queue__pane{grid-template-columns:1fr}}
+.pane-empty{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);
+  padding:48px 24px;text-align:center;color:var(--bx-muted)}
+
+/* Превью документа */
+.doc{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:14px;position:sticky;top:16px}
+.doc__bar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+.doc__frame{background:var(--bx-bg);border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);
+  padding:10px;max-height:62vh;overflow:auto;display:flex;justify-content:center}
+.doc__frame img{max-width:100%;border-radius:var(--bx-r-lg);box-shadow:0 2px 10px rgba(65,19,48,.10)}
+.doc__tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.doc__tab{font-size:11.5px;padding:4px 10px;border-radius:9999px;border:1px solid var(--bx-border);
+  background:#fff;cursor:pointer;font-family:inherit;color:var(--bx-text-2)}
+.doc__tab--on{background:var(--bx-wine);color:#fff;border-color:var(--bx-wine)}
+.scan{background:#fff;width:100%;max-width:460px;border-radius:var(--bx-r-lg);padding:22px 20px;
+  box-shadow:0 2px 10px rgba(65,19,48,.10);font-size:11px;color:#4b4b4b;line-height:1.45}
+.scan__h{font-family:var(--bx-font-head);font-size:15px;color:#222;font-weight:700;margin-bottom:10px}
+.scan table{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}
+.scan th,.scan td{border:1px solid #dcdcdc;padding:4px 6px;text-align:left}
+.scan th{background:#f4f4f4;font-weight:600}
+.scan__line{height:1px;background:#e2e2e2;margin:8px 0}
+.scan__req{display:grid;grid-template-columns:120px 1fr;gap:2px 8px;font-size:10.5px}
+.scan__total{text-align:right;font-weight:700;font-size:12.5px;color:#222;margin-top:6px}
+
+/* Карточка полей */
+.pane{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:18px}
+.pane__head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:4px}
+.pane__amount{font-size:32px;font-weight:700;color:var(--bx-wine);font-variant-numeric:tabular-nums;
+  letter-spacing:-.01em;line-height:1;margin:10px 0 2px}
+.pane__purpose{color:var(--bx-text-2);font-size:13.5px;margin-bottom:14px}
+.rows{display:grid;grid-template-columns:160px 1fr;gap:7px 12px;font-size:13px;margin-bottom:14px}
+.rows dt{color:var(--bx-muted);font-size:12px}
+.rows dd{margin:0;color:var(--bx-text)}
+.alloc{border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);overflow:hidden;margin-bottom:14px}
+.alloc__row{display:flex;justify-content:space-between;gap:10px;padding:8px 12px;font-size:12.5px;border-top:1px solid var(--bx-border)}
+.alloc__row:first-child{border-top:none;background:#faf5f9;color:var(--bx-wine);font-weight:600;font-size:11.5px;
+  text-transform:uppercase;letter-spacing:.03em}
+.pane__actions{display:flex;gap:8px;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--bx-border)}
+.hint{font-size:11.5px;color:var(--bx-muted)}
+.hint kbd{background:var(--bx-bg-2);border:1px solid var(--bx-border);border-radius:4px;padding:1px 5px;
+  font-family:inherit;font-size:11px;color:var(--bx-wine)}
+.reqbox{border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);margin-bottom:14px;overflow:hidden}
+.reqbox__head{width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 12px;
+  background:#fdfbfd;border:none;cursor:pointer;font-family:inherit;font-size:12.5px;color:var(--bx-wine);text-align:left}
+.reqbox__body{display:none;padding:10px 12px;border-top:1px solid var(--bx-border)}
+.reqbox--open .reqbox__body{display:block}
+.locked{padding:10px 12px;border-radius:var(--bx-r-xl);background:#fffbeb;border:1px solid #fde68a;
+  color:#b45309;font-size:12.5px;margin-bottom:14px}
+
+/* ---------- Таблица ---------- */
+.tbl-wrap{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:6px 6px 14px;overflow-x:auto}
+table.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-size:11.5px;color:var(--bx-muted);text-transform:uppercase;letter-spacing:.03em;
+  font-weight:600;padding:12px 10px;white-space:nowrap;border-bottom:1px solid var(--bx-border)}
+.tbl th.sortable{cursor:pointer;user-select:none}
+.tbl th.sortable:hover{color:var(--bx-wine)}
+.tbl th.on{color:var(--bx-wine)}
+.tbl td{padding:11px 10px;border-bottom:1px solid var(--bx-border);vertical-align:middle}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tbody tr:hover{background:var(--bx-bg)}
+.tbl tr.arch td{background:#fbf8fa;color:var(--bx-text-2)}
+.tbl .num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.tbl .right{text-align:right}
+.linkish{color:var(--bx-pink-deep);cursor:pointer;font-weight:600;background:none;border:none;padding:0;font-family:inherit;font-size:13px}
+.linkish:hover{text-decoration:underline}
+.cbx{width:16px;height:16px;accent-color:#411330;cursor:pointer}
+.more{display:flex;justify-content:center;align-items:center;gap:12px;padding:14px 0 4px;flex-wrap:wrap}
+.tbl-sum{padding:10px 12px;font-size:12.5px;color:var(--bx-text-2);display:flex;gap:16px;flex-wrap:wrap}
+.tbl-sum b{color:var(--bx-wine);font-variant-numeric:tabular-nums}
+
+/* Панель массового действия */
+.bulkbar{position:fixed;left:50%;transform:translateX(-50%) translateY(160%);bottom:22px;z-index:60;
+  background:var(--bx-wine);color:#fff;border-radius:var(--bx-r-2xl);padding:12px 16px;
+  display:flex;align-items:center;gap:12px;box-shadow:0 8px 28px rgba(65,19,48,.28);transition:transform .2s;flex-wrap:wrap;max-width:94vw}
+.bulkbar--on{transform:translateX(-50%) translateY(0)}
+.bulkbar__txt{font-size:13.5px}
+.bulkbar__sum{font-weight:700;font-variant-numeric:tabular-nums}
+@media(max-width:640px){.bulkbar{left:16px;right:16px;transform:translateY(180%)}
+  .bulkbar--on{transform:translateY(0)}}
+
+/* ---------- Платёжный борд ---------- */
+.board{display:grid;grid-template-columns:repeat(5,minmax(210px,1fr));gap:12px;overflow-x:auto;padding-bottom:8px}
+@media(max-width:1200px){.board{grid-auto-flow:column;grid-auto-columns:minmax(240px,1fr);grid-template-columns:none}}
+.col{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:12px;min-height:240px;
+  transition:background .12s,border-color .12s}
+.col--over{background:var(--bx-bg-2);border-color:var(--bx-pink)}
+.col__head{margin-bottom:10px}
+.col__name{font-family:var(--bx-font-head);font-weight:700;font-size:14px;color:var(--bx-wine)}
+.col__sum{font-size:12.5px;color:var(--bx-text-2);font-variant-numeric:tabular-nums;margin-top:2px}
+.col__bar{height:7px;border-radius:4px;background:var(--bx-pink-wash);overflow:hidden;margin-top:8px}
+.col__fill{height:100%;border-radius:4px;background:var(--bx-grad-accent)}
+.bcard{background:var(--bx-bg);border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);padding:10px;
+  margin-bottom:8px;cursor:grab}
+.bcard:active{cursor:grabbing}
+.bcard--drag{opacity:.45}
+.bcard--locked{cursor:default;opacity:.75}
+.bcard__cp{font-weight:600;color:var(--bx-wine);font-size:12.5px}
+.bcard__amt{font-weight:700;font-variant-numeric:tabular-nums;color:var(--bx-wine);font-size:14px;margin:4px 0}
+.bcard__meta{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px;color:var(--bx-muted)}
+
+/* ---------- Модалки ---------- */
+.ovl{position:fixed;inset:0;background:rgba(19,8,16,.55);z-index:70;display:none}
+.ovl--on{display:block}
+.modal{position:fixed;inset:0;z-index:71;display:none;align-items:flex-start;justify-content:center;
+  padding:24px 16px;overflow:auto}
+.modal--on{display:flex}
+.modal__box{background:#fff;border-radius:var(--bx-r-2xl);width:100%;max-width:960px;overflow:hidden;
+  box-shadow:0 20px 60px rgba(19,8,16,.35)}
+.modal__head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:18px 22px;
+  border-bottom:1px solid var(--bx-border)}
+.modal__body{padding:20px 22px;max-height:70vh;overflow:auto}
+.modal__foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 22px;border-top:1px solid var(--bx-border);
+  background:#fdfbfd;flex-wrap:wrap}
+.x{background:none;border:none;cursor:pointer;color:var(--bx-muted);padding:4px;line-height:0;border-radius:var(--bx-r-md)}
+.x:hover{color:var(--bx-wine);background:var(--bx-bg)}
+
+/* Зона вставки скрина */
+.drop{border:2px dashed var(--bx-pink);border-radius:var(--bx-r-2xl);background:var(--bx-bg);
+  padding:20px;text-align:center;transition:background .15s,border-color .15s}
+.drop--hot{background:var(--bx-bg-2);border-color:var(--bx-wine)}
+.drop__title{font-family:var(--bx-font-head);font-weight:700;color:var(--bx-wine);font-size:16px;margin-bottom:4px}
+.drop__hint{font-size:12.5px;color:var(--bx-text-2);margin-bottom:14px}
+.drop__btns{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+/* Камера и подсказка про съёмку — только там, где ввод пальцем. Критерий
+   не ширина окна, а тип указателя: на узком окне десктопа камеры всё равно нет. */
+.only-touch{display:none}
+@media (pointer:coarse){
+  .only-touch{display:block}
+  button.only-touch{display:inline-flex}
+}
+.thumbs{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center}
+.thumb{position:relative;width:92px;height:92px;border-radius:var(--bx-r-xl);overflow:hidden;
+  border:1px solid var(--bx-border);background:#fff}
+.thumb img{width:100%;height:100%;object-fit:cover}
+.thumb__pdf{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:6px;color:var(--bx-wine);font-size:10.5px;text-align:center;padding:6px}
+.thumb__del{position:absolute;top:4px;right:4px;background:rgba(19,8,16,.65);border:none;color:#fff;
+  width:20px;height:20px;border-radius:50%;cursor:pointer;line-height:0;display:flex;align-items:center;justify-content:center}
+
+/* Список шаблонов */
+.tpl{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;
+  border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);margin-bottom:8px;flex-wrap:wrap}
+.tpl__name{font-weight:600;color:var(--bx-wine)}
+.tpl__meta{font-size:12px;color:var(--bx-muted);margin-top:2px}
+
+/* Лента истории и обсуждения */
+.feed{border-top:1px solid var(--bx-border);margin-top:14px;padding-top:12px;max-height:260px;overflow:auto}
+.feed__item{display:flex;gap:10px;padding:6px 0;font-size:12.5px}
+.feed__dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--bx-pink);margin-top:6px}
+.feed__when{color:var(--bx-muted);font-size:11.5px}
+.feed__msg{background:var(--bx-bg);border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);
+  padding:8px 10px;margin:4px 0;flex:1}
+.feed__msg-text{white-space:pre-wrap;margin-top:3px;color:var(--bx-text)}
+.feed__dot--msg{background:var(--bx-wine)}
+.talk{margin-top:10px;display:flex;gap:8px;align-items:flex-start}
+.talk .bx-textarea{min-height:44px}
+.talk__hint{font-size:11.5px;color:var(--bx-muted);margin-top:6px}
+
+/* Тосты */
+.toasts{position:fixed;bottom:22px;right:22px;z-index:90;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+.toast{background:var(--bx-wine);color:#fff;padding:11px 16px;border-radius:var(--bx-r-xl);font-size:13px;
+  box-shadow:0 8px 24px rgba(65,19,48,.28);max-width:420px;animation:tin .18s ease}
+.toast--ok{background:var(--bx-up)} .toast--err{background:var(--bx-down)}
+@keyframes tin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@media(max-width:640px){.toasts{left:16px;right:16px;align-items:stretch}}
+
+.note{background:#fff;border:1px dashed var(--bx-pink);border-radius:var(--bx-r-xl);padding:12px 14px;
+  font-size:12.5px;color:var(--bx-text-2);margin-bottom:16px}
+.note b{color:var(--bx-wine)}
+.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+</style>
+</head>
+<body>
+
+<div class="bx-page">
+
+  <header class="bx-header">
+    <div class="bx-header__left">
+      <span class="bx-header__icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>
+          <path d="M9 13h6"/><path d="M9 17h4"/>
+        </svg>
+      </span>
+      <div>
+        <h1 class="bx-header__title">Согласование счетов v2 <span class="bx-header__count" id="hdrCount"></span></h1>
+        <p class="bx-header__subtitle">Прототип — данные вымышленные, ничего никуда не отправляется</p>
+      </div>
+    </div>
+    <div class="bx-header__actions">
+      <button class="bx-btn bx-btn--ghost-light" id="btnTemplates">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Шаблоны
+      </button>
+      <button class="bx-btn bx-btn--ghost-light" id="btnRefs">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        Справочники
+      </button>
+      <button class="bx-btn" id="btnNew" style="background:#fff;color:var(--bx-wine)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        Новый счёт
+      </button>
+    </div>
+  </header>
+
+  <div class="note">
+    <b>Что нового во второй версии прототипа.</b> Фильтры — общие для всех трёх вкладок, включая архив
+    и оплаченные. В таблице: город, сортировка в обе стороны, массовая отправка в банк. В форме счёта —
+    все поля боевого модуля, сворачиваемый блок реквизитов с проверкой и распределение на любое число
+    строк с контролем остатка. Плюс шаблоны счетов.
+  </div>
+
+  <div class="kpi-grid" id="kpis"></div>
+
+  <!-- ================= ФИЛЬТРЫ (общие для всех вкладок) ================= -->
+  <div class="filters" id="filters">
+    <div class="filters__bar">
+      <div class="filters__left">
+        <button class="filters__toggle" id="filtersToggle">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>
+          Фильтры
+        </button>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div class="hint" id="filtersCount"></div>
+    </div>
+
+    <div class="filters__body">
+      <div class="filters__grid">
+        <div class="field" style="margin:0">
+          <label class="field__label">Контрагент</label>
+          <input class="bx-input" id="fCp" placeholder="название или ИНН">
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Назначение платежа</label>
+          <input class="bx-input" id="fPurpose" placeholder="текст в назначении">
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Город</label>
+          <select class="bx-select" id="fCity"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Салон / проект</label>
+          <select class="bx-select" id="fStore"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">На кого выставлен</label>
+          <select class="bx-select" id="fPayer"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Статья расхода</label>
+          <select class="bx-select" id="fCat"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Статус</label>
+          <select class="bx-select" id="fStatus"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Автор</label>
+          <select class="bx-select" id="fAuthor"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Заведён с</label>
+          <input class="bx-input" id="fCreatedFrom" type="date">
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Заведён по</label>
+          <input class="bx-input" id="fCreatedTo" type="date">
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Оплата (план) с</label>
+          <input class="bx-input" id="fDueFrom" type="date">
+        </div>
+        <div class="field" style="margin:0">
+          <label class="field__label">Оплата (план) по</label>
+          <input class="bx-input" id="fDueTo" type="date">
+        </div>
+      </div>
+
+      <div class="filters__foot">
+        <div style="display:flex;gap:18px;flex-wrap:wrap">
+          <label class="switch"><input type="checkbox" class="cbx" id="fArchived"> Показать архив</label>
+          <label class="switch"><input type="checkbox" class="cbx" id="fPaid" checked> Показывать оплаченные</label>
+        </div>
+        <button class="bx-btn bx-btn--ghost bx-btn--sm" id="fReset">Сбросить всё</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="bx-tabs" id="tabs">
+      <button class="bx-tab bx-tab--active" data-view="queue">Очередь</button>
+      <button class="bx-tab" data-view="table">Таблица</button>
+      <button class="bx-tab" data-view="board">Платёжный борд</button>
+    </div>
+    <div class="hint" id="viewHint"></div>
+  </div>
+
+  <div id="viewQueue"></div>
+  <div id="viewTable" style="display:none"></div>
+  <div id="viewBoard" style="display:none"></div>
+
+</div>
+
+<!-- ============ Панель массового действия ============ -->
+<div class="bulkbar" id="bulkbar">
+  <span class="bulkbar__txt">Выбрано <b id="bulkN">0</b> · <span class="bulkbar__sum" id="bulkSum"></span></span>
+  <span id="bulkActions" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+  <button class="bx-btn bx-btn--sm" id="bulkClear" style="background:transparent;border:1px solid rgba(255,255,255,.3)">Снять выбор</button>
+</div>
+
+<!-- ============ Модалка карточки счёта ============ -->
+<div class="ovl" id="ovlCard"></div>
+<div class="modal" id="modalCard">
+  <div class="modal__box" style="max-width:1040px">
+    <div class="modal__head">
+      <h3 id="cardTitle">Счёт</h3>
+      <button class="x" id="cardClose" aria-label="Закрыть">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal__body" id="cardBody"></div>
+    <div class="modal__foot" id="cardFoot"></div>
+  </div>
+</div>
+
+<!-- ============ Модалка создания счёта ============ -->
+<div class="ovl" id="ovlNew"></div>
+<div class="modal" id="modalNew">
+  <div class="modal__box">
+    <div class="modal__head">
+      <h3 id="newTitle">Новый счёт</h3>
+      <button class="x" id="newClose" aria-label="Закрыть">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal__body">
+
+      <!-- Шаблон -->
+      <div class="grid2" style="margin-bottom:14px">
+        <div class="field" style="margin:0">
+          <label class="field__label">Создать из шаблона</label>
+          <select class="bx-select" id="nTemplate"></select>
+        </div>
+        <div class="field" style="margin:0;display:flex;align-items:flex-end">
+          <button class="bx-btn bx-btn--ghost" id="nApplyTpl" style="width:100%">Подставить шаблон</button>
+        </div>
+      </div>
+
+      <!-- Вставка скрина -->
+      <div class="drop" id="drop">
+        <div class="drop__title">Приложите счёт</div>
+        <div class="drop__hint only-touch">
+          Сфотографируйте счёт или выберите файл из галереи
+        </div>
+        <div class="drop__btns">
+          <button class="bx-btn bx-btn--ghost bx-btn--sm" id="pickFile">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            Выбрать файл
+          </button>
+          <button class="bx-btn bx-btn--ghost bx-btn--sm only-touch" id="pickCam">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+            Сфотографировать
+          </button>
+        </div>
+        <input type="file" id="fileInput" accept="image/*,.pdf" multiple hidden>
+        <input type="file" id="camInput" accept="image/*" capture="environment" hidden>
+        <div class="thumbs" id="thumbs"></div>
+      </div>
+
+      <div style="height:16px"></div>
+
+      <!-- Основное -->
+      <div class="sect sect--open" id="sectMain">
+        <button class="sect__head" data-sect="sectMain">
+          <span class="sect__title">Основное</span>
+          <svg class="sect__chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="sect__body">
+          <div class="grid3">
+            <div class="field">
+              <label class="field__label">Город <span>*</span></label>
+              <select class="bx-select" id="nCity"></select>
+            </div>
+            <div class="field">
+              <label class="field__label">На кого выставлен счёт <span>*</span></label>
+              <select class="bx-select" id="nPayer"></select>
+            </div>
+            <div class="field">
+              <label class="field__label">Планируемая дата оплаты <span>*</span></label>
+              <input class="bx-input" id="nDue" type="date">
+            </div>
+          </div>
+          <div class="grid2">
+            <div class="field">
+              <label class="field__label">Сумма счёта, ₽ <span>*</span></label>
+              <input class="bx-input" id="nAmount" type="number" min="0" step="0.01" placeholder="0.00">
+            </div>
+            <div class="field">
+              <label class="field__label">НДС</label>
+              <select class="bx-select" id="nVat"></select>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field__label">Назначение платежа <span>*</span></label>
+            <textarea class="bx-textarea" id="nPurpose" placeholder="За что и на основании чего платим — этот текст уходит в банк"></textarea>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label class="field__label">Комментарий для согласующего</label>
+            <textarea class="bx-textarea" id="nComment" placeholder="В банк не уходит"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- Контрагент и реквизиты -->
+      <div class="sect" id="sectReq">
+        <button class="sect__head" data-sect="sectReq">
+          <span>
+            <span class="sect__title">Контрагент и реквизиты</span>
+            <span class="hint" id="reqSummary" style="display:block;margin-top:2px">не заполнены</span>
+          </span>
+          <svg class="sect__chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="sect__body">
+          <div class="grid2">
+            <div class="field">
+              <label class="field__label">Контрагент из справочника</label>
+              <select class="bx-select" id="nCpPick"></select>
+            </div>
+            <div class="field">
+              <label class="field__label">ИНН</label>
+              <input class="bx-input" id="nInn" list="innList" autocomplete="off" placeholder="10 или 12 цифр">
+              <datalist id="innList"></datalist>
+              <div class="field__err" id="errInn"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field__label">Наименование контрагента</label>
+            <input class="bx-input" id="nCpName" placeholder="Название компании или ИП">
+            <div class="hint" id="cpSource" style="margin-top:4px"></div>
+          </div>
+          <div class="grid2">
+            <div class="field">
+              <label class="field__label">КПП</label>
+              <input class="bx-input" id="nKpp" placeholder="9 цифр, у ИП пусто">
+              <div class="field__err" id="errKpp"></div>
+            </div>
+            <div class="field">
+              <label class="field__label">БИК банка</label>
+              <input class="bx-input" id="nBik" placeholder="9 цифр">
+              <div class="field__err" id="errBik"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field__label">Банк контрагента</label>
+            <input class="bx-input" id="nBank" placeholder="Название банка">
+          </div>
+          <div class="grid2">
+            <div class="field">
+              <label class="field__label">Расчётный счёт</label>
+              <input class="bx-input" id="nAcc" placeholder="20 цифр">
+              <div class="field__err" id="errAcc"></div>
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label class="field__label">Корреспондентский счёт</label>
+              <input class="bx-input" id="nCorr" placeholder="20 цифр">
+              <div class="field__err" id="errCorr"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Распределение -->
+      <div class="sect sect--open" id="sectAlloc">
+        <button class="sect__head" data-sect="sectAlloc">
+          <span class="sect__title">Распределение по салонам и статьям <span style="color:var(--bx-down)">*</span></span>
+          <svg class="sect__chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="sect__body">
+          <div id="allocRows"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+            <button class="bx-btn bx-btn--ghost bx-btn--sm" id="allocAdd">+ Добавить строку</button>
+            <button class="bx-btn bx-btn--ghost bx-btn--sm" id="allocRest">Остаток в последнюю строку</button>
+            <button class="bx-btn bx-btn--ghost bx-btn--sm" id="allocEqual">Разделить поровну</button>
+          </div>
+          <div class="alloc-total" id="allocTotal"></div>
+        </div>
+      </div>
+
+    </div>
+    <div class="modal__foot">
+      <button class="bx-btn bx-btn--ghost" id="newSaveTpl" style="margin-right:auto">Сохранить как шаблон</button>
+      <button class="bx-btn bx-btn--ghost" id="newCancel">Отмена</button>
+      <button class="bx-btn" id="newSubmit">Отправить на согласование</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Диалог ввода причины ============ -->
+<div class="ovl" id="ovlAsk"></div>
+<div class="modal" id="modalAsk">
+  <div class="modal__box" style="max-width:520px">
+    <div class="modal__head">
+      <h3 id="askTitle">Причина</h3>
+      <button class="x" id="askClose" aria-label="Закрыть">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal__body">
+      <p class="bx-card__caption" id="askText"></p>
+      <textarea class="bx-textarea" id="askInput" rows="3"></textarea>
+      <div class="field__err" id="askErr"></div>
+    </div>
+    <div class="modal__foot">
+      <button class="bx-btn bx-btn--ghost" id="askCancel">Отмена</button>
+      <button class="bx-btn" id="askOk">Подтвердить</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Модалка шаблонов ============ -->
+<div class="ovl" id="ovlTpl"></div>
+<div class="modal" id="modalTpl">
+  <div class="modal__box" style="max-width:720px">
+    <div class="modal__head">
+      <h3>Шаблоны счетов</h3>
+      <button class="x" id="tplClose" aria-label="Закрыть">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal__body">
+      <p class="bx-card__caption">Шаблон хранит контрагента с реквизитами, город, плательщика, НДС,
+        назначение и распределение. Сумма и дата оплаты заполняются при создании счёта.</p>
+      <div id="tplList"></div>
+    </div>
+    <div class="modal__foot">
+      <button class="bx-btn bx-btn--ghost" id="tplCloseFoot">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   Справочники и моковые данные
+   ============================================================ */
+const STORES=['Салон на Ленина','Салон на Победы','Салон Центр','Салон Заречный'];
+const CATS=['Цветы и растения','Упаковка','Аренда','Хозрасходы','Реклама','Клубника и шоколад'];
+const CITIES=['Екатеринбург','Красноярск'];
+const PAYERS=['ИП Бархат','ООО «Бархат»','ИП Иванова А. С.'];
+const VATS=['Без НДС','НДС 20%','НДС 10%'];
+const AUTHORS=['Марина К.','Ольга П.','Дарья С.'];
+
+const CPS=[
+  {name:'ООО «Флора Опт»',inn:'6670123456',kpp:'667001001',bank:'Уральский филиал АО «Модульбанк»',
+   bik:'046577795',acc:'40702810512340000111',corr:'30101810100000000795',last:'12.08.2026'},
+  {name:'ООО «Азбука Упаковки»',inn:'6658991122',kpp:'665801001',bank:'ПАО Сбербанк',
+   bik:'046577674',acc:'40702810600000012345',corr:'30101810500000000674',last:'05.08.2026'},
+  {name:'ИП Сергеев А. В.',inn:'665800112233',kpp:'',bank:'АО «Тинькофф Банк»',
+   bik:'044525974',acc:'40802810900000998877',corr:'30101810145250000974',last:'21.08.2026'},
+  {name:'ООО «Клубника Премиум»',inn:'2465110987',kpp:'246501001',bank:'ПАО «Красноярский»',
+   bik:'040407627',acc:'40702810300000554433',corr:'30101810700000000627',last:'18.08.2026'},
+  {name:'ООО «Аренда Плюс»',inn:'6671004455',kpp:'667101001',bank:'АО «Модульбанк»',
+   bik:'044525092',acc:'40702810111110000222',corr:'30101810645250000092',last:'01.08.2026'},
+  {name:'ООО «Тепличный»',inn:'668522003',kpp:'668501001',bank:'ПАО Сбербанк',
+   bik:'0465776',acc:'40702810777770000333',corr:'30101810500000000674',last:'14.08.2026'},
+];
+
+const DAY=86400000;
+function dshift(n){const d=new Date();d.setHours(0,0,0,0);return new Date(d.getTime()+n*DAY);}
+function iso(d){return d.toISOString().slice(0,10);}
+let SEQ=50;
+
+function mk(o){
+  return Object.assign({
+    id:'INV-00'+(SEQ++), cp:'', inn:'', kpp:'', bank:'', bik:'', acc:'', corr:'',
+    amount:0, purpose:'', comment:'', due:iso(dshift(1)), status:'on_approval',
+    author:'Марина К.', created:dshift(-1), city:CITIES[0], payer:PAYERS[0], vat:VATS[0],
+    archived:false, alloc:[], files:[], feed:[]
+  },o);
+}
+function withCp(name,extra){
+  const c=CPS.find(x=>x.name===name)||{};
+  return mk(Object.assign({cp:name,inn:c.inn||'',kpp:c.kpp||'',bank:c.bank||'',
+    bik:c.bik||'',acc:c.acc||'',corr:c.corr||''},extra));
+}
+
+let DATA=[
+  withCp('ООО «Флора Опт»',{id:'INV-0041',amount:186400,
+    purpose:'Оплата за розу Эквадор 70 см по счёту 1841 от 20.08.2026',
+    comment:'Поставка к 1 сентября, поставщик просит предоплату',
+    due:iso(dshift(-3)),status:'on_approval',author:'Марина К.',created:dshift(-4),vat:'НДС 20%',
+    alloc:[{store:'Салон на Ленина',cat:'Цветы и растения',amount:110000},
+           {store:'Салон Центр',cat:'Цветы и растения',amount:76400}]}),
+  withCp('ООО «Азбука Упаковки»',{id:'INV-0042',amount:42800,
+    purpose:'Крафт-бумага, лента атласная, коробки подарочные по счёту 553',
+    due:iso(dshift(0)),status:'on_approval',author:'Ольга П.',created:dshift(-1),vat:'НДС 20%',
+    alloc:[{store:'Салон на Победы',cat:'Упаковка',amount:42800}]}),
+  withCp('ИП Сергеев А. В.',{id:'INV-0043',amount:24000,
+    purpose:'Ремонт холодильной витрины, счёт 12 от 21.08.2026',
+    comment:'Возвращено: приложите акт выполненных работ',
+    due:iso(dshift(1)),status:'rework',author:'Марина К.',created:dshift(-2),vat:'Без НДС',
+    alloc:[{store:'Салон Заречный',cat:'Хозрасходы',amount:24000}]}),
+  withCp('ООО «Клубника Премиум»',{id:'INV-0044',amount:96400,
+    purpose:'Клубника свежая, шоколад бельгийский, счёт 2210',
+    due:iso(dshift(-1)),status:'approved',author:'Дарья С.',created:dshift(-3),
+    city:'Красноярск',payer:'ООО «Бархат»',vat:'НДС 10%',
+    alloc:[{store:'Салон Центр',cat:'Клубника и шоколад',amount:96400}]}),
+  withCp('ООО «Аренда Плюс»',{id:'INV-0045',amount:140000,
+    purpose:'Аренда помещения за сентябрь 2026, договор А-14',
+    due:iso(dshift(0)),status:'approved',author:'Ольга П.',created:dshift(-2),vat:'Без НДС',
+    alloc:[{store:'Салон на Ленина',cat:'Аренда',amount:70000},
+           {store:'Салон на Победы',cat:'Аренда',amount:70000}]}),
+  withCp('ООО «Тепличный»',{id:'INV-0046',amount:68200,
+    purpose:'Горшечные растения, грунт, кашпо — счёт 903',
+    due:iso(dshift(2)),status:'on_approval',author:'Дарья С.',created:dshift(-1),vat:'НДС 20%',
+    alloc:[{store:'Салон Заречный',cat:'Цветы и растения',amount:68200}]}),
+  withCp('ООО «Флора Опт»',{id:'INV-0047',amount:15600,
+    purpose:'Хризантема кустовая, счёт 1856',
+    due:iso(dshift(5)),status:'on_approval',author:'Марина К.',created:dshift(0),vat:'НДС 20%',
+    alloc:[{store:'Салон Центр',cat:'Цветы и растения',amount:15600}]}),
+  mk({id:'INV-0048',cp:'ИП Гареева Л. Р.',inn:'662500998877',bank:'АО «Альфа-Банк»',bik:'044525593',
+    acc:'40802810400000112233',corr:'30101810200000000593',amount:33900,
+    purpose:'Таргетированная реклама, август 2026',
+    due:iso(dshift(1)),status:'on_approval',author:'Ольга П.',created:dshift(0),vat:'Без НДС',
+    alloc:[{store:'Салон на Ленина',cat:'Реклама',amount:33900}]}),
+  mk({id:'INV-0049',cp:'ООО «Сити Медиа»',inn:'6678334411',kpp:'667801001',bank:'ПАО «Банк Уралсиб»',
+    bik:'046577781',acc:'40702810900000445566',corr:'30101810600000000781',amount:55000,
+    purpose:'Размещение наружной рекламы, сентябрь',
+    due:iso(dshift(12)),status:'on_approval',author:'Дарья С.',created:dshift(0),vat:'НДС 20%',
+    alloc:[{store:'Салон на Победы',cat:'Реклама',amount:55000}]}),
+  withCp('ООО «Клубника Премиум»',{id:'INV-0050',amount:74300,
+    purpose:'Клубника в шоколаде, наборы к 1 сентября, счёт 2244',
+    due:iso(dshift(3)),status:'sent_to_bank',author:'Дарья С.',created:dshift(-2),
+    city:'Красноярск',vat:'НДС 10%',
+    alloc:[{store:'Салон Центр',cat:'Клубника и шоколад',amount:74300}]}),
+  withCp('ООО «Флора Опт»',{id:'INV-0038',amount:210300,
+    purpose:'Поставка цветов, счёт 1799',
+    due:iso(dshift(-6)),status:'paid',author:'Марина К.',created:dshift(-9),vat:'НДС 20%',
+    alloc:[{store:'Салон на Ленина',cat:'Цветы и растения',amount:210300}]}),
+  mk({id:'INV-0039',cp:'ООО «Упак Сервис»',inn:'6662114477',bank:'ПАО Сбербанк',bik:'046577674',
+    acc:'40702810300000778899',corr:'30101810500000000674',amount:12400,
+    purpose:'Пакеты фирменные, счёт 77',
+    due:iso(dshift(-5)),status:'paid',author:'Ольга П.',created:dshift(-8),vat:'НДС 20%',
+    alloc:[{store:'Салон Центр',cat:'Упаковка',amount:12400}]}),
+  mk({id:'INV-0040',cp:'ООО «Дизайн Бюро»',inn:'6679005566',bank:'АО «Тинькофф Банк»',bik:'044525974',
+    acc:'40702810100000334455',corr:'30101810145250000974',amount:30000,
+    purpose:'Разработка макетов витрины',
+    comment:'Отклонён: дубль счёта INV-0037',
+    due:iso(dshift(-2)),status:'rejected',author:'Дарья С.',created:dshift(-7),vat:'Без НДС',
+    alloc:[{store:'Салон Заречный',cat:'Реклама',amount:30000}]}),
+  withCp('ООО «Аренда Плюс»',{id:'INV-0031',amount:140000,
+    purpose:'Аренда помещения за август 2026, договор А-14',
+    due:iso(dshift(-32)),status:'paid',author:'Ольга П.',created:dshift(-35),archived:true,vat:'Без НДС',
+    alloc:[{store:'Салон на Ленина',cat:'Аренда',amount:70000},
+           {store:'Салон на Победы',cat:'Аренда',amount:70000}]}),
+  withCp('ООО «Азбука Упаковки»',{id:'INV-0028',amount:38900,
+    purpose:'Упаковка, счёт 501 от 12.07.2026',
+    due:iso(dshift(-44)),status:'paid',author:'Марина К.',created:dshift(-48),archived:true,vat:'НДС 20%',
+    alloc:[{store:'Салон Центр',cat:'Упаковка',amount:38900}]}),
+];
+
+DATA.forEach(inv=>{
+  inv.feed=[{who:inv.author,what:'создал счёт',when:fmtWhen(inv.created)}];
+  if(inv.status==='rework') inv.feed.push({who:'Стас',what:'вернул на доработку — нет акта',when:'вчера, 18:20'});
+  if(inv.status==='approved') inv.feed.push({who:'Стас',what:'согласовал',when:'вчера, 09:40'});
+  if(inv.status==='sent_to_bank'){inv.feed.push({who:'Стас',what:'согласовал',when:'2 дня назад'});
+                                  inv.feed.push({who:'Стас',what:'отправил платёжку в банк',when:'вчера, 11:05'});}
+  if(inv.status==='paid'){inv.feed.push({who:'Стас',what:'согласовал',when:'5 дней назад'});
+                          inv.feed.push({who:'Система',what:'оплачен, сверено с ПланФактом',when:'4 дня назад'});}
+  if(inv.status==='rejected') inv.feed.push({who:'Стас',what:'отклонил — дубль счёта INV-0037',when:'6 дней назад'});
+  if(inv.archived) inv.feed.push({who:'Стас',what:'отправил в архив',when:'месяц назад'});
+});
+
+/* Шаблоны счетов */
+let TEMPLATES=[
+  {id:1,name:'Аренда — Ленина и Победы (ежемесячно)',cp:'ООО «Аренда Плюс»',
+   city:'Екатеринбург',payer:'ИП Бархат',vat:'Без НДС',
+   purpose:'Аренда помещения за <месяц> 2026, договор А-14',
+   alloc:[{store:'Салон на Ленина',cat:'Аренда',amount:70000},
+          {store:'Салон на Победы',cat:'Аренда',amount:70000}]},
+  {id:2,name:'Роза Эквадор — Флора Опт',cp:'ООО «Флора Опт»',
+   city:'Екатеринбург',payer:'ИП Бархат',vat:'НДС 20%',
+   purpose:'Оплата за розу Эквадор 70 см по счёту <номер>',
+   alloc:[{store:'Салон на Ленина',cat:'Цветы и растения',amount:0}]},
+  {id:3,name:'Упаковка — Азбука',cp:'ООО «Азбука Упаковки»',
+   city:'Екатеринбург',payer:'ИП Бархат',vat:'НДС 20%',
+   purpose:'Крафт-бумага, лента, коробки по счёту <номер>',
+   alloc:[{store:'Салон Центр',cat:'Упаковка',amount:0}]},
+];
+let TPL_SEQ=4;
+
+/* ============================================================
+   Утилиты
+   ============================================================ */
+const $=s=>document.querySelector(s);
+const money=n=>Number(n||0).toLocaleString('ru-RU',{maximumFractionDigits:0})+' ₽';
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const digits=s=>String(s||'').replace(/\D/g,'');
+
+const ST={on_approval:['На согласовании','b-onappr'],rework:['На доработке','b-rework'],
+  approved:['Согласован','b-appr'],sent_to_bank:['Загружен в банк','b-bank'],
+  paid:['Оплачен','b-paid'],rejected:['Отклонён','b-rej']};
+
+function badge(inv){
+  const [t,c]=ST[inv.status]||['—','b-rej'];
+  return `<span class="bx-badge ${c}">${t}</span>`+
+    (inv.archived?' <span class="bx-badge b-arch">Архив</span>':'');
+}
+function daysTo(isoDate){
+  const d=new Date(isoDate+'T00:00:00'); const t=new Date(); t.setHours(0,0,0,0);
+  return Math.round((d-t)/DAY);
+}
+function dueLabel(inv){
+  if(inv.status==='paid') return '<span class="hint">оплачен</span>';
+  const n=daysTo(inv.due);
+  if(n<0) return `<span class="bx-badge b-over">просрочен на ${Math.abs(n)} дн.</span>`;
+  if(n===0) return '<span class="bx-badge b-today">сегодня</span>';
+  if(n===1) return '<span class="hint">завтра</span>';
+  return `<span class="hint">через ${n} дн.</span>`;
+}
+function fmtWhen(d){
+  const diff=Math.round((Date.now()-d.getTime())/DAY);
+  if(diff<=0) return 'сегодня';
+  if(diff===1) return 'вчера';
+  return diff+' дн. назад';
+}
+function waitDays(inv){return Math.max(0,Math.round((Date.now()-inv.created.getTime())/DAY));}
+function fmtDate(isoDate){const d=new Date(isoDate+'T00:00:00');
+  return d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric'});}
+function allocSum(inv){return (inv.alloc||[]).reduce((s,a)=>s+Number(a.amount||0),0);}
+
+function toast(msg,kind){
+  const el=document.createElement('div');
+  el.className='toast'+(kind?' toast--'+kind:'');
+  el.textContent=msg;
+  $('#toasts').appendChild(el);
+  setTimeout(()=>{el.style.opacity='0';el.style.transition='opacity .25s';setTimeout(()=>el.remove(),260);},3400);
+}
+
+/* Проверка реквизитов — те же правила, что в боевом справочнике контрагентов */
+function reqWarnings(o){
+  const w=[];
+  const inn=digits(o.inn), kpp=digits(o.kpp), bik=digits(o.bik), acc=digits(o.acc), corr=digits(o.corr);
+  if(inn&&inn.length!==10&&inn.length!==12) w.push({f:'inn',t:`ИНН из ${inn.length} цифр — должно быть 10 или 12`});
+  if(kpp&&kpp.length!==9) w.push({f:'kpp',t:`КПП из ${kpp.length} цифр — должно быть 9`});
+  if(bik&&bik.length!==9) w.push({f:'bik',t:`БИК из ${bik.length} цифр — должно быть 9`});
+  if(acc&&acc.length!==20) w.push({f:'acc',t:`Расчётный счёт из ${acc.length} цифр — должно быть 20`});
+  if(corr&&corr.length!==20) w.push({f:'corr',t:`Корр. счёт из ${corr.length} цифр — должно быть 20`});
+  return w;
+}
+const BANK_READY=inv=>inv.cp&&inv.inn&&inv.bank&&inv.bik&&inv.acc&&inv.corr&&!reqWarnings(inv).length;
+
+/* ============================================================
+   Состояние
+   ============================================================ */
+let view='queue';
+let kpiFilter=null;
+let selected=new Set();
+let activeId=null;
+let sortKey='due', sortDir=1;
+let pageSize=10;
+let docTab=0;
+const commentDraft={};   // недописанные сообщения по счетам: id → текст
+
+const F={cp:'',purpose:'',city:'',store:'',payer:'',cat:'',status:'',author:'',
+         createdFrom:'',createdTo:'',dueFrom:'',dueTo:'',archived:false,paid:true};
+
+function matchFilters(i){
+  if(!F.archived && i.archived) return false;
+  if(F.archived && !i.archived) return false;
+  if(!F.paid && i.status==='paid') return false;
+  if(F.cp){const q=F.cp.toLowerCase();
+    if(!(i.cp||'').toLowerCase().includes(q)&&!(i.inn||'').includes(q)) return false;}
+  if(F.purpose&&!(i.purpose||'').toLowerCase().includes(F.purpose.toLowerCase())) return false;
+  if(F.city&&i.city!==F.city) return false;
+  if(F.payer&&i.payer!==F.payer) return false;
+  if(F.author&&i.author!==F.author) return false;
+  if(F.status&&i.status!==F.status) return false;
+  if(F.store&&!(i.alloc||[]).some(a=>a.store===F.store)) return false;
+  if(F.cat&&!(i.alloc||[]).some(a=>a.cat===F.cat)) return false;
+  if(F.createdFrom&&iso(i.created)<F.createdFrom) return false;
+  if(F.createdTo&&iso(i.created)>F.createdTo) return false;
+  if(F.dueFrom&&i.due<F.dueFrom) return false;
+  if(F.dueTo&&i.due>F.dueTo) return false;
+  return true;
+}
+function matchKpi(i){
+  if(!kpiFilter) return true;
+  if(kpiFilter==='wait') return i.status==='on_approval';
+  if(kpiFilter==='today') return daysTo(i.due)===0&&i.status!=='paid'&&i.status!=='rejected';
+  if(kpiFilter==='over') return daysTo(i.due)<0&&i.status!=='paid'&&i.status!=='rejected';
+  if(kpiFilter==='rework') return i.status==='rework';
+  return true;
+}
+function visible(){return DATA.filter(i=>matchFilters(i)&&matchKpi(i));}
+function activeFilterCount(){
+  let n=0;
+  ['cp','purpose','city','store','payer','cat','status','author','createdFrom','createdTo','dueFrom','dueTo']
+    .forEach(k=>{if(F[k])n++;});
+  if(F.archived)n++;
+  if(!F.paid)n++;
+  return n;
+}
+
+/* ============================================================
+   Фильтры: разметка, чипы, применение
+   ============================================================ */
+function fillSelect(el,items,allLabel){
+  el.innerHTML=`<option value="">${allLabel}</option>`+items.map(v=>`<option>${esc(v)}</option>`).join('');
+}
+function initFilters(){
+  fillSelect($('#fCity'),CITIES,'Все города');
+  fillSelect($('#fStore'),STORES,'Все салоны');
+  fillSelect($('#fPayer'),PAYERS,'Все плательщики');
+  fillSelect($('#fCat'),CATS,'Все статьи');
+  fillSelect($('#fAuthor'),AUTHORS,'Все авторы');
+  $('#fStatus').innerHTML='<option value="">Все статусы</option>'+
+    Object.keys(ST).map(k=>`<option value="${k}">${ST[k][0]}</option>`).join('');
+
+  $('#filtersToggle').onclick=()=>$('#filters').classList.toggle('filters--open');
+  $('#fReset').onclick=resetFilters;
+  // Кнопки «Применить» намеренно нет: список пересобирается на каждое изменение,
+  // и кнопка только заставляла бы сомневаться, сработал ли фильтр. На бою текстовые
+  // поля должны уходить на сервер с задержкой ~350 мс, иначе каждый символ — запрос.
+  ['fCp','fPurpose','fCity','fStore','fPayer','fCat','fStatus','fAuthor',
+   'fCreatedFrom','fCreatedTo','fDueFrom','fDueTo','fArchived','fPaid'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.addEventListener(el.tagName==='INPUT'&&el.type!=='checkbox'?'input':'change',applyFilters);
+  });
+}
+function applyFilters(){
+  F.cp=$('#fCp').value.trim(); F.purpose=$('#fPurpose').value.trim();
+  F.city=$('#fCity').value; F.store=$('#fStore').value; F.payer=$('#fPayer').value;
+  F.cat=$('#fCat').value; F.status=$('#fStatus').value; F.author=$('#fAuthor').value;
+  F.createdFrom=$('#fCreatedFrom').value; F.createdTo=$('#fCreatedTo').value;
+  F.dueFrom=$('#fDueFrom').value; F.dueTo=$('#fDueTo').value;
+  F.archived=$('#fArchived').checked; F.paid=$('#fPaid').checked;
+  selected.clear(); pageSize=10; render();
+}
+function resetFilters(){
+  ['fCp','fPurpose','fCreatedFrom','fCreatedTo','fDueFrom','fDueTo'].forEach(id=>document.getElementById(id).value='');
+  ['fCity','fStore','fPayer','fCat','fStatus','fAuthor'].forEach(id=>document.getElementById(id).value='');
+  $('#fArchived').checked=false; $('#fPaid').checked=true;
+  kpiFilter=null; applyFilters(); toast('Фильтры сброшены');
+}
+const CHIP_LABELS={cp:'Контрагент',purpose:'Назначение',city:'Город',store:'Салон',payer:'Плательщик',
+  cat:'Статья',status:'Статус',author:'Автор',createdFrom:'Заведён с',createdTo:'Заведён по',
+  dueFrom:'Оплата с',dueTo:'Оплата по'};
+function renderChips(){
+  const chips=[];
+  Object.keys(CHIP_LABELS).forEach(k=>{
+    if(!F[k]) return;
+    const val=k==='status'?ST[F[k]][0]:F[k];
+    chips.push(`<span class="chip">${CHIP_LABELS[k]}: ${esc(val)}
+      <button data-chip="${k}" aria-label="Убрать"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></span>`);
+  });
+  if(F.archived) chips.push(`<span class="chip">Только архив
+    <button data-chip="archived" aria-label="Убрать"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></span>`);
+  if(!F.paid) chips.push(`<span class="chip">Без оплаченных
+    <button data-chip="paid" aria-label="Убрать"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></span>`);
+  if(kpiFilter){
+    const names={wait:'Ждут согласования',today:'К оплате сегодня',over:'Просрочено',rework:'На доработке'};
+    chips.push(`<span class="chip">${names[kpiFilter]}
+      <button data-chip="kpi" aria-label="Убрать"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></span>`);
+  }
+  $('#chips').innerHTML=chips.join('');
+  $('#chips').querySelectorAll('[data-chip]').forEach(b=>{
+    b.onclick=()=>{
+      const k=b.getAttribute('data-chip');
+      if(k==='kpi'){kpiFilter=null;render();return;}
+      if(k==='archived'){$('#fArchived').checked=false;}
+      else if(k==='paid'){$('#fPaid').checked=true;}
+      else {
+        const map={cp:'fCp',purpose:'fPurpose',city:'fCity',store:'fStore',payer:'fPayer',cat:'fCat',
+          status:'fStatus',author:'fAuthor',createdFrom:'fCreatedFrom',createdTo:'fCreatedTo',
+          dueFrom:'fDueFrom',dueTo:'fDueTo'};
+        document.getElementById(map[k]).value='';
+      }
+      applyFilters();
+    };
+  });
+  const n=activeFilterCount();
+  const list=visible();
+  $('#filtersCount').textContent=(n?`фильтров: ${n} · `:'')+
+    `найдено ${list.length} на ${money(list.reduce((s,i)=>s+i.amount,0))}`;
+}
+
+/* ============================================================
+   KPI
+   ============================================================ */
+function renderKpis(){
+  const base=DATA.filter(i=>!i.archived);
+  const wait=base.filter(i=>i.status==='on_approval');
+  const today=base.filter(i=>daysTo(i.due)===0&&i.status!=='paid'&&i.status!=='rejected');
+  const over=base.filter(i=>daysTo(i.due)<0&&i.status!=='paid'&&i.status!=='rejected');
+  const rework=base.filter(i=>i.status==='rework');
+  const sum=a=>a.reduce((s,i)=>s+i.amount,0);
+  const oldest=wait.length?Math.max(...wait.map(waitDays)):0;
+
+  const tiles=[
+    {k:'wait',label:'Ждут согласования',v:wait.length,s:money(sum(wait)),
+     sub:oldest?`<span class="kpi__sub kpi__sub--flat">самый старый ждёт ${oldest} дн.</span>`:''},
+    {k:'today',label:'К оплате сегодня',v:today.length,s:money(sum(today)),
+     sub:'<span class="kpi__sub kpi__sub--flat">по плановой дате</span>'},
+    {k:'over',label:'Просрочено',v:over.length,s:money(sum(over)),
+     sub:over.length?'<span class="kpi__sub kpi__sub--down">▼ требует решения сегодня</span>'
+                    :'<span class="kpi__sub kpi__sub--up">▲ просрочек нет</span>'},
+    {k:'rework',label:'На доработке у авторов',v:rework.length,s:money(sum(rework)),
+     sub:'<span class="kpi__sub kpi__sub--flat">вернулись к сотрудникам</span>'},
+  ];
+  $('#kpis').innerHTML=tiles.map(t=>`
+    <button class="kpi ${kpiFilter===t.k?'kpi--active':''}" data-kpi="${t.k}">
+      <div class="kpi__label">${t.label}</div>
+      <div class="kpi__value">${t.v}<span class="kpi__unit">${t.s}</span></div>
+      ${t.sub}
+    </button>`).join('');
+  $('#kpis').querySelectorAll('[data-kpi]').forEach(b=>{
+    b.onclick=()=>{const k=b.getAttribute('data-kpi');
+      kpiFilter=(kpiFilter===k)?null:k; selected.clear(); render();};
+  });
+  $('#hdrCount').textContent=wait.length?wait.length+' ждут вас':'всё согласовано';
+}
+
+/* ============================================================
+   Псевдо-скан счёта
+   ============================================================ */
+function scanHtml(inv){
+  const files=inv.files||[];
+  let tabs='';
+  if(files.length>1){
+    tabs=`<div class="doc__tabs">`+files.map((f,i)=>
+      `<button class="doc__tab ${i===docTab?'doc__tab--on':''}" data-doctab="${i}">${esc(f.name.slice(0,22))}</button>`).join('')+`</div>`;
+  }
+  const cur=files[Math.min(docTab,files.length-1)];
+  if(cur&&cur.url) return tabs+`<div class="doc__frame"><img src="${cur.url}" alt="Вложение"></div>`;
+  if(cur&&cur.pdf) return tabs+`<div class="doc__frame"><div class="scan"><div class="scan__h">${esc(cur.name)}</div>
+    <div class="hint">PDF-файл. В боевой версии откроется во встроенном просмотрщике.</div></div></div>`;
+
+  const rows=(inv.alloc||[]).map((a,idx)=>`
+    <tr><td>${idx+1}</td><td>${esc(a.cat)} — ${esc(a.store)}</td>
+    <td style="text-align:right">${Number(a.amount).toLocaleString('ru-RU')}</td></tr>`).join('');
+  return tabs+`<div class="doc__frame"><div class="scan">
+    <div class="scan__h">Счёт на оплату № ${esc(inv.id.replace('INV-',''))} от ${fmtDate(iso(inv.created))}</div>
+    <div class="scan__line"></div>
+    <div class="scan__req">
+      <div>Поставщик:</div><div><b>${esc(inv.cp||'—')}</b></div>
+      <div>ИНН / КПП:</div><div>${esc(inv.inn||'—')}${inv.kpp?' / '+esc(inv.kpp):''}</div>
+      <div>Р/счёт:</div><div>${esc(inv.acc||'—')}</div>
+      <div>Банк:</div><div>${esc(inv.bank||'—')}, БИК ${esc(inv.bik||'—')}</div>
+      <div>Покупатель:</div><div>${esc(inv.payer)}</div>
+    </div>
+    <table>
+      <thead><tr><th style="width:24px">№</th><th>Наименование</th><th style="text-align:right;width:90px">Сумма, ₽</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="3">—</td></tr>'}</tbody>
+    </table>
+    <div class="scan__total">Итого к оплате: ${Number(inv.amount).toLocaleString('ru-RU')} ₽ (${esc(inv.vat)})</div>
+    <div class="scan__line"></div>
+    <div style="color:#8a8a8a;font-size:9.5px">Демонстрационный документ прототипа. Вставьте свой скрин —
+      он появится здесь вместо этого листа.</div>
+  </div></div>`;
+}
+
+/* ============================================================
+   Вид «Очередь»
+   ============================================================ */
+function renderQueue(){
+  const list=visible().filter(i=>{
+    if(kpiFilter||F.status||F.archived) return true;      // фильтр главнее режима
+    return i.status==='on_approval'||i.status==='rework';
+  });
+  if(!list.length){
+    $('#viewQueue').innerHTML=`<div class="pane-empty">Под текущие фильтры счетов нет</div>`;
+    return;
+  }
+  if(!activeId||!list.find(i=>i.id===activeId)){activeId=list[0].id;docTab=0;}
+  const inv=DATA.find(i=>i.id===activeId);
+
+  const items=list.map(i=>`
+    <button class="qitem ${i.id===activeId?'qitem--active':''}" data-q="${i.id}">
+      <div class="qitem__top">
+        <span class="qitem__cp">${esc(i.cp||'без контрагента')}</span>
+        <span class="qitem__amt">${money(i.amount)}</span>
+      </div>
+      <div class="qitem__meta">
+        <span>${esc(i.id)} · ${esc(i.city)} · ждёт ${waitDays(i)} дн.</span>
+        ${dueLabel(i)}
+      </div>
+    </button>`).join('');
+
+  $('#viewQueue').innerHTML=`
+    <div class="queue">
+      <div class="queue__list">${items}</div>
+      <div class="queue__pane">
+        <div class="doc">
+          <div class="doc__bar">
+            <span class="bx-card__title">Документ</span>
+            <button class="bx-btn bx-btn--ghost bx-btn--sm" data-act="attach">Приложить ещё</button>
+          </div>
+          ${scanHtml(inv)}
+        </div>
+        ${paneHtml(inv,false)}
+      </div>
+    </div>`;
+
+  $('#viewQueue').querySelectorAll('[data-q]').forEach(b=>{
+    b.onclick=()=>{activeId=b.getAttribute('data-q');docTab=0;render();};
+  });
+  bindPane($('#viewQueue'),inv);
+}
+
+function paneHtml(inv,compact){
+  const alloc=(inv.alloc||[]).map(a=>`
+    <div class="alloc__row"><span>${esc(a.store)} · ${esc(a.cat)}</span><span>${money(a.amount)}</span></div>`).join('')
+    ||'<div class="alloc__row"><span class="hint">не распределён</span><span></span></div>';
+  const feed=(inv.feed||[]).map(f=>f.msg
+    ? `<div class="feed__item"><span class="feed__dot feed__dot--msg"></span>
+         <div class="feed__msg"><b>${esc(f.who)}</b><span class="feed__when"> · ${esc(f.when)}</span>
+           <div class="feed__msg-text">${esc(f.what)}</div></div>
+       </div>`
+    : `<div class="feed__item"><span class="feed__dot"></span>
+         <div><b>${esc(f.who)}</b> ${esc(f.what)}<div class="feed__when">${esc(f.when)}</div></div>
+       </div>`).join('');
+  const warns=reqWarnings(inv);
+  const reqRows=[['ИНН',inv.inn],['КПП',inv.kpp],['Банк',inv.bank],['БИК',inv.bik],
+                 ['Расчётный счёт',inv.acc],['Корр. счёт',inv.corr]]
+    .map(([k,v])=>`<dt>${k}</dt><dd>${esc(v||'—')}</dd>`).join('');
+
+  return `
+  <div class="pane">
+    <div class="pane__head">
+      <div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="bx-card__title">${esc(inv.id)}</span>${badge(inv)}
+        </div>
+        <div class="hint" style="margin-top:4px">${esc(inv.cp||'без контрагента')} · ИНН ${esc(inv.inn||'—')}</div>
+      </div>
+    </div>
+
+    <div class="pane__amount">${money(inv.amount)}</div>
+    <div class="pane__purpose">${esc(inv.purpose)}</div>
+
+    <dl class="rows">
+      <dt>Срок оплаты</dt><dd>${fmtDate(inv.due)} · ${dueLabel(inv)}</dd>
+      <dt>Город</dt><dd>${esc(inv.city)}</dd>
+      <dt>На кого выставлен</dt><dd>${esc(inv.payer)}</dd>
+      <dt>НДС</dt><dd>${esc(inv.vat)}</dd>
+      <dt>Автор</dt><dd>${esc(inv.author)} · ${fmtWhen(inv.created)}</dd>
+      ${inv.comment?`<dt>Комментарий</dt><dd>${esc(inv.comment)}</dd>`:''}
+    </dl>
+
+    <div class="reqbox" data-reqbox>
+      <button class="reqbox__head" data-act="toggle-req">
+        <span>Реквизиты контрагента ${warns.length
+          ?`<span class="bx-badge b-warn">${warns.length} к проверке</span>`
+          :(BANK_READY(inv)?'<span class="bx-badge b-appr">полные</span>':'<span class="bx-badge b-rej">неполные</span>')}</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="reqbox__body">
+        <dl class="rows" style="grid-template-columns:150px 1fr;margin:0">${reqRows}</dl>
+        ${warns.length?`<div class="field__err" style="margin-top:8px">${warns.map(w=>esc(w.t)).join('<br>')}</div>`:''}
+      </div>
+    </div>
+
+    <div class="alloc">
+      <div class="alloc__row"><span>Салон · статья</span><span>Сумма</span></div>
+      ${alloc}
+    </div>
+
+    <div class="feed">${feed}</div>
+
+    <div class="talk">
+      <textarea class="bx-textarea" data-talk="${inv.id}" rows="2"
+        placeholder="Написать сообщение по счёту — автор и согласующий увидят его здесь">${esc(commentDraft[inv.id]||'')}</textarea>
+      <button class="bx-btn bx-btn--ghost" data-act="send-comment">Отправить</button>
+    </div>
+    <div class="talk__hint">Обсуждение видно всем, у кого есть доступ к счёту. В банк не уходит.</div>
+
+    ${statusBoxHtml(inv)}
+
+    ${compact?'':`<div class="pane__actions">${actionsHtml(inv)}</div>
+    <div class="hint" style="margin-top:10px">
+      <kbd>A</kbd> согласовать · <kbd>D</kbd> на доработку · <kbd>R</kbd> отклонить · <kbd>↑</kbd><kbd>↓</kbd> следующий счёт
+    </div>`}
+  </div>`;
+}
+
+/* Правка полей закрыта после отправки в банк, оплаты и в архиве — те же
+   границы, что в боевом can_edit_invoice_fields. */
+function canEdit(inv){
+  return !inv.archived && inv.status!=='sent_to_bank' && inv.status!=='paid';
+}
+function lockReason(inv){
+  if(inv.archived) return 'Счёт в архиве — правки закрыты. Верните его из архива, чтобы редактировать.';
+  if(inv.status==='sent_to_bank') return 'Платёжка уже ушла в банк — правки полей закрыты. Можно только изменить статус.';
+  if(inv.status==='paid') return 'Счёт оплачен — правки закрыты. Изменить можно только статус.';
+  return '';
+}
+/* Ручного селекта статуса нет: статус двигают только действия — «Согласовать»,
+   «Отправить в банк», «Отметить оплаченным», «В архив». Так статус всегда
+   подтверждён каким-то решением, а не выставлен мимо процесса. */
+function statusBoxHtml(inv){
+  return canEdit(inv)&&!inv.archived ? '' : `<div class="locked">${esc(lockReason(inv))}</div>`;
+}
+
+function actionsHtml(inv){
+  let h='';
+  if(canEdit(inv)) h+=`<button class="bx-btn bx-btn--ghost" data-act="edit">Редактировать</button>`;
+  if(inv.archived){
+    h+=`<button class="bx-btn bx-btn--ghost" data-act="unarchive">Вернуть из архива</button>`;
+    h+=`<button class="bx-btn bx-btn--ghost" data-act="copy">Копировать счёт</button>`;
+    return h;
+  }
+  if(inv.status==='on_approval'){
+    h+=`<button class="bx-btn bx-btn--ok" data-act="approve">Согласовать</button>`;
+    h+=`<button class="bx-btn bx-btn--ghost" data-act="rework">Вернуть на доработку</button>`;
+    h+=`<button class="bx-btn bx-btn--danger" data-act="reject">Отклонить</button>`;
+  } else if(inv.status==='rework'){
+    h+=`<button class="bx-btn" data-act="resubmit">Исправлено, отправить снова</button>`;
+  } else if(inv.status==='approved'){
+    h+=`<button class="bx-btn" data-act="bank" ${BANK_READY(inv)?'':'disabled title="Неполные или ошибочные реквизиты"'}>Отправить в банк</button>`;
+    h+=`<button class="bx-btn bx-btn--ok" data-act="paid">Отметить оплаченным</button>`;
+  } else if(inv.status==='sent_to_bank'){
+    h+=`<button class="bx-btn bx-btn--ok" data-act="paid">Отметить оплаченным</button>`;
+  }
+  h+=`<button class="bx-btn bx-btn--ghost" data-act="copy">Копировать счёт</button>`;
+  h+=`<button class="bx-btn bx-btn--ghost" data-act="tpl">Сохранить как шаблон</button>`;
+  if(inv.status==='paid'||inv.status==='rejected')
+    h+=`<button class="bx-btn bx-btn--ghost" data-act="archive">В архив</button>`;
+  return h;
+}
+
+function bindPane(root,inv){
+  root.querySelectorAll('[data-act]').forEach(b=>{
+    b.onclick=()=>doAction(b.getAttribute('data-act'),inv.id,b);
+  });
+  root.querySelectorAll('[data-doctab]').forEach(b=>{
+    b.onclick=()=>{docTab=+b.getAttribute('data-doctab');render();};
+  });
+  // Черновик сообщения переживает перерисовку списка: иначе набранный текст
+  // пропадает от любого действия в соседней колонке.
+  root.querySelectorAll('[data-talk]').forEach(t=>{
+    t.addEventListener('input',()=>{commentDraft[t.getAttribute('data-talk')]=t.value;});
+    t.addEventListener('keydown',e=>{
+      if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();doAction('send-comment',inv.id,t);}
+    });
+  });
+}
+
+/* Сообщение по счёту — то же, что лента invoice_comments в боевом модуле. */
+function sendComment(inv,text,who){
+  inv.feed.push({who:who||'Стас',what:text,when:'только что',msg:true});
+}
+
+/* Диалог ввода текста. Нативный prompt не годится: в iframe Пульса он молча
+   игнорируется, и кнопка «ничего не делает». */
+let askResolve=null;
+function ask(opts){
+  $('#askTitle').textContent=opts.title||'Причина';
+  $('#askText').textContent=opts.text||'';
+  $('#askInput').value=''; $('#askErr').textContent='';
+  $('#askInput').placeholder=opts.placeholder||'';
+  $('#askOk').textContent=opts.confirmText||'Подтвердить';
+  $('#modalAsk').classList.add('modal--on'); $('#ovlAsk').classList.add('ovl--on');
+  setTimeout(()=>$('#askInput').focus(),30);
+  return new Promise(res=>{askResolve=v=>{res(v);};$('#askOk').dataset.required=opts.required?'1':'';});
+}
+function closeAsk(value){
+  $('#modalAsk').classList.remove('modal--on'); $('#ovlAsk').classList.remove('ovl--on');
+  const r=askResolve; askResolve=null; if(r) r(value);
+}
+$('#askOk').onclick=()=>{
+  const v=$('#askInput').value.trim();
+  if($('#askOk').dataset.required&&!v){$('#askErr').textContent='Без причины автор не поймёт, что исправить';return;}
+  closeAsk(v);
+};
+$('#askCancel').onclick=()=>closeAsk(null);
+$('#askClose').onclick=()=>closeAsk(null);
+$('#ovlAsk').onclick=()=>closeAsk(null);
+
+async function doAction(act,id,btn){
+  const inv=DATA.find(i=>i.id===id); if(!inv) return;
+  if(act==='toggle-req'){btn.closest('[data-reqbox]').classList.toggle('reqbox--open');return;}
+  if(act==='send-comment'){
+    const box=(btn.closest('.pane')||document).querySelector('[data-talk]');
+    const text=(box?box.value:'').trim();
+    if(!text){toast('Пустое сообщение не отправляется','err');return;}
+    sendComment(inv,text);
+    commentDraft[inv.id]='';
+    render(); if(cardOpenId===id) drawCard(id);
+    toast('Сообщение добавлено в обсуждение','ok');
+    return;
+  }
+  if(act==='attach'){pendingAttachFor=id;$('#fileInput').click();return;}
+  if(act==='copy'){openNew(inv,false);return;}
+  if(act==='edit'){
+    if(!canEdit(inv)){toast(lockReason(inv),'err');return;}
+    // Карточку закрываем: две модалки друг на друге — верный способ
+    // потерять понимание, что именно ты сейчас правишь.
+    editReturnToCard = cardOpenId===id;
+    if(cardOpenId) closeCard();
+    openNew(inv,true); return;
+  }
+  if(act==='tpl'){saveTemplateFrom(inv);return;}
+  if(act==='approve'){inv.status='approved';push(inv,'Стас','согласовал');toast(inv.id+' согласован','ok');next();}
+  if(act==='rework'){
+    const reason=await ask({title:'Вернуть на доработку',
+      text:'Что автору нужно исправить? Текст попадёт в обсуждение счёта.',
+      placeholder:'Например: приложите акт выполненных работ',
+      confirmText:'Вернуть автору',required:true});
+    if(reason===null) return;
+    inv.status='rework'; push(inv,'Стас','вернул на доработку'); sendComment(inv,reason);
+    toast(inv.id+' вернулся автору с причиной'); next();
+  }
+  if(act==='reject'){
+    const reason=await ask({title:'Отклонить счёт',
+      text:'Причина отклонения — необязательно, но автору без неё непонятно.',
+      placeholder:'Например: дубль счёта INV-0037',
+      confirmText:'Отклонить'});
+    if(reason===null) return;
+    inv.status='rejected'; push(inv,'Стас','отклонил');
+    if(reason) sendComment(inv,reason);
+    toast(inv.id+' отклонён','err'); next();
+  }
+  if(act==='resubmit'){
+    const note=await ask({title:'Отправить снова',
+      text:'Что исправлено? Согласующий увидит это в обсуждении.',
+      placeholder:'Например: приложил акт, сумму уточнил у поставщика',
+      confirmText:'Отправить на согласование'});
+    if(note===null) return;
+    inv.status='on_approval'; push(inv,inv.author,'исправил и отправил снова');
+    if(note) sendComment(inv,note,inv.author);
+    toast(inv.id+' снова в очереди');
+  }
+  if(act==='bank'){
+    if(!BANK_READY(inv)){toast('Реквизиты неполные — банк развернёт платёжку','err');return;}
+    inv.status='sent_to_bank';push(inv,'Стас','отправил платёжку в банк');
+    toast('Платёжка по '+inv.id+' ушла в банк черновиком');}
+  if(act==='paid'){inv.status='paid';push(inv,'Стас','отметил оплаченным');toast(inv.id+' оплачен','ok');}
+  if(act==='archive'){inv.archived=true;push(inv,'Стас','отправил в архив');
+    toast(inv.id+' в архиве — найдёте через фильтр «Показать архив»');}
+  if(act==='unarchive'){inv.archived=false;push(inv,'Стас','вернул из архива');toast(inv.id+' возвращён из архива');}
+  render();
+  if(cardOpenId===id&&DATA.find(i=>i.id===id)) drawCard(id);
+}
+function push(inv,who,what){inv.feed.push({who:who,what:what,when:'только что'});}
+function next(){
+  const q=visible().filter(i=>i.status==='on_approval');
+  activeId=q.length?q[0].id:null; docTab=0;
+}
+
+/* ============================================================
+   Вид «Таблица»
+   ============================================================ */
+const COLS=[
+  {k:'id',label:'Номер',sort:'id'},
+  {k:'city',label:'Город',sort:'city'},
+  {k:'cp',label:'Контрагент',sort:'cp'},
+  {k:'payer',label:'На кого выставлен',sort:'payer'},
+  {k:'amount',label:'Сумма',sort:'amount',right:true},
+  {k:'alloc',label:'Распределение'},
+  {k:'due',label:'Оплата (план)',sort:'due'},
+  {k:'status',label:'Статус'},
+  {k:'author',label:'Автор',sort:'author'},
+  {k:'created',label:'Заведён',sort:'created'},
+];
+// Чекбокс + колонки: считаем, а не хардкодим — иначе раскрывающаяся строка
+// распределения разъезжается при любом изменении набора колонок.
+const TBL_SPAN=()=>COLS.length+1;
+
+function sortList(list){
+  return list.slice().sort((a,b)=>{
+    let r=0;
+    switch(sortKey){
+      case 'amount': r=a.amount-b.amount; break;
+      case 'due': r=new Date(a.due)-new Date(b.due); break;
+      case 'created': r=a.created-b.created; break;
+      case 'city': r=a.city.localeCompare(b.city,'ru'); break;
+      case 'payer': r=a.payer.localeCompare(b.payer,'ru'); break;
+      case 'author': r=a.author.localeCompare(b.author,'ru'); break;
+      case 'cp': r=(a.cp||'').localeCompare(b.cp||'','ru'); break;
+      default: r=a.id.localeCompare(b.id,'ru');
+    }
+    return r*sortDir;
+  });
+}
+
+function renderTable(){
+  const list=sortList(visible());
+  const shown=list.slice(0,pageSize);
+  const arrow=k=>sortKey===k?(sortDir>0?' ▲':' ▼'):'';
+
+  const head=COLS.map(c=>{
+    const on=c.sort&&sortKey===c.sort?' on':'';
+    return `<th class="${c.sort?'sortable':''}${on}${c.right?' right':''}"
+      ${c.sort?`data-sort="${c.sort}"`:''}>${esc(c.label)}${c.sort?arrow(c.sort):''}</th>`;
+  }).join('');
+
+  const rows=shown.map(i=>{
+    const selectable=i.status==='on_approval'||i.status==='approved'||i.status==='sent_to_bank';
+    return `<tr class="${i.archived?'arch':''}">
+      <td>${selectable?`<input type="checkbox" class="cbx" data-sel="${i.id}" ${selected.has(i.id)?'checked':''}>`:''}</td>
+      <td><button class="linkish" data-open="${i.id}">${esc(i.id)}</button></td>
+      <td>${esc(i.city)}</td>
+      <td>${esc(i.cp||'—')}</td>
+      <td>${esc(i.payer)}</td>
+      <td class="num right">${money(i.amount)}</td>
+      <td>${allocCell(i)}</td>
+      <td class="num">${fmtDate(i.due)}<div style="margin-top:3px">${dueLabel(i)}</div></td>
+      <td>${badge(i)}</td>
+      <td>${esc(i.author)}</td>
+      <td class="num">${fmtDate(iso(i.created))}</td>
+    </tr>` + allocRowHtml(i);
+  }).join('');
+
+  const total=list.reduce((s,i)=>s+i.amount,0);
+  const shownSum=shown.reduce((s,i)=>s+i.amount,0);
+
+  $('#viewTable').innerHTML=`
+    <div class="tbl-wrap">
+      <div class="tbl-sum">
+        <span>Найдено: <b>${list.length}</b> на <b>${money(total)}</b></span>
+        <span>Показано: <b>${shown.length}</b> на <b>${money(shownSum)}</b></span>
+        <span class="hint">Сортировка: ${esc(colLabel(sortKey))} ${sortDir>0?'по возрастанию':'по убыванию'}</span>
+      </div>
+      <table class="tbl">
+        <thead><tr><th style="width:34px"></th>${head}</tr></thead>
+        <tbody>${rows||`<tr><td colspan="${TBL_SPAN()}" style="text-align:center;padding:24px;color:var(--bx-muted)">Под текущие фильтры счетов нет</td></tr>`}</tbody>
+      </table>
+      ${list.length>shown.length
+        ?`<div class="more"><button class="bx-btn bx-btn--ghost" id="moreBtn">Показать ещё · осталось ${list.length-shown.length}</button></div>`
+        :`<div class="more"><span class="hint">Показаны все ${list.length}</span></div>`}
+    </div>`;
+
+  $('#viewTable').querySelectorAll('[data-sort]').forEach(th=>{
+    th.onclick=()=>{const k=th.getAttribute('data-sort');
+      if(sortKey===k) sortDir*=-1; else {sortKey=k;sortDir=k==='amount'?-1:1;} render();};
+  });
+  $('#viewTable').querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openCard(b.getAttribute('data-open')));
+  $('#viewTable').querySelectorAll('[data-alloc]').forEach(b=>{
+    b.onclick=()=>{const r=$('#viewTable').querySelector(`tr[data-alloc-for="${b.getAttribute('data-alloc')}"]`);
+      if(r) r.style.display=r.style.display==='none'?'':'none';};
+  });
+  $('#viewTable').querySelectorAll('[data-sel]').forEach(c=>{
+    c.onchange=()=>{const id=c.getAttribute('data-sel');
+      c.checked?selected.add(id):selected.delete(id); renderBulk();};
+  });
+  const mb=$('#moreBtn'); if(mb) mb.onclick=()=>{pageSize+=10;render();};
+}
+function colLabel(k){const c=COLS.find(x=>x.sort===k);return c?c.label:'номер';}
+
+/* Одна строка распределения — показываем салон и статью сразу: без статьи
+   колонка отвечает лишь на половину вопроса «куда ушли деньги». */
+function allocCell(i){
+  const items=i.alloc||[];
+  if(!items.length) return '<span class="hint">не распределён</span>';
+  if(items.length===1)
+    return `${esc(items[0].store)}<div class="hint">${esc(items[0].cat)}</div>`;
+  const stores=[...new Set(items.map(a=>a.store))];
+  const cats=[...new Set(items.map(a=>a.cat))];
+  return `<button class="linkish" data-alloc="${i.id}" style="font-size:12.5px">
+            ${plural(items.length,'строка','строки','строк')}</button>
+          <div class="hint">${esc(stores.length>1?plural(stores.length,'салон','салона','салонов'):stores[0])} ·
+            ${esc(cats.length>1?plural(cats.length,'статья','статьи','статей'):cats[0])}</div>`;
+}
+function plural(n,one,few,many){
+  const m10=n%10, m100=n%100;
+  const word=(m10===1&&m100!==11)?one:((m10>=2&&m10<=4&&(m100<12||m100>14))?few:many);
+  return n+' '+word;
+}
+function allocRowHtml(i){
+  if(!(i.alloc||[]).length||i.alloc.length<2) return '';
+  const rows=i.alloc.map(a=>`<tr><td>${esc(a.store)}</td><td>${esc(a.cat)}</td>
+    <td style="text-align:right">${money(a.amount)}</td></tr>`).join('');
+  return `<tr data-alloc-for="${i.id}" style="display:none"><td colspan="${TBL_SPAN()}" style="background:#faf4f9">
+    <table style="width:auto;min-width:420px;border-collapse:collapse;font-size:12.5px">
+      <thead><tr><th style="text-align:left;padding:4px 8px">Салон</th>
+        <th style="text-align:left;padding:4px 8px">Статья</th>
+        <th style="text-align:right;padding:4px 8px">Сумма</th></tr></thead>
+      <tbody>${rows}</tbody></table></td></tr>`;
+}
+
+/* Массовые действия — набор кнопок зависит от того, что выбрано */
+function renderBulk(){
+  const bar=$('#bulkbar');
+  const ids=[...selected].filter(id=>DATA.find(i=>i.id===id));
+  selected=new Set(ids);
+  if(!ids.length||view!=='table'){bar.classList.remove('bulkbar--on');return;}
+
+  const items=ids.map(id=>DATA.find(i=>i.id===id));
+  const onAppr=items.filter(i=>i.status==='on_approval');
+  const appr=items.filter(i=>i.status==='approved');
+  const bankable=appr.filter(BANK_READY);
+  // Оплаченным можно отметить и согласованный счёт, и уже ушедший в банк:
+  // часть счетов оплачивается мимо автозагрузки платёжки.
+  const payable=items.filter(i=>i.status==='approved'||i.status==='sent_to_bank');
+
+  let h='';
+  if(onAppr.length) h+=`<button class="bx-btn bx-btn--ok bx-btn--sm" data-bulk="approve">Согласовать (${onAppr.length})</button>`
+                     +`<button class="bx-btn bx-btn--sm" data-bulk="rework" style="background:rgba(255,255,255,.18)">На доработку (${onAppr.length})</button>`;
+  if(appr.length) h+=`<button class="bx-btn bx-btn--sm" data-bulk="bank" style="background:rgba(255,255,255,.18)"
+                        ${bankable.length?'':'disabled'}>Отправить в банк (${bankable.length}${appr.length!==bankable.length?' из '+appr.length:''})</button>`;
+  if(payable.length) h+=`<button class="bx-btn bx-btn--ok bx-btn--sm" data-bulk="paid">Отметить оплаченными (${payable.length})</button>`;
+  if(!h) h=`<span class="hint" style="color:rgba(255,255,255,.7)">Для выбранных счетов массовых действий нет</span>`;
+
+  $('#bulkActions').innerHTML=h;
+  $('#bulkActions').querySelectorAll('[data-bulk]').forEach(b=>b.onclick=()=>bulkAction(b.getAttribute('data-bulk')));
+  $('#bulkN').textContent=ids.length;
+  $('#bulkSum').textContent=money(items.reduce((s,i)=>s+i.amount,0));
+  bar.classList.add('bulkbar--on');
+}
+function bulkAction(kind){
+  const items=[...selected].map(id=>DATA.find(i=>i.id===id)).filter(Boolean);
+  let n=0, skipped=0;
+  items.forEach(inv=>{
+    if(kind==='approve'&&inv.status==='on_approval'){inv.status='approved';push(inv,'Стас','согласовал (пакетно)');n++;}
+    else if(kind==='rework'&&inv.status==='on_approval'){inv.status='rework';push(inv,'Стас','вернул на доработку (пакетно)');n++;}
+    else if(kind==='bank'&&inv.status==='approved'){
+      if(!BANK_READY(inv)){skipped++;return;}
+      inv.status='sent_to_bank';push(inv,'Стас','отправил платёжку в банк (пакетно)');n++;}
+    else if(kind==='paid'&&(inv.status==='approved'||inv.status==='sent_to_bank')){
+      inv.status='paid';push(inv,'Стас','отметил оплаченным (пакетно)');n++;}
+  });
+  const label={approve:'Согласовано',rework:'Возвращено авторам',
+    bank:'Отправлено в банк',paid:'Отмечено оплаченными'}[kind];
+  toast(`${label}: ${n}`+(skipped?` · пропущено из-за реквизитов: ${skipped}`:''),skipped?'':'ok');
+  selected.clear(); render();
+}
+// Обработчик «Снять выбор» держим рядом с остальной логикой пакета: в прошлой
+// версии он потерялся при переписывании, и кнопка молча ничего не делала.
+$('#bulkClear').onclick=()=>{selected.clear();render();};
+
+/* ============================================================
+   Вид «Платёжный борд»
+   ============================================================ */
+const BCOLS=[
+  {k:'over',name:'Просрочено',days:0,test:n=>n<0},
+  {k:'today',name:'Сегодня',days:0,test:n=>n===0},
+  {k:'tmrw',name:'Завтра',days:1,test:n=>n===1},
+  {k:'week',name:'Эта неделя',days:4,test:n=>n>1&&n<=7},
+  {k:'later',name:'Позже',days:14,test:n=>n>7},
+];
+function renderBoard(){
+  const list=visible().filter(i=>i.status!=='paid'&&i.status!=='rejected'&&!i.archived);
+  const max=Math.max(1,...BCOLS.map(c=>list.filter(i=>c.test(daysTo(i.due))).reduce((s,i)=>s+i.amount,0)));
+
+  $('#viewBoard').innerHTML=`
+    <div class="board">${BCOLS.map(c=>{
+      const items=list.filter(i=>c.test(daysTo(i.due)));
+      const sum=items.reduce((s,i)=>s+i.amount,0);
+      return `<div class="col" data-col="${c.k}">
+        <div class="col__head">
+          <div class="col__name">${c.name}</div>
+          <div class="col__sum">${items.length} счетов · ${money(sum)}</div>
+          <div class="col__bar"><div class="col__fill" style="width:${Math.round(sum/max*100)}%"></div></div>
+        </div>
+        ${items.map(i=>{
+          const locked=i.status==='sent_to_bank';
+          return `<div class="bcard ${locked?'bcard--locked':''}" ${locked?'':'draggable="true"'} data-card="${i.id}">
+            <div class="bcard__cp">${esc(i.cp||'без контрагента')}</div>
+            <div class="bcard__amt">${money(i.amount)}</div>
+            <div class="bcard__meta"><span>${esc(i.id)} · ${esc(i.city)}</span>${badge(i)}</div>
+          </div>`;}).join('')||'<div class="hint" style="padding:8px 2px">пусто</div>'}
+      </div>`;}).join('')}
+    </div>`;
+
+  let dragged=null;
+  $('#viewBoard').querySelectorAll('[data-card]').forEach(card=>{
+    card.addEventListener('dragstart',e=>{
+      dragged=card.getAttribute('data-card');
+      card.classList.add('bcard--drag');
+      e.dataTransfer.effectAllowed='move';
+      try{e.dataTransfer.setData('text/plain',dragged);}catch(err){}
+    });
+    card.addEventListener('dragend',()=>card.classList.remove('bcard--drag'));
+    card.addEventListener('click',()=>openCard(card.getAttribute('data-card')));
+  });
+  $('#viewBoard').querySelectorAll('[data-col]').forEach(col=>{
+    col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('col--over');});
+    col.addEventListener('dragleave',()=>col.classList.remove('col--over'));
+    col.addEventListener('drop',e=>{
+      e.preventDefault(); col.classList.remove('col--over');
+      const id=dragged||e.dataTransfer.getData('text/plain'); if(!id) return;
+      const inv=DATA.find(i=>i.id===id); if(!inv) return;
+      const c=BCOLS.find(x=>x.k===col.getAttribute('data-col'));
+      if(c.k==='over'){toast('В «Просрочено» перенести нельзя — это следствие даты','err');return;}
+      inv.due=iso(dshift(c.days));
+      push(inv,'Стас','перенёс срок оплаты на '+fmtDate(inv.due));
+      toast(inv.id+': срок оплаты — '+fmtDate(inv.due),'ok');
+      render();
+    });
+  });
+}
+
+/* ============================================================
+   Карточка счёта
+   ============================================================ */
+let cardOpenId=null;
+function openCard(id){ location.hash='#/invoice/'+id; }
+function closeCard(){ if(cardOpenId) location.hash='#/'; }
+function drawCard(id){
+  const inv=DATA.find(i=>i.id===id);
+  if(!inv){toast('Счёт не найден или нет доступа','err');location.hash='#/';return;}
+  cardOpenId=id;
+  $('#cardTitle').textContent='Счёт '+inv.id;
+  $('#cardBody').innerHTML=`
+    <div class="queue__pane" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr)">
+      <div class="doc" style="position:static">
+        <div class="doc__bar"><span class="bx-card__title">Документ</span>
+          <button class="bx-btn bx-btn--ghost bx-btn--sm" data-act="attach">Приложить ещё</button></div>
+        ${scanHtml(inv)}
+      </div>
+      ${paneHtml(inv,true)}
+    </div>`;
+  $('#cardFoot').innerHTML=actionsHtml(inv)+`<button class="bx-btn bx-btn--ghost" data-act="close">Закрыть</button>`;
+  bindPane($('#cardBody'),inv);
+  $('#cardFoot').querySelectorAll('[data-act]').forEach(b=>{
+    b.onclick=()=>{const a=b.getAttribute('data-act');
+      if(a==='close'){closeCard();return;} doAction(a,inv.id,b);};
+  });
+  $('#modalCard').classList.add('modal--on');
+  $('#ovlCard').classList.add('ovl--on');
+}
+function hideCard(){
+  cardOpenId=null;
+  $('#modalCard').classList.remove('modal--on');
+  $('#ovlCard').classList.remove('ovl--on');
+}
+function syncFromHash(){
+  const m=location.hash.match(/^#\/invoice\/(.+)$/);
+  if(m){ if(cardOpenId!==m[1]) drawCard(m[1]); }
+  else if(cardOpenId) hideCard();
+}
+$('#cardClose').onclick=closeCard;
+$('#ovlCard').onclick=closeCard;
+window.addEventListener('hashchange',syncFromHash);
+
+/* ============================================================
+   Создание счёта
+   ============================================================ */
+let draft=[];
+let draftAlloc=[];
+let pendingAttachFor=null;
+let editingId=null;        // не null — форма работает как редактор существующего счёта
+let editReturnToCard=false; // правку открыли из карточки — туда же и вернём
+
+/**
+ * Одна форма на два сценария: создание (в т.ч. копия другого счёта) и правка.
+ * Копия намеренно не переносит сумму и суммы распределения — у одного и того же
+ * поставщика от счёта к счёту меняются именно они.
+ */
+function openNew(source,isEdit){
+  editingId=isEdit?source.id:null;
+  draft=isEdit?(source.files||[]).slice():[]; renderThumbs();
+  $('#newTitle').textContent=isEdit?('Счёт '+source.id+' — редактирование')
+    :(source?'Новый счёт — копия '+source.id:'Новый счёт');
+  $('#newSubmit').textContent=isEdit?'Сохранить изменения':'Отправить на согласование';
+  $('#newSaveTpl').style.display=isEdit?'none':'';
+  fillSelect($('#nCity'),CITIES,'— выбрать —');
+  fillSelect($('#nPayer'),PAYERS,'— выбрать —');
+  fillSelect($('#nVat'),VATS,'— не указан —');
+  $('#nCpPick').innerHTML='<option value="">— выбрать, реквизиты подставятся —</option>'+
+    CPS.map((c,idx)=>`<option value="${idx}">${esc(c.name)} · ИНН ${esc(c.inn)}</option>`).join('');
+  $('#innList').innerHTML=CPS.map(c=>`<option value="${esc(c.inn)}">${esc(c.name)}</option>`).join('');
+  $('#nTemplate').innerHTML='<option value="">— без шаблона —</option>'+
+    TEMPLATES.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');
+
+  $('#nCity').value=source?source.city:CITIES[0];
+  $('#nPayer').value=source?source.payer:PAYERS[0];
+  $('#nVat').value=source?source.vat:VATS[0];
+  $('#nDue').value=isEdit?source.due:iso(dshift(3));
+  $('#nAmount').value=isEdit?source.amount:'';
+  $('#nPurpose').value=source?source.purpose:'';
+  $('#nComment').value=isEdit?(source.comment||''):'';
+  setReq(source?source:{});
+  $('#cpSource').textContent=(source&&!isEdit)?('Реквизиты скопированы из счёта '+source.id):'';
+  draftAlloc=source
+    ? (source.alloc||[]).map(a=>({store:a.store,cat:a.cat,amount:isEdit?a.amount:''}))
+    : [{store:STORES[0],cat:CATS[0],amount:''}];
+  if(!draftAlloc.length) draftAlloc=[{store:STORES[0],cat:CATS[0],amount:''}];
+  renderAllocRows();
+  $('#sectReq').classList.toggle('sect--open',!!(source&&reqWarnings(source).length));
+  $('#modalNew').classList.add('modal--on'); $('#ovlNew').classList.add('ovl--on');
+}
+function closeNew(){
+  editingId=null; editReturnToCard=false;
+  $('#modalNew').classList.remove('modal--on');
+  $('#ovlNew').classList.remove('ovl--on');
+}
+function setReq(o){
+  $('#nCpName').value=o.cp||''; $('#nInn').value=o.inn||''; $('#nKpp').value=o.kpp||'';
+  $('#nBank').value=o.bank||''; $('#nBik').value=o.bik||''; $('#nAcc').value=o.acc||''; $('#nCorr').value=o.corr||'';
+  validateReq();
+}
+function readReq(){
+  return {cp:$('#nCpName').value.trim(),inn:$('#nInn').value.trim(),kpp:$('#nKpp').value.trim(),
+    bank:$('#nBank').value.trim(),bik:$('#nBik').value.trim(),acc:$('#nAcc').value.trim(),corr:$('#nCorr').value.trim()};
+}
+function validateReq(){
+  const o=readReq(), w=reqWarnings(o);
+  const map={inn:['#nInn','#errInn'],kpp:['#nKpp','#errKpp'],bik:['#nBik','#errBik'],
+             acc:['#nAcc','#errAcc'],corr:['#nCorr','#errCorr']};
+  Object.keys(map).forEach(f=>{
+    const [inp,err]=map[f]; const hit=w.find(x=>x.f===f);
+    $(inp).classList.toggle('bx-input--bad',!!hit);
+    $(err).textContent=hit?hit.t:'';
+  });
+  const filled=o.cp&&o.inn&&o.bank&&o.bik&&o.acc&&o.corr;
+  $('#reqSummary').innerHTML = !o.cp&&!o.inn ? 'не заполнены'
+    : (w.length?`<span class="bx-badge b-warn">${w.length} к проверке</span> ${esc(o.cp||'')}`
+      : (filled?`<span class="bx-badge b-appr">полные</span> ${esc(o.cp)}`
+              :`<span class="bx-badge b-rej">неполные</span> ${esc(o.cp||'')}`));
+  return w;
+}
+['nCpName','nInn','nKpp','nBank','nBik','nAcc','nCorr'].forEach(id=>{
+  document.getElementById(id).addEventListener('input',validateReq);
+});
+$('#nCpPick').onchange=()=>{
+  const c=CPS[+$('#nCpPick').value]; if(!c) return;
+  setReq({cp:c.name,inn:c.inn,kpp:c.kpp,bank:c.bank,bik:c.bik,acc:c.acc,corr:c.corr});
+  $('#cpSource').textContent='Реквизиты из справочника, последний счёт от '+c.last;
+  $('#sectReq').classList.add('sect--open');
+};
+$('#nInn').addEventListener('change',()=>{
+  const inn=digits($('#nInn').value);
+  const hits=CPS.filter(c=>c.inn===inn);
+  if(hits.length===1&&!$('#nAcc').value.trim()&&!$('#nCpName').value.trim()){
+    const c=hits[0];
+    setReq({cp:c.name,inn:c.inn,kpp:c.kpp,bank:c.bank,bik:c.bik,acc:c.acc,corr:c.corr});
+    $('#cpSource').textContent='Найден по ИНН в справочнике, последний счёт от '+c.last;
+  }
+});
+
+/* --- Распределение --- */
+function renderAllocRows(){
+  $('#allocRows').innerHTML=draftAlloc.map((a,idx)=>`
+    <div class="arow">
+      <select class="bx-select" data-al="store" data-i="${idx}">
+        ${STORES.map(s=>`<option ${s===a.store?'selected':''}>${esc(s)}</option>`).join('')}
+      </select>
+      <select class="bx-select" data-al="cat" data-i="${idx}">
+        ${CATS.map(s=>`<option ${s===a.cat?'selected':''}>${esc(s)}</option>`).join('')}
+      </select>
+      <input class="bx-input" type="number" min="0" step="0.01" placeholder="сумма"
+             data-al="amount" data-i="${idx}" value="${a.amount===''?'':a.amount}">
+      <button class="arow__del" data-aldel="${idx}" aria-label="Удалить строку" ${draftAlloc.length<2?'disabled':''}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
+      </button>
+    </div>`).join('');
+  $('#allocRows').querySelectorAll('[data-al]').forEach(el=>{
+    el.addEventListener(el.tagName==='SELECT'?'change':'input',()=>{
+      const i=+el.getAttribute('data-i'), f=el.getAttribute('data-al');
+      draftAlloc[i][f]=f==='amount'?(el.value===''?'':parseFloat(el.value)):el.value;
+      recalcAlloc();
+    });
+  });
+  $('#allocRows').querySelectorAll('[data-aldel]').forEach(b=>{
+    b.onclick=()=>{draftAlloc.splice(+b.getAttribute('data-aldel'),1);renderAllocRows();};
+  });
+  recalcAlloc();
+}
+function recalcAlloc(){
+  const total=parseFloat($('#nAmount').value||'0')||0;
+  const dist=draftAlloc.reduce((s,a)=>s+(parseFloat(a.amount)||0),0);
+  const left=Math.round((total-dist)*100)/100;
+  const box=$('#allocTotal');
+  const filled=dist>0;
+  box.className='alloc-total'+(total&&filled&&Math.abs(left)<0.01?' alloc-total--ok':' alloc-total--bad');
+  box.innerHTML=`<span>Строк: <b>${draftAlloc.length}</b> · распределено <b>${money(dist)}</b> из <b>${money(total)}</b></span>`+
+    (!total?`<span>Укажите сумму счёта</span>`
+      :(!filled?`<span>Заполните суммы — распределение обязательно</span>`
+        :(Math.abs(left)<0.01?`<span>Сходится</span>`
+          :`<span>${left>0?'Не распределено':'Перебор'}: <b>${money(Math.abs(left))}</b></span>`)));
+}
+$('#nAmount').addEventListener('input',recalcAlloc);
+$('#allocAdd').onclick=()=>{draftAlloc.push({store:STORES[0],cat:CATS[0],amount:''});renderAllocRows();};
+$('#allocRest').onclick=()=>{
+  const total=parseFloat($('#nAmount').value||'0')||0;
+  if(!total){toast('Сначала укажите сумму счёта','err');return;}
+  const others=draftAlloc.slice(0,-1).reduce((s,a)=>s+(parseFloat(a.amount)||0),0);
+  draftAlloc[draftAlloc.length-1].amount=Math.round((total-others)*100)/100;
+  renderAllocRows();
+};
+$('#allocEqual').onclick=()=>{
+  const total=parseFloat($('#nAmount').value||'0')||0;
+  if(!total){toast('Сначала укажите сумму счёта','err');return;}
+  const n=draftAlloc.length;
+  const base=Math.floor(total/n*100)/100;
+  draftAlloc.forEach((a,i)=>a.amount=i===n-1?Math.round((total-base*(n-1))*100)/100:base);
+  renderAllocRows();
+};
+
+/* --- Секции-аккордеоны --- */
+document.querySelectorAll('[data-sect]').forEach(b=>{
+  b.onclick=()=>document.getElementById(b.getAttribute('data-sect')).classList.toggle('sect--open');
+});
+
+/* --- Вложения --- */
+function addFiles(files,forId){
+  const list=[...files].filter(Boolean);
+  if(!list.length) return;
+  let done=0;
+  list.forEach(f=>{
+    const isPdf=/pdf$/i.test(f.type)||/\.pdf$/i.test(f.name||'');
+    // У картинки из буфера имени может не быть — задаём сами, иначе сервер
+    // отвергнет файл без расширения.
+    const name=f.name||('скрин-счёта-'+new Date().toISOString().slice(0,10)+(isPdf?'.pdf':'.png'));
+    if(isPdf){commit({name:name,url:null,pdf:true},forId); if(++done===list.length) after(forId,list.length); return;}
+    const r=new FileReader();
+    r.onload=e=>{commit({name:name,url:e.target.result,pdf:false},forId);
+      if(++done===list.length) after(forId,list.length);};
+    r.readAsDataURL(f);
+  });
+}
+function commit(file,forId){
+  if(forId){const inv=DATA.find(i=>i.id===forId);
+    if(inv){inv.files.unshift(file);push(inv,'Стас','приложил '+file.name);}}
+  else draft.unshift(file);
+}
+function after(forId,n){
+  if(forId){toast('Приложено файлов: '+n,'ok');pendingAttachFor=null;docTab=0;render();
+    if(cardOpenId) drawCard(cardOpenId);}
+  else {renderThumbs();toast('Скрин приложен — сохранять на диск не потребовалось','ok');}
+}
+function renderThumbs(){
+  $('#thumbs').innerHTML=draft.map((f,idx)=>`
+    <div class="thumb">
+      ${f.pdf?`<div class="thumb__pdf">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          PDF</div>`
+        :`<img src="${f.url}" alt="${esc(f.name)}">`}
+      <button class="thumb__del" data-del="${idx}" aria-label="Удалить">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>`).join('');
+  $('#thumbs').querySelectorAll('[data-del]').forEach(b=>{
+    b.onclick=()=>{draft.splice(+b.getAttribute('data-del'),1);renderThumbs();};
+  });
+}
+$('#pickFile').onclick=()=>{pendingAttachFor=null;$('#fileInput').click();};
+$('#pickCam').onclick=()=>{pendingAttachFor=null;$('#camInput').click();};
+$('#fileInput').onchange=e=>{addFiles(e.target.files,pendingAttachFor);e.target.value='';};
+$('#camInput').onchange=e=>{addFiles(e.target.files,pendingAttachFor);e.target.value='';};
+
+document.addEventListener('paste',e=>{
+  const items=(e.clipboardData||{}).items||[];
+  const files=[];
+  for(const it of items) if(it.kind==='file'){const f=it.getAsFile(); if(f) files.push(f);}
+  if(!files.length) return;
+  e.preventDefault();
+  if($('#modalNew').classList.contains('modal--on')) addFiles(files,null);
+  else if(cardOpenId) addFiles(files,cardOpenId);
+  else {openNew(); addFiles(files,null); toast('Скрин из буфера — форма счёта открыта автоматически');}
+});
+['dragenter','dragover'].forEach(ev=>document.addEventListener(ev,e=>{
+  if(!e.dataTransfer||![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault();
+  if(!$('#modalNew').classList.contains('modal--on')&&!cardOpenId) openNew();
+  $('#drop').classList.add('drop--hot');
+}));
+document.addEventListener('dragleave',e=>{if(e.relatedTarget===null)$('#drop').classList.remove('drop--hot');});
+document.addEventListener('drop',e=>{
+  if(!e.dataTransfer||!e.dataTransfer.files.length) return;
+  e.preventDefault(); $('#drop').classList.remove('drop--hot');
+  addFiles(e.dataTransfer.files,cardOpenId&&!$('#modalNew').classList.contains('modal--on')?cardOpenId:null);
+});
+
+/* --- Отправка --- */
+$('#newSubmit').onclick=()=>{
+  const city=$('#nCity').value, payer=$('#nPayer').value, due=$('#nDue').value;
+  const amount=parseFloat($('#nAmount').value||'0');
+  const purpose=$('#nPurpose').value.trim();
+  if(!city){toast('Выберите город','err');return;}
+  if(!payer){toast('Выберите, на кого выставлен счёт','err');return;}
+  if(!due){toast('Укажите планируемую дату оплаты','err');return;}
+  if(!amount||amount<=0){toast('Укажите корректную сумму','err');return;}
+  if(!purpose){toast('Укажите назначение платежа','err');return;}
+
+  // Распределение обязательно: без него счёт не попадает ни в один разрез по салонам
+  // и статьям, а именно ради этих разрезов модуль и существует.
+  const alloc=draftAlloc.filter(a=>parseFloat(a.amount)>0)
+    .map(a=>({store:a.store,cat:a.cat,amount:parseFloat(a.amount)}));
+  if(!alloc.length){
+    toast('Распределите счёт по салонам и статьям — это обязательно','err');
+    $('#sectAlloc').classList.add('sect--open');
+    $('#allocRows').querySelector('[data-al="amount"]')?.focus();
+    return;
+  }
+  const dist=alloc.reduce((s,a)=>s+a.amount,0);
+  if(Math.abs(dist-amount)>=0.01){
+    toast(`Распределение (${money(dist)}) не равно сумме счёта (${money(amount)})`,'err');
+    $('#sectAlloc').classList.add('sect--open'); return;
+  }
+  const w=validateReq();
+  const req=readReq();
+  const fields={amount:amount,purpose:purpose,comment:$('#nComment').value.trim(),
+    due:due,city:city,payer:payer,vat:$('#nVat').value||VATS[0]};
+
+  if(editingId){
+    const inv=DATA.find(i=>i.id===editingId);
+    if(!inv){toast('Счёт не найден','err');return;}
+    if(!canEdit(inv)){toast(lockReason(inv),'err');return;}
+    const changes=applyEdit(inv,fields,req,alloc);
+    const back=editReturnToCard;
+    if(!changes.length){toast('Изменений нет');closeNew();if(back)openCard(inv.id);return;}
+    changes.forEach(c=>push(inv,'Стас','изменил «'+c.label+'»: '+c.from+' → '+c.to));
+    closeNew(); docTab=0; render();
+    if(back) openCard(inv.id);
+    toast('Счёт '+inv.id+': сохранено изменений — '+changes.length,'ok');
+    if(w.length) toast('В реквизитах '+w.length+' замечаний — банк такую платёжку развернёт');
+    return;
+  }
+
+  if(w.length) toast('Счёт создан, но в реквизитах '+w.length+' замечаний — проверьте до отправки в банк');
+  const inv=mk(Object.assign({
+    id:'INV-00'+(SEQ++), status:'on_approval', author:'Марина К.', created:new Date(),
+    alloc:alloc, files:draft.slice()
+  },fields,req));
+  inv.feed=[{who:inv.author,what:'создал счёт'+(draft.length?' со скрином из буфера':''),when:'только что'}];
+  DATA.unshift(inv);
+  closeNew(); activeId=inv.id; docTab=0; view='queue'; syncTabs(); render();
+  toast('Счёт '+inv.id+' отправлен на согласование','ok');
+};
+
+/* Правка с фиксацией того, что именно поменялось — в боевом модуле каждое
+   изменённое поле отдельной записью в invoice_history. */
+const EDIT_LABELS={amount:'Сумма',purpose:'Назначение платежа',comment:'Комментарий',
+  due:'Дата оплаты',city:'Город',payer:'На кого выставлен',vat:'НДС',
+  cp:'Контрагент',inn:'ИНН',kpp:'КПП',bank:'Банк',bik:'БИК',acc:'Расчётный счёт',corr:'Корр. счёт'};
+function applyEdit(inv,fields,req,alloc){
+  const changes=[];
+  const show=(k,v)=>{
+    if(v===''||v==null) return '—';
+    if(k==='amount') return money(v);
+    if(k==='due') return fmtDate(v);
+    return String(v);
+  };
+  Object.keys(EDIT_LABELS).forEach(k=>{
+    const nv=(k in fields)?fields[k]:req[k];
+    if(nv===undefined) return;
+    const ov=inv[k];
+    if(String(ov||'')===String(nv||'')) return;
+    changes.push({label:EDIT_LABELS[k],from:show(k,ov),to:show(k,nv)});
+    inv[k]=nv;
+  });
+
+  const oldAlloc=JSON.stringify((inv.alloc||[]).map(a=>[a.store,a.cat,a.amount]));
+  const newAlloc=JSON.stringify(alloc.map(a=>[a.store,a.cat,a.amount]));
+  if(oldAlloc!==newAlloc){
+    changes.push({label:'Распределение',
+      from:(inv.alloc||[]).length+' стр. на '+money(allocSum(inv)),
+      to:alloc.length+' стр. на '+money(alloc.reduce((s,a)=>s+a.amount,0))});
+    inv.alloc=alloc;
+  }
+
+  const oldFiles=(inv.files||[]).map(f=>f.name).join('|');
+  const newFiles=draft.map(f=>f.name).join('|');
+  if(oldFiles!==newFiles){
+    changes.push({label:'Вложения',from:(inv.files||[]).length+' шт.',to:draft.length+' шт.'});
+    inv.files=draft.slice();
+  }
+  return changes;
+}
+$('#btnNew').onclick=()=>openNew(null,false);
+$('#newClose').onclick=closeNew;
+$('#newCancel').onclick=closeNew;
+$('#ovlNew').onclick=closeNew;
+$('#btnRefs').onclick=()=>toast('Справочники и контрагенты — как в текущем модуле, в прототипе не менялись');
+
+/* ============================================================
+   Шаблоны
+   ============================================================ */
+function applyTemplate(t){
+  $('#nCity').value=t.city; $('#nPayer').value=t.payer; $('#nVat').value=t.vat;
+  $('#nPurpose').value=t.purpose;
+  const c=CPS.find(x=>x.name===t.cp);
+  if(c){setReq({cp:c.name,inn:c.inn,kpp:c.kpp,bank:c.bank,bik:c.bik,acc:c.acc,corr:c.corr});
+        $('#cpSource').textContent='Реквизиты из шаблона «'+t.name+'»';}
+  draftAlloc=t.alloc.map(a=>({store:a.store,cat:a.cat,amount:a.amount||''}));
+  renderAllocRows();
+  toast('Шаблон подставлен — осталось указать сумму и дату');
+}
+$('#nApplyTpl').onclick=()=>{
+  const t=TEMPLATES.find(x=>x.id===+$('#nTemplate').value);
+  if(!t){toast('Выберите шаблон','err');return;}
+  applyTemplate(t);
+};
+function saveTemplateFrom(inv){
+  const name=(inv.cp||'Счёт')+' — '+(inv.alloc[0]?inv.alloc[0].cat:'без статьи');
+  TEMPLATES.push({id:TPL_SEQ++,name:name,cp:inv.cp,city:inv.city,payer:inv.payer,vat:inv.vat,
+    purpose:inv.purpose,alloc:(inv.alloc||[]).map(a=>({store:a.store,cat:a.cat,amount:0}))});
+  toast('Шаблон «'+name+'» сохранён','ok');
+}
+$('#newSaveTpl').onclick=()=>{
+  const req=readReq();
+  if(!req.cp){toast('Укажите контрагента — иначе шаблон бесполезен','err');return;}
+  TEMPLATES.push({id:TPL_SEQ++,name:req.cp+' — '+(draftAlloc[0]?draftAlloc[0].cat:'без статьи'),
+    cp:req.cp,city:$('#nCity').value,payer:$('#nPayer').value,vat:$('#nVat').value,
+    purpose:$('#nPurpose').value.trim(),
+    alloc:draftAlloc.map(a=>({store:a.store,cat:a.cat,amount:0}))});
+  toast('Шаблон сохранён — найдёте его в списке «Шаблоны»','ok');
+};
+function renderTemplates(){
+  $('#tplList').innerHTML=TEMPLATES.map(t=>`
+    <div class="tpl">
+      <div>
+        <div class="tpl__name">${esc(t.name)}</div>
+        <div class="tpl__meta">${esc(t.cp)} · ${esc(t.city)} · ${esc(t.payer)} · ${esc(t.vat)} ·
+          строк распределения: ${t.alloc.length}</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="bx-btn bx-btn--sm" data-tpl-use="${t.id}">Создать счёт</button>
+        <button class="bx-btn bx-btn--ghost bx-btn--sm" data-tpl-del="${t.id}">Удалить</button>
+      </div>
+    </div>`).join('')||'<p class="hint">Шаблонов пока нет. Сохраните первый из формы счёта или из карточки.</p>';
+  $('#tplList').querySelectorAll('[data-tpl-use]').forEach(b=>{
+    b.onclick=()=>{const t=TEMPLATES.find(x=>x.id===+b.getAttribute('data-tpl-use'));
+      closeTpl(); openNew(null); applyTemplate(t);};
+  });
+  $('#tplList').querySelectorAll('[data-tpl-del]').forEach(b=>{
+    b.onclick=()=>{TEMPLATES=TEMPLATES.filter(x=>x.id!==+b.getAttribute('data-tpl-del'));
+      renderTemplates(); toast('Шаблон удалён');};
+  });
+}
+function openTpl(){renderTemplates();$('#modalTpl').classList.add('modal--on');$('#ovlTpl').classList.add('ovl--on');}
+function closeTpl(){$('#modalTpl').classList.remove('modal--on');$('#ovlTpl').classList.remove('ovl--on');}
+$('#btnTemplates').onclick=openTpl;
+$('#tplClose').onclick=closeTpl;
+$('#tplCloseFoot').onclick=closeTpl;
+$('#ovlTpl').onclick=closeTpl;
+
+/* ============================================================
+   Вкладки, хоткеи, старт
+   ============================================================ */
+const HINTS={
+  queue:'Один экран на решение: скан слева, поля справа, клавиши для согласования',
+  table:'Отметьте счета — появится панель массовых действий: согласовать, вернуть, отправить в банк',
+  board:'Перетащите карточку в другую колонку — изменится плановая дата оплаты',
+};
+function syncTabs(){
+  $('#tabs').querySelectorAll('.bx-tab').forEach(t=>{
+    t.classList.toggle('bx-tab--active',t.getAttribute('data-view')===view);
+  });
+  $('#viewQueue').style.display=view==='queue'?'':'none';
+  $('#viewTable').style.display=view==='table'?'':'none';
+  $('#viewBoard').style.display=view==='board'?'':'none';
+  $('#viewHint').textContent=HINTS[view];
+}
+$('#tabs').querySelectorAll('.bx-tab').forEach(t=>{
+  t.onclick=()=>{view=t.getAttribute('data-view');selected.clear();syncTabs();render();};
+});
+
+document.addEventListener('keydown',e=>{
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName||''))) return;
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(e.key==='Escape'){closeNew();closeTpl();closeCard();return;}
+  if(view!=='queue'||!activeId||cardOpenId) return;
+  const k=e.key.toLowerCase();
+  if(k==='a'||k==='ф'){doAction('approve',activeId);e.preventDefault();}
+  if(k==='d'||k==='в'){doAction('rework',activeId);e.preventDefault();}
+  if(k==='r'||k==='к'){doAction('reject',activeId);e.preventDefault();}
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    const q=visible().filter(i=>i.status==='on_approval'||i.status==='rework');
+    const idx=q.findIndex(i=>i.id===activeId);
+    const nx=q[idx+(e.key==='ArrowDown'?1:-1)];
+    if(nx){activeId=nx.id;docTab=0;render();}
+    e.preventDefault();
+  }
+});
+
+function render(){
+  renderKpis();
+  renderChips();
+  if(view==='queue') renderQueue();
+  if(view==='table') renderTable();
+  if(view==='board') renderBoard();
+  renderBulk();
+}
+
+initFilters();
+syncTabs();
+render();
+syncFromHash();
+
+})();
+</script>
+</body>
+</html>
