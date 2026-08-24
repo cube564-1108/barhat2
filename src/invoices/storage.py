@@ -1485,13 +1485,15 @@ def list_invoices(
         query += " AND created_by = ?"
         params.append(created_by)
 
+    # py_lower, а не голый LIKE: SQLite приводит регистр только у латиницы,
+    # и фильтр по «ромашка» не находил счёт «ООО Ромашка» (см. get_db)
     if counterparty:
-        query += " AND counterparty_name LIKE ?"
-        params.append(f"%{counterparty}%")
+        query += " AND py_lower(counterparty_name) LIKE ?"
+        params.append(f"%{counterparty.lower()}%")
 
     if payment_purpose:
-        query += " AND payment_purpose LIKE ?"
-        params.append(f"%{payment_purpose}%")
+        query += " AND py_lower(payment_purpose) LIKE ?"
+        params.append(f"%{payment_purpose.lower()}%")
 
     if created_from:
         query += " AND created_at >= ?"
