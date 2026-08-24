@@ -462,7 +462,13 @@
     }
 
     function csvCell(value) {
-        const text = String(value ?? '');
+        let text = String(value ?? '');
+        // Имя курьера редактируется в RetailCRM, а Excel исполняет ячейку,
+        // начинающуюся с = + - @, как формулу. Апостроф перед такой ячейкой
+        // делает её текстом.
+        if (/^[=+\-@\t\r]/.test(text)) {
+            text = "'" + text;
+        }
         return /[";\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
     }
 
