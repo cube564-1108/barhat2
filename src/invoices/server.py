@@ -76,6 +76,13 @@ from .storage import (
     get_invoice_line_items,
     set_invoice_line_items,
     counterparty_data_report,
+    list_counterparties,
+    search_counterparties,
+    get_counterparty_by_id,
+    create_counterparty,
+    update_counterparty,
+    delete_counterparty,
+    remember_counterparty_from_invoice,
     add_invoice_attachment,
     get_invoice_attachments,
     get_attachment_by_id,
@@ -454,6 +461,11 @@ def add_invoice():
     except sqlite3.IntegrityError:
         logger.exception("create_invoice упал с IntegrityError")
         return jsonify({"error": "Не удалось создать счёт, попробуйте ещё раз"}), 409
+
+    # Запоминаем контрагента уже после того, как счёт создан и его соединение
+    # закрыто: справочник — приятное дополнение, ронять из-за него создание
+    # счёта нельзя (внутри всё обёрнуто в try).
+    remember_counterparty_from_invoice(invoice)
 
     log_action(current_user.username, "create_invoice", f"{invoice['invoice_number']}: {amount}")
     return jsonify({"ok": True, "invoice": invoice}), 201
@@ -1202,3 +1214,72 @@ def counterparties_data_report():
     делаются HTTP-ручками.
     """
     return jsonify(counterparty_data_report())
+
+
+# =============================================================================
+# СПРАВОЧНИК КОНТРАГЕНТОВ (план 2026-08-24, Фаза 3)
+# =============================================================================
+
+@invoices_bp.route("/counterparties", methods=["GET"])
+@section_required("invoices")
+def get_counterparties():
+    """
+    Справочник контрагентов. С ?query= — подсказки для формы счёта
+    (до 10 записей), без него — весь список для страницы справочника.
+    """
+    query = request.args.get("query")
+    if query is not None:
+        return jsonify({"counterparties": search_counterparties(query)})
+    include_inactive = request.args.get("include_inactive", "false").lower() == "true"
+    return jsonify({"counterparties": list_counterparties(include_inactive=include_inactive)})
+
+
+@invoices_bp.route("/counterparties", methods=["POST"])
+@role_required("admin")
+def add_counterparty():
+    """Завести контрагента вручную (обычно он заводится сам при создании счёта)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        counterparty = create_counterparty(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "Контрагент с таким ИНН и расчётным счётом уже есть"}), 409
+
+    log_action(current_user.username, "create_counterparty", counterparty["name"])
+    return jsonify({"ok": True, "counterparty": counterparty}), 201
+
+
+@invoices_bp.route("/counterparties/<int:counterparty_id>", methods=["PUT"])
+@role_required("admin")
+def edit_counterparty(counterparty_id):
+    """
+    Поправить реквизиты в справочнике. Уже выставленные счета не меняются —
+    там своя копия реквизитов на момент платежа.
+    """
+    if not get_counterparty_by_id(counterparty_id):
+        return jsonify({"error": "Контрагент не найден"}), 404
+
+    data = request.get_json(silent=True) or {}
+    try:
+        counterparty = update_counterparty(counterparty_id, data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "Контрагент с таким ИНН и расчётным счётом уже есть"}), 409
+
+    log_action(current_user.username, "update_counterparty", f"{counterparty_id}: {counterparty['name']}")
+    return jsonify({"ok": True, "counterparty": counterparty})
+
+
+@invoices_bp.route("/counterparties/<int:counterparty_id>", methods=["DELETE"])
+@role_required("admin")
+def remove_counterparty(counterparty_id):
+    """Мягкое удаление: пропадает из подсказок, счета и история целы."""
+    counterparty = get_counterparty_by_id(counterparty_id)
+    if not counterparty:
+        return jsonify({"error": "Контрагент не найден"}), 404
+
+    delete_counterparty(counterparty_id)
+    log_action(current_user.username, "delete_counterparty", f"{counterparty_id}: {counterparty['name']}")
+    return jsonify({"ok": True})

@@ -82,6 +82,11 @@ def get_db():
     # каждом соединении — дёшево и идемпотентно, если уже включено.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=20000")
+    # Встроенные LOWER() и COLLATE NOCASE в SQLite работают только с латиницей:
+    # 'Ромашка' и 'ромашка' для них разные строки, и поиск по названию
+    # кириллицей молча не находит ничего. Отдаём приведение регистра Python.
+    conn.create_function("py_lower", 1, lambda text: text.lower() if text else text,
+                         deterministic=True)
     return conn
 
 
@@ -201,6 +206,43 @@ def init_invoices_tables():
 
     # Поле «Комментарий» (план 2026-08-24, Фаза 1) — добавлено позже остальных.
     _ensure_invoice_comment_column(conn)
+
+    # ========================================================================
+    # 3.1. Справочник контрагентов (план 2026-08-24, Фаза 3)
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_counterparties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            inn TEXT,
+            kpp TEXT,
+            bank_name TEXT,
+            bank_bik TEXT,
+            bank_account TEXT,
+            bank_corr_account TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT
+        )
+    """)
+    # Ключ — пара «ИНН + расчётный счёт», а не имя и не один ИНН: у юрлица
+    # легально несколько расчётных счетов, а платим мы на конкретный.
+    # Индекс частичный (WHERE is_active = 1) — иначе удалённая запись навсегда
+    # заблокирует повторное заведение того же контрагента; на этих граблях
+    # модуль уже стоял со справочниками с UNIQUE(name).
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_counterparties_inn_account
+        ON invoice_counterparties(inn, bank_account)
+        WHERE is_active = 1 AND inn IS NOT NULL AND bank_account IS NOT NULL
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_counterparties_inn ON invoice_counterparties(inn)")
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_counterparties_active
+        ON invoice_counterparties(is_active) WHERE is_active = 1
+    """)
+    conn.commit()
+
+    _backfill_counterparties(conn)
 
     # ========================================================================
     # 4. Распределение по проектам/статьям (invoice_line_items)
@@ -1766,3 +1808,271 @@ def counterparty_data_report(examples_limit: int = 20) -> Dict[str, Any]:
             key=lambda x: -x["invoices"]
         )[:examples_limit],
     }
+
+
+# Поля справочника, которые можно задать/поменять
+_COUNTERPARTY_FIELDS = ("name", "inn", "kpp", "bank_name", "bank_bik",
+                        "bank_account", "bank_corr_account")
+
+# Цифровые реквизиты храним нормализованными (только цифры) — иначе один и
+# тот же контрагент, записанный как "ИНН 6670123456" и "6670123456", обходит
+# уникальный индекс и создаёт дубль.
+_COUNTERPARTY_DIGIT_FIELDS = ("inn", "kpp", "bank_bik", "bank_account", "bank_corr_account")
+
+
+def _clean_counterparty_values(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Привести реквизиты к каноничному виду: цифровые — к цифрам, имя — trim."""
+    cleaned: Dict[str, Any] = {}
+    for field in _COUNTERPARTY_FIELDS:
+        if field not in values:
+            continue
+        value = values[field]
+        if field in _COUNTERPARTY_DIGIT_FIELDS:
+            cleaned[field] = normalize_account(value)
+        else:
+            cleaned[field] = (str(value).strip() or None) if value else None
+    return cleaned
+
+
+def _counterparty_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    """
+    Запись справочника + подсказка для интерфейса: ИНН неправильной длины.
+    10 знаков — юрлицо, 12 — ИП, всё остальное — опечатка при вводе счёта,
+    её видно только глазами (отчёт Фазы 2 нашёл две такие на 29 счетов).
+    """
+    item = dict(row)
+    inn = item.get("inn")
+    item["inn_looks_invalid"] = bool(inn) and len(inn) not in (10, 12)
+    return item
+
+
+def _backfill_counterparties(conn: sqlite3.Connection):
+    """
+    Разовое наполнение справочника из истории счетов (Фаза 3 плана 2026-08-24).
+
+    Группируем по паре (нормализованный ИНН, нормализованный расчётный счёт),
+    реквизиты берём из последнего счёта пары — он свежее остальных.
+    Счета без ИНН или без расчётного счёта пропускаем: подставлять из них
+    нечего, а мусор в справочнике хуже пустого поля.
+
+    Идемпотентно: если в справочнике уже что-то есть, ничего не делаем.
+    Блокировка как в остальных миграциях модуля — два gunicorn-воркера
+    стартуют параллельно и иначе зальют историю дважды.
+    """
+    if not _table_exists(conn, "invoices"):
+        return
+    if conn.execute("SELECT 1 FROM invoice_counterparties LIMIT 1").fetchone():
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT 1 FROM invoice_counterparties LIMIT 1").fetchone():
+            conn.rollback()
+            return
+
+        rows = conn.execute(
+            """
+            SELECT counterparty_name, counterparty_inn, counterparty_kpp,
+                   counterparty_bank_name, counterparty_bank_bik,
+                   counterparty_bank_account, counterparty_bank_corr_account
+            FROM invoices
+            ORDER BY id
+            """
+        ).fetchall()
+
+        by_pair: Dict[tuple, Dict[str, Any]] = {}
+        for row in rows:
+            inn = normalize_inn(row["counterparty_inn"])
+            account = normalize_account(row["counterparty_bank_account"])
+            if not inn or not account:
+                continue
+            by_pair[(inn, account)] = {
+                "name": (row["counterparty_name"] or "").strip() or f"ИНН {inn}",
+                "inn": inn,
+                "kpp": normalize_account(row["counterparty_kpp"]),
+                "bank_name": (row["counterparty_bank_name"] or "").strip() or None,
+                "bank_bik": normalize_account(row["counterparty_bank_bik"]),
+                "bank_account": account,
+                "bank_corr_account": normalize_account(row["counterparty_bank_corr_account"]),
+            }
+
+        for values in by_pair.values():
+            conn.execute(
+                """
+                INSERT INTO invoice_counterparties
+                    (name, inn, kpp, bank_name, bank_bik, bank_account, bank_corr_account)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(values[f] for f in _COUNTERPARTY_FIELDS)
+            )
+
+        conn.commit()
+        logger.info(f"Справочник контрагентов: заполнено {len(by_pair)} записей из истории счетов")
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def list_counterparties(include_inactive: bool = False) -> List[Dict[str, Any]]:
+    """Весь справочник, по названию."""
+    conn = get_db()
+    where = "" if include_inactive else "WHERE is_active = 1"
+    rows = conn.execute(
+        f"SELECT * FROM invoice_counterparties {where} ORDER BY py_lower(name)"
+    ).fetchall()
+    conn.close()
+    return [_counterparty_to_dict(row) for row in rows]
+
+
+def search_counterparties(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Подсказки для формы счёта: совпадение по началу ИНН или расчётного счёта
+    либо по вхождению в название. Ищем и по цифрам, и по тексту одним
+    запросом — сотрудник может начать с любого конца.
+    """
+    text = (query or "").strip()
+    if len(text) < 2:
+        return []
+
+    digits = normalize_account(text)
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT * FROM invoice_counterparties
+        WHERE is_active = 1
+          AND (
+                (? IS NOT NULL AND (inn LIKE ? OR bank_account LIKE ?))
+                OR py_lower(name) LIKE ?
+              )
+        ORDER BY py_lower(name)
+        LIMIT ?
+        """,
+        (digits, f"{digits}%" if digits else None, f"{digits}%" if digits else None,
+         f"%{text.lower()}%", limit)
+    ).fetchall()
+    conn.close()
+    return [_counterparty_to_dict(row) for row in rows]
+
+
+def get_counterparty_by_id(counterparty_id: int) -> Optional[Dict[str, Any]]:
+    """Запись справочника по id (в том числе неактивная)."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM invoice_counterparties WHERE id = ?", (counterparty_id,)
+    ).fetchone()
+    conn.close()
+    return _counterparty_to_dict(row) if row else None
+
+
+def find_counterparty(inn: Optional[str], bank_account: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Найти активную запись по паре (ИНН, расчётный счёт)."""
+    inn_norm = normalize_inn(inn)
+    account_norm = normalize_account(bank_account)
+    if not inn_norm or not account_norm:
+        return None
+    conn = get_db()
+    row = conn.execute(
+        """
+        SELECT * FROM invoice_counterparties
+        WHERE is_active = 1 AND inn = ? AND bank_account = ?
+        """,
+        (inn_norm, account_norm)
+    ).fetchone()
+    conn.close()
+    return _counterparty_to_dict(row) if row else None
+
+
+def create_counterparty(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Завести контрагента. Кидает sqlite3.IntegrityError на дубль (ИНН, счёт)."""
+    cleaned = _clean_counterparty_values(values)
+    if not cleaned.get("name"):
+        raise ValueError("Название контрагента обязательно")
+
+    # try/finally, а не голый close(): на дубле INSERT кидает IntegrityError,
+    # и незакрытое соединение остаётся держать блокировку файла — следующая
+    # же запись падает с "database is locked". Ровно так модуль ложился
+    # раньше на брошенном соединении неудавшегося ALTER.
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            f"""
+            INSERT INTO invoice_counterparties ({", ".join(_COUNTERPARTY_FIELDS)})
+            VALUES ({", ".join("?" for _ in _COUNTERPARTY_FIELDS)})
+            """,
+            tuple(cleaned.get(f) for f in _COUNTERPARTY_FIELDS)
+        )
+        counterparty_id = cursor.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+    return get_counterparty_by_id(counterparty_id)
+
+
+def update_counterparty(counterparty_id: int, values: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Поправить реквизиты. Уже созданные счета не трогает — там своя копия."""
+    cleaned = _clean_counterparty_values(values)
+    if "name" in cleaned and not cleaned["name"]:
+        raise ValueError("Название контрагента обязательно")
+    if not cleaned:
+        return get_counterparty_by_id(counterparty_id)
+
+    assignments = ", ".join(f"{f} = ?" for f in cleaned)
+    conn = get_db()
+    try:
+        conn.execute(
+            f"UPDATE invoice_counterparties SET {assignments}, updated_at = datetime('now') WHERE id = ?",
+            tuple(cleaned.values()) + (counterparty_id,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_counterparty_by_id(counterparty_id)
+
+
+def delete_counterparty(counterparty_id: int) -> bool:
+    """Мягкое удаление — запись пропадает из подсказок, история счетов цела."""
+    conn = get_db()
+    cursor = conn.execute(
+        "UPDATE invoice_counterparties SET is_active = 0, updated_at = datetime('now') WHERE id = ?",
+        (counterparty_id,)
+    )
+    conn.commit()
+    changed = cursor.rowcount > 0
+    conn.close()
+    return changed
+
+
+def remember_counterparty_from_invoice(invoice: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Запомнить контрагента после создания счёта, если такой пары (ИНН, счёт)
+    ещё нет. Существующие записи НЕ обновляем: одна опечатка в счёте иначе
+    испортила бы подстановку всем остальным. Правка — руками в справочнике.
+
+    Вызывать только после того, как соединение вызывающего кода закрыто:
+    на вложенных соединениях модуль уже ловил "database is locked".
+    Никогда не роняет создание счёта — счёт важнее справочника.
+    """
+    inn = normalize_inn(invoice.get("counterparty_inn"))
+    account = normalize_account(invoice.get("counterparty_bank_account"))
+    if not inn or not account:
+        return None
+
+    try:
+        existing = find_counterparty(inn, account)
+        if existing:
+            return existing
+        return create_counterparty({
+            "name": (invoice.get("counterparty_name") or "").strip() or f"ИНН {inn}",
+            "inn": inn,
+            "kpp": invoice.get("counterparty_kpp"),
+            "bank_name": invoice.get("counterparty_bank_name"),
+            "bank_bik": invoice.get("counterparty_bank_bik"),
+            "bank_account": account,
+            "bank_corr_account": invoice.get("counterparty_bank_corr_account"),
+        })
+    except sqlite3.IntegrityError:
+        # Гонка: параллельный запрос успел завести ту же пару
+        return find_counterparty(inn, account)
+    except Exception:
+        logger.exception("Не удалось запомнить контрагента из счёта")
+        return None
