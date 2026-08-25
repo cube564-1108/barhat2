@@ -295,6 +295,13 @@ def get_invoices():
     for inv in invoices:
         inv["created_by_full_name"] = full_names.get(inv.get("created_by"))
         inv["approved_by_full_name"] = full_names.get(inv.get("approved_by"))
+        # Право на правку считаем той же функцией, что потом и разрешит PUT.
+        # Нужно платёжному борду (Фаза 9): перетаскивать можно только то, что
+        # сервер согласится изменить, а своя копия правил на клиенте рано или
+        # поздно разойдётся с этой. Старый раздел лишнее поле игнорирует.
+        inv["can_edit_fields"] = can_edit_invoice_fields(
+            inv, current_user.username, current_user.role
+        )
 
     result = {"invoices": invoices, "count": len(invoices)}
 

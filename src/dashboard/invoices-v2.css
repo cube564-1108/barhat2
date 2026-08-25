@@ -1488,3 +1488,125 @@
 
 .iv2 .iv2-pf-row .iv2-select,
 .iv2 .iv2-pf-row .iv2-input { width: 280px; max-width: 100%; }
+
+/* === Платёжный борд ================================================== */
+
+.iv2 .iv2-board {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(200px, 1fr));
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 8px;
+    align-items: start;
+}
+
+/* На узком экране колонки едут вбок — читать борд, листая горизонтально,
+   привычнее, чем шесть колонок в столбик друг под другом. */
+@media (max-width: 1200px) {
+    .iv2 .iv2-board {
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(240px, 1fr);
+        grid-template-columns: none;
+    }
+}
+
+.iv2 .iv2-col {
+    background: #fff;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 12px;
+    min-height: 240px;
+    transition: background 0.12s, border-color 0.12s;
+}
+
+.iv2 .iv2-col--over {
+    background: var(--bx-bg-2);
+    border-color: var(--bx-pink);
+}
+
+.iv2 .iv2-col__head { margin-bottom: 10px; }
+
+.iv2 .iv2-col__name {
+    font-family: var(--bx-font-head);
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--bx-wine);
+}
+
+.iv2 .iv2-col__sum {
+    font-size: 12.5px;
+    color: var(--bx-text-2);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+}
+
+.iv2 .iv2-col__bar {
+    height: 7px;
+    border-radius: 4px;
+    background: var(--bx-pink-wash);
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+.iv2 .iv2-col__fill {
+    height: 100%;
+    border-radius: 4px;
+    background: var(--bx-grad-accent);
+}
+
+.iv2 .iv2-col__empty { padding: 8px 2px; }
+
+.iv2 .iv2-bcard {
+    background: var(--bx-bg);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    padding: 10px;
+    margin-bottom: 8px;
+    cursor: grab;
+}
+
+.iv2 .iv2-bcard:active { cursor: grabbing; }
+.iv2 .iv2-bcard--drag { opacity: 0.45; }
+
+/* Счёт, который уже нельзя править: остаётся кликабельным, но не тащится */
+.iv2 .iv2-bcard--locked { cursor: pointer; opacity: 0.75; }
+
+.iv2 .iv2-bcard__cp {
+    font-weight: 600;
+    color: var(--bx-wine);
+    font-size: 12.5px;
+    word-break: break-word;
+}
+
+.iv2 .iv2-bcard__amt {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--bx-wine);
+    font-size: 14px;
+    margin: 4px 0;
+}
+
+.iv2 .iv2-bcard__meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--bx-muted);
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-board-msg {
+    background: #fff;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 40px 24px;
+    text-align: center;
+    color: var(--bx-muted);
+}
+
+.iv2 .iv2-board-note { margin: 10px 2px 0; }
+
+/* Длинная колонка прокручивается внутри себя: иначе одна перегруженная
+   колонка растягивает борд на несколько экранов вниз. */
+.iv2 .iv2-col__body { max-height: 62vh; overflow-y: auto; }

@@ -174,6 +174,9 @@
         commentDrafts: {},
         details: {},
 
+        // Платёжный борд: свой запрос и свой набор строк (см. loadBoard)
+        board: { rows: [], total: 0, loading: false, loaded: false, error: '' },
+
         // Инструменты раздела (справочники, контрагенты, ПланФакт) — одна
         // модалка за раз, поэтому одно поле `open` на все три.
         tools: emptyTools(),
@@ -466,6 +469,14 @@
         // иначе очередь на первом входе успевает мигнуть «Очередь пуста».
         renderTable();
         if (state.view === 'queue') renderQueue();
+
+        // Борд живёт на своём запросе, но фильтры у него те же, поэтому любая
+        // пересборка списка обязана пересобрать и его. Открыт другой вид —
+        // просто помечаем устаревшим, загрузится при переключении.
+        if (!append) {
+            state.board.loaded = false;
+            if (state.view === 'board') loadBoard();
+        }
 
         try {
             const data = await apiGet('/api/invoices?' + params.toString());
@@ -826,17 +837,19 @@
         const hint = $('iv2ViewHint');
         if (hint) {
             hint.textContent = state.view === 'board'
-                ? 'Этот вид ещё в работе, фильтры к нему уже применяются'
+                ? 'Перетащите карточку в другую колонку — изменится плановая дата оплаты'
                 : 'Фильтры общие для всех видов';
         }
 
-        // Борд — Фаза 9. Пока показываем, что именно приедет, вместо пустого
-        // экрана без объяснений.
-        renderPlaceholder('iv2ViewBoard', 'Платёжный борд',
-            'Колонки по срокам оплаты, перенос даты перетаскиванием — Фаза 9.');
-
         // Панель массовых действий имеет смысл только в таблице — там чекбоксы
         renderBulkBar();
+
+        if (state.view === 'board') {
+            renderBoard();
+            // Борд грузится своим запросом (см. loadBoard): ему нужны все счета
+            // с открытым сроком, а не страница таблицы
+            if (!state.board.loaded && !state.board.loading) loadBoard();
+        }
 
         if (state.view === 'queue') {
             renderQueue();
@@ -847,15 +860,253 @@
         }
     }
 
-    function renderPlaceholder(hostId, title, text) {
-        const host = $(hostId);
-        if (!host || host.dataset.ready === '1') return;
-        host.innerHTML = `
-            <div class="iv2-placeholder">
-                <h3 class="iv2-placeholder__title">${escapeHtml(title)}</h3>
-                <p>${escapeHtml(text)}</p>
+    // =========================================================================
+    // Отрисовка: платёжный борд
+    // =========================================================================
+
+    /**
+     * Колонки борда — из принятого прототипа, плюс «Без срока».
+     *
+     * `days` — на сколько дней вперёд от сегодня встаёт срок, когда карточку
+     * бросили в эту колонку. Правило одно на все колонки: дата, попадающая в
+     * эту же колонку, — так человек предсказывает результат до того, как
+     * отпустит карточку.
+     */
+    const BOARD_COLS = [
+        { key: 'over',  label: 'Просрочено', days: null, test: days => days !== null && days < 0 },
+        { key: 'today', label: 'Сегодня',    days: 0,    test: days => days === 0 },
+        { key: 'tmrw',  label: 'Завтра',     days: 1,    test: days => days === 1 },
+        { key: 'week',  label: 'Эта неделя', days: 4,    test: days => days !== null && days > 1 && days <= 7 },
+        { key: 'later', label: 'Позже',      days: 14,   test: days => days !== null && days > 7 },
+        // Счёта без срока в прототипе не было: там он есть у всех. В боевой
+        // базе `due_date` не всегда заполнен, и без своей колонки такой счёт
+        // молча исчезает с борда — а это ровно тот счёт, который потеряется.
+        { key: 'none',  label: 'Без срока',  days: null, test: days => days === null },
+    ];
+
+    // Верхняя граница страницы на сервере. Борд показывает открытые платежи,
+    // а не всю историю, поэтому одной страницы хватает; если счетов больше —
+    // говорим об этом вслух, а не молча обрезаем.
+    const BOARD_LIMIT = 200;
+
+    let boardToken = 0;
+
+    function shiftDays(plainDate, days) {
+        const date = new Date(plainDate + 'T00:00:00');
+        date.setDate(date.getDate() + days);
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${date.getFullYear()}-${month}-${day}`;
+    }
+
+    /**
+     * Борд грузится своим запросом, а не берёт строки таблицы: таблица
+     * листается страницами по 25 и сортирована как выбрал человек, а борду
+     * нужны все открытые платежи разом и по возрастанию срока.
+     */
+    async function loadBoard() {
+        const token = ++boardToken;
+        state.board.loading = true;
+        state.board.error = '';
+        renderBoard();
+
+        const params = buildListParams();
+        params.set('limit', String(BOARD_LIMIT));
+        params.set('offset', '0');
+        params.set('with_total', 'true');
+        params.set('sort', 'due_date');
+        params.set('order', 'asc');
+        // Архив и оплаченные на борде не нужны: он про то, что ещё предстоит
+        // заплатить. Явный фильтр по статусу человек всё же вправе задать сам.
+        params.delete('archived');
+        if (!state.filters.status) params.set('hide_paid', 'true');
+
+        try {
+            const data = await apiGet('/api/invoices?' + params.toString());
+            if (token !== boardToken) return;
+            const rows = (data.invoices || []).filter(invoice =>
+                !invoice.is_archived && invoice.status !== 'paid' && invoice.status !== 'rejected');
+            state.board.rows = rows;
+            state.board.total = data.total ?? rows.length;
+            state.board.loaded = true;
+        } catch (error) {
+            if (token !== boardToken) return;
+            console.error('invoices-v2: не удалось загрузить борд:', error);
+            state.board.rows = [];
+            state.board.total = 0;
+            state.board.error = error.message;
+        } finally {
+            if (token === boardToken) {
+                state.board.loading = false;
+                renderBoard();
+            }
+        }
+    }
+
+    function boardCardHtml(invoice) {
+        const locked = !invoice.can_edit_fields;
+        const title = locked
+            ? 'Срок меняется, только пока счёт открыт для правки'
+            : 'Перетащите в другую колонку — изменится плановая дата оплаты';
+        return `
+            <div class="iv2-bcard${locked ? ' iv2-bcard--locked' : ''}" data-card="${escapeHtml(invoice.id)}"
+                 ${locked ? '' : 'draggable="true"'} title="${escapeHtml(title)}">
+                <div class="iv2-bcard__cp">${escapeHtml(invoice.counterparty_name || 'без контрагента')}</div>
+                <div class="iv2-bcard__amt">${escapeHtml(money(invoice.amount))}</div>
+                <div class="iv2-bcard__meta">
+                    <span>${escapeHtml(invoice.invoice_number || ('#' + invoice.id))}${
+                        invoice.city_name ? ' · ' + escapeHtml(invoice.city_name) : ''}</span>
+                    ${statusBadge(invoice)}
+                </div>
             </div>`;
-        host.dataset.ready = '1';
+    }
+
+    function renderBoard() {
+        const host = $('iv2ViewBoard');
+        if (!host) return;
+
+        if (state.board.error) {
+            host.innerHTML = `<div class="iv2-board-msg">Не удалось загрузить борд: ${escapeHtml(state.board.error)}</div>`;
+            return;
+        }
+        // «Загрузка…» и до старта запроса тоже: renderViews рисует борд раньше,
+        // чем уходит loadBoard, и пустые колонки успевали мигнуть.
+        if (!state.board.rows.length && (state.board.loading || !state.board.loaded)) {
+            host.innerHTML = '<div class="iv2-board-msg">Загрузка…</div>';
+            return;
+        }
+
+        const columns = BOARD_COLS.map(col => {
+            const items = state.board.rows.filter(invoice => col.test(daysTo(invoice.due_date)));
+            return { col, items, sum: items.reduce((total, i) => total + (Number(i.amount) || 0), 0) };
+        });
+        // Полоска в шапке — доля колонки от самой тяжёлой, а не от общей суммы:
+        // так видно, куда смещён платёжный вес.
+        const maxSum = Math.max(1, ...columns.map(c => c.sum));
+
+        const cut = state.board.total > state.board.rows.length
+            ? `<p class="iv2-hint iv2-board-note">Показаны первые ${state.board.rows.length} счетов
+                   из ${state.board.total} — сузьте фильтры, если нужного нет на борде.</p>`
+            : '';
+
+        host.innerHTML = `
+            <div class="iv2-board">
+                ${columns.map(({ col, items, sum }) => `
+                    <div class="iv2-col" data-col="${col.key}">
+                        <div class="iv2-col__head">
+                            <div class="iv2-col__name">${escapeHtml(col.label)}</div>
+                            <div class="iv2-col__sum">${withCount(items.length, 'счёт', 'счёта', 'счетов')}
+                                 · ${escapeHtml(money(sum))}</div>
+                            <div class="iv2-col__bar">
+                                <div class="iv2-col__fill" style="width:${Math.round(sum / maxSum * 100)}%"></div>
+                            </div>
+                        </div>
+                        <div class="iv2-col__body">
+                            ${items.map(boardCardHtml).join('') || '<div class="iv2-hint iv2-col__empty">пусто</div>'}
+                        </div>
+                    </div>`).join('')}
+            </div>
+            ${cut}
+            <p class="iv2-hint iv2-board-note">
+                Перенос ставит ближайшую дату из выбранной колонки: «Завтра» — завтра,
+                «Эта неделя» — через четыре дня, «Позже» — через две недели. Точную дату
+                можно поставить в карточке счёта.
+            </p>`;
+
+        bindBoard();
+    }
+
+    function bindBoard() {
+        const host = $('iv2ViewBoard');
+        if (!host) return;
+
+        // Клик по карточке открывает счёт, но только если это был клик, а не
+        // конец перетаскивания: иначе каждый перенос открывал бы карточку.
+        let draggedId = null;
+        let dragHappened = false;
+
+        host.querySelectorAll('[data-card]').forEach(card => {
+            const invoiceId = Number(card.getAttribute('data-card'));
+
+            card.addEventListener('dragstart', event => {
+                draggedId = invoiceId;
+                dragHappened = true;
+                card.classList.add('iv2-bcard--drag');
+                if (event.dataTransfer) {
+                    event.dataTransfer.effectAllowed = 'move';
+                    try {
+                        event.dataTransfer.setData('text/plain', String(invoiceId));
+                    } catch (e) { /* старый Edge не даёт setData на dragstart */ }
+                }
+            });
+            card.addEventListener('dragend', () => {
+                card.classList.remove('iv2-bcard--drag');
+                draggedId = null;
+                setTimeout(() => { dragHappened = false; }, 0);
+            });
+            card.addEventListener('click', () => {
+                if (dragHappened) return;
+                openCard(invoiceId);
+            });
+        });
+
+        host.querySelectorAll('[data-col]').forEach(column => {
+            column.addEventListener('dragover', event => {
+                event.preventDefault();
+                column.classList.add('iv2-col--over');
+            });
+            column.addEventListener('dragleave', () => column.classList.remove('iv2-col--over'));
+            column.addEventListener('drop', event => {
+                event.preventDefault();
+                column.classList.remove('iv2-col--over');
+                let invoiceId = draggedId;
+                if (!invoiceId && event.dataTransfer) {
+                    invoiceId = Number(event.dataTransfer.getData('text/plain'));
+                }
+                if (invoiceId) moveInvoiceDue(invoiceId, column.getAttribute('data-col'));
+            });
+        });
+    }
+
+    async function moveInvoiceDue(invoiceId, columnKey) {
+        const column = BOARD_COLS.find(col => col.key === columnKey);
+        if (!column) return;
+
+        if (column.key === 'over') {
+            toast('В «Просрочено» перенести нельзя — это следствие даты, а не решение', 'error');
+            return;
+        }
+        if (column.key === 'none') {
+            toast('Срок оплаты обязателен — убрать его нельзя', 'error');
+            return;
+        }
+
+        const invoice = state.board.rows.find(row => row.id === invoiceId);
+        if (!invoice) return;
+
+        const dueDate = shiftDays(today(), column.days);
+        if (invoice.due_date === dueDate) return;
+
+        const label = invoice.invoice_number || ('#' + invoiceId);
+        try {
+            await apiPut('/api/invoices/' + invoiceId, { due_date: dueDate });
+        } catch (error) {
+            toast(`${label}: не удалось перенести срок — ${error.message}`, 'error');
+            // Карточка на экране осталась на старом месте, но состояние счёта
+            // могло уйти вперёд у соседа — перечитываем борд целиком
+            loadBoard();
+            return;
+        }
+
+        invoice.due_date = dueDate;
+        delete state.details[invoiceId];      // в карточке лежит копия со старым сроком
+        renderBoard();
+        toast(`${label}: срок оплаты — ${fmtDue(dueDate)}`, 'success');
+
+        // Срок виден в таблице и в очереди, а «К оплате сегодня» и «Просрочено»
+        // считаются по нему же
+        loadSummary();
+        loadList(false);
     }
 
     // =========================================================================
