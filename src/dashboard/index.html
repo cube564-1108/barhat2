@@ -10,6 +10,9 @@
     <link rel="stylesheet" href="/brand/tokens.css">
     <link rel="stylesheet" href="/brand/brand.css">
     <link rel="stylesheet" href="/styles.css">
+    <!-- Стили раздела «Согласование счетов v2» на токенах --bx-* (DESIGN-SPEC.md).
+         Все правила внутри скоуплены под .iv2 — на остальной дашборд не влияют. -->
+    <link rel="stylesheet" href="/invoices-v2.css">
     <!-- chart.js — со своего домена, не с jsdelivr: чужой CDN означал лишние
          DNS + TLS перед первой отрисовкой и зависимость от его доступности.
          defer у всех скриптов: качаются параллельно с разбором страницы,
@@ -90,6 +93,16 @@
                             <line x1="8" y1="17" x2="16" y2="17"/>
                         </svg>
                         <span>Счета на оплату</span>
+                    </a>
+                    <a href="/invoices-v2" class="nav-item" data-page="invoices_v2">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <path d="M14 2v6h6"/>
+                            <path d="M9 13h6"/>
+                            <path d="M9 17h4"/>
+                        </svg>
+                        <span>Согласование счетов v2</span>
                     </a>
                 </div>
 
@@ -2188,6 +2201,52 @@
                     </div>
                 </div>
 
+                <!-- ==================================================================
+                     Согласование счетов v2 — пилотный раздел.
+                     План: plans/2026-08-24-счета-новый-раздел.md
+                     Эталон вида: prototypes/invoices/index.html
+
+                     Держим ОДНИМ блоком и стараемся не менять при следующих фазах:
+                     контейнеры ниже уже заготовлены под KPI, фильтры, три вида и
+                     модалки — наполняет их invoices-v2.js.
+
+                     Класс .iv2 — граница стилей на токенах --bx-*: весь CSS раздела
+                     скоуплен под неё (invoices-v2.css), чтобы не задеть остальной
+                     дашборд на --barkhat-*. Модалки раздела монтируются в #iv2Modals
+                     ВНУТРИ этого блока — вынесенные в body они потеряют стили.
+                     ================================================================== -->
+                <div class="page iv2" data-page="invoices_v2">
+                    <header class="bx-header">
+                        <div class="bx-header__left">
+                            <span class="bx-header__icon">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.75"
+                                     stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                    <path d="M14 2v6h6"/>
+                                    <path d="M9 13h6"/>
+                                    <path d="M9 17h4"/>
+                                </svg>
+                            </span>
+                            <div>
+                                <h1 class="bx-header__title">
+                                    Согласование счетов v2
+                                    <span class="bx-header__count" id="iv2HeaderCount" hidden></span>
+                                </h1>
+                                <p class="bx-header__subtitle">Очередь согласования, платёжный борд и заведение счетов. Данные общие со старым разделом</p>
+                            </div>
+                        </div>
+                        <div class="bx-header__actions" id="iv2HeaderActions"></div>
+                    </header>
+
+                    <div id="iv2Kpis"></div>
+                    <div id="iv2Filters"></div>
+                    <div id="iv2Toolbar"></div>
+                    <div id="iv2ViewQueue"></div>
+                    <div id="iv2ViewTable" hidden></div>
+                    <div id="iv2ViewBoard" hidden></div>
+                    <div id="iv2Modals"></div>
+                </div>
+
                 <!-- Остальные страницы будут добавлены по мере необходимости -->
             </div>
         </main>
@@ -2208,5 +2267,6 @@
     <script defer src="/tasks.js"></script>
     <script defer src="/writeoffs.js"></script>
     <script defer src="/courier-payouts.js"></script>
+    <script defer src="/invoices-v2.js"></script>
 </body>
 </html>

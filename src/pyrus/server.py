@@ -618,6 +618,24 @@ def invoices_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/invoices-v2')
+def invoices_v2_page():
+    """Страница нового раздела «Согласование счетов v2» (пилот).
+
+    Отдаёт ту же оболочку дашборда: раздел живёт внутри SPA, доступ к пункту
+    меню решает секция invoices_v2 (см. ROLE_SECTIONS в src/auth.py), а доступ
+    к данным — секция invoices на ручках счетов.
+    """
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return _serve_dashboard_shell()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /invoices-v2: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 @app.route('/writeoffs')
 def writeoffs_page():
     """Страница списаний товара"""
@@ -705,6 +723,16 @@ def serve_cash_shifts():
 def serve_invoices():
     """Отдаёт скрипт счетов на оплату"""
     return send_from_directory(DASHBOARD_DIR, 'invoices.js')
+
+@app.route('/invoices-v2.js')
+def serve_invoices_v2():
+    """Отдаёт скрипт нового раздела согласования счетов"""
+    return send_from_directory(DASHBOARD_DIR, 'invoices-v2.js')
+
+@app.route('/invoices-v2.css')
+def serve_invoices_v2_css():
+    """Отдаёт стили нового раздела согласования счетов (токены --bx-*)"""
+    return send_from_directory(DASHBOARD_DIR, 'invoices-v2.css')
 
 @app.route('/abc-analysis.js')
 def serve_abc_analysis():

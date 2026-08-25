@@ -22,6 +22,7 @@
         'quality': 'Качество сборки',
         'cash_shifts': 'Кассовые смены',
         'invoices': 'Счета на оплату',
+        'invoices_v2': 'Согласование счетов v2',
         'writeoffs': 'Списания товара',
         'abc_analysis': 'ABC-анализ товаров',
         'courier_payouts': 'Оплата курьерам',
@@ -30,7 +31,8 @@
 
     // === Пресеты permissions для ролей ===
     const ROLE_PERMISSIONS = {
-        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'writeoffs', 'abc_analysis', 'courier_payouts', 'users_manage'],
+        // invoices_v2 — пилот, пока только у админа (см. ROLE_SECTIONS в src/auth.py)
+        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'abc_analysis', 'courier_payouts', 'users_manage'],
         'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'writeoffs', 'courier_payouts'],
         'florist': ['cash_shifts', 'writeoffs'],
         'florist_analyst': ['quality']

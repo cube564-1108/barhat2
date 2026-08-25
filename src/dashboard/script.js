@@ -170,6 +170,12 @@ document.addEventListener('DOMContentLoaded', async function() {
                 window.InvoicesModule.onPageActivated(currentUser);
             }
 
+            // Активируем новый раздел согласования счетов (пилот, см.
+            // plans/2026-08-24-счета-новый-раздел.md). Старый модуль выше не трогаем.
+            if (pageName === 'invoices_v2' && window.InvoicesV2Module) {
+                window.InvoicesV2Module.onPageActivated(currentUser);
+            }
+
             // Активируем модуль списаний товара
             if (pageName === 'writeoffs' && window.WriteoffsModule) {
                 window.WriteoffsModule.onPageActivated(currentUser);
@@ -227,6 +233,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'quality': 'КАЧЕСТВО СБОРКИ БУКЕТОВ',
             'cash_shifts': 'КАССОВЫЕ СМЕНЫ',
             'invoices': 'СЧЕТА НА ОПЛАТУ',
+            'invoices_v2': 'СОГЛАСОВАНИЕ СЧЕТОВ V2',
             'writeoffs': 'СПИСАНИЯ ТОВАРА',
             'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
             'courier_payouts': 'ОПЛАТА КУРЬЕРАМ',

@@ -1,0 +1,223 @@
+/**
+ * Раздел «Согласование счетов v2» — стили.
+ * План: plans/2026-08-24-счета-новый-раздел.md
+ * Эталон вида: prototypes/invoices/index.html
+ * Стандарт: DESIGN-SPEC.md (токены --bx-*, Vollkorn в заголовках, без эмодзи)
+ *
+ * ВАЖНО ПРО СКОУП. Дашборд — одностраничное приложение: все разделы живут в одном
+ * DOM, а старая вёрстка написана на токенах --barkhat-* и на общих классах
+ * (.card, .btn, .section). Поэтому КАЖДОЕ правило здесь начинается с `.iv2`
+ * — класса на <div class="page iv2" data-page="invoices_v2"> в index.html.
+ * Правило без этого префикса утечёт в остальные разделы.
+ *
+ * Сами токены --bx-* определены глобально в brand/tokens.css (§1 DESIGN-SPEC),
+ * переопределять их здесь не нужно.
+ */
+
+/* === Контейнер раздела ============================================== */
+
+/* Внешние отступы и max-width уже даёт .main-content (styles.css:136),
+   поэтому свой padding из DESIGN-SPEC §3 здесь не повторяем — иначе
+   получится двойная рамка. */
+.iv2 {
+    font-family: var(--bx-font-body);
+    font-size: 14px;
+    color: var(--bx-text);
+}
+
+.iv2 h1,
+.iv2 h2,
+.iv2 h3,
+.iv2 h4 {
+    font-family: var(--bx-font-head);
+    color: var(--bx-wine);
+    font-weight: 700;
+    margin: 0;
+}
+
+/* === Шапка раздела (DESIGN-SPEC §4) ================================= */
+
+.iv2 .bx-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    background: var(--bx-grad-header);
+    color: #fff;
+    border-radius: var(--bx-r-2xl);
+    padding: 28px 32px;
+    margin-bottom: 20px;
+}
+
+.iv2 .bx-header__left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
+}
+
+.iv2 .bx-header__icon {
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--bx-r-xl);
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.iv2 .bx-header__title {
+    font-size: 30px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.iv2 .bx-header__subtitle {
+    color: rgba(255, 255, 255, 0.70);
+    font-size: 14px;
+    margin: 4px 0 0;
+    max-width: 42rem;
+}
+
+.iv2 .bx-header__actions {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* Счётчик «N ждут вас» — гротеск, а не Vollkorn: это число, а не заголовок */
+.iv2 .bx-header__count {
+    font-family: var(--bx-font-body);
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 9999px;
+    padding: 4px 12px;
+    letter-spacing: 0;
+    white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+    .iv2 .bx-header {
+        padding: 20px;
+        flex-direction: column;
+    }
+    .iv2 .bx-header__title {
+        font-size: 22px;
+    }
+}
+
+/* === Карточка (DESIGN-SPEC §5) ====================================== */
+
+.iv2 .bx-card {
+    background: #fff;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 18px;
+}
+
+.iv2 .bx-card__title {
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 15.5px;
+    color: var(--bx-wine);
+    margin: 0;
+}
+
+.iv2 .bx-card__caption {
+    color: var(--bx-muted);
+    font-size: 12px;
+    margin: 2px 0 12px;
+}
+
+/* === Кнопки (DESIGN-SPEC §6) ======================================== */
+
+.iv2 .bx-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-radius: var(--bx-r-xl);
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    background: var(--bx-wine);
+    color: #fff;
+    transition: opacity 0.15s;
+}
+
+.iv2 .bx-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.iv2 .bx-btn:hover:not(:disabled) {
+    opacity: 0.92;
+}
+
+.iv2 .bx-btn--ghost {
+    background: transparent;
+    color: var(--bx-wine);
+    border: 1px solid var(--bx-border);
+}
+
+/* Контурная кнопка на градиентной шапке: обычная --ghost на ней не читается */
+.iv2 .bx-btn--ghost-light {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.iv2 .bx-btn--light {
+    background: #fff;
+    color: var(--bx-wine);
+}
+
+.iv2 .bx-btn--ok {
+    background: var(--bx-up);
+}
+
+.iv2 .bx-btn--danger {
+    background: var(--bx-down);
+}
+
+.iv2 .bx-btn--sm {
+    padding: 6px 12px;
+    font-size: 12.5px;
+    border-radius: var(--bx-r-lg);
+}
+
+/* === Заглушка на месте ещё не сделанных видов ======================== */
+
+.iv2 .iv2-placeholder {
+    background: #fff;
+    border: 1px dashed var(--bx-pink-light);
+    border-radius: var(--bx-r-2xl);
+    padding: 48px 24px;
+    text-align: center;
+    color: var(--bx-muted);
+}
+
+.iv2 .iv2-placeholder__title {
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 15.5px;
+    color: var(--bx-wine);
+    margin: 0 0 6px;
+}
+
+.iv2 .iv2-placeholder p {
+    margin: 0;
+    font-size: 13px;
+}

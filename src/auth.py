@@ -37,7 +37,12 @@ login_manager = LoginManager()
 # Роли и какие разделы им доступны.
 # Меняйте под свои реальные разделы дашборда.
 ROLE_SECTIONS = {
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "abc_analysis", "writeoffs", "courier_payouts"},
+    # invoices_v2 — пилотный раздел «Согласование счетов v2» (plans/2026-08-24-счета-новый-раздел.md).
+    # Пока только у админа: сотрудники продолжают работать в старом разделе.
+    # ВАЖНО: эта секция даёт только пункт меню. Все ручки счетов проверяют
+    # @section_required("invoices"), поэтому доступ к данным идёт по старой секции —
+    # снимать её у сотрудников нельзя, пока section_required не примет обе (Фаза 10).
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts"},
     "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "writeoffs", "courier_payouts"},
     "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
@@ -312,6 +317,7 @@ ALL_MODULES = [
     'quality',        # Качество сборки
     'cash_shifts',    # Кассовые смены
     'invoices',       # Счета на оплату
+    'invoices_v2',    # Согласование счетов v2 (пилот, пока только admin)
     'abc_analysis',   # ABC-анализ товаров
     'users_manage',   # Управление пользователями
     'writeoffs',      # Списания товара
@@ -458,6 +464,11 @@ def init_auth_tables():
 
     # Догрузка права на модуль courier_payouts (оплата курьерам)
     migrate_new_module_permissions("courier_payouts", ["admin", "manager"])
+
+    # Догрузка права на пилотный раздел invoices_v2 («Согласование счетов v2»).
+    # Только admin — раздать manager/sso_viewer можно будет после приёмки (Фаза 10),
+    # причём одновременно с обучением section_required двум секциям.
+    migrate_new_module_permissions("invoices_v2", ["admin"])
 
     # Догрузка прав SSO-пользователям: первые из них были заведены, когда
     # sso_viewer имел доступ только к "quality" (см. SSO_MODULES выше).
