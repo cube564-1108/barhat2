@@ -117,6 +117,18 @@
     // отрисовать. Список тот же, что в белом списке ручки inline на сервере.
     const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
 
+    // Что вообще принимаем во вложения — тот же список, что
+    // ALLOWED_ATTACHMENT_EXTENSIONS в storage.py. Расходиться им нельзя:
+    // клиент отсеет лишнее до загрузки, сервер — окончательно.
+    const ATTACHMENT_EXTENSIONS = IMAGE_EXTENSIONS.concat(['.pdf']);
+    const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
+    // Фото счёта с телефона — это 3-8 МБ, интернет в салоне медленный, а
+    // вложения копятся на платном /data. 1500px по длинной стороне читаемость
+    // счёта сохраняют полностью.
+    const IMAGE_MAX_SIDE = 1500;
+    const COMPRESS_ABOVE_BYTES = 1024 * 1024;
+
     // =========================================================================
     // Состояние
     // =========================================================================
@@ -1026,43 +1038,298 @@
         return IMAGE_EXTENSIONS.some(ext => name.endsWith(ext));
     }
 
+    function inlineUrl(attachmentId) {
+        return '/api/invoices/attachments/' + attachmentId + '/inline';
+    }
+
+    /**
+     * Зона «приложите счёт»: вставка из буфера, перетаскивание и обычный выбор
+     * файла. Кнопка съёмки и подсказка про камеру — только там, где ввод
+     * пальцем (класс iv2-only-touch, критерий `@media (pointer: coarse)`):
+     * на узком окне десктопа камеры всё равно нет, и кнопка вела бы в никуда.
+     */
+    function dropZoneHtml(invoiceId) {
+        return `
+            <div class="iv2-drop" data-drop="${invoiceId}">
+                <div class="iv2-drop__title">Приложите счёт</div>
+                <div class="iv2-drop__hint">Вставьте скрин из буфера, перетащите файл сюда или выберите на диске.
+                    <span class="iv2-only-touch">Можно сфотографировать счёт камерой.</span></div>
+                <div class="iv2-drop__btns">
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-act="pick-file">Выбрать файл</button>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm iv2-only-touch" type="button" data-act="take-photo">Сфотографировать</button>
+                </div>
+                <input type="file" class="iv2-hidden-input" data-file-input="${invoiceId}"
+                       accept="image/*,.pdf" multiple>
+                <input type="file" class="iv2-hidden-input" data-camera-input="${invoiceId}"
+                       accept="image/*" capture="environment">
+            </div>`;
+    }
+
+    /** Миниатюры вместо списка имён — по картинке сразу видно, что приложено. */
+    function thumbsHtml(details, activeIndex) {
+        const attachments = details.attachments || [];
+        if (attachments.length < 2) return '';
+        const canDelete = state.user && state.user.role === 'admin';
+        return `<div class="iv2-thumbs">${attachments.map((a, i) => `
+            <div class="iv2-thumb${i === activeIndex ? ' iv2-thumb--on' : ''}">
+                <button class="iv2-thumb__pick" type="button" data-doctab="${i}"
+                        title="${escapeHtml(a.original_filename)}">
+                    ${isImage(a.original_filename)
+                        ? `<img src="${escapeHtml(inlineUrl(a.id))}" alt="${escapeHtml(a.original_filename)}">`
+                        : `<span class="iv2-thumb__pdf">PDF<br>${escapeHtml(shortName(a.original_filename))}</span>`}
+                </button>
+                ${canDelete
+                    ? `<button class="iv2-thumb__del" type="button" data-del-att="${a.id}"
+                               aria-label="Удалить вложение" title="Удалить вложение">
+                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                       </button>`
+                    : ''}
+            </div>`).join('')}</div>`;
+    }
+
+    function shortName(filename) {
+        const name = String(filename || '');
+        return name.length > 14 ? name.slice(0, 12) + '…' : name;
+    }
+
     function docHtml(details) {
         const attachments = details.attachments || [];
+        const invoiceId = details.invoice.id;
+
         if (!attachments.length) {
             return `
                 <div class="iv2-doc">
                     <div class="iv2-doc__bar"><span class="bx-card__title">Документ</span></div>
-                    <div class="iv2-doc__empty">Скан счёта не приложен — решение придётся принимать вслепую.
-                        Приложить файл можно будет в Фазе 4.</div>
+                    <div class="iv2-doc__empty">Скана нет — решение придётся принимать вслепую.</div>
+                    ${dropZoneHtml(invoiceId)}
                 </div>`;
         }
 
         const index = Math.min(state.docIndex, attachments.length - 1);
         const active = attachments[index];
-        const inlineUrl = '/api/invoices/attachments/' + active.id + '/inline';
         const downloadUrl = '/api/invoices/attachments/' + active.id + '/download';
-
-        // Переключатель нужен только когда вложений несколько
-        const tabs = attachments.length > 1
-            ? `<div class="iv2-doc__tabs">${attachments.map((a, i) => `
-                    <button class="iv2-doc__tab${i === index ? ' iv2-doc__tab--on' : ''}"
-                            type="button" data-doctab="${i}">${escapeHtml(a.original_filename)}</button>`).join('')}</div>`
-            : '';
+        const canDelete = state.user && state.user.role === 'admin';
 
         const frame = isImage(active.original_filename)
-            ? `<img src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(active.original_filename)}">`
-            : `<iframe class="iv2-doc__pdf" src="${escapeHtml(inlineUrl)}" title="Скан счёта"></iframe>`;
+            ? `<img src="${escapeHtml(inlineUrl(active.id))}" alt="${escapeHtml(active.original_filename)}">`
+            : `<iframe class="iv2-doc__pdf" src="${escapeHtml(inlineUrl(active.id))}" title="Скан счёта"></iframe>`;
 
         return `
             <div class="iv2-doc">
                 <div class="iv2-doc__bar">
                     <span class="bx-card__title">Документ</span>
-                    <a class="bx-btn bx-btn--ghost bx-btn--sm" href="${escapeHtml(downloadUrl)}"
-                       target="_blank" rel="noopener">Скачать</a>
+                    <span class="iv2-doc__actions">
+                        ${canDelete && attachments.length === 1
+                            ? `<button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                                       data-del-att="${active.id}">Удалить</button>`
+                            : ''}
+                        <a class="bx-btn bx-btn--ghost bx-btn--sm" href="${escapeHtml(downloadUrl)}"
+                           target="_blank" rel="noopener">Скачать</a>
+                    </span>
                 </div>
-                ${tabs}
+                ${thumbsHtml(details, index)}
                 <div class="iv2-doc__frame">${frame}</div>
+                <div class="iv2-doc__name">${escapeHtml(active.original_filename)}</div>
+                ${dropZoneHtml(invoiceId)}
             </div>`;
+    }
+
+    // =========================================================================
+    // Вложения: сжатие, вставка, перетаскивание, загрузка
+    // =========================================================================
+
+    function fileExtension(name) {
+        const match = /\.[a-z0-9]+$/i.exec(String(name || ''));
+        return match ? match[0].toLowerCase() : '';
+    }
+
+    function timestampName(extension) {
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        return `screenshot-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+            + `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}${extension}`;
+    }
+
+    /**
+     * Сжатие фото перед загрузкой.
+     *
+     * createImageBitmap с imageOrientation:'from-image' обязателен: canvas сам
+     * по себе игнорирует EXIF, и снятый телефоном счёт приезжает боком.
+     * Маленькие файлы не трогаем — перекодировать чёткий скрин в JPEG значит
+     * без нужды размыть текст счёта.
+     */
+    async function compressImage(file) {
+        if (!isImage(file.name) || file.size <= COMPRESS_ABOVE_BYTES) return file;
+        if (typeof createImageBitmap !== 'function') return file;
+
+        try {
+            const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+            const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+            const width = Math.round(bitmap.width * scale);
+            const height = Math.round(bitmap.height * scale);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            canvas.getContext('2d').drawImage(bitmap, 0, 0, width, height);
+            if (bitmap.close) bitmap.close();
+
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+            if (!blob || blob.size >= file.size) return file;
+
+            const base = String(file.name).replace(/\.[^.]+$/, '');
+            return new File([blob], base + '.jpg', { type: 'image/jpeg' });
+        } catch (error) {
+            // Сжатие — оптимизация, а не условие работы: не вышло — грузим как есть
+            console.warn('invoices-v2: не удалось сжать изображение, грузим оригинал:', error);
+            return file;
+        }
+    }
+
+    async function uploadAttachments(invoiceId, files) {
+        const list = Array.from(files || []).filter(Boolean);
+        if (!list.length) return;
+
+        let uploaded = 0;
+        const skipped = [];
+
+        for (const original of list) {
+            const extension = fileExtension(original.name);
+            if (ATTACHMENT_EXTENSIONS.indexOf(extension) === -1) {
+                skipped.push(`${original.name || 'файл'} — тип не поддерживается`);
+                continue;
+            }
+
+            let file = original;
+            try {
+                file = await compressImage(original);
+            } catch (error) {
+                file = original;
+            }
+
+            if (file.size > MAX_ATTACHMENT_BYTES) {
+                skipped.push(`${file.name} — больше 15 МБ`);
+                continue;
+            }
+
+            const form = new FormData();
+            // Имя файла ОБЯЗАТЕЛЬНО третьим аргументом: без него blob из буфера
+            // уедет под именем «blob» без расширения, и сервер ответит
+            // «Недопустимый тип файла» — он проверяет именно расширение.
+            form.append('file', file, file.name);
+
+            try {
+                const response = await fetch(`/api/invoices/${invoiceId}/attachments`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    body: form,
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+                uploaded += 1;
+            } catch (error) {
+                skipped.push(`${file.name} — ${error.message}`);
+            }
+        }
+
+        if (uploaded) {
+            toast(uploaded === 1 ? 'Файл приложен' : `Приложено файлов: ${uploaded}`, 'success');
+            // Показываем только что приложенное
+            const details = state.details[invoiceId];
+            const before = details && details.attachments ? details.attachments.length : 0;
+            state.docIndex = Math.max(0, before + uploaded - 1);
+            await refreshDetails(invoiceId);
+        }
+        if (skipped.length) {
+            toast('Не приложено: ' + skipped.join('; '), 'error');
+        }
+    }
+
+    /** Какому счёту сейчас адресована вставка: открытой карточке или очереди. */
+    function attachTargetId() {
+        if (state.card.id && state.card.data) return state.card.id;
+        if (state.view === 'queue' && state.queueActiveId && state.details[state.queueActiveId]) {
+            return state.queueActiveId;
+        }
+        return null;
+    }
+
+    function filesFromClipboard(event) {
+        const data = event.clipboardData;
+        if (!data) return [];
+        if (data.files && data.files.length) return Array.from(data.files);
+        // Скрин из мессенджера часто приходит только как item, без files
+        return Array.from(data.items || [])
+            .filter(item => item.kind === 'file')
+            .map(item => item.getAsFile())
+            .filter(Boolean);
+    }
+
+    /**
+     * Вставка и перетаскивание вешаются на document, поэтому обязаны сначала
+     * убедиться, что открыт именно наш раздел: дашборд — одностраничное
+     * приложение, и обработчик перехватил бы вставку картинки в кассовых
+     * сменах или каталоге.
+     */
+    document.addEventListener('paste', function(event) {
+        if (!pageIsActive()) return;
+        const invoiceId = attachTargetId();
+        if (!invoiceId) return;
+
+        const files = filesFromClipboard(event);
+        if (!files.length) return;  // обычная вставка текста — не мешаем
+
+        event.preventDefault();
+        uploadAttachments(invoiceId, files.map(file => (
+            // У blob из буфера имени нет вовсе — задаём сами, иначе сервер
+            // отвергнет файл по расширению
+            file.name && fileExtension(file.name)
+                ? file
+                : new File([file], timestampName(file.type === 'application/pdf' ? '.pdf' : '.png'),
+                           { type: file.type || 'image/png' })
+        )));
+    });
+
+    function draggingFiles(event) {
+        return Boolean(event.dataTransfer)
+            && Array.from(event.dataTransfer.types || []).indexOf('Files') !== -1;
+    }
+
+    // preventDefault обязателен и здесь: без него событие drop до нас вообще не
+    // дойдёт, браузер откроет файл в текущей вкладке и человек потеряет
+    // страницу вместе с набранным сообщением. Поэтому перехватываем всегда,
+    // пока открыт наш раздел, — даже если приложить файл сейчас некуда.
+    document.addEventListener('dragover', function(event) {
+        if (!pageIsActive() || !draggingFiles(event)) return;
+        event.preventDefault();
+        highlightDropZone(event.target.closest ? event.target.closest('[data-drop]') : null);
+    });
+
+    document.addEventListener('dragleave', function(event) {
+        if (!pageIsActive()) return;
+        if (event.target.closest && event.target.closest('[data-drop]')) return;
+        highlightDropZone(null);
+    });
+
+    document.addEventListener('drop', function(event) {
+        if (!pageIsActive() || !draggingFiles(event)) return;
+        event.preventDefault();
+        highlightDropZone(null);
+
+        const invoiceId = attachTargetId();
+        if (!invoiceId) {
+            toast('Откройте счёт, чтобы приложить к нему файл');
+            return;
+        }
+        if (event.dataTransfer.files && event.dataTransfer.files.length) {
+            uploadAttachments(invoiceId, event.dataTransfer.files);
+        }
+    });
+
+    function highlightDropZone(zone) {
+        document.querySelectorAll('.iv2-drop--hot').forEach(el => el.classList.remove('iv2-drop--hot'));
+        if (zone) zone.classList.add('iv2-drop--hot');
     }
 
     // =========================================================================
@@ -1092,12 +1359,21 @@
      */
     function feedHtml(details) {
         const events = [];
-        (details.history || []).forEach(h => events.push({
-            at: h.changed_at,
-            who: h.changed_by_full_name || h.changed_by,
-            text: historyText(h),
-            message: false,
-        }));
+        const byName = {};
+        (details.attachments || []).forEach(a => { byName[a.original_filename] = a; });
+
+        (details.history || []).forEach(h => {
+            // Приложенная картинка видна прямо в ленте: «вложение: scan.png»
+            // без превью не отвечает на вопрос «то ли приложили».
+            const attachment = h.field_name === 'вложение' ? byName[h.new_value] : null;
+            events.push({
+                at: h.changed_at,
+                who: h.changed_by_full_name || h.changed_by,
+                text: historyText(h),
+                message: false,
+                attachment: attachment && isImage(attachment.original_filename) ? attachment : null,
+            });
+        });
         (details.comments || []).forEach(c => events.push({
             at: c.created_at,
             who: c.author_full_name || c.author,
@@ -1121,6 +1397,10 @@
             : `<div class="iv2-feed__item">
                    <span class="iv2-feed__dot"></span>
                    <div><b>${escapeHtml(event.who)}</b> ${escapeHtml(event.text)}
+                       ${event.attachment
+                           ? `<div class="iv2-feed__pic"><img src="${escapeHtml(inlineUrl(event.attachment.id))}"
+                                   alt="${escapeHtml(event.attachment.original_filename)}"></div>`
+                           : ''}
                        <div class="iv2-feed__when">${escapeHtml(fmtCreated(event.at))}</div></div>
                </div>`).join('');
     }
@@ -1297,6 +1577,43 @@
                 }
             });
         });
+
+        root.querySelectorAll('[data-file-input], [data-camera-input]').forEach(input => {
+            input.addEventListener('change', () => {
+                const files = input.files;
+                // Сбрасываем значение сразу: иначе повторный выбор того же
+                // файла не даст события change
+                input.value = '';
+                uploadAttachments(invoiceId, files);
+            });
+        });
+
+        root.querySelectorAll('[data-del-att]').forEach(button => {
+            button.addEventListener('click', () => deleteAttachment(invoiceId, Number(button.getAttribute('data-del-att'))));
+        });
+    }
+
+    async function deleteAttachment(invoiceId, attachmentId) {
+        const details = state.details[invoiceId];
+        const attachment = (details && details.attachments || []).find(a => a.id === attachmentId);
+        const ok = await window.BarhatUI.confirm(
+            `Файл «${attachment ? attachment.original_filename : ''}» будет удалён с диска безвозвратно.`,
+            { title: 'Удалить вложение?', confirmText: 'Удалить', danger: true });
+        if (!ok) return;
+
+        try {
+            const response = await fetch(`/api/invoices/attachments/${attachmentId}`, {
+                method: 'DELETE',
+                credentials: 'include',
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+            state.docIndex = 0;
+            toast('Вложение удалено');
+            await refreshDetails(invoiceId);
+        } catch (error) {
+            toast('Не удалось удалить: ' + error.message, 'error');
+        }
     }
 
     // =========================================================================
@@ -1322,6 +1639,16 @@
         if (action === 'toggle-req') {
             const box = sourceElement.closest('.iv2-reqbox');
             if (box) box.classList.toggle('iv2-reqbox--open');
+            return;
+        }
+
+        // Скрытый input открываем кликом: свой вид у него не настраивается,
+        // а системный выглядит чужеродно рядом с кнопками раздела
+        if (action === 'pick-file' || action === 'take-photo') {
+            const zone = sourceElement.closest('[data-drop]');
+            const input = zone && zone.querySelector(
+                action === 'pick-file' ? '[data-file-input]' : '[data-camera-input]');
+            if (input) input.click();
             return;
         }
 

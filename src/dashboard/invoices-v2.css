@@ -744,6 +744,112 @@
 
 .iv2 .iv2-doc__pdf { width: 100%; height: 58vh; border: none; background: #fff; }
 
+.iv2 .iv2-doc__actions { display: flex; gap: 8px; align-items: center; }
+
+.iv2 .iv2-doc__name {
+    font-size: 11.5px;
+    color: var(--bx-muted);
+    text-align: center;
+    margin-top: 8px;
+    word-break: break-all;
+}
+
+/* === Вложения: зона вставки, миниатюры =============================== */
+
+.iv2 .iv2-drop {
+    border: 2px dashed var(--bx-pink);
+    border-radius: var(--bx-r-2xl);
+    background: var(--bx-bg);
+    padding: 16px;
+    text-align: center;
+    margin-top: 12px;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.iv2 .iv2-drop--hot { background: var(--bx-bg-2); border-color: var(--bx-wine); }
+
+.iv2 .iv2-drop__title {
+    font-family: var(--bx-font-head);
+    font-weight: 700;
+    color: var(--bx-wine);
+    font-size: 15px;
+    margin-bottom: 4px;
+}
+
+.iv2 .iv2-drop__hint { font-size: 12.5px; color: var(--bx-text-2); margin-bottom: 12px; }
+.iv2 .iv2-drop__btns { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.iv2 .iv2-hidden-input { display: none; }
+
+/* Камера и подсказка про съёмку — только там, где ввод пальцем. Критерий не
+   ширина окна, а тип указателя: на узком окне десктопа камеры всё равно нет,
+   и кнопка вела бы в никуда. */
+.iv2 .iv2-only-touch { display: none; }
+
+@media (pointer: coarse) {
+    .iv2 span.iv2-only-touch { display: inline; }
+    .iv2 button.iv2-only-touch { display: inline-flex; }
+}
+
+.iv2 .iv2-thumbs { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+
+.iv2 .iv2-thumb {
+    position: relative;
+    width: 76px;
+    height: 76px;
+    border-radius: var(--bx-r-xl);
+    overflow: hidden;
+    border: 1px solid var(--bx-border);
+    background: #fff;
+}
+
+.iv2 .iv2-thumb--on { border-color: var(--bx-wine); box-shadow: 0 0 0 2px rgba(65, 19, 48, 0.12); }
+
+.iv2 .iv2-thumb__pick {
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    display: block;
+}
+
+.iv2 .iv2-thumb__pick img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.iv2 .iv2-thumb__pdf {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    color: var(--bx-wine);
+    font-size: 10.5px;
+    text-align: center;
+    padding: 6px;
+    font-family: inherit;
+}
+
+.iv2 .iv2-thumb__del {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    background: rgba(19, 8, 16, 0.65);
+    border: none;
+    color: #fff;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: pointer;
+    line-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.iv2 .iv2-thumb__del:hover { background: var(--bx-down); }
+
 .iv2 .iv2-doc__empty {
     background: var(--bx-bg);
     border: 1px dashed var(--bx-pink-light);
@@ -918,6 +1024,16 @@
 }
 
 .iv2 .iv2-feed__text { white-space: pre-wrap; margin-top: 3px; color: var(--bx-text); }
+
+.iv2 .iv2-feed__pic { margin: 6px 0; }
+
+.iv2 .iv2-feed__pic img {
+    max-width: 180px;
+    max-height: 120px;
+    border-radius: var(--bx-r-lg);
+    border: 1px solid var(--bx-border);
+    display: block;
+}
 
 .iv2 .iv2-talk { margin-top: 10px; display: flex; gap: 8px; align-items: flex-start; }
 
