@@ -16,6 +16,7 @@ import re
 import sqlite3
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -818,6 +819,247 @@ def send_to_bank(invoice_id):
         log_action(current_user.username, action, invoice["invoice_number"])
 
     return jsonify(outcome["body"]), outcome["http_status"]
+
+
+# =============================================================================
+# МАССОВЫЕ ДЕЙСТВИЯ (план 2026-08-24, Фаза 6)
+# =============================================================================
+
+# Сколько счетов принимаем за раз. Для банка предел жёстче: каждый счёт —
+# отдельное обращение к внешнему API, и пакет ограничен не числом, а временем.
+BULK_MAX_IDS = 100
+BULK_BANK_MAX_IDS = 25
+
+# Бюджет времени на пакетную отправку платёжек. Клиент Модульбанка ходит с
+# timeout=30 (modulbank/client.py), а gunicorn убивает запрос на 120 с
+# (amvera.yml). Значит новую отправку нельзя начинать, если до конца бюджета
+# осталось меньше одного полного таймаута: воркер умрёт после того, как часть
+# платёжек уже ушла, и ответа пользователь не получит вовсе.
+BANK_BATCH_BUDGET_SECONDS = 90
+BANK_CALL_TIMEOUT_SECONDS = 30
+
+
+def _read_bulk_ids(data, limit=BULK_MAX_IDS):
+    """Разобрать и проверить {ids: [...]}. Возвращает (ids, error)."""
+    ids = data.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return None, "Не переданы счета"
+    if not all(isinstance(i, int) for i in ids):
+        return None, "Список счетов должен состоять из чисел"
+    # Дубли схлопываем, порядок сохраняем: иначе один и тот же счёт
+    # обрабатывается дважды и попадает в отчёт двумя строками
+    unique = list(dict.fromkeys(ids))
+    if len(unique) > limit:
+        return None, f"За раз можно обработать не больше {limit} счетов"
+    return unique, None
+
+
+def _bulk_load(invoice_id):
+    """Счёт для массовой операции: (invoice, reason_to_skip)."""
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return None, "счёт не найден"
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return None, "нет доступа"
+    return invoice, None
+
+
+def _bulk_label(invoice, invoice_id):
+    return (invoice or {}).get("invoice_number") or f"#{invoice_id}"
+
+
+@invoices_bp.route("/bulk-approve", methods=["POST"])
+@role_required("admin")
+def bulk_approve():
+    """
+    Согласовать пачку счетов. Body: {"ids": [int, ...]}.
+
+    Каждый счёт обрабатывается своей транзакцией: ошибка на одном не должна
+    откатывать остальные — иначе разбор накопившихся счетов встанет из-за
+    одного проблемного.
+
+    Идемпотентно: уже согласованный счёт попадает в «пропущено» с причиной,
+    а не в ошибку. Распределение здесь НЕ проверяется намеренно (§3.3):
+    старые нераспределённые счета должны разбираться пачкой.
+    """
+    data = request.get_json(silent=True) or {}
+    ids, error = _read_bulk_ids(data)
+    if error:
+        return jsonify({"error": error}), 400
+
+    done, skipped, total = [], [], 0.0
+    for invoice_id in ids:
+        invoice, reason = _bulk_load(invoice_id)
+        if reason:
+            skipped.append({"id": invoice_id, "label": f"#{invoice_id}", "reason": reason})
+            continue
+        if invoice["status"] != "on_approval":
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": f"статус «{invoice['status']}», согласовать нельзя"})
+            continue
+        try:
+            if approve_invoice(invoice_id, current_user.username):
+                done.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                             "amount": invoice["amount"]})
+                total += invoice["amount"]
+            else:
+                skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                                "reason": "статус изменился, пока шла операция"})
+        except Exception:
+            logger.exception("bulk_approve: счёт %s не согласован", invoice_id)
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": "внутренняя ошибка"})
+
+    if done:
+        log_action(current_user.username, "bulk_approve_invoices",
+                   f"{len(done)} шт. на {total}")
+    return jsonify({"ok": True, "approved": done, "skipped": skipped, "approved_amount": total})
+
+
+@invoices_bp.route("/bulk-mark-paid", methods=["POST"])
+@role_required("admin")
+def bulk_mark_paid():
+    """
+    Отметить пачку счетов оплаченными. Body: {"ids": [int, ...]}.
+
+    Доступно для «Согласован» и «Загружен в банк»: часть счетов оплачивается
+    мимо автозагрузки платёжки.
+
+    В отчёте отдельно считаем, сколько счетов ушло в архив автоматически
+    (_auto_archive_if_ready): полностью распределённый оплаченный счёт
+    архивируется сам и исчезает из списка — без явной строки в отчёте это
+    выглядит как «счета пропали».
+    """
+    data = request.get_json(silent=True) or {}
+    ids, error = _read_bulk_ids(data)
+    if error:
+        return jsonify({"error": error}), 400
+
+    done, skipped, total, archived = [], [], 0.0, 0
+    for invoice_id in ids:
+        invoice, reason = _bulk_load(invoice_id)
+        if reason:
+            skipped.append({"id": invoice_id, "label": f"#{invoice_id}", "reason": reason})
+            continue
+        if invoice["status"] not in ("approved", "sent_to_bank"):
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": f"статус «{invoice['status']}», отметить оплаченным нельзя"})
+            continue
+        try:
+            if mark_invoice_paid(invoice_id, current_user.username):
+                after = get_invoice_by_id(invoice_id)
+                if after and after["is_archived"]:
+                    archived += 1
+                done.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                             "amount": invoice["amount"]})
+                total += invoice["amount"]
+            else:
+                skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                                "reason": "статус изменился, пока шла операция"})
+        except Exception:
+            logger.exception("bulk_mark_paid: счёт %s не отмечен", invoice_id)
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": "внутренняя ошибка"})
+
+    if done:
+        log_action(current_user.username, "bulk_mark_invoices_paid", f"{len(done)} шт. на {total}")
+    return jsonify({"ok": True, "paid": done, "skipped": skipped,
+                    "paid_amount": total, "archived_count": archived})
+
+
+@invoices_bp.route("/bulk-send-to-bank", methods=["POST"])
+@role_required("admin")
+def bulk_send_to_bank():
+    """
+    Пакетная загрузка платёжек в Модульбанк. Body: {"ids": [...], "sandbox": bool}.
+
+    Самая аккуратная ручка раздела: каждый счёт — отдельное обращение к
+    внешнему API. Поэтому здесь:
+
+    * счета с неполными реквизитами отсеиваются ДО обращения к банку и
+      называются поимённо — банк развернул бы такую платёжку уже после отправки;
+    * если отправлять нечего вовсе, пакет отклоняется целиком (400), а не
+      возвращает пустой успех;
+    * каждый счёт обрабатывается отдельно, результат фиксируется сразу —
+      ошибка на одном не отменяет уже отправленные;
+    * действует бюджет времени, см. BANK_BATCH_BUDGET_SECONDS.
+
+    Сама по себе отправка деньги не двигает: банк создаёт черновик,
+    подписание — вручную в личном кабинете (см. _send_invoice_to_bank).
+    """
+    data = request.get_json(silent=True) or {}
+    ids, error = _read_bulk_ids(data, limit=BULK_BANK_MAX_IDS)
+    if error:
+        return jsonify({"error": error}), 400
+
+    sandbox = bool(data.get("sandbox"))
+
+    # Шаг 1: отбор. Обращаться к банку начинаем, только когда понятно, что
+    # отправлять есть что.
+    ready, skipped = [], []
+    for invoice_id in ids:
+        invoice, reason = _bulk_load(invoice_id)
+        if reason:
+            skipped.append({"id": invoice_id, "label": f"#{invoice_id}", "reason": reason})
+            continue
+        label = _bulk_label(invoice, invoice_id)
+        if not sandbox and invoice["status"] != "approved":
+            skipped.append({"id": invoice_id, "label": label,
+                            "reason": f"статус «{invoice['status']}», в банк не отправляется"})
+            continue
+        missing = [f for f in _INVOICE_REQUIRED_BANK_FIELDS if not invoice.get(f)]
+        if missing:
+            skipped.append({"id": invoice_id, "label": label,
+                            "reason": "не заполнены реквизиты контрагента"})
+            continue
+        if not payer_has_bank_requisites(invoice["payer_id"]):
+            payer = get_payer_by_id(invoice["payer_id"])
+            skipped.append({"id": invoice_id, "label": label,
+                            "reason": f"у плательщика «{(payer or {}).get('name', '')}» нет реквизитов банка"})
+            continue
+        ready.append(invoice)
+
+    if not ready:
+        return jsonify({"error": "Ни один счёт не готов к отправке в банк", "skipped": skipped}), 400
+
+    # Шаг 2: отправка по одному, с фиксацией результата сразу и с бюджетом
+    # времени — недоделанный пакет лучше убитого воркера.
+    started = time.monotonic()
+    sent, failed, postponed = [], [], []
+    for invoice in ready:
+        elapsed = time.monotonic() - started
+        if elapsed > BANK_BATCH_BUDGET_SECONDS - BANK_CALL_TIMEOUT_SECONDS:
+            postponed.append({"id": invoice["id"], "label": _bulk_label(invoice, invoice["id"]),
+                              "reason": "не успели за отведённое время, повторите для остальных"})
+            continue
+        try:
+            outcome = _send_invoice_to_bank(invoice, sandbox, current_user.username)
+        except Exception:
+            logger.exception("bulk_send_to_bank: счёт %s упал", invoice["id"])
+            failed.append({"id": invoice["id"], "label": _bulk_label(invoice, invoice["id"]),
+                           "reason": "внутренняя ошибка"})
+            continue
+
+        if outcome["ok"]:
+            sent.append({"id": invoice["id"], "label": _bulk_label(invoice, invoice["id"]),
+                         "amount": invoice["amount"]})
+        else:
+            failed.append({"id": invoice["id"], "label": _bulk_label(invoice, invoice["id"]),
+                           "reason": outcome["body"].get("error") or "банк отклонил платёжку"})
+
+    log_action(current_user.username,
+               "bulk_send_to_bank_sandbox" if sandbox else "bulk_send_to_bank",
+               f"отправлено {len(sent)}, ошибок {len(failed)}, отложено {len(postponed)}")
+
+    return jsonify({
+        "ok": True,
+        "sandbox": sandbox,
+        "sent": sent,
+        "sent_amount": sum(item["amount"] for item in sent),
+        "failed": failed,
+        "skipped": skipped,
+        "postponed": postponed,
+    })
 
 
 @invoices_bp.route("/<int:invoice_id>/archive", methods=["POST"])

@@ -51,7 +51,18 @@
 
     // Считаем, а не хардкодим: раскрывающаяся строка распределения разъедется
     // при любом изменении набора колонок, если colspan прописать числом.
-    const tableSpan = () => COLS.length;
+    // Колонка чекбоксов есть только у того, кому доступны массовые действия.
+    const tableSpan = () => COLS.length + (canBulk() ? 1 : 0);
+
+    // Из каких статусов счёт вообще можно выбрать для массового действия
+    const BULK_SELECTABLE = ['on_approval', 'approved', 'sent_to_bank'];
+
+    // Массовые действия: какие статусы принимает каждое и как называется
+    const BULK_ACTIONS = [
+        { key: 'approve', label: 'Согласовать', statuses: ['on_approval'], style: 'bx-btn--ok' },
+        { key: 'bank', label: 'Отправить в банк', statuses: ['approved'], style: '' },
+        { key: 'paid', label: 'Отметить оплаченными', statuses: ['approved', 'sent_to_bank'], style: 'bx-btn--ok' },
+    ];
 
     /**
      * Поля панели фильтров — тоже декларативно. `key` совпадает с параметром
@@ -147,6 +158,8 @@
         total: 0,
         totalAmount: 0,
         expandedAlloc: new Set(),
+        selected: new Set(),
+        report: null,
         summary: null,
         loading: false,
 
@@ -780,6 +793,9 @@
         renderPlaceholder('iv2ViewBoard', 'Платёжный борд',
             'Колонки по срокам оплаты, перенос даты перетаскиванием — Фаза 9.');
 
+        // Панель массовых действий имеет смысл только в таблице — там чекбоксы
+        renderBulkBar();
+
         if (state.view === 'queue') {
             renderQueue();
             // Детали активного счёта могли не загрузиться, пока вид был скрыт
@@ -888,11 +904,20 @@
         return `${name} — ${state.sort.dir === 'asc' ? 'по возрастанию' : 'по убыванию'}`;
     }
 
+    function canBulk() {
+        return Boolean(state.user && state.user.role === 'admin');
+    }
+
+    function isSelectable(invoice) {
+        return !invoice.is_archived && BULK_SELECTABLE.indexOf(invoice.status) !== -1;
+    }
+
     function renderTable() {
         const host = $('iv2ViewTable');
         if (!host) return;
 
-        const head = COLS.map(col => `
+        const bulk = canBulk();
+        const head = (bulk ? '<th class="iv2-cbx-col"></th>' : '') + COLS.map(col => `
             <th class="${col.sort ? 'iv2-sortable' : ''}${col.sort === state.sort.key ? ' iv2-sorted' : ''}${col.right ? ' iv2-right' : ''}"
                 ${col.sort ? `data-sort="${col.sort}"` : ''}>${escapeHtml(col.label)}${sortArrow(col)}</th>`).join('');
 
@@ -904,6 +929,11 @@
         } else {
             body = state.rows.map(invoice => `
                 <tr class="${invoice.is_archived ? 'iv2-arch' : ''}">
+                    ${bulk ? `<td class="iv2-cbx-col">${isSelectable(invoice)
+                        ? `<input type="checkbox" class="iv2-cbx" data-select="${invoice.id}"
+                                  ${state.selected.has(invoice.id) ? 'checked' : ''}
+                                  aria-label="Выбрать счёт">`
+                        : ''}</td>` : ''}
                     ${COLS.map(col => `<td class="${col.right ? 'iv2-right iv2-num' : ''}">${cellContent(col, invoice)}</td>`).join('')}
                 </tr>${allocDetailRow(invoice)}`).join('');
         }
@@ -958,6 +988,15 @@
             button.addEventListener('click', () => openCard(Number(button.getAttribute('data-open'))));
         });
 
+        host.querySelectorAll('[data-select]').forEach(box => {
+            box.addEventListener('change', () => {
+                const id = Number(box.getAttribute('data-select'));
+                if (box.checked) state.selected.add(id);
+                else state.selected.delete(id);
+                renderBulkBar();
+            });
+        });
+
         const more = $('iv2MoreBtn');
         if (more) more.addEventListener('click', () => loadList(true));
 
@@ -973,6 +1012,7 @@
         renderKpis();
         renderChips();
         renderTable();
+        renderBulkBar();
         if (state.view === 'queue') {
             renderQueue();
             if (state.queueActiveId && !state.details[state.queueActiveId]) {
@@ -1977,6 +2017,210 @@
     }
 
     // =========================================================================
+    // Массовые действия
+    // =========================================================================
+
+    /** Выбранные счета из текущей страницы: со снятых фильтром отметку снимаем. */
+    function selectedInvoices() {
+        const byId = {};
+        state.rows.forEach(invoice => { byId[invoice.id] = invoice; });
+        const alive = [];
+        state.selected.forEach(id => { if (byId[id]) alive.push(byId[id]); });
+        if (alive.length !== state.selected.size) {
+            state.selected = new Set(alive.map(invoice => invoice.id));
+        }
+        return alive;
+    }
+
+    function renderBulkBar() {
+        const host = modalHost('bulk');
+        if (!host) return;
+
+        const chosen = selectedInvoices();
+        if (!canBulk() || state.view !== 'table' || !chosen.length) {
+            host.innerHTML = '';
+            return;
+        }
+
+        const total = chosen.reduce((sum, invoice) => sum + (Number(invoice.amount) || 0), 0);
+
+        // Кнопка появляется, если под неё подходит хотя бы один выбранный счёт,
+        // и показывает, скольких именно касается: при смешанном выборе иначе
+        // непонятно, что произойдёт.
+        const buttons = BULK_ACTIONS.map(action => {
+            const count = chosen.filter(invoice => action.statuses.indexOf(invoice.status) !== -1).length;
+            if (!count) return '';
+            return `<button class="bx-btn bx-btn--sm ${action.style}" type="button"
+                            data-bulk="${action.key}">${escapeHtml(action.label)} · ${count}</button>`;
+        }).join('');
+
+        host.innerHTML = `
+            <div class="iv2-bulkbar">
+                <span class="iv2-bulkbar__txt">Выбрано <b>${chosen.length}</b> ·
+                    <span class="iv2-bulkbar__sum">${escapeHtml(money(total))}</span></span>
+                <span class="iv2-bulkbar__actions">${buttons || '<span class="iv2-bulkbar__txt">Для выбранных статусов массовых действий нет</span>'}</span>
+                <button class="bx-btn bx-btn--sm iv2-bulkbar__clear" type="button" id="iv2BulkClear">Снять выбор</button>
+            </div>`;
+
+        host.querySelectorAll('[data-bulk]').forEach(button => {
+            button.addEventListener('click', () => runBulkAction(button.getAttribute('data-bulk')));
+        });
+        const clear = $('iv2BulkClear');
+        if (clear) {
+            clear.addEventListener('click', () => {
+                state.selected.clear();
+                renderTable();
+                renderBulkBar();
+            });
+        }
+    }
+
+    function invoiceListText(invoices, limit) {
+        const shown = invoices.slice(0, limit || 12)
+            .map(invoice => invoice.invoice_number || ('#' + invoice.id));
+        const rest = invoices.length - shown.length;
+        return shown.join(', ') + (rest > 0 ? ` и ещё ${rest}` : '');
+    }
+
+    async function runBulkAction(actionKey) {
+        const action = BULK_ACTIONS.find(a => a.key === actionKey);
+        if (!action) return;
+
+        const chosen = selectedInvoices().filter(invoice => action.statuses.indexOf(invoice.status) !== -1);
+        if (!chosen.length) return;
+
+        const ids = chosen.map(invoice => invoice.id);
+        const total = chosen.reduce((sum, invoice) => sum + (Number(invoice.amount) || 0), 0);
+
+        // Подтверждение со списком номеров и итоговой суммой — обязательно для
+        // всех трёх действий: пачка в 20 счетов уходит одним кликом, и ошибку
+        // заметят поздно.
+        const texts = {
+            approve: {
+                title: 'Согласовать счета?',
+                confirm: 'Согласовать',
+                body: `${withCount(chosen.length, 'счёт', 'счёта', 'счетов')} на ${money(total)}:\n${invoiceListText(chosen)}`,
+            },
+            paid: {
+                title: 'Отметить оплаченными?',
+                confirm: 'Отметить',
+                body: `${withCount(chosen.length, 'счёт', 'счёта', 'счетов')} на ${money(total)}:\n${invoiceListText(chosen)}\n\n`
+                    + 'Полностью распределённые счета уйдут в архив сами и пропадут из списка.',
+            },
+            bank: {
+                title: 'Отправить платёжки в банк?',
+                confirm: 'Отправить',
+                body: `${withCount(chosen.length, 'счёт', 'счёта', 'счетов')} на ${money(total)}:\n${invoiceListText(chosen)}\n\n`
+                    + 'Банк создаст черновики платёжек — подписывать их всё равно нужно вручную в личном кабинете. '
+                    + 'Счета с неполными реквизитами будут пропущены и названы поимённо.',
+            },
+        };
+        const text = texts[actionKey];
+        const ok = await window.BarhatUI.confirm(text.body, {
+            title: text.title,
+            confirmText: text.confirm,
+            danger: actionKey === 'bank',
+        });
+        if (!ok) return;
+
+        const paths = {
+            approve: '/api/invoices/bulk-approve',
+            paid: '/api/invoices/bulk-mark-paid',
+            bank: '/api/invoices/bulk-send-to-bank',
+        };
+
+        try {
+            const data = await apiPost(paths[actionKey], { ids });
+            state.selected.clear();
+            showBulkReport(actionKey, data);
+        } catch (error) {
+            // Пакет мог быть отклонён целиком (например, в банк отправлять
+            // нечего) — сервер в этом случае называет причины поимённо
+            showBulkReport(actionKey, { error: error.message });
+        }
+
+        loadSummary();
+        loadList(false);
+    }
+
+    function reportSection(title, items, withAmount) {
+        if (!items || !items.length) return '';
+        return `
+            <div class="iv2-report__section">
+                <div class="iv2-report__title">${escapeHtml(title)} — ${items.length}</div>
+                <ul class="iv2-report__list">
+                    ${items.map(item => `<li><b>${escapeHtml(item.label || ('#' + item.id))}</b>${
+                        withAmount && item.amount !== undefined ? ' · ' + escapeHtml(money(item.amount)) : ''
+                    }${item.reason ? ' — ' + escapeHtml(item.reason) : ''}</li>`).join('')}
+                </ul>
+            </div>`;
+    }
+
+    function showBulkReport(actionKey, data) {
+        state.report = { actionKey, data };
+        renderBulkReport();
+    }
+
+    function renderBulkReport() {
+        const host = modalHost('report');
+        if (!host) return;
+        if (!state.report) {
+            host.innerHTML = '';
+            return;
+        }
+
+        const { actionKey, data } = state.report;
+        let body;
+
+        if (data.error) {
+            body = `<div class="iv2-form-error">${escapeHtml(data.error)}</div>`
+                + reportSection('Не отправлены', data.skipped);
+        } else if (actionKey === 'approve') {
+            body = `<div class="iv2-report__head">Согласовано ${withCount((data.approved || []).length, 'счёт', 'счёта', 'счетов')}
+                        на ${escapeHtml(money(data.approved_amount || 0))}</div>`
+                + reportSection('Согласованы', data.approved, true)
+                + reportSection('Пропущены', data.skipped);
+        } else if (actionKey === 'paid') {
+            body = `<div class="iv2-report__head">Отмечено оплаченными ${withCount((data.paid || []).length, 'счёт', 'счёта', 'счетов')}
+                        на ${escapeHtml(money(data.paid_amount || 0))}${
+                        data.archived_count ? `, из них ${data.archived_count} ушли в архив автоматически` : ''}</div>`
+                + reportSection('Оплачены', data.paid, true)
+                + reportSection('Пропущены', data.skipped);
+        } else {
+            body = `<div class="iv2-report__head">${data.sandbox ? 'Тестовый контур. ' : ''}Отправлено
+                        ${withCount((data.sent || []).length, 'платёжка', 'платёжки', 'платёжек')}
+                        на ${escapeHtml(money(data.sent_amount || 0))}</div>`
+                + reportSection('Ушли в банк', data.sent, true)
+                + reportSection('Банк отклонил', data.failed)
+                + reportSection('Пропущены до отправки', data.skipped)
+                + reportSection('Не успели за отведённое время', data.postponed);
+        }
+
+        host.innerHTML = `
+            <div class="iv2-ovl iv2-ovl--report" id="iv2ReportOverlay"></div>
+            <div class="iv2-modal iv2-modal--report">
+                <div class="iv2-modal__box iv2-modal__box--narrow">
+                    <div class="iv2-modal__head">
+                        <h3 class="bx-card__title">Результат</h3>
+                        <button class="iv2-x" type="button" id="iv2ReportClose" aria-label="Закрыть">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                 stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                        </button>
+                    </div>
+                    <div class="iv2-modal__body">${body}</div>
+                    <div class="iv2-modal__foot">
+                        <button class="bx-btn" type="button" id="iv2ReportOk">Понятно</button>
+                    </div>
+                </div>
+            </div>`;
+
+        const close = () => { state.report = null; renderBulkReport(); };
+        [$('iv2ReportClose'), $('iv2ReportOk'), $('iv2ReportOverlay')].forEach(element => {
+            if (element) element.addEventListener('click', close);
+        });
+    }
+
+    // =========================================================================
     // Форма счёта: создание, копирование, правка
     // =========================================================================
 
@@ -2024,10 +2268,17 @@
      * могут быть открыты одновременно (правка вызывается из карточки), а общий
      * innerHTML стирал бы одну при перерисовке другой.
      */
+    const MODAL_HOSTS = {
+        card: 'iv2CardHost',
+        form: 'iv2FormHost',
+        bulk: 'iv2BulkHost',
+        report: 'iv2ReportHost',
+    };
+
     function modalHost(name) {
         const root = $('iv2Modals');
         if (!root) return null;
-        const id = name === 'card' ? 'iv2CardHost' : 'iv2FormHost';
+        const id = MODAL_HOSTS[name];
         let host = $(id);
         if (!host) {
             host = document.createElement('div');
@@ -2639,7 +2890,8 @@
         // Escape обрабатываем до проверки поля ввода: закрыть форму хочется и
         // из середины заполнения. Форма поверх карточки — закрываем верхнюю.
         if (event.key === 'Escape') {
-            if (state.form.open) confirmCloseForm();
+            if (state.report) { state.report = null; renderBulkReport(); }
+            else if (state.form.open) confirmCloseForm();
             else if (state.card.id) closeCard();
             return;
         }

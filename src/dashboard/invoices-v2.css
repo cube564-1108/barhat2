@@ -1274,6 +1274,71 @@
 .iv2 .iv2-alloc-total--bad { background: #fffbeb; color: #b45309; }
 .iv2 .iv2-alloc-total__btns { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* === Массовые действия ============================================== */
+
+.iv2 .iv2-cbx-col { width: 34px; }
+
+.iv2 .iv2-bulkbar {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    /* Ниже диалогов BarhatUI (100000) — панель зовёт подтверждение и не должна
+       его закрывать; выше гамбургера мобильного меню (1001) */
+    z-index: 1900;
+    background: var(--bx-wine);
+    color: #fff;
+    border-radius: var(--bx-r-2xl);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 8px 28px rgba(65, 19, 48, 0.28);
+    flex-wrap: wrap;
+    max-width: 94vw;
+}
+
+.iv2 .iv2-bulkbar__txt { font-size: 13.5px; }
+.iv2 .iv2-bulkbar__sum { font-weight: 700; font-variant-numeric: tabular-nums; }
+.iv2 .iv2-bulkbar__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.iv2 .iv2-bulkbar__clear {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+@media (max-width: 640px) {
+    .iv2 .iv2-bulkbar { left: 16px; right: 16px; transform: none; }
+}
+
+/* Отчёт по массовой операции */
+
+.iv2 .iv2-ovl--report { z-index: 2004; }
+.iv2 .iv2-modal--report { z-index: 2005; }
+.iv2 .iv2-modal__box--narrow { max-width: 560px; }
+
+.iv2 .iv2-report__head {
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 15.5px;
+    color: var(--bx-wine);
+    margin-bottom: 12px;
+}
+
+.iv2 .iv2-report__section { margin-bottom: 14px; }
+
+.iv2 .iv2-report__title {
+    font-size: 11.5px;
+    color: var(--bx-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 6px;
+}
+
+.iv2 .iv2-report__list { margin: 0; padding-left: 18px; font-size: 13px; }
+.iv2 .iv2-report__list li { margin-bottom: 4px; }
+.iv2 .iv2-report__list b { color: var(--bx-wine); }
+
 /* === Заглушка на месте ещё не сделанных видов ======================== */
 
 .iv2 .iv2-placeholder {
