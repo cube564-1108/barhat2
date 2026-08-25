@@ -6,6 +6,7 @@ Pyrus API Server
 import os
 import re
 import sys
+import glob
 import time
 import importlib
 import shutil
@@ -13,7 +14,10 @@ import sqlite3
 import logging
 from datetime import datetime
 from typing import Optional
-from flask import Flask, jsonify, request, send_from_directory, redirect, session
+from flask import (
+    Flask, jsonify, request, send_from_directory, send_file, redirect, session,
+    after_this_request,
+)
 from flask.sessions import SecureCookieSessionInterface
 from flask_cors import CORS
 from flask_compress import Compress
@@ -24,7 +28,9 @@ import sys
 import os
 auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
-from auth import auth_bp, login_manager, init_auth_tables, section_required, role_required
+from auth import (
+    auth_bp, login_manager, init_auth_tables, section_required, role_required, log_action,
+)
 
 # ОТЛАДКА: показываем откуда запущен
 print("=" * 60)
@@ -443,6 +449,145 @@ def health_check():
         'disk': _disk_free_info(),
         'write_test': _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
     })
+
+
+# Больше этого одним файлом не отдаём. Смысл границы не в диске, а в том,
+# что воркеров всего два (amvera.yml): отдача занимает один из них на всё
+# время скачивания, и на медленном канале это заметно всем остальным.
+MAX_DB_BACKUP_MB = 512
+
+
+def _remove_stale_db_backups(directory):
+    """Убрать временные копии, оставшиеся от прошлых выгрузок.
+
+    На Linux временный файл удаляется сразу после открытия и сюда не попадает
+    вовсе. На Windows (локальный запуск) открытый файл удалить нельзя, а
+    уборка после отдачи ответа срабатывает не всегда — без этой подчистки
+    копия базы лежала бы на диске до перезапуска. Копия базы на диске —
+    ровно то, чего эта ручка не должна оставлять после себя.
+    """
+    for path in glob.glob(os.path.join(directory, '.db-backup-*.tmp')):
+        try:
+            os.remove(path)
+        except OSError:
+            logger.warning('Не удалось убрать прошлую временную копию базы: %s', path)
+
+
+@app.route('/api/admin/db-backup', methods=['GET'])
+@role_required('admin')
+def download_db_backup():
+    """
+    Копия боевой базы одним файлом — страховка перед миграциями схемы.
+
+    На этом тарифе Amvera нет консоли контейнера, поэтому снять копию можно
+    только HTTP-ручкой. Копируем через sqlite3.Connection.backup(), а не
+    `VACUUM INTO`: backup идёт порциями страниц с паузами и не держит базу
+    заблокированной всё время, что важно при двух воркерах на одном WAL.
+    Копия получается консистентной, без отдельного -wal рядом.
+
+    Безопасность: это единственная ручка проекта, отдающая всю базу целиком —
+    вместе с хешами паролей и данными всех модулей. Поэтому только admin,
+    обязательная запись в audit_log, ответ без кэширования, а временный файл
+    удаляется сразу после открытия — скачиваемой копии на диске не остаётся.
+
+    Регулярные бэкапы этой ручкой не делаются: это была бы отдельная задача
+    с ротацией и шифрованием, а не «скачать по ссылке».
+    """
+    from flask_login import current_user
+
+    source = os.environ.get('BARHAT_DB_PATH', 'barhat.db')
+    if not os.path.exists(source):
+        return jsonify({'error': f'База не найдена: {source}'}), 404
+
+    size = os.path.getsize(source)
+    if size > MAX_DB_BACKUP_MB * 1024 * 1024:
+        return jsonify({
+            'error': f'База весит {round(size / 1024 / 1024, 1)} МБ — больше лимита '
+                     f'{MAX_DB_BACKUP_MB} МБ. Выгружать её через эту ручку нельзя.'
+        }), 413
+
+    # Копия ложится рядом с базой: на проде это /data, то есть постоянный диск
+    # с известным запасом места. В /tmp контейнера места может не быть вовсе.
+    directory = os.path.dirname(os.path.abspath(source))
+    _remove_stale_db_backups(directory)
+    try:
+        free = shutil.disk_usage(directory).free
+    except OSError:
+        free = None
+    if free is not None and free < size * 1.5:
+        return jsonify({
+            'error': f'На диске свободно {round(free / 1024 / 1024, 1)} МБ — '
+                     f'для копии базы ({round(size / 1024 / 1024, 1)} МБ) этого мало'
+        }), 507
+
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    tmp_path = os.path.join(directory, f'.db-backup-{stamp}-{os.getpid()}.tmp')
+
+    source_conn = None
+    target_conn = None
+    try:
+        source_conn = sqlite3.connect(source, timeout=30)
+        source_conn.execute('PRAGMA busy_timeout=30000')
+        target_conn = sqlite3.connect(tmp_path)
+        # Порциями с паузой: за время копирования соседний воркер должен
+        # успевать писать в базу, иначе логин и любое действие встают колом.
+        source_conn.backup(target_conn, pages=2048, sleep=0.01)
+    except Exception:
+        logger.exception('Не удалось снять копию базы %s', source)
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                logger.warning('Временный файл копии остался на диске: %s', tmp_path)
+        return jsonify({'error': 'Не удалось снять копию базы, подробности в логах сервера'}), 500
+    finally:
+        for conn in (target_conn, source_conn):
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+
+    backup_size = os.path.getsize(tmp_path)
+
+    # Файл открываем и тут же удаляем с диска: на Linux данные остаются
+    # доступны через открытый дескриптор, а скачиваемой копии базы на диске
+    # не существует ни секунды. На Windows (локальный запуск) удалить открытый
+    # файл нельзя — там убираем его после ответа.
+    handle = open(tmp_path, 'rb')
+    try:
+        os.remove(tmp_path)
+        cleanup_after_send = False
+    except OSError:
+        cleanup_after_send = True
+
+    log_action(
+        current_user.username, 'download_db_backup',
+        f'{os.path.basename(source)}, {round(backup_size / 1024 / 1024, 2)} МБ'
+    )
+
+    response = send_file(
+        handle,
+        mimetype='application/octet-stream',
+        as_attachment=True,
+        download_name=f'barhat-backup-{stamp}.db',
+    )
+    # Копия базы не должна осесть ни в одном кэше по дороге
+    response.headers['Cache-Control'] = 'no-store'
+
+    if cleanup_after_send:
+        # Именно call_on_close, а не after_this_request: последний срабатывает
+        # ДО того, как WSGI прочитает файл, и ответ падает с «read of closed
+        # file». Здесь же уборка идёт после отдачи тела.
+        @response.call_on_close
+        def _remove_backup_file():
+            try:
+                handle.close()
+                os.remove(tmp_path)
+            except OSError:
+                logger.warning('Временный файл копии остался на диске: %s', tmp_path)
+
+    return response
 
 
 # === Dashboard Routes ===
