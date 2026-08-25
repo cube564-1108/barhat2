@@ -107,10 +107,28 @@ PULSE_ORIGIN = os.environ.get(
 
 @app.after_request
 def _apply_frame_ancestors(response):
-    # Разрешаем встраивание только с домена Пульса. X-Frame-Options
-    # намеренно НЕ выставляем — DENY/SAMEORIGIN сломали бы встраивание,
-    # а frame-ancestors современным браузерам достаточно.
-    response.headers["Content-Security-Policy"] = f"frame-ancestors {PULSE_ORIGIN}"
+    """Разрешаем встраивать наши ответы в <iframe> только со своего домена
+    и с домена Пульса. X-Frame-Options намеренно НЕ выставляем —
+    DENY/SAMEORIGIN сломали бы встраивание в Пульс, а frame-ancestors
+    современным браузерам достаточно.
+
+    Хук ДОПОЛНЯЕТ политику вьюхи, а не затирает её. Раньше здесь стояло
+    присваивание, и оно молча выигрывало у вьюхи: просмотр вложений
+    (src/invoices/server.py, ручка inline) ставит себе `sandbox`, но до
+    браузера тот заголовок не доезжал. Последствий было два — песочницы на
+    вложениях не существовало вовсе, а PDF вообще перестал открываться:
+    ответу доставался только `frame-ancestors <домен Пульса>`, поэтому
+    встраивание в <iframe> на самом дашборде браузер блокировал
+    (ERR_BLOCKED_BY_RESPONSE). Отсюда же и `'self'` в списке источников.
+    """
+    frame_ancestors = f"frame-ancestors 'self' {PULSE_ORIGIN}"
+    existing = (response.headers.get("Content-Security-Policy") or "").strip()
+    if not existing:
+        response.headers["Content-Security-Policy"] = frame_ancestors
+    elif "frame-ancestors" not in existing:
+        # Своя frame-ancestors у вьюхи — приоритет её: она знает про свой
+        # ответ больше, чем общий хук.
+        response.headers["Content-Security-Policy"] = f"{existing.rstrip('; ')}; {frame_ancestors}"
     return response
 
 
