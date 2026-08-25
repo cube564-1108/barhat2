@@ -972,13 +972,43 @@ def resolve_planfact_unmatched(unmatched_id: int) -> bool:
 # РАСПРЕДЕЛЕНИЕ ПО ПРОЕКТАМ/СТАТЬЯМ (invoice_line_items)
 # =============================================================================
 
+def _select_line_items_with_names(conn: sqlite3.Connection, invoice_ids: List[int]) -> List[sqlite3.Row]:
+    """
+    Строки распределения вместе с названиями салона и статьи — одним запросом
+    на все переданные счета.
+
+    Общая для списка и для карточки: раньше карточка отдавала строки без
+    названий, и в интерфейсе на месте салона и статьи стояли прочерки.
+
+    Салоны живут в таблице модуля кассовых смен (та же база). Если модуль
+    почему-то не поднялся, таблицы нет — тогда отдаём строки без названия
+    салона, но выборку не роняем.
+    """
+    if not invoice_ids:
+        return []
+    store_name = "s.name AS store_name" if _table_exists(conn, "stores") else "NULL AS store_name"
+    store_join = "LEFT JOIN stores s ON s.id = li.store_id" if _table_exists(conn, "stores") else ""
+    placeholders = ",".join("?" * len(invoice_ids))
+    return conn.execute(
+        f"""
+        SELECT li.id, li.invoice_id, li.store_id, li.expense_category_id, li.amount,
+               {store_name}, c.name AS category_name
+        FROM invoice_line_items li
+        {store_join}
+        LEFT JOIN invoice_expense_categories c ON c.id = li.expense_category_id
+        WHERE li.invoice_id IN ({placeholders})
+        ORDER BY li.id
+        """,
+        tuple(invoice_ids)
+    ).fetchall()
+
+
 def get_invoice_line_items(invoice_id: int) -> List[Dict[str, Any]]:
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM invoice_line_items WHERE invoice_id = ? ORDER BY id",
-        (invoice_id,)
-    ).fetchall()
-    conn.close()
+    try:
+        rows = _select_line_items_with_names(conn, [invoice_id])
+    finally:
+        conn.close()
     return [dict(row) for row in rows]
 
 
@@ -1324,33 +1354,11 @@ def update_invoice(invoice_id: int, changes: Dict[str, Any], changed_by: str) ->
     """
     Частично обновить поля счёта (без статуса, см. update_invoice_status).
     Каждое реально изменившееся поле пишется в invoice_history.
+
+    Тонкая обёртка над update_invoice_with_line_items: две отдельные реализации
+    правки счёта обязательно разъедутся — одну поправят, вторую забудут.
     """
-    invoice = get_invoice_by_id(invoice_id)
-    conn = get_db()
-
-    # Сначала все UPDATE в одной транзакции, историю пишем ПОСЛЕ commit/close —
-    # add_invoice_history открывает своё собственное соединение, и попытка
-    # записать через него, пока это (conn) ещё держит незакоммиченную
-    # транзакцию, падает с "database is locked"
-    actually_changed = []
-    for field, new_value in changes.items():
-        if field not in _EDITABLE_INVOICE_FIELDS:
-            continue
-        old_value = invoice.get(field)
-        if old_value == new_value:
-            continue
-        conn.execute(f"UPDATE invoices SET {field} = ? WHERE id = ?", (new_value, invoice_id))
-        actually_changed.append((field, old_value, new_value))
-
-    conn.commit()
-    conn.close()
-
-    for field, old_value, new_value in actually_changed:
-        add_invoice_history(invoice_id, changed_by, field,
-                             None if old_value is None else str(old_value),
-                             None if new_value is None else str(new_value))
-
-    return get_invoice_by_id(invoice_id)
+    return update_invoice_with_line_items(invoice_id, changes, None, changed_by)["invoice"]
 
 
 def update_invoice_with_line_items(
@@ -1917,24 +1925,7 @@ def _attach_line_items(conn: sqlite3.Connection, invoices: List[Dict[str, Any]])
         return
 
     by_id = {invoice["id"]: invoice for invoice in invoices}
-    placeholders = ",".join("?" * len(by_id))
-    # Салоны живут в таблице модуля кассовых смен (та же база). Если модуль
-    # почему-то не поднялся, таблицы нет — тогда отдаём строки без названия
-    # салона, но список счетов не роняем.
-    store_name = "s.name AS store_name" if _table_exists(conn, "stores") else "NULL AS store_name"
-    store_join = "LEFT JOIN stores s ON s.id = li.store_id" if _table_exists(conn, "stores") else ""
-    rows = conn.execute(
-        f"""
-        SELECT li.id, li.invoice_id, li.store_id, li.expense_category_id, li.amount,
-               {store_name}, c.name AS category_name
-        FROM invoice_line_items li
-        {store_join}
-        LEFT JOIN invoice_expense_categories c ON c.id = li.expense_category_id
-        WHERE li.invoice_id IN ({placeholders})
-        ORDER BY li.id
-        """,
-        tuple(by_id)
-    ).fetchall()
+    rows = _select_line_items_with_names(conn, list(by_id))
 
     for row in rows:
         by_id[row["invoice_id"]]["line_items"].append(dict(row))
