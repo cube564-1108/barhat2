@@ -65,6 +65,10 @@
         { key: 'bank', label: 'Отправить в банк', statuses: ['approved'], style: '' },
         { key: 'paid', label: 'Отметить оплаченными', statuses: ['approved', 'sent_to_bank'], style: 'bx-btn--ok' },
         { key: 'archive', label: 'Убрать в архив', statuses: ['paid', 'rejected'], style: 'bx-btn--ghost' },
+        // Возврат из архива живёт по своим правилам: он касается только
+        // архивных счетов, а остальные действия — только не архивных
+        { key: 'unarchive', label: 'Вернуть из архива', statuses: ['paid', 'rejected', 'on_approval', 'approved', 'sent_to_bank'],
+          style: 'bx-btn--ghost', archivedOnly: true },
     ];
 
     /**
@@ -164,6 +168,8 @@
         selected: new Set(),
         report: null,
         summary: null,
+        // Счета, уехавшие в архив при отменённой автоархивации (см. loadAutoArchived)
+        autoArchived: null,
         loading: false,
 
         // Очередь: какой счёт открыт в правой колонке и какое из его вложений
@@ -556,6 +562,74 @@
             element.addEventListener('click', () => openTool(element.getAttribute('data-tool')));
         });
         host.dataset.ready = role;
+    }
+
+    /**
+     * Счета, уехавшие в архив ещё при автоархивации.
+     *
+     * Её отмена подействовала только на будущее: те счета, что уже уехали,
+     * так и лежат в архиве и в списке не видны. Показываем плашку с
+     * предложением вернуть их — консоли на этом тарифе Amvera нет, разовые
+     * операции с боевой базой делаются из интерфейса.
+     */
+    async function loadAutoArchived() {
+        if (!isAdmin()) return;
+        try {
+            const data = await apiGet('/api/invoices/admin/auto-archived');
+            state.autoArchived = { count: data.count || 0, amount: data.amount || 0 };
+        } catch (error) {
+            console.error('invoices-v2: не удалось проверить архив:', error);
+            state.autoArchived = null;
+        }
+        renderAutoArchived();
+    }
+
+    function renderAutoArchived() {
+        const host = $('iv2AutoArchived');
+        if (!host) return;
+        if (!state.autoArchived || !state.autoArchived.count) {
+            host.innerHTML = '';
+            return;
+        }
+
+        const { count, amount } = state.autoArchived;
+        host.innerHTML = `
+            <div class="iv2-notice">
+                <div class="iv2-notice__text">
+                    <b>${escapeHtml(withCount(count, 'оплаченный счёт', 'оплаченных счёта', 'оплаченных счетов'))}</b>
+                    на ${escapeHtml(money(amount))} ${count === 1 ? 'лежит' : 'лежат'} в архиве —
+                    их убрала туда автоархивация, пока она работала. Сейчас счета в архив кладёте только вы.
+                </div>
+                <button class="bx-btn bx-btn--sm" type="button" id="iv2RestoreArchived">Вернуть в список</button>
+            </div>`;
+
+        const button = $('iv2RestoreArchived');
+        if (button) button.addEventListener('click', () => restoreAutoArchived(button));
+    }
+
+    async function restoreAutoArchived(button) {
+        const { count, amount } = state.autoArchived;
+        const ok = await window.BarhatUI.confirm(
+            `${withCount(count, 'счёт', 'счёта', 'счетов')} на ${money(amount)} вернутся в обычный список. `
+            + 'Те, что вы убирали в архив сами, останутся на месте.',
+            { title: 'Вернуть счета из архива?', confirmText: 'Вернуть' });
+        if (!ok) return;
+
+        button.disabled = true;
+        try {
+            const data = await apiPost('/api/invoices/admin/auto-archived/restore', {});
+            const restored = (data.restored || []).length;
+            toast(restored
+                ? `Возвращено в список: ${withCount(restored, 'счёт', 'счёта', 'счетов')}`
+                : 'Возвращать нечего', 'success');
+            state.autoArchived = { count: 0, amount: 0 };
+            renderAutoArchived();
+            loadSummary();
+            loadList(false);
+        } catch (error) {
+            button.disabled = false;
+            toast('Не удалось вернуть счета: ' + error.message, 'error');
+        }
     }
 
     function renderKpis() {
@@ -1208,8 +1282,21 @@
         return isAdmin();
     }
 
+    /**
+     * Можно ли выбрать счёт чекбоксом. Архивные выбираются тоже — ради
+     * массового возврата из архива; действия, которым архивный счёт не
+     * подходит, до него просто не доберутся (см. bulkActionFits).
+     */
     function isSelectable(invoice) {
-        return !invoice.is_archived && BULK_SELECTABLE.indexOf(invoice.status) !== -1;
+        if (invoice.is_archived) return true;
+        return BULK_SELECTABLE.indexOf(invoice.status) !== -1;
+    }
+
+    /** Подходит ли счёт под массовое действие: и по статусу, и по архиву. */
+    function bulkActionFits(action, invoice) {
+        if (action.archivedOnly) return Boolean(invoice.is_archived);
+        if (invoice.is_archived) return false;
+        return action.statuses.indexOf(invoice.status) !== -1;
     }
 
     function renderTable() {
@@ -2364,7 +2451,7 @@
         // и показывает, скольких именно касается: при смешанном выборе иначе
         // непонятно, что произойдёт.
         const buttons = BULK_ACTIONS.map(action => {
-            const count = chosen.filter(invoice => action.statuses.indexOf(invoice.status) !== -1).length;
+            const count = chosen.filter(invoice => bulkActionFits(action, invoice)).length;
             if (!count) return '';
             return `<button class="bx-btn bx-btn--sm ${action.style}" type="button"
                             data-bulk="${action.key}">${escapeHtml(action.label)} · ${count}</button>`;
@@ -2402,7 +2489,7 @@
         const action = BULK_ACTIONS.find(a => a.key === actionKey);
         if (!action) return;
 
-        const chosen = selectedInvoices().filter(invoice => action.statuses.indexOf(invoice.status) !== -1);
+        const chosen = selectedInvoices().filter(invoice => bulkActionFits(action, invoice));
         if (!chosen.length) return;
 
         const ids = chosen.map(invoice => invoice.id);
@@ -2427,7 +2514,13 @@
                 confirm: 'Убрать в архив',
                 body: `${withCount(chosen.length, 'счёт', 'счёта', 'счетов')} на ${money(total)}:\n${invoiceListText(chosen)}\n\n`
                     + 'Они пропадут из списка — найти их можно переключателем «Показать архив», '
-                    + 'а вернуть кнопкой в карточке.',
+                    + 'а вернуть оттуда тем же массовым действием.',
+            },
+            unarchive: {
+                title: 'Вернуть счета из архива?',
+                confirm: 'Вернуть',
+                body: `${withCount(chosen.length, 'счёт', 'счёта', 'счетов')} на ${money(total)}:\n${invoiceListText(chosen)}\n\n`
+                    + 'Они снова появятся в обычном списке.',
             },
             bank: {
                 title: 'Отправить платёжки в банк?',
@@ -2450,6 +2543,7 @@
             paid: '/api/invoices/bulk-mark-paid',
             bank: '/api/invoices/bulk-send-to-bank',
             archive: '/api/invoices/bulk-archive',
+            unarchive: '/api/invoices/bulk-unarchive',
         };
 
         try {
@@ -2512,6 +2606,11 @@
             body = `<div class="iv2-report__head">Убрано в архив ${withCount((data.archived || []).length, 'счёт', 'счёта', 'счетов')}
                         на ${escapeHtml(money(data.archived_amount || 0))}</div>`
                 + reportSection('В архиве', data.archived, true)
+                + reportSection('Пропущены', data.skipped);
+        } else if (actionKey === 'unarchive') {
+            body = `<div class="iv2-report__head">Возвращено из архива ${withCount((data.unarchived || []).length, 'счёт', 'счёта', 'счетов')}
+                        на ${escapeHtml(money(data.unarchived_amount || 0))}</div>`
+                + reportSection('Вернулись в список', data.unarchived, true)
                 + reportSection('Пропущены', data.skipped);
         } else {
             body = `<div class="iv2-report__head">${data.sandbox ? 'Тестовый контур. ' : ''}Отправлено
@@ -4377,6 +4476,7 @@
 
         loadSummary();
         loadList(false);
+        loadAutoArchived();
 
         // Пришли по адресу с номером счёта — открываем карточку. Своей записи
         // в истории при этом не заводим: она уже там, человек пришёл по ссылке

@@ -1678,3 +1678,27 @@
 }
 
 .iv2 .iv2-form-file__del:hover { color: var(--bx-wine); border-color: var(--bx-pink); }
+
+/* === Плашка «счета остались в архиве после автоархивации» ============ */
+
+.iv2 .iv2-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+    background: #fff;
+    border: 1px solid var(--bx-pink);
+    border-radius: var(--bx-r-2xl);
+    padding: 14px 16px;
+    margin-bottom: 14px;
+}
+
+.iv2 .iv2-notice__text {
+    flex: 1;
+    min-width: 240px;
+    font-size: 13.5px;
+    color: var(--bx-text);
+}
+
+.iv2 .iv2-notice__text b { color: var(--bx-wine); }

@@ -2013,6 +2013,40 @@ def mark_invoice_paid(invoice_id: int, changed_by: str = "system") -> bool:
     return True
 
 
+def find_auto_archived_invoices() -> List[Dict[str, Any]]:
+    """
+    Оплаченные счета, которые в архив положила не человек, а автоархивация.
+
+    Отмена автоархивации (2026-08-25) действует только на будущее: те счета,
+    что уже уехали, так и лежат в архиве и не видны в списке. Отличить их
+    можно точно — set_invoice_archived писала историю от имени `system`, а
+    ручная архивация пишет имя пользователя.
+
+    Берём те, у которых ПОСЛЕДНЯЯ запись об архивации сделана системой: если
+    после неё счёт возвращали и архивировали руками, это уже решение человека,
+    и трогать его нельзя.
+    """
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT i.id, i.invoice_number, i.amount, i.paid_at, i.archived_at
+        FROM invoices i
+        WHERE i.is_archived = 1
+          AND i.status = 'paid'
+          AND (
+                SELECT h.changed_by
+                FROM invoice_history h
+                WHERE h.invoice_id = i.id AND h.field_name = 'is_archived'
+                ORDER BY h.changed_at DESC, h.id DESC
+                LIMIT 1
+              ) = 'system'
+        ORDER BY i.paid_at DESC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 # Автоархивации здесь больше нет (решение владельца 2026-08-25).
 # Оплаченный и полностью распределённый счёт уходил в архив сам, а архив в
 # списке скрыт по умолчанию — из-за этого оплаченные счета «пропадали» с

@@ -79,6 +79,7 @@ from .storage import (
     reject_invoice,
     mark_invoice_paid,
     set_invoice_archived,
+    find_auto_archived_invoices,
     get_invoice_line_items,
     set_invoice_line_items,
     counterparty_data_report,
@@ -972,6 +973,88 @@ def bulk_mark_paid():
 # ещё согласовывать и платить. Тот же набор, при котором кнопка «В архив»
 # показывается в карточке.
 ARCHIVABLE_STATUSES = ("paid", "rejected")
+
+
+@invoices_bp.route("/admin/auto-archived", methods=["GET"])
+@role_required("admin")
+def list_auto_archived():
+    """
+    Сколько оплаченных счетов лежит в архиве не по решению человека.
+
+    Отмена автоархивации подействовала только на будущее — уже уехавшие счета
+    остались в архиве и в списке не видны. Сначала показываем, что найдено,
+    и только отдельным запросом возвращаем: разовые операции с боевой базой на
+    этом тарифе Amvera делаются HTTP-ручками, консоли контейнера нет.
+    """
+    found = find_auto_archived_invoices()
+    return jsonify({
+        "count": len(found),
+        "amount": round(sum(float(i["amount"] or 0) for i in found), 2),
+        "invoices": found,
+    })
+
+
+@invoices_bp.route("/admin/auto-archived/restore", methods=["POST"])
+@role_required("admin")
+def restore_auto_archived():
+    """Вернуть из архива счета, которые туда положила автоархивация."""
+    found = find_auto_archived_invoices()
+    restored, failed = [], []
+    for invoice in found:
+        try:
+            if set_invoice_archived(invoice["id"], False, current_user.username):
+                restored.append({"id": invoice["id"],
+                                 "label": invoice["invoice_number"] or f"#{invoice['id']}",
+                                 "amount": invoice["amount"]})
+            else:
+                failed.append({"id": invoice["id"], "label": invoice["invoice_number"] or f"#{invoice['id']}",
+                               "reason": "счёт не найден"})
+        except Exception:
+            logger.exception("restore_auto_archived: счёт %s не возвращён", invoice["id"])
+            failed.append({"id": invoice["id"], "label": invoice["invoice_number"] or f"#{invoice['id']}",
+                           "reason": "внутренняя ошибка"})
+
+    if restored:
+        log_action(current_user.username, "restore_auto_archived_invoices", f"{len(restored)} шт.")
+    return jsonify({"ok": True, "restored": restored, "failed": failed,
+                    "restored_amount": round(sum(float(i["amount"] or 0) for i in restored), 2)})
+
+
+@invoices_bp.route("/bulk-unarchive", methods=["POST"])
+@role_required("admin")
+def bulk_unarchive():
+    """Вернуть пачку счетов из архива. Body: {"ids": [int, ...]}."""
+    data = request.get_json(silent=True) or {}
+    ids, error = _read_bulk_ids(data)
+    if error:
+        return jsonify({"error": error}), 400
+
+    done, skipped, total = [], [], 0.0
+    for invoice_id in ids:
+        invoice, reason = _bulk_load(invoice_id)
+        if reason:
+            skipped.append({"id": invoice_id, "label": f"#{invoice_id}", "reason": reason})
+            continue
+        if not invoice["is_archived"]:
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": "счёт не в архиве"})
+            continue
+        try:
+            if set_invoice_archived(invoice_id, False, current_user.username):
+                done.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                             "amount": invoice["amount"]})
+                total += invoice["amount"]
+            else:
+                skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                                "reason": "счёт изменился, пока шла операция"})
+        except Exception:
+            logger.exception("bulk_unarchive: счёт %s не возвращён", invoice_id)
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": "внутренняя ошибка"})
+
+    if done:
+        log_action(current_user.username, "bulk_unarchive_invoices", f"{len(done)} шт. на {total}")
+    return jsonify({"ok": True, "unarchived": done, "skipped": skipped, "unarchived_amount": total})
 
 
 @invoices_bp.route("/bulk-archive", methods=["POST"])
