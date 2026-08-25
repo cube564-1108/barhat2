@@ -29,6 +29,8 @@ from typing import Any, Dict, Optional
 from dotenv import load_dotenv
 import requests
 
+from russian_ca import trust_russian_ca
+
 from .document import build_1c_payment_document
 
 load_dotenv()
@@ -53,6 +55,10 @@ class ModulbankClient:
         self.session = requests.Session()
         self.session.trust_env = False
         self.session.proxies = {"http": None, "https": None, "no_proxy": None}
+        # api.modulbank.ru подписан корнем НУЦ Минцифры, которого нет в certifi:
+        # без этого запрос падает на проверке TLS, не дойдя до банка. См.
+        # src/russian_ca.py — там же объяснение, почему не verify=False.
+        trust_russian_ca(self.session)
 
     def _headers(self) -> Dict[str, str]:
         headers = {

@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 import requests
 
+from russian_ca import trust_russian_ca
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ class PlanFactClient:
         self.session = requests.Session()
         self.session.trust_env = False
         self.session.proxies = {"http": None, "https": None, "no_proxy": None}
+        trust_russian_ca(self.session)
 
     def _headers(self) -> Dict[str, str]:
         return {

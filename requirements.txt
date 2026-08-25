@@ -1,6 +1,10 @@
 # HTTP client для Pyrus API
 requests==2.32.3
 
+# Бандл корневых сертификатов. Тянется как зависимость requests, но мы
+# импортируем его напрямую в src/russian_ca.py — фиксируем явно.
+certifi>=2024.7.4
+
 # HTTP server (для JSON endpoint)
 flask==3.0.3
 

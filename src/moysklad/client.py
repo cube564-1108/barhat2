@@ -14,6 +14,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 import requests
 
+from russian_ca import trust_russian_ca
+
 # Загружаем переменные окружения
 load_dotenv()
 
@@ -73,6 +75,7 @@ class MoySkladClient:
         # Отключаем прокси
         self.session.trust_env = False
         self.session.proxies = {'http': None, 'https': None, 'no_proxy': None}
+        trust_russian_ca(self.session)
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Получить заголовки авторизации"""

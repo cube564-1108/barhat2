@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import requests
 
+from russian_ca import trust_russian_ca
+
 from .seed_data import RETAILCRM_CASH_PAYMENT_CODE
 
 logger = logging.getLogger(__name__)
@@ -104,6 +106,7 @@ class RetailCRMClient:
         self.session.headers.update({
             "X-API-KEY": self.api_key
         })
+        trust_russian_ca(self.session)
 
     def _get(self, endpoint: str, params: Dict = None) -> Dict:
         """Выполнить GET-запрос к API."""

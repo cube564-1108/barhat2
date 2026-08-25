@@ -23,6 +23,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
+from russian_ca import trust_russian_ca
+
 logger = logging.getLogger(__name__)
 
 RETAILCRM_URL = os.environ.get("RETAILCRM_URL")
@@ -94,6 +96,7 @@ class CourierOrdersClient:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({"X-API-KEY": self.api_key or ""})
+        trust_russian_ca(self.session)
 
     def _get(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
         if not self.api_url or not self.api_key:
