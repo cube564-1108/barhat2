@@ -59,16 +59,22 @@
     // (решение владельца 2026-08-25) убирать отработанные счета надо пачкой.
     const BULK_SELECTABLE = ['on_approval', 'approved', 'sent_to_bank', 'paid', 'rejected'];
 
-    // Массовые действия: какие статусы принимает каждое и как называется
+    /**
+     * Массовые действия: какие статусы принимает каждое и как называется.
+     *
+     * `style` тут только из светлого набора: панель массовых действий залита
+     * `--bx-wine`, и `bx-btn--ghost` красит текст ровно в этот же цвет — от
+     * кнопки остаётся одна рамка. Для тёмного фона есть `bx-btn--ghost-light`.
+     */
     const BULK_ACTIONS = [
         { key: 'approve', label: 'Согласовать', statuses: ['on_approval'], style: 'bx-btn--ok' },
         { key: 'bank', label: 'Отправить в банк', statuses: ['approved'], style: '' },
         { key: 'paid', label: 'Отметить оплаченными', statuses: ['approved', 'sent_to_bank'], style: 'bx-btn--ok' },
-        { key: 'archive', label: 'Убрать в архив', statuses: ['paid', 'rejected'], style: 'bx-btn--ghost' },
+        { key: 'archive', label: 'Убрать в архив', statuses: ['paid', 'rejected'], style: 'bx-btn--ghost-light' },
         // Возврат из архива живёт по своим правилам: он касается только
         // архивных счетов, а остальные действия — только не архивных
         { key: 'unarchive', label: 'Вернуть из архива', statuses: ['paid', 'rejected', 'on_approval', 'approved', 'sent_to_bank'],
-          style: 'bx-btn--ghost', archivedOnly: true },
+          style: 'bx-btn--ghost-light', archivedOnly: true },
     ];
 
     /**
