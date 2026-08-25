@@ -1362,3 +1362,90 @@
     margin: 0;
     font-size: 13px;
 }
+
+/* === Инструменты раздела: справочники, контрагенты, ПланФакт ========== */
+
+/* Поверх формы счёта: из формы инструменты не открыть, но при любом их
+   пересечении сверху должно оказаться то, что человек открыл последним. */
+.iv2 .iv2-ovl--tools { z-index: 2006; }
+.iv2 .iv2-modal--tools { z-index: 2007; }
+.iv2 .iv2-modal__box--tools { max-width: 820px; }
+
+.iv2 .iv2-tabs--tools { margin-bottom: 14px; }
+
+.iv2 .iv2-tools-note {
+    font-size: 12.5px;
+    color: var(--bx-text-2);
+    margin: 0 0 12px;
+}
+
+.iv2 .iv2-tools-add {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-tools-add .iv2-input { flex: 1; min-width: 200px; }
+
+.iv2 .iv2-tools-empty {
+    padding: 22px 0;
+    text-align: center;
+    color: var(--bx-muted);
+    font-size: 13px;
+}
+
+.iv2 .iv2-tools-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--bx-border);
+}
+
+.iv2 .iv2-tools-row:last-child { border-bottom: none; }
+
+.iv2 .iv2-tools-row__main { flex: 1; min-width: 0; }
+
+.iv2 .iv2-tools-row__name {
+    font-size: 14px;
+    color: var(--bx-text);
+    word-break: break-word;
+}
+
+.iv2 .iv2-tools-row__req {
+    font-size: 12.5px;
+    color: var(--bx-text-2);
+    margin-top: 2px;
+    word-break: break-word;
+}
+
+.iv2 .iv2-tools-row__warn {
+    font-size: 12px;
+    color: #b45309;
+    margin-top: 2px;
+}
+
+.iv2 .iv2-tools-row__btns {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-tools-bank {
+    flex-basis: 100%;
+    border-top: 1px dashed var(--bx-border);
+    margin-top: 8px;
+    padding-top: 12px;
+}
+
+.iv2 .iv2-tools-bank__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0 12px;
+}
+
+.iv2 .iv2-tools-bank__btns { display: flex; gap: 8px; flex-wrap: wrap; }

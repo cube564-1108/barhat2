@@ -173,7 +173,29 @@
         // пропадает от любого действия в соседней колонке.
         commentDrafts: {},
         details: {},
+
+        // Инструменты раздела (справочники, контрагенты, ПланФакт) — одна
+        // модалка за раз, поэтому одно поле `open` на все три.
+        tools: emptyTools(),
     };
+
+    function emptyTools() {
+        return {
+            open: null,           // 'refs' | 'counterparties' | 'planfact'
+            refs: { type: 'categories', list: [], loading: false, error: '', bankEditId: null, newName: '' },
+            cp: { list: [], loaded: false, loading: false, error: '', search: '', form: null, saving: false },
+            pf: {
+                tab: 'sync',
+                busy: false,
+                status: '',
+                result: null,
+                mapping: null,
+                mappingLoading: false,
+                unmatched: null,
+                unmatchedLoading: false,
+            },
+        };
+    }
 
     /**
      * Счёт из адреса страницы. Читаем СИНХРОННО при загрузке файла: script.js
@@ -488,18 +510,36 @@
         badge.hidden = false;
     }
 
+    /**
+     * Кнопки шапки. Ключ кэша — роль, а не «уже рисовали»: набор кнопок от неё
+     * зависит, а роль становится известна только с первым onPageActivated.
+     */
     function renderHeaderActions() {
         const host = $('iv2HeaderActions');
-        if (!host || host.dataset.ready === '1') return;
-        host.innerHTML = `
+        if (!host) return;
+        const role = (state.user && state.user.role) || 'unknown';
+        if (host.dataset.ready === role) return;
+
+        // Справочники, контрагенты и ПланФакт правит только админ — как и в
+        // старом разделе. Подстановка реквизитов в форме счёта доступна всем.
+        const toolButtons = isAdmin() ? TOOL_BUTTONS.map(tool => `
+            <button class="bx-btn bx-btn--ghost-light" type="button" data-tool="${tool.key}">
+                ${escapeHtml(tool.label)}
+            </button>`).join('') : '';
+
+        host.innerHTML = toolButtons + `
             <button class="bx-btn bx-btn--light" type="button" id="iv2NewInvoice">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                      stroke-width="1.75" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
                 Новый счёт
             </button>`;
+
         const button = $('iv2NewInvoice');
         if (button) button.addEventListener('click', () => openForm('create'));
-        host.dataset.ready = '1';
+        host.querySelectorAll('[data-tool]').forEach(element => {
+            element.addEventListener('click', () => openTool(element.getAttribute('data-tool')));
+        });
+        host.dataset.ready = role;
     }
 
     function renderKpis() {
@@ -904,8 +944,12 @@
         return `${name} — ${state.sort.dir === 'asc' ? 'по возрастанию' : 'по убыванию'}`;
     }
 
-    function canBulk() {
+    function isAdmin() {
         return Boolean(state.user && state.user.role === 'admin');
+    }
+
+    function canBulk() {
+        return isAdmin();
     }
 
     function isSelectable(invoice) {
@@ -1497,7 +1541,7 @@
      */
     function actionsHtml(details) {
         const invoice = details.invoice;
-        const isAdmin = state.user && state.user.role === 'admin';
+        const admin = isAdmin();
         const buttons = [];
 
         // Правку показываем по ответу сервера, а не по своей копии правил:
@@ -1508,7 +1552,7 @@
         }
         buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="copy">Копировать счёт</button>`);
 
-        if (isAdmin) {
+        if (admin) {
             if (invoice.is_archived) {
                 buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="unarchive">Вернуть из архива</button>`);
             } else if (invoice.status === 'on_approval') {
@@ -1523,8 +1567,7 @@
         }
 
         const soon = [];
-        if (isAdmin && !invoice.is_archived && invoice.status === 'on_approval') soon.push('«Вернуть на доработку» — Фаза 7');
-        if (isAdmin && invoice.status === 'approved') soon.push('«Отправить в банк» — Фаза 6');
+        if (admin && !invoice.is_archived && invoice.status === 'on_approval') soon.push('«Вернуть на доработку» — Фаза 7');
 
         return buttons.join('')
             + (soon.length ? `<div class="iv2-hint iv2-soon">Ещё приедет: ${escapeHtml(soon.join(' · '))}</div>` : '');
@@ -2273,6 +2316,7 @@
         form: 'iv2FormHost',
         bulk: 'iv2BulkHost',
         report: 'iv2ReportHost',
+        tools: 'iv2ToolsHost',
     };
 
     function modalHost(name) {
@@ -2891,6 +2935,7 @@
         // из середины заполнения. Форма поверх карточки — закрываем верхнюю.
         if (event.key === 'Escape') {
             if (state.report) { state.report = null; renderBulkReport(); }
+            else if (state.tools.open) closeTool();
             else if (state.form.open) confirmCloseForm();
             else if (state.card.id) closeCard();
             return;
@@ -2931,6 +2976,344 @@
             renderCard();
         }
     });
+
+    // =========================================================================
+    // Инструменты раздела: справочники, контрагенты, ПланФакт
+    //
+    // Раздел заменяет старый целиком (решение №11 плана), поэтому всё, что
+    // делалось из шапки старого раздела, должно делаться и здесь. Серверные
+    // ручки те же — переписан только интерфейс, на токенах --bx-* и внутри
+    // #iv2Modals: вынесенная в body модалка потеряла бы скоуп стилей .iv2.
+    // =========================================================================
+
+    const TOOL_BUTTONS = [
+        { key: 'refs', label: 'Справочники' },
+        { key: 'counterparties', label: 'Контрагенты' },
+        { key: 'planfact', label: 'ПланФакт' },
+    ];
+
+    const TOOL_TITLES = {
+        refs: 'Справочники счетов',
+        counterparties: 'Контрагенты',
+        planfact: 'ПланФакт — авторазноска оплаченных счетов',
+    };
+
+    /**
+     * Вкладки справочников. `api` — база роута: салоны (проекты) физически
+     * живут в модуле кассовых смен, у них общая таблица stores, остальные
+     * справочники принадлежат счетам. Обе группы построены по одному шаблону
+     * (GET/POST списка, PUT/DELETE по id), поэтому одна модалка на всё.
+     */
+    const REF_TABS = [
+        { key: 'categories',  label: 'Статьи расхода',     api: '/api/invoices' },
+        { key: 'cities',      label: 'Города',             api: '/api/invoices' },
+        { key: 'payers',      label: 'На кого выставлен',  api: '/api/invoices' },
+        { key: 'vat-options', label: 'НДС',                api: '/api/invoices' },
+        { key: 'stores',      label: 'Салоны (проекты)',   api: '/api/cash-shifts' },
+    ];
+
+    // Реквизиты расчётного счёта плательщика: своя запись у каждой компании,
+    // все в одном кабинете Модульбанка под одним токеном. Пустые реквизиты =
+    // этот плательщик через банк-автоматику не проводится.
+    const PAYER_BANK_FIELDS = [
+        { key: 'inn', label: 'ИНН' },
+        { key: 'kpp', label: 'КПП' },
+        { key: 'bank_account', label: 'Расчётный счёт' },
+        { key: 'bank_name', label: 'Банк' },
+        { key: 'bank_bik', label: 'БИК' },
+        { key: 'bank_corr_account', label: 'Корр. счёт' },
+    ];
+
+    async function apiDelete(path) {
+        const response = await fetch(path, { method: 'DELETE', credentials: 'include' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        return data;
+    }
+
+    /**
+     * Перечитать справочники раздела после правки в модалке: селекты фильтров
+     * и открытая форма счёта иначе останутся со старым списком до перезахода
+     * в раздел.
+     */
+    async function reloadReferences() {
+        state.refsLoaded = false;
+        try {
+            await loadReferences();
+            fillFilterSelects();
+            if (state.form.open) renderForm();
+        } catch (error) {
+            console.error('invoices-v2: не удалось перечитать справочники:', error);
+        }
+    }
+
+    function openTool(key) {
+        if (!isAdmin()) return;
+        state.tools = emptyTools();
+        state.tools.open = key;
+        renderTools();
+        if (key === 'refs') loadRefList();
+    }
+
+    function closeTool() {
+        state.tools = emptyTools();
+        renderTools();
+    }
+
+    function toolsTabsHtml(tabs, current, attribute) {
+        return `<div class="iv2-tabs iv2-tabs--tools">${tabs.map(tab => `
+            <button class="iv2-tab${tab.key === current ? ' iv2-tab--active' : ''}" type="button"
+                    ${attribute}="${escapeHtml(tab.key)}">${escapeHtml(tab.label)}</button>`).join('')}</div>`;
+    }
+
+    function renderTools() {
+        const host = modalHost('tools');
+        if (!host) return;
+
+        const open = state.tools.open;
+        if (!open) {
+            host.innerHTML = '';
+            return;
+        }
+
+        let body = '';
+        if (open === 'refs') body = refsBodyHtml();
+
+        host.innerHTML = `
+            <div class="iv2-ovl iv2-ovl--tools" id="iv2ToolsOverlay"></div>
+            <div class="iv2-modal iv2-modal--tools">
+                <div class="iv2-modal__box iv2-modal__box--tools">
+                    <div class="iv2-modal__head">
+                        <h3 class="bx-card__title">${escapeHtml(TOOL_TITLES[open] || '')}</h3>
+                        <button class="iv2-x" type="button" id="iv2ToolsClose" aria-label="Закрыть">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                 stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                        </button>
+                    </div>
+                    <div class="iv2-modal__body">${body}</div>
+                    <div class="iv2-modal__foot">
+                        <button class="bx-btn bx-btn--ghost" type="button" id="iv2ToolsDone">Закрыть</button>
+                    </div>
+                </div>
+            </div>`;
+
+        [$('iv2ToolsClose'), $('iv2ToolsDone'), $('iv2ToolsOverlay')].forEach(element => {
+            if (element) element.addEventListener('click', closeTool);
+        });
+
+        if (open === 'refs') bindRefs();
+    }
+
+    // ------------------------------------------------------------------ Справочники
+
+    function refApiBase() {
+        const tab = REF_TABS.find(t => t.key === state.tools.refs.type);
+        return tab ? tab.api : '/api/invoices';
+    }
+
+    async function loadRefList() {
+        const refs = state.tools.refs;
+        refs.loading = true;
+        refs.error = '';
+        renderTools();
+        try {
+            const data = await apiGet(`${refApiBase()}/${refs.type}`);
+            // Ключ ответа совпадает с типом справочника, включая 'vat-options'
+            refs.list = data[refs.type] || [];
+        } catch (error) {
+            refs.list = [];
+            refs.error = error.message;
+        } finally {
+            refs.loading = false;
+            renderTools();
+        }
+    }
+
+    function refsBodyHtml() {
+        const refs = state.tools.refs;
+        return toolsTabsHtml(REF_TABS, refs.type, 'data-ref')
+            + `<div class="iv2-tools-add">
+                   <input class="iv2-input" type="text" id="iv2RefNewName" placeholder="Название"
+                          autocomplete="off" value="${escapeHtml(refs.newName || '')}">
+                   <button class="bx-btn bx-btn--sm" type="button" id="iv2RefAdd">Добавить</button>
+               </div>
+               <div id="iv2RefList">${refsListHtml()}</div>`;
+    }
+
+    function refsListHtml() {
+        const refs = state.tools.refs;
+        if (refs.loading) return '<p class="iv2-tools-empty">Загрузка…</p>';
+        if (refs.error) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(refs.error)}</p>`;
+        if (!refs.list.length) return '<p class="iv2-tools-empty">Список пуст</p>';
+
+        const isPayers = refs.type === 'payers';
+        return refs.list.map(item => `
+            <div class="iv2-tools-row">
+                <div class="iv2-tools-row__main">
+                    <div class="iv2-tools-row__name">${escapeHtml(item.name)}</div>
+                    ${isPayers ? `<div class="iv2-hint">${item.bank_account
+                        ? 'реквизиты банка заполнены' : 'реквизиты банка не заполнены'}</div>` : ''}
+                </div>
+                <div class="iv2-tools-row__btns">
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                            data-ref-act="rename" data-ref-id="${escapeHtml(item.id)}">Изменить</button>
+                    ${isPayers ? `<button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                            data-ref-act="bank" data-ref-id="${escapeHtml(item.id)}">Реквизиты банка</button>` : ''}
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                            data-ref-act="delete" data-ref-id="${escapeHtml(item.id)}">Удалить</button>
+                </div>
+                ${isPayers && String(refs.bankEditId) === String(item.id) ? payerBankFormHtml(item) : ''}
+            </div>`).join('');
+    }
+
+    function payerBankFormHtml(item) {
+        return `
+            <div class="iv2-tools-bank" data-payer-form="${escapeHtml(item.id)}">
+                <div class="iv2-tools-bank__grid">
+                    ${PAYER_BANK_FIELDS.map(field => `
+                        <div class="iv2-field">
+                            <label class="iv2-field__label">${escapeHtml(field.label)}</label>
+                            <input class="iv2-input" type="text" data-payer-field="${field.key}"
+                                   value="${escapeHtml(item[field.key] || '')}">
+                        </div>`).join('')}
+                </div>
+                <div class="iv2-tools-bank__btns">
+                    <button class="bx-btn bx-btn--ok bx-btn--sm" type="button"
+                            data-ref-act="bank-save" data-ref-id="${escapeHtml(item.id)}">Сохранить реквизиты</button>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-ref-act="bank-cancel">Отмена</button>
+                </div>
+            </div>`;
+    }
+
+    /** Перерисовать только список: иначе поле «Название» теряет набранный текст. */
+    function renderRefList() {
+        const host = $('iv2RefList');
+        if (!host) return;
+        host.innerHTML = refsListHtml();
+        bindRefListActions();
+    }
+
+    function bindRefs() {
+        const host = modalHost('tools');
+        if (host) {
+            host.querySelectorAll('[data-ref]').forEach(tab => {
+                tab.addEventListener('click', () => {
+                    state.tools.refs.type = tab.getAttribute('data-ref');
+                    state.tools.refs.bankEditId = null;
+                    state.tools.refs.list = [];
+                    loadRefList();
+                });
+            });
+        }
+
+        const nameInput = $('iv2RefNewName');
+        if (nameInput) {
+            nameInput.addEventListener('input', () => { state.tools.refs.newName = nameInput.value; });
+            nameInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') { event.preventDefault(); addRefItem(); }
+            });
+        }
+        const addButton = $('iv2RefAdd');
+        if (addButton) addButton.addEventListener('click', addRefItem);
+
+        bindRefListActions();
+    }
+
+    function bindRefListActions() {
+        const host = $('iv2RefList');
+        if (!host) return;
+        host.querySelectorAll('[data-ref-act]').forEach(button => {
+            button.addEventListener('click', () => {
+                refAction(button.getAttribute('data-ref-act'), button.getAttribute('data-ref-id'));
+            });
+        });
+    }
+
+    async function refAction(action, id) {
+        const refs = state.tools.refs;
+        const item = refs.list.find(row => String(row.id) === String(id));
+
+        if (action === 'bank') {
+            refs.bankEditId = String(refs.bankEditId) === String(id) ? null : id;
+            renderRefList();
+            return;
+        }
+        if (action === 'bank-cancel') {
+            refs.bankEditId = null;
+            renderRefList();
+            return;
+        }
+        if (action === 'bank-save') {
+            await savePayerBank(id);
+            return;
+        }
+        if (action === 'rename') {
+            const name = await window.BarhatUI.prompt('Новое название:', item ? item.name : '', {
+                title: 'Переименовать запись',
+                confirmText: 'Сохранить',
+            });
+            if (!name || !name.trim()) return;
+            try {
+                await apiPut(`${refApiBase()}/${refs.type}/${id}`, { name: name.trim() });
+                await loadRefList();
+                await reloadReferences();
+                toast('Название сохранено', 'success');
+            } catch (error) {
+                toast('Не удалось изменить: ' + error.message, 'error');
+            }
+            return;
+        }
+        if (action === 'delete') {
+            const confirmed = await window.BarhatUI.confirm(
+                `«${item ? item.name : id}» перестанет предлагаться в формах. Заведённые счета не изменятся.`,
+                { title: 'Удалить запись из справочника?', confirmText: 'Удалить', danger: true }
+            );
+            if (!confirmed) return;
+            try {
+                await apiDelete(`${refApiBase()}/${refs.type}/${id}`);
+                await loadRefList();
+                await reloadReferences();
+                toast('Запись удалена', 'success');
+            } catch (error) {
+                toast('Не удалось удалить: ' + error.message, 'error');
+            }
+        }
+    }
+
+    async function addRefItem() {
+        const name = String(state.tools.refs.newName || '').trim();
+        if (!name) {
+            toast('Укажите название', 'error');
+            return;
+        }
+        try {
+            await apiPost(`${refApiBase()}/${state.tools.refs.type}`, { name });
+            state.tools.refs.newName = '';
+            await loadRefList();
+            await reloadReferences();
+            toast('Запись добавлена', 'success');
+        } catch (error) {
+            toast('Не удалось добавить: ' + error.message, 'error');
+        }
+    }
+
+    async function savePayerBank(id) {
+        const form = document.querySelector(`[data-payer-form="${id}"]`);
+        if (!form) return;
+        const payload = {};
+        PAYER_BANK_FIELDS.forEach(field => {
+            const input = form.querySelector(`[data-payer-field="${field.key}"]`);
+            payload[field.key] = input ? input.value.trim() : '';
+        });
+        try {
+            await apiPut(`/api/invoices/payers/${id}/bank-requisites`, payload);
+            state.tools.refs.bankEditId = null;
+            await loadRefList();
+            toast('Реквизиты плательщика сохранены', 'success');
+        } catch (error) {
+            toast('Не удалось сохранить реквизиты: ' + error.message, 'error');
+        }
+    }
 
     // =========================================================================
     // Точка входа
