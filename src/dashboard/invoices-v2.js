@@ -54,14 +54,17 @@
     // Колонка чекбоксов есть только у того, кому доступны массовые действия.
     const tableSpan = () => COLS.length + (canBulk() ? 1 : 0);
 
-    // Из каких статусов счёт вообще можно выбрать для массового действия
-    const BULK_SELECTABLE = ['on_approval', 'approved', 'sent_to_bank'];
+    // Из каких статусов счёт вообще можно выбрать для массового действия.
+    // Оплаченные и отклонённые здесь ради архивации: с отменой автоархивации
+    // (решение владельца 2026-08-25) убирать отработанные счета надо пачкой.
+    const BULK_SELECTABLE = ['on_approval', 'approved', 'sent_to_bank', 'paid', 'rejected'];
 
     // Массовые действия: какие статусы принимает каждое и как называется
     const BULK_ACTIONS = [
         { key: 'approve', label: 'Согласовать', statuses: ['on_approval'], style: 'bx-btn--ok' },
         { key: 'bank', label: 'Отправить в банк', statuses: ['approved'], style: '' },
         { key: 'paid', label: 'Отметить оплаченными', statuses: ['approved', 'sent_to_bank'], style: 'bx-btn--ok' },
+        { key: 'archive', label: 'Убрать в архив', statuses: ['paid', 'rejected'], style: 'bx-btn--ghost' },
     ];
 
     /**
@@ -2088,7 +2091,7 @@
                 toast('Счёт отклонён и отправлен в архив');
             } else if (action === 'paid') {
                 const ok = await window.BarhatUI.confirm(
-                    `${label} · ${money(invoice.amount)}. Полностью распределённый счёт уйдёт в архив сам.`,
+                    `${label} · ${money(invoice.amount)}. Счёт останется в списке — в архив его убираете вы.`,
                     { title: 'Отметить оплаченным?', confirmText: 'Отметить' });
                 if (!ok) return;
                 await apiPost(`/api/invoices/${invoiceId}/mark-paid`);
@@ -2417,8 +2420,14 @@
             paid: {
                 title: 'Отметить оплаченными?',
                 confirm: 'Отметить',
+                body: `${withCount(chosen.length, 'счёт', 'счёта', 'счетов')} на ${money(total)}:\n${invoiceListText(chosen)}`,
+            },
+            archive: {
+                title: 'Убрать счета в архив?',
+                confirm: 'Убрать в архив',
                 body: `${withCount(chosen.length, 'счёт', 'счёта', 'счетов')} на ${money(total)}:\n${invoiceListText(chosen)}\n\n`
-                    + 'Полностью распределённые счета уйдут в архив сами и пропадут из списка.',
+                    + 'Они пропадут из списка — найти их можно переключателем «Показать архив», '
+                    + 'а вернуть кнопкой в карточке.',
             },
             bank: {
                 title: 'Отправить платёжки в банк?',
@@ -2440,6 +2449,7 @@
             approve: '/api/invoices/bulk-approve',
             paid: '/api/invoices/bulk-mark-paid',
             bank: '/api/invoices/bulk-send-to-bank',
+            archive: '/api/invoices/bulk-archive',
         };
 
         try {
@@ -2495,9 +2505,13 @@
                 + reportSection('Пропущены', data.skipped);
         } else if (actionKey === 'paid') {
             body = `<div class="iv2-report__head">Отмечено оплаченными ${withCount((data.paid || []).length, 'счёт', 'счёта', 'счетов')}
-                        на ${escapeHtml(money(data.paid_amount || 0))}${
-                        data.archived_count ? `, из них ${data.archived_count} ушли в архив автоматически` : ''}</div>`
+                        на ${escapeHtml(money(data.paid_amount || 0))}</div>`
                 + reportSection('Оплачены', data.paid, true)
+                + reportSection('Пропущены', data.skipped);
+        } else if (actionKey === 'archive') {
+            body = `<div class="iv2-report__head">Убрано в архив ${withCount((data.archived || []).length, 'счёт', 'счёта', 'счетов')}
+                        на ${escapeHtml(money(data.archived_amount || 0))}</div>`
+                + reportSection('В архиве', data.archived, true)
                 + reportSection('Пропущены', data.skipped);
         } else {
             body = `<div class="iv2-report__head">${data.sandbox ? 'Тестовый контур. ' : ''}Отправлено

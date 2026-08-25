@@ -932,17 +932,15 @@ def bulk_mark_paid():
     Доступно для «Согласован» и «Загружен в банк»: часть счетов оплачивается
     мимо автозагрузки платёжки.
 
-    В отчёте отдельно считаем, сколько счетов ушло в архив автоматически
-    (_auto_archive_if_ready): полностью распределённый оплаченный счёт
-    архивируется сам и исчезает из списка — без явной строки в отчёте это
-    выглядит как «счета пропали».
+    Оплаченный счёт остаётся в списке: автоархивация убрана 2026-08-25 —
+    в архив счета кладёт человек (см. /bulk-archive).
     """
     data = request.get_json(silent=True) or {}
     ids, error = _read_bulk_ids(data)
     if error:
         return jsonify({"error": error}), 400
 
-    done, skipped, total, archived = [], [], 0.0, 0
+    done, skipped, total = [], [], 0.0
     for invoice_id in ids:
         invoice, reason = _bulk_load(invoice_id)
         if reason:
@@ -954,9 +952,6 @@ def bulk_mark_paid():
             continue
         try:
             if mark_invoice_paid(invoice_id, current_user.username):
-                after = get_invoice_by_id(invoice_id)
-                if after and after["is_archived"]:
-                    archived += 1
                 done.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
                              "amount": invoice["amount"]})
                 total += invoice["amount"]
@@ -970,8 +965,63 @@ def bulk_mark_paid():
 
     if done:
         log_action(current_user.username, "bulk_mark_invoices_paid", f"{len(done)} шт. на {total}")
-    return jsonify({"ok": True, "paid": done, "skipped": skipped,
-                    "paid_amount": total, "archived_count": archived})
+    return jsonify({"ok": True, "paid": done, "skipped": skipped, "paid_amount": total})
+
+
+# Что вообще имеет смысл убирать в архив: счёт в работе прятать нельзя, его
+# ещё согласовывать и платить. Тот же набор, при котором кнопка «В архив»
+# показывается в карточке.
+ARCHIVABLE_STATUSES = ("paid", "rejected")
+
+
+@invoices_bp.route("/bulk-archive", methods=["POST"])
+@role_required("admin")
+def bulk_archive():
+    """
+    Убрать пачку счетов в архив. Body: {"ids": [int, ...]}.
+
+    Появилась вместе с отменой автоархивации (2026-08-25): раз оплаченный счёт
+    больше не уходит в архив сам, убирать отработанные счета надо уметь пачкой,
+    иначе список растёт бесконечно.
+
+    Архивируем то же, что разрешает кнопка в карточке, — оплаченные и
+    отклонённые: счёт в работе прятать нельзя, его ещё согласовывать.
+    """
+    data = request.get_json(silent=True) or {}
+    ids, error = _read_bulk_ids(data)
+    if error:
+        return jsonify({"error": error}), 400
+
+    done, skipped, total = [], [], 0.0
+    for invoice_id in ids:
+        invoice, reason = _bulk_load(invoice_id)
+        if reason:
+            skipped.append({"id": invoice_id, "label": f"#{invoice_id}", "reason": reason})
+            continue
+        if invoice["is_archived"]:
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": "уже в архиве"})
+            continue
+        if invoice["status"] not in ARCHIVABLE_STATUSES:
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": "счёт ещё в работе — в архив убираются оплаченные и отклонённые"})
+            continue
+        try:
+            if set_invoice_archived(invoice_id, True, current_user.username):
+                done.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                             "amount": invoice["amount"]})
+                total += invoice["amount"]
+            else:
+                skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                                "reason": "счёт изменился, пока шла операция"})
+        except Exception:
+            logger.exception("bulk_archive: счёт %s не убран в архив", invoice_id)
+            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
+                            "reason": "внутренняя ошибка"})
+
+    if done:
+        log_action(current_user.username, "bulk_archive_invoices", f"{len(done)} шт. на {total}")
+    return jsonify({"ok": True, "archived": done, "skipped": skipped, "archived_amount": total})
 
 
 @invoices_bp.route("/bulk-send-to-bank", methods=["POST"])

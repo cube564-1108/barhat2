@@ -1072,8 +1072,6 @@ def set_invoice_line_items(invoice_id: int, items: List[Dict[str, Any]], changed
     if old_summary != new_summary:
         add_invoice_history(invoice_id, changed_by, "распределение", old_summary, new_summary)
 
-    _auto_archive_if_ready(invoice_id)
-
     return {"ok": True, "error": None}
 
 
@@ -1447,8 +1445,6 @@ def update_invoice_with_line_items(
     if allocation_change:
         add_invoice_history(invoice_id, changed_by, "распределение", allocation_change[0], allocation_change[1])
 
-    _auto_archive_if_ready(invoice_id)
-
     return {"ok": True, "error": None, "invoice": get_invoice_by_id(invoice_id)}
 
 
@@ -1490,9 +1486,6 @@ def update_invoice_status(invoice_id: int, new_status: str, changed_by: str) -> 
     conn.close()
 
     add_invoice_history(invoice_id, changed_by, "status", old_status, new_status)
-
-    if new_status == "paid":
-        _auto_archive_if_ready(invoice_id)
 
     return get_invoice_by_id(invoice_id)
 
@@ -2017,25 +2010,18 @@ def mark_invoice_paid(invoice_id: int, changed_by: str = "system") -> bool:
     conn.close()
 
     add_invoice_history(invoice_id, changed_by, "status", old_status, "paid")
-    _auto_archive_if_ready(invoice_id)
     return True
 
 
-def _auto_archive_if_ready(invoice_id: int):
-    """Оплаченный и полностью разнесённый счёт автоматически уходит в архив."""
-    conn = get_db()
-    row = conn.execute("SELECT status, is_archived FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
-    if not row or row["status"] != "paid" or row["is_archived"]:
-        conn.close()
-        return
-    conn.close()
-
-    if is_invoice_fully_allocated(invoice_id):
-        set_invoice_archived(invoice_id, True)
+# Автоархивации здесь больше нет (решение владельца 2026-08-25).
+# Оплаченный и полностью распределённый счёт уходил в архив сам, а архив в
+# списке скрыт по умолчанию — из-за этого оплаченные счета «пропадали» с
+# экрана, причём не все, а только распределённые. Теперь в архив счёт кладёт
+# человек: кнопкой в карточке или массовым действием (bulk-archive).
 
 
 def set_invoice_archived(invoice_id: int, archived: bool, changed_by: str = "system") -> bool:
-    """Ручной перевод счёта в архив/из архива (доступно и вне авто-условий)."""
+    """Перевод счёта в архив/из архива — только по действию человека."""
     conn = get_db()
     row = conn.execute("SELECT id, is_archived FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
     if not row:
