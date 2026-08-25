@@ -198,6 +198,407 @@
     border-radius: var(--bx-r-lg);
 }
 
+/* === Бейджи статусов (DESIGN-SPEC §6) =============================== */
+
+.iv2 .bx-badge {
+    display: inline-block;
+    border-radius: 9999px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.iv2 .b-onappr { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+.iv2 .b-appr   { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.iv2 .b-bank   { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
+.iv2 .b-paid   { background: var(--bx-wine); color: #fff; }
+.iv2 .b-rej    { background: rgba(0, 0, 0, 0.05); color: var(--bx-text-2); }
+.iv2 .b-arch   { background: rgba(0, 0, 0, 0.05); color: var(--bx-text-2); border: 1px dashed #cfc4cb; }
+.iv2 .b-over   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+.iv2 .b-today  { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+
+/* === KPI-плитки (DESIGN-SPEC §5) ==================================== */
+
+.iv2 .iv2-kpi-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(4, 1fr);
+    margin-bottom: 16px;
+}
+
+@media (max-width: 1000px) {
+    .iv2 .iv2-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 560px) {
+    .iv2 .iv2-kpi-grid { grid-template-columns: 1fr; }
+}
+
+.iv2 .iv2-kpi {
+    display: block;
+    text-align: left;
+    background: #fff;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 16px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.iv2 .iv2-kpi:hover:not(:disabled) {
+    border-color: var(--bx-pink);
+    box-shadow: 0 2px 10px rgba(65, 19, 48, 0.06);
+}
+
+.iv2 .iv2-kpi:disabled { cursor: default; }
+
+.iv2 .iv2-kpi--active {
+    border-color: var(--bx-wine);
+    box-shadow: 0 0 0 2px rgba(65, 19, 48, 0.10);
+}
+
+.iv2 .iv2-kpi__label {
+    display: block;
+    font-size: 11.5px;
+    color: var(--bx-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    line-height: 1.2;
+}
+
+.iv2 .iv2-kpi__value {
+    display: block;
+    font-weight: 700;
+    font-size: 28px;
+    color: var(--bx-wine);
+    margin: 6px 0 4px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums lining-nums;
+    letter-spacing: -0.01em;
+}
+
+.iv2 .iv2-kpi__unit {
+    font-size: 14px;
+    color: var(--bx-text-2);
+    font-weight: 500;
+    margin-left: 6px;
+    letter-spacing: 0;
+}
+
+.iv2 .iv2-kpi__sub { display: block; font-size: 12.5px; font-weight: 600; }
+.iv2 .iv2-kpi__sub--up   { color: var(--bx-up); }
+.iv2 .iv2-kpi__sub--down { color: var(--bx-down); }
+.iv2 .iv2-kpi__sub--flat { color: var(--bx-muted); font-weight: 400; }
+
+.iv2 .iv2-kpis-empty {
+    color: var(--bx-muted);
+    font-size: 12.5px;
+    margin-bottom: 16px;
+}
+
+/* === Панель фильтров ================================================ */
+
+.iv2 .iv2-filters {
+    background: #fff;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+
+.iv2 .iv2-filters__bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-filters__left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.iv2 .iv2-filters__toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 15.5px;
+    color: var(--bx-wine);
+    padding: 0;
+}
+
+.iv2 .iv2-filters__body {
+    display: none;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--bx-border);
+}
+
+.iv2 .iv2-filters--open .iv2-filters__body { display: block; }
+
+.iv2 .iv2-filters__grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+}
+
+@media (max-width: 1100px) {
+    .iv2 .iv2-filters__grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 620px) {
+    .iv2 .iv2-filters__grid { grid-template-columns: 1fr; }
+}
+
+.iv2 .iv2-filters__foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-switches { display: flex; gap: 18px; flex-wrap: wrap; }
+
+.iv2 .iv2-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    color: var(--bx-text);
+    cursor: pointer;
+}
+
+.iv2 .iv2-cbx {
+    width: 16px;
+    height: 16px;
+    accent-color: #411330;
+    cursor: pointer;
+}
+
+/* Чипы активных фильтров */
+
+.iv2 .iv2-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.iv2 .iv2-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(228, 194, 221, 0.4);
+    color: var(--bx-wine);
+    border: 1px solid var(--bx-pink-light);
+    border-radius: 9999px;
+    padding: 3px 6px 3px 10px;
+    font-size: 11.5px;
+}
+
+.iv2 .iv2-chip button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--bx-wine);
+    line-height: 0;
+    padding: 2px;
+    border-radius: 50%;
+}
+
+.iv2 .iv2-chip button:hover { background: rgba(65, 19, 48, 0.10); }
+
+/* === Поля ввода (DESIGN-SPEC §6) ==================================== */
+
+.iv2 .iv2-input,
+.iv2 .iv2-select {
+    width: 100%;
+    padding: 10px 14px;
+    border-radius: var(--bx-r-xl);
+    border: 1px solid #e5e7eb;
+    font-size: 14px;
+    font-family: inherit;
+    color: #1f2937;
+    background: #fff;
+    outline: none;
+    transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.iv2 .iv2-input:focus,
+.iv2 .iv2-select:focus {
+    border-color: var(--bx-pink-deep);
+    box-shadow: 0 0 0 3px rgba(178, 111, 161, 0.15);
+}
+
+.iv2 .iv2-input::placeholder { color: #cbd5e1; }
+
+/* min-width: 0 обязателен — иначе длинное значение в select растягивает
+   колонку грида и панель фильтров разъезжается по горизонтали */
+.iv2 .iv2-field { min-width: 0; }
+
+.iv2 .iv2-field__label {
+    display: block;
+    font-size: 11.5px;
+    color: var(--bx-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 5px;
+}
+
+/* === Табы видов (DESIGN-SPEC §6) ==================================== */
+
+.iv2 .iv2-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.iv2 .iv2-tabs {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px;
+    border-radius: var(--bx-r-xl);
+    background: rgba(228, 194, 221, 0.15);
+}
+
+.iv2 .iv2-tab {
+    padding: 8px 16px;
+    font-size: 14px;
+    font-family: inherit;
+    border: none;
+    background: none;
+    border-radius: var(--bx-r-lg);
+    color: var(--bx-wine);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+}
+
+.iv2 .iv2-tab:hover { background: rgba(228, 194, 221, 0.25); }
+
+.iv2 .iv2-tab--active {
+    background: var(--bx-wine);
+    color: #fff;
+    font-weight: 500;
+}
+
+/* === Таблица ======================================================== */
+
+.iv2 .iv2-tbl-wrap {
+    background: #fff;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 6px 6px 14px;
+    overflow-x: auto;
+}
+
+.iv2 .iv2-tbl-sum {
+    padding: 10px 12px;
+    font-size: 12.5px;
+    color: var(--bx-text-2);
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-tbl-sum b {
+    color: var(--bx-wine);
+    font-variant-numeric: tabular-nums;
+}
+
+.iv2 table.iv2-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.iv2 .iv2-tbl th {
+    text-align: left;
+    font-size: 11.5px;
+    color: var(--bx-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    font-weight: 600;
+    padding: 12px 10px;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--bx-border);
+}
+
+.iv2 .iv2-tbl th.iv2-sortable { cursor: pointer; user-select: none; }
+.iv2 .iv2-tbl th.iv2-sortable:hover { color: var(--bx-wine); }
+.iv2 .iv2-tbl th.iv2-sorted { color: var(--bx-wine); }
+
+.iv2 .iv2-tbl td {
+    padding: 11px 10px;
+    border-bottom: 1px solid var(--bx-border);
+    vertical-align: middle;
+}
+
+.iv2 .iv2-tbl tbody tr:hover td { background: var(--bx-bg); }
+
+/* Архивные строки приглушены — видно, что это уже не текущая работа */
+.iv2 .iv2-tbl tr.iv2-arch td { background: #fbf8fa; color: var(--bx-text-2); }
+
+.iv2 .iv2-tbl .iv2-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.iv2 .iv2-tbl .iv2-right { text-align: right; }
+.iv2 .iv2-tbl .iv2-tbl-empty { text-align: center; padding: 28px 12px; color: var(--bx-muted); }
+.iv2 .iv2-due-badge { margin-top: 3px; }
+
+.iv2 .iv2-alloc-row td { background: var(--bx-bg); }
+
+.iv2 .iv2-alloc-table {
+    width: auto;
+    min-width: 420px;
+    border-collapse: collapse;
+    font-size: 12.5px;
+}
+
+.iv2 .iv2-alloc-table th,
+.iv2 .iv2-alloc-table td {
+    padding: 4px 8px;
+    border: none;
+    text-align: left;
+}
+
+.iv2 .iv2-alloc-table th { color: var(--bx-muted); font-weight: 600; }
+.iv2 .iv2-alloc-table .iv2-right { text-align: right; }
+
+.iv2 .iv2-linkish {
+    color: var(--bx-pink-deep);
+    cursor: pointer;
+    font-weight: 600;
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+    font-size: 12.5px;
+}
+
+.iv2 .iv2-linkish:hover { text-decoration: underline; }
+
+.iv2 .iv2-more {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 0 4px;
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-hint { font-size: 11.5px; color: var(--bx-muted); }
+
 /* === Заглушка на месте ещё не сделанных видов ======================== */
 
 .iv2 .iv2-placeholder {

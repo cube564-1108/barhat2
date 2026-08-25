@@ -29,7 +29,11 @@ from auth import role_required, section_required, log_action
 
 from .storage import (
     STATUSES,
+    INVOICE_SORT_FIELDS,
     ATTACHMENTS_DIR,
+    count_invoices,
+    get_invoices_summary,
+    list_invoice_authors,
     get_all_stores,
     get_store_by_id,
     get_all_expense_categories,
@@ -106,6 +110,10 @@ logger = logging.getLogger(__name__)
 # pytz — в РФ нет перехода на летнее время с 2014 года (тот же приём, что в
 # src/modulbank/document.py и src/cashshifts/retailcrm_client.py)
 _MOSCOW_TZ = timezone(timedelta(hours=3))
+
+# Календарная дата от клиента (KPI-плитки: «сегодня» по часам сотрудника).
+# Проверяем формат до подстановки в SQL — сравнение с due_date строковое.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 invoices_bp = Blueprint("invoices", __name__, url_prefix="/api/invoices")
 
@@ -224,13 +232,30 @@ def get_invoices():
     """
     Список счетов с фильтрами.
 
-    Query params: status, store_id, city_id, payer_id, created_by, counterparty,
-    payment_purpose, created_from, created_to, due_from, due_to, archived,
-    limit, offset
+    Query params: status, store_id, city_id, payer_id, expense_category_id,
+    created_by, counterparty, payment_purpose, created_from, created_to,
+    due_from, due_to, archived, hide_paid, sort, order, with_total, limit, offset
+
+    Параметры expense_category_id, hide_paid, sort, order и with_total добавлены
+    для раздела «Согласование счетов v2» и все необязательны: старый раздел их
+    не передаёт и получает ровно прежний ответ.
     """
     status = request.args.get("status")
     if status and status not in STATUSES:
         return jsonify({"error": f"Неизвестный статус. Доступны: {list(STATUSES)}"}), 400
+
+    sort = request.args.get("sort")
+    if sort and sort not in INVOICE_SORT_FIELDS:
+        return jsonify({"error": f"Сортировка недоступна. Доступны: {sorted(INVOICE_SORT_FIELDS)}"}), 400
+
+    order = (request.args.get("order") or "desc").lower()
+    if order not in ("asc", "desc"):
+        return jsonify({"error": "order должен быть asc или desc"}), 400
+
+    # Верхняя граница страницы. Без неё limit=100000 разом вытянул бы всю базу
+    # вместе со строками распределения — на двух воркерах это заметно.
+    limit = max(1, min(request.args.get("limit", 100, type=int) or 100, 200))
+    offset = max(0, request.args.get("offset", 0, type=int) or 0)
 
     # Не-админ видит только счета своих салонов (или созданные им самим) —
     # см. user_can_access_invoice в storage.py
@@ -240,24 +265,26 @@ def get_invoices():
         restrict_username = current_user.username
         restrict_store_ids = get_user_stores(current_user.username)
 
-    invoices = list_invoices(
-        status=status,
-        store_id=request.args.get("store_id", type=int),
-        city_id=request.args.get("city_id", type=int),
-        payer_id=request.args.get("payer_id", type=int),
-        created_by=request.args.get("created_by"),
-        counterparty=request.args.get("counterparty"),
-        payment_purpose=request.args.get("payment_purpose"),
-        created_from=request.args.get("created_from"),
-        created_to=request.args.get("created_to"),
-        due_from=request.args.get("due_from"),
-        due_to=request.args.get("due_to"),
-        is_archived=request.args.get("archived", "false").lower() == "true",
-        limit=request.args.get("limit", 100, type=int),
-        offset=request.args.get("offset", 0, type=int),
-        restrict_username=restrict_username,
-        restrict_store_ids=restrict_store_ids,
-    )
+    filters = {
+        "status": status,
+        "store_id": request.args.get("store_id", type=int),
+        "city_id": request.args.get("city_id", type=int),
+        "payer_id": request.args.get("payer_id", type=int),
+        "expense_category_id": request.args.get("expense_category_id", type=int),
+        "created_by": request.args.get("created_by"),
+        "counterparty": request.args.get("counterparty"),
+        "payment_purpose": request.args.get("payment_purpose"),
+        "created_from": request.args.get("created_from"),
+        "created_to": request.args.get("created_to"),
+        "due_from": request.args.get("due_from"),
+        "due_to": request.args.get("due_to"),
+        "is_archived": request.args.get("archived", "false").lower() == "true",
+        "hide_paid": request.args.get("hide_paid", "false").lower() == "true",
+        "restrict_username": restrict_username,
+        "restrict_store_ids": restrict_store_ids,
+    }
+
+    invoices = list_invoices(sort=sort, order=order, limit=limit, offset=offset, **filters)
 
     usernames = {inv.get("created_by") for inv in invoices}
     usernames.update(inv.get("approved_by") for inv in invoices)
@@ -267,7 +294,60 @@ def get_invoices():
         inv["created_by_full_name"] = full_names.get(inv.get("created_by"))
         inv["approved_by_full_name"] = full_names.get(inv.get("approved_by"))
 
-    return jsonify({"invoices": invoices, "count": len(invoices)})
+    result = {"invoices": invoices, "count": len(invoices)}
+
+    # Итог по всей выборке считаем только когда о нём попросили. Клиент просит
+    # его на первой странице и переиспользует при «Показать ещё»: набор фильтров
+    # там не меняется, а лишний COUNT(*) на каждую подгрузку — лишняя работа.
+    if request.args.get("with_total", "false").lower() == "true":
+        totals = count_invoices(**filters)
+        result["total"] = totals["count"]
+        result["total_amount"] = totals["amount"]
+
+    return jsonify(result)
+
+
+@invoices_bp.route("/summary", methods=["GET"])
+@section_required("invoices")
+def get_invoices_summary_view():
+    """
+    Четыре KPI-плитки раздела v2 одним запросом.
+
+    Query params: today=YYYY-MM-DD — календарная дата по часам сотрудника.
+    Сервер живёт в UTC, салоны в UTC+5/+7, поэтому «сегодня» определяет клиент;
+    без параметра берём дату сервера.
+    """
+    today = (request.args.get("today") or "").strip()
+    if not _DATE_RE.match(today):
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    restrict_username = None
+    restrict_store_ids = None
+    if current_user.role != "admin":
+        restrict_username = current_user.username
+        restrict_store_ids = get_user_stores(current_user.username)
+
+    return jsonify(get_invoices_summary(
+        today=today,
+        restrict_username=restrict_username,
+        restrict_store_ids=restrict_store_ids,
+    ))
+
+
+@invoices_bp.route("/authors", methods=["GET"])
+@section_required("invoices")
+def get_invoice_authors():
+    """Авторы счетов для фильтра «Автор» — только те, чьи счета видны этому пользователю."""
+    restrict_username = None
+    restrict_store_ids = None
+    if current_user.role != "admin":
+        restrict_username = current_user.username
+        restrict_store_ids = get_user_stores(current_user.username)
+
+    return jsonify({"authors": list_invoice_authors(
+        restrict_username=restrict_username,
+        restrict_store_ids=restrict_store_ids,
+    )})
 
 
 @invoices_bp.route("/<int:invoice_id>", methods=["GET"])

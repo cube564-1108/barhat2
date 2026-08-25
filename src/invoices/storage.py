@@ -16,7 +16,7 @@ import logging
 import os
 import sqlite3
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from storage_paths import resolve as resolve_data_path
 
@@ -1418,11 +1418,43 @@ def get_invoice_by_match_code(match_code: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
-def list_invoices(
+# Откуда читаем список счетов. Города и плательщики подтянуты join'ом, а не
+# отдельными запросами с фронта: иначе в таблице нового раздела на каждую
+# строку пришлось бы разрешать id в название на клиенте, а сортировать по
+# городу стало бы нечем — в самой таблице invoices лежит только city_id.
+_INVOICE_LIST_FROM = """
+    FROM invoices i
+    LEFT JOIN invoice_cities ci ON ci.id = i.city_id
+    LEFT JOIN invoice_payers p ON p.id = i.payer_id
+"""
+
+# Белый список сортировок: ключ приходит от клиента, значение — готовое
+# SQL-выражение. Подставить поле сортировки параметром нельзя, поэтому
+# единственный безопасный путь — сопоставление по словарю. Ничего, что
+# пришло из запроса, в текст SQL не склеивается.
+#
+# py_lower у текстовых полей по той же причине, что и в фильтрах: встроенный
+# LOWER() в SQLite не знает кириллицы, и при сортировке «Ромашка» уехала бы
+# в отдельную группу от «ромашка» (см. get_db).
+INVOICE_SORT_FIELDS = {
+    "created_at": "i.created_at",
+    "due_date": "i.due_date",
+    "amount": "i.amount",
+    "counterparty_name": "py_lower(i.counterparty_name)",
+    "status": "i.status",
+    "city": "py_lower(ci.name)",
+    "payer": "py_lower(p.name)",
+    "created_by": "py_lower(i.created_by)",
+    "id": "i.id",
+}
+
+
+def _build_invoice_filters(
     status: Optional[str] = None,
     store_id: Optional[int] = None,
     city_id: Optional[int] = None,
     payer_id: Optional[int] = None,
+    expense_category_id: Optional[int] = None,
     created_by: Optional[str] = None,
     counterparty: Optional[str] = None,
     payment_purpose: Optional[str] = None,
@@ -1431,13 +1463,16 @@ def list_invoices(
     due_from: Optional[str] = None,
     due_to: Optional[str] = None,
     is_archived: bool = False,
-    limit: int = 100,
-    offset: int = 0,
+    hide_paid: bool = False,
     restrict_username: Optional[str] = None,
     restrict_store_ids: Optional[List[int]] = None,
-) -> List[Dict[str, Any]]:
+) -> Tuple[str, List[Any]]:
     """
-    Получить список счетов с фильтрами.
+    Собрать WHERE и параметры для выборки счетов.
+
+    Вынесено из list_invoices, потому что теми же фильтрами считаются итоги
+    «найдено N на сумму X» (count_invoices). Держать два набора условий
+    отдельно — верный способ получить список и счётчик, которые не сходятся.
 
     restrict_username/restrict_store_ids — ограничение видимости для не-админов:
     показываем счёт, если его создал сам пользователь (restrict_username),
@@ -1445,58 +1480,75 @@ def list_invoices(
     (restrict_store_ids). Передавать оба вместе для не-админа, оба None —
     для админа (без ограничений).
     """
-
-    query = "SELECT * FROM invoices WHERE is_archived = ?"
+    where = "WHERE i.is_archived = ?"
     params: List[Any] = [1 if is_archived else 0]
 
     if restrict_username is not None:
         if restrict_store_ids:
             placeholders = ",".join("?" * len(restrict_store_ids))
-            query += f"""
-                AND (created_by = ? OR id IN (
+            where += f"""
+                AND (i.created_by = ? OR i.id IN (
                     SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders})
                 ))
             """
             params.append(restrict_username)
             params.extend(restrict_store_ids)
         else:
-            query += " AND created_by = ?"
+            where += " AND i.created_by = ?"
             params.append(restrict_username)
 
     if status:
-        query += " AND status = ?"
+        where += " AND i.status = ?"
         params.append(status)
 
+    # Переключатель «Показывать оплаченные» в новом разделе. Отдельным флагом,
+    # а не через status: статус там выбирается одним значением, и «всё, кроме
+    # оплаченных» им не выразить.
+    if hide_paid:
+        where += " AND i.status != 'paid'"
+
     if store_id:
-        query += " AND id IN (SELECT invoice_id FROM invoice_line_items WHERE store_id = ?)"
+        where += " AND i.id IN (SELECT invoice_id FROM invoice_line_items WHERE store_id = ?)"
         params.append(store_id)
 
+    # Статья расхода живёт в строках распределения — тем же подзапросом, что и
+    # салон. Счёт без распределения под такой фильтр не попадает, но и не
+    # исчезает при пустом фильтре.
+    if expense_category_id:
+        where += " AND i.id IN (SELECT invoice_id FROM invoice_line_items WHERE expense_category_id = ?)"
+        params.append(expense_category_id)
+
     if city_id:
-        query += " AND city_id = ?"
+        where += " AND i.city_id = ?"
         params.append(city_id)
 
     # На кого выставлен счёт (юрлицо/ИП Бархата) — поле payer_id самого счёта,
     # а не строк распределения, поэтому фильтр прямой, без подзапроса.
     if payer_id:
-        query += " AND payer_id = ?"
+        where += " AND i.payer_id = ?"
         params.append(payer_id)
 
     if created_by:
-        query += " AND created_by = ?"
+        where += " AND i.created_by = ?"
         params.append(created_by)
 
     # py_lower, а не голый LIKE: SQLite приводит регистр только у латиницы,
-    # и фильтр по «ромашка» не находил счёт «ООО Ромашка» (см. get_db)
+    # и фильтр по «ромашка» не находил счёт «ООО Ромашка» (см. get_db).
+    #
+    # Ищем заодно по ИНН: в одно поле удобно вставить и название, и ИНН из
+    # платёжки, не гадая, куда его класть. Для старого раздела это расширение
+    # результата, а не сужение — то, что находилось раньше, находится и теперь.
     if counterparty:
-        query += " AND py_lower(counterparty_name) LIKE ?"
+        where += " AND (py_lower(i.counterparty_name) LIKE ? OR i.counterparty_inn LIKE ?)"
         params.append(f"%{counterparty.lower()}%")
+        params.append(f"%{counterparty.strip()}%")
 
     if payment_purpose:
-        query += " AND py_lower(payment_purpose) LIKE ?"
+        where += " AND py_lower(i.payment_purpose) LIKE ?"
         params.append(f"%{payment_purpose.lower()}%")
 
     if created_from:
-        query += " AND created_at >= ?"
+        where += " AND i.created_at >= ?"
         params.append(created_from)
 
     if created_to:
@@ -1506,21 +1558,81 @@ def list_invoices(
         # напрямую, и сравнение created_at <= '2026-08-20' отсекло бы все
         # счета этого дня, заведённые позже полуночи.
         if len(created_to.strip()) == 10:
-            query += " AND created_at < datetime(?, '+1 day')"
+            where += " AND i.created_at < datetime(?, '+1 day')"
         else:
-            query += " AND created_at <= ?"
+            where += " AND i.created_at <= ?"
         params.append(created_to)
 
     if due_from:
-        query += " AND due_date >= ?"
+        where += " AND i.due_date >= ?"
         params.append(due_from)
 
     if due_to:
-        query += " AND due_date <= ?"
+        where += " AND i.due_date <= ?"
         params.append(due_to)
 
-    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    return where, params
+
+
+def _build_invoice_order_by(sort: Optional[str], order: Optional[str]) -> str:
+    """
+    ORDER BY по белому списку. Неизвестное поле молча откатывается к сортировке
+    по умолчанию — так же, как вело себя API до появления параметра
+    (валидацию с ответом 400 делает слой server.py, здесь только защита).
+
+    Хвост `i.id DESC` — стабилизатор: без него счета с одинаковой суммой или
+    датой прыгают между страницами при листании «Показать ещё».
+    """
+    field = INVOICE_SORT_FIELDS.get(sort or "", INVOICE_SORT_FIELDS["created_at"])
+    direction = "ASC" if (order or "").lower() == "asc" else "DESC"
+    return f"{field} {direction}, i.id DESC"
+
+
+def list_invoices(
+    status: Optional[str] = None,
+    store_id: Optional[int] = None,
+    city_id: Optional[int] = None,
+    payer_id: Optional[int] = None,
+    expense_category_id: Optional[int] = None,
+    created_by: Optional[str] = None,
+    counterparty: Optional[str] = None,
+    payment_purpose: Optional[str] = None,
+    created_from: Optional[str] = None,
+    created_to: Optional[str] = None,
+    due_from: Optional[str] = None,
+    due_to: Optional[str] = None,
+    is_archived: bool = False,
+    hide_paid: bool = False,
+    sort: Optional[str] = None,
+    order: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    restrict_username: Optional[str] = None,
+    restrict_store_ids: Optional[List[int]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Получить список счетов с фильтрами.
+
+    Новые параметры (expense_category_id, hide_paid, sort, order) имеют
+    значения по умолчанию, при которых поведение ровно прежнее: старый раздел
+    их не передаёт и получает тот же список, что и раньше.
+    """
+    where, params = _build_invoice_filters(
+        status=status, store_id=store_id, city_id=city_id, payer_id=payer_id,
+        expense_category_id=expense_category_id, created_by=created_by,
+        counterparty=counterparty, payment_purpose=payment_purpose,
+        created_from=created_from, created_to=created_to,
+        due_from=due_from, due_to=due_to, is_archived=is_archived,
+        hide_paid=hide_paid, restrict_username=restrict_username,
+        restrict_store_ids=restrict_store_ids,
+    )
+
+    query = (
+        f"SELECT i.*, ci.name AS city_name, p.name AS payer_name"
+        f"{_INVOICE_LIST_FROM} {where}"
+        f" ORDER BY {_build_invoice_order_by(sort, order)} LIMIT ? OFFSET ?"
+    )
+    params = params + [limit, offset]
 
     conn = get_db()
     rows = conn.execute(query, params).fetchall()
@@ -1529,6 +1641,174 @@ def list_invoices(
     conn.close()
 
     return invoices
+
+
+def count_invoices(**filters) -> Dict[str, Any]:
+    """
+    Сколько счетов попадает под фильтры и на какую сумму — для подписи
+    «найдено N на сумму X» и для «Показать ещё».
+
+    Принимает те же фильтры, что list_invoices (кроме сортировки и страницы).
+    Считается одним запросом с агрегатами, а не выборкой всех строк: смысл
+    счётчика в том, чтобы не тащить на клиент то, что он не показывает.
+    """
+    filters.pop("limit", None)
+    filters.pop("offset", None)
+    filters.pop("sort", None)
+    filters.pop("order", None)
+
+    where, params = _build_invoice_filters(**filters)
+    conn = get_db()
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt, COALESCE(SUM(i.amount), 0) AS total_amount"
+            f"{_INVOICE_LIST_FROM} {where}",
+            params
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return {"count": row["cnt"], "amount": row["total_amount"]}
+
+
+def get_invoices_summary(
+    today: str,
+    restrict_username: Optional[str] = None,
+    restrict_store_ids: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    """
+    Четыре KPI-плитки одним запросом: ждут согласования / к оплате сегодня /
+    просрочено / на доработке у авторов. По каждой — количество и сумма.
+
+    Считается по всей базе (в пределах видимости пользователя), а НЕ по
+    текущему фильтру списка: плитка отвечает на вопрос «сколько работы всего»,
+    а не «сколько нашлось». Отсюда же и отдельный запрос вместо подсчёта по
+    выданной странице.
+
+    `today` приходит с клиента в виде YYYY-MM-DD — это календарная дата по
+    часам сотрудника. Сервер на Amvera живёт в UTC, салоны в UTC+5 и UTC+7,
+    и «сегодня» у них наступает раньше: взяв дату сервера, мы бы полдня
+    показывали вчерашний срок оплаты как сегодняшний.
+
+    Колонка rework_at появляется только в Фазе 7 — до неё плитка «на доработке»
+    честно показывает ноль, а условие «ждут согласования» не сужается. Так
+    summary не придётся переписывать после миграции.
+    """
+    conn = get_db()
+    try:
+        has_rework = _column_exists(conn, "invoices", "rework_at")
+
+        wait_cond = "i.status = 'on_approval'"
+        rework_cond = "0"
+        if has_rework:
+            wait_cond = "i.status = 'on_approval' AND i.rework_at IS NULL"
+            rework_cond = "i.status = 'on_approval' AND i.rework_at IS NOT NULL"
+
+        # Отклонённые счета архивируются сразу (см. reject_invoice), поэтому
+        # is_archived = 0 их уже отсекает — отдельного условия не нужно.
+        due_open = "i.status != 'paid' AND i.due_date IS NOT NULL"
+
+        where = "WHERE i.is_archived = 0"
+        params: List[Any] = []
+        if restrict_username is not None:
+            if restrict_store_ids:
+                placeholders = ",".join("?" * len(restrict_store_ids))
+                where += f"""
+                    AND (i.created_by = ? OR i.id IN (
+                        SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders})
+                    ))
+                """
+                params.append(restrict_username)
+                params.extend(restrict_store_ids)
+            else:
+                where += " AND i.created_by = ?"
+                params.append(restrict_username)
+
+        row = conn.execute(
+            f"""
+            SELECT
+                SUM(CASE WHEN {wait_cond} THEN 1 ELSE 0 END) AS wait_count,
+                COALESCE(SUM(CASE WHEN {wait_cond} THEN i.amount ELSE 0 END), 0) AS wait_amount,
+                MIN(CASE WHEN {wait_cond} THEN i.created_at END) AS wait_oldest_at,
+                SUM(CASE WHEN {due_open} AND i.due_date = ? THEN 1 ELSE 0 END) AS today_count,
+                COALESCE(SUM(CASE WHEN {due_open} AND i.due_date = ? THEN i.amount ELSE 0 END), 0) AS today_amount,
+                SUM(CASE WHEN {due_open} AND i.due_date < ? THEN 1 ELSE 0 END) AS overdue_count,
+                COALESCE(SUM(CASE WHEN {due_open} AND i.due_date < ? THEN i.amount ELSE 0 END), 0) AS overdue_amount,
+                SUM(CASE WHEN {rework_cond} THEN 1 ELSE 0 END) AS rework_count,
+                COALESCE(SUM(CASE WHEN {rework_cond} THEN i.amount ELSE 0 END), 0) AS rework_amount
+            FROM invoices i
+            {where}
+            """,
+            [today, today, today, today] + params
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return {
+        "wait": {
+            "count": row["wait_count"] or 0,
+            "amount": row["wait_amount"] or 0,
+            "oldest_at": row["wait_oldest_at"],
+        },
+        "due_today": {"count": row["today_count"] or 0, "amount": row["today_amount"] or 0},
+        "overdue": {"count": row["overdue_count"] or 0, "amount": row["overdue_amount"] or 0},
+        "rework": {
+            "count": row["rework_count"] or 0,
+            "amount": row["rework_amount"] or 0,
+            "available": has_rework,
+        },
+    }
+
+
+def list_invoice_authors(
+    restrict_username: Optional[str] = None,
+    restrict_store_ids: Optional[List[int]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Кто заводил счета — для выпадающего списка «Автор» в фильтрах.
+
+    Берём из самих счетов, а не из /api/auth/users: тот эндпоинт открыт только
+    админу и делает запрос permissions на каждого пользователя. Здесь же нужны
+    ровно те авторы, чьи счета человек и так видит.
+    """
+    # Архивные счета тоже учитываем: сотрудник мог завести только их, и без
+    # него в списке его счета было бы нечем отфильтровать.
+    where = "WHERE 1 = 1"
+    params: List[Any] = []
+    if restrict_username is not None:
+        if restrict_store_ids:
+            placeholders = ",".join("?" * len(restrict_store_ids))
+            where += f"""
+                AND (i.created_by = ? OR i.id IN (
+                    SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders})
+                ))
+            """
+            params.append(restrict_username)
+            params.extend(restrict_store_ids)
+        else:
+            where += " AND i.created_by = ?"
+            params.append(restrict_username)
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            f"SELECT i.created_by AS username, COUNT(*) AS invoice_count "
+            f"FROM invoices i {where} GROUP BY i.created_by ORDER BY COUNT(*) DESC",
+            params
+        ).fetchall()
+    finally:
+        conn.close()
+
+    usernames = [row["username"] for row in rows if row["username"]]
+    full_names = get_users_full_names(usernames)
+    return [
+        {
+            "username": row["username"],
+            "full_name": full_names.get(row["username"]) or row["username"],
+            "invoice_count": row["invoice_count"],
+        }
+        for row in rows if row["username"]
+    ]
 
 
 def _attach_line_items(conn: sqlite3.Connection, invoices: List[Dict[str, Any]]):
