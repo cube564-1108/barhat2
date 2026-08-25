@@ -80,14 +80,42 @@
         { key: 'rework',    label: 'На доработке у авторов' },
     ];
 
+    // Очередь первой и по умолчанию (решение №4 плана): раздел делался ради
+    // того, чтобы работа приходила к согласующему, а не искалась в таблице.
     const VIEWS = [
-        { key: 'table', label: 'Таблица' },
         { key: 'queue', label: 'Очередь' },
+        { key: 'table', label: 'Таблица' },
         { key: 'board', label: 'Платёжный борд' },
     ];
 
     const PAGE_SIZE = 25;
     const TEXT_FILTER_DELAY_MS = 350;
+
+    // Человеческие названия полей в истории изменений
+    const HISTORY_FIELDS = {
+        status: 'Статус',
+        amount: 'Сумма',
+        due_date: 'Срок оплаты',
+        payment_purpose: 'Назначение платежа',
+        comment: 'Комментарий',
+        city_id: 'Город',
+        payer_id: 'На кого выставлен',
+        vat_id: 'НДС',
+        counterparty_name: 'Контрагент',
+        counterparty_inn: 'ИНН',
+        counterparty_kpp: 'КПП',
+        counterparty_bank_name: 'Банк',
+        counterparty_bank_bik: 'БИК',
+        counterparty_bank_account: 'Расчётный счёт',
+        counterparty_bank_corr_account: 'Корр. счёт',
+        line_items: 'Распределение',
+        attachments: 'Вложения',
+        is_archived: 'Архив',
+    };
+
+    // Показываем вложение прямо в интерфейсе только то, что браузер умеет
+    // отрисовать. Список тот же, что в белом списке ручки inline на сервере.
+    const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
 
     // =========================================================================
     // Состояние
@@ -95,8 +123,8 @@
 
     const state = {
         user: null,
-        view: 'table',
-        refs: { cities: [], payers: [], categories: [], stores: [], authors: [], statuses: [] },
+        view: 'queue',
+        refs: { cities: [], payers: [], categories: [], stores: [], authors: [], statuses: [], vatOptions: [] },
         refsLoaded: false,
         filters: emptyFilters(),
         showArchived: false,
@@ -109,7 +137,36 @@
         expandedAlloc: new Set(),
         summary: null,
         loading: false,
+
+        // Очередь: какой счёт открыт в правой колонке и какое из его вложений
+        // показано. Карточка — та же панель, но модалкой поверх любого вида.
+        queueActiveId: null,
+        docIndex: 0,
+        card: { id: null, data: null, loading: false, error: null },
+        cardPushed: false,
+        // Черновики сообщений переживают перерисовку: иначе набранный текст
+        // пропадает от любого действия в соседней колонке.
+        commentDrafts: {},
+        details: {},
     };
+
+    /**
+     * Счёт из адреса страницы. Читаем СИНХРОННО при загрузке файла: script.js
+     * на первой отрисовке зовёт history.replaceState('/invoices-v2') и стирает
+     * параметр, а его обработчик асинхронный (ждёт /api/auth/me) и потому
+     * выполняется позже этого модуля.
+     */
+    let pendingInvoiceId = readInvoiceIdFromUrl();
+
+    function readInvoiceIdFromUrl() {
+        try {
+            const raw = new URLSearchParams(window.location.search).get('invoice');
+            const id = Number(raw);
+            return raw && Number.isFinite(id) && id > 0 ? id : null;
+        } catch (e) {
+            return null;
+        }
+    }
 
     // Токен запроса: ответы приходят не в том порядке, в каком уходили. Без
     // него быстрый набор в поле фильтра оставляет на экране результат
@@ -306,17 +363,19 @@
 
     async function loadReferences() {
         if (state.refsLoaded) return;
-        const [cities, payers, categories, stores, authors] = await Promise.all([
+        const [cities, payers, categories, stores, authors, vat] = await Promise.all([
             apiGet('/api/invoices/cities').catch(() => ({ cities: [] })),
             apiGet('/api/invoices/payers').catch(() => ({ payers: [] })),
             apiGet('/api/invoices/categories').catch(() => ({ categories: [] })),
             apiGet('/api/invoices/stores').catch(() => ({ stores: [] })),
             apiGet('/api/invoices/authors').catch(() => ({ authors: [] })),
+            apiGet('/api/invoices/vat-options').catch(() => ({ 'vat-options': [] })),
         ]);
         state.refs.cities = cities.cities || [];
         state.refs.payers = payers.payers || [];
         state.refs.categories = categories.categories || [];
         state.refs.stores = stores.stores || [];
+        state.refs.vatOptions = vat['vat-options'] || [];
         state.refs.authors = (authors.authors || []).map(a => ({
             id: a.username,
             name: a.full_name || a.username,
@@ -354,7 +413,10 @@
         params.set('offset', String(append ? state.rows.length : 0));
         if (!append) params.set('with_total', 'true');
 
+        // Показываем «Загрузка…» в том виде, который сейчас на экране, —
+        // иначе очередь на первом входе успевает мигнуть «Очередь пуста».
         renderTable();
+        if (state.view === 'queue') renderQueue();
 
         try {
             const data = await apiGet('/api/invoices?' + params.toString());
@@ -682,17 +744,23 @@
 
         const hint = $('iv2ViewHint');
         if (hint) {
-            hint.textContent = state.view === 'table'
-                ? 'Фильтры общие для всех видов'
-                : 'Этот вид ещё в работе, фильтры к нему уже применяются';
+            hint.textContent = state.view === 'board'
+                ? 'Этот вид ещё в работе, фильтры к нему уже применяются'
+                : 'Фильтры общие для всех видов';
         }
 
-        // Очередь и борд — Фазы 3 и 9. Пока показываем, что именно приедет,
-        // вместо пустого экрана без объяснений.
-        renderPlaceholder('iv2ViewQueue', 'Очередь согласования',
-            'Список слева, скан по центру, поля и кнопки справа — Фаза 3.');
+        // Борд — Фаза 9. Пока показываем, что именно приедет, вместо пустого
+        // экрана без объяснений.
         renderPlaceholder('iv2ViewBoard', 'Платёжный борд',
             'Колонки по срокам оплаты, перенос даты перетаскиванием — Фаза 9.');
+
+        if (state.view === 'queue') {
+            renderQueue();
+            // Детали активного счёта могли не загрузиться, пока вид был скрыт
+            if (state.queueActiveId && !state.details[state.queueActiveId]) {
+                selectQueueInvoice(state.queueActiveId);
+            }
+        }
     }
 
     function renderPlaceholder(hostId, title, text) {
@@ -769,7 +837,7 @@
 
     function cellContent(col, invoice) {
         switch (col.key) {
-            case 'number': return escapeHtml(invoice.invoice_number || ('#' + invoice.id));
+            case 'number': return `<button class="iv2-linkish iv2-linkish--num" type="button" data-open="${invoice.id}">${escapeHtml(invoice.invoice_number || ('#' + invoice.id))}</button>`;
             case 'city': return escapeHtml(invoice.city_name || '—');
             case 'counterparty': return escapeHtml(invoice.counterparty_name || '—');
             case 'payer': return escapeHtml(invoice.payer_name || '—');
@@ -860,6 +928,10 @@
             });
         });
 
+        host.querySelectorAll('[data-open]').forEach(button => {
+            button.addEventListener('click', () => openCard(Number(button.getAttribute('data-open'))));
+        });
+
         const more = $('iv2MoreBtn');
         if (more) more.addEventListener('click', () => loadList(true));
 
@@ -875,7 +947,717 @@
         renderKpis();
         renderChips();
         renderTable();
+        if (state.view === 'queue') {
+            renderQueue();
+            if (state.queueActiveId && !state.details[state.queueActiveId]) {
+                selectQueueInvoice(state.queueActiveId);
+            }
+        }
     }
+
+    // =========================================================================
+    // Детали счёта: загрузка и вспомогательные разборы
+    // =========================================================================
+
+    /**
+     * Открытие счёта — ОДИН запрос вместо четырёх.
+     * В очереди счета листаются стрелками, и на каждом шаге уходила бы пачка
+     * «счёт + история + сообщения + вложения».
+     */
+    async function loadDetails(invoiceId, force) {
+        if (!force && state.details[invoiceId]) return state.details[invoiceId];
+        const data = await apiGet('/api/invoices/' + invoiceId + '?include=history,comments');
+        state.details[invoiceId] = data;
+        return data;
+    }
+
+    function refName(refKey, id) {
+        if (id === null || id === undefined || id === '') return '';
+        const item = (state.refs[refKey] || []).find(x => String(x.id) === String(id));
+        return item ? item.name : '';
+    }
+
+    function digits(value) {
+        return String(value || '').replace(/\D/g, '');
+    }
+
+    /**
+     * Проверка реквизитов на очевидные опечатки.
+     *
+     * ВНИМАНИЕ: правила намеренно повторяют серверную
+     * counterparty_requisite_warnings (storage.py) — они нужны мгновенно, без
+     * запроса. Источник истины при сохранении и при отправке в банк остаётся
+     * серверным. Меняете правила — правьте оба места вместе.
+     */
+    function requisiteWarnings(invoice) {
+        const warnings = [];
+        const checks = [
+            ['counterparty_inn', [10, 12], 'ИНН из %n цифр — должно быть 10 (юрлицо) или 12 (ИП/физлицо)'],
+            ['counterparty_kpp', [9], 'КПП из %n цифр — должно быть 9'],
+            ['counterparty_bank_bik', [9], 'БИК из %n цифр — должно быть 9'],
+            ['counterparty_bank_account', [20], 'Расчётный счёт из %n цифр — должно быть 20'],
+            ['counterparty_bank_corr_account', [20], 'Корр. счёт из %n цифр — должно быть 20'],
+        ];
+        checks.forEach(([field, lengths, template]) => {
+            const value = digits(invoice[field]);
+            if (value && lengths.indexOf(value.length) === -1) {
+                warnings.push(template.replace('%n', value.length));
+            }
+        });
+        return warnings;
+    }
+
+    const BANK_FIELDS = [
+        'counterparty_name', 'counterparty_inn', 'counterparty_bank_name',
+        'counterparty_bank_bik', 'counterparty_bank_account', 'counterparty_bank_corr_account',
+    ];
+
+    function bankReady(invoice) {
+        return BANK_FIELDS.every(field => String(invoice[field] || '').trim())
+            && requisiteWarnings(invoice).length === 0;
+    }
+
+    // =========================================================================
+    // Отрисовка: превью документа
+    // =========================================================================
+
+    function isImage(filename) {
+        const name = String(filename || '').toLowerCase();
+        return IMAGE_EXTENSIONS.some(ext => name.endsWith(ext));
+    }
+
+    function docHtml(details) {
+        const attachments = details.attachments || [];
+        if (!attachments.length) {
+            return `
+                <div class="iv2-doc">
+                    <div class="iv2-doc__bar"><span class="bx-card__title">Документ</span></div>
+                    <div class="iv2-doc__empty">Скан счёта не приложен — решение придётся принимать вслепую.
+                        Приложить файл можно будет в Фазе 4.</div>
+                </div>`;
+        }
+
+        const index = Math.min(state.docIndex, attachments.length - 1);
+        const active = attachments[index];
+        const inlineUrl = '/api/invoices/attachments/' + active.id + '/inline';
+        const downloadUrl = '/api/invoices/attachments/' + active.id + '/download';
+
+        // Переключатель нужен только когда вложений несколько
+        const tabs = attachments.length > 1
+            ? `<div class="iv2-doc__tabs">${attachments.map((a, i) => `
+                    <button class="iv2-doc__tab${i === index ? ' iv2-doc__tab--on' : ''}"
+                            type="button" data-doctab="${i}">${escapeHtml(a.original_filename)}</button>`).join('')}</div>`
+            : '';
+
+        const frame = isImage(active.original_filename)
+            ? `<img src="${escapeHtml(inlineUrl)}" alt="${escapeHtml(active.original_filename)}">`
+            : `<iframe class="iv2-doc__pdf" src="${escapeHtml(inlineUrl)}" title="Скан счёта"></iframe>`;
+
+        return `
+            <div class="iv2-doc">
+                <div class="iv2-doc__bar">
+                    <span class="bx-card__title">Документ</span>
+                    <a class="bx-btn bx-btn--ghost bx-btn--sm" href="${escapeHtml(downloadUrl)}"
+                       target="_blank" rel="noopener">Скачать</a>
+                </div>
+                ${tabs}
+                <div class="iv2-doc__frame">${frame}</div>
+            </div>`;
+    }
+
+    // =========================================================================
+    // Отрисовка: лента событий и обсуждение
+    // =========================================================================
+
+    function historyText(entry) {
+        const field = HISTORY_FIELDS[entry.field_name] || entry.field_name;
+        const asLabel = (value) => {
+            if (value === null || value === undefined || value === '') return '—';
+            if (entry.field_name === 'status') {
+                const meta = STATUSES[value];
+                if (meta) return meta.label;
+            }
+            return String(value);
+        };
+        if (entry.old_value === null || entry.old_value === undefined || entry.old_value === '') {
+            return `${field}: ${asLabel(entry.new_value)}`;
+        }
+        return `${field}: ${asLabel(entry.old_value)} → ${asLabel(entry.new_value)}`;
+    }
+
+    /**
+     * Лента — слияние истории изменений и переписки, по времени.
+     * Сообщения людей визуально отличаются от системных событий: иначе
+     * вопрос «а точно ли этот счёт наш?» теряется среди смен статуса.
+     */
+    function feedHtml(details) {
+        const events = [];
+        (details.history || []).forEach(h => events.push({
+            at: h.changed_at,
+            who: h.changed_by_full_name || h.changed_by,
+            text: historyText(h),
+            message: false,
+        }));
+        (details.comments || []).forEach(c => events.push({
+            at: c.created_at,
+            who: c.author_full_name || c.author,
+            text: c.message,
+            message: true,
+        }));
+
+        if (!events.length) return '<div class="iv2-hint">Событий пока нет</div>';
+
+        events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+
+        return events.map(event => event.message
+            ? `<div class="iv2-feed__item">
+                   <span class="iv2-feed__dot iv2-feed__dot--msg"></span>
+                   <div class="iv2-feed__msg">
+                       <b>${escapeHtml(event.who)}</b>
+                       <span class="iv2-feed__when"> · ${escapeHtml(fmtCreated(event.at))}</span>
+                       <div class="iv2-feed__text">${escapeHtml(event.text)}</div>
+                   </div>
+               </div>`
+            : `<div class="iv2-feed__item">
+                   <span class="iv2-feed__dot"></span>
+                   <div><b>${escapeHtml(event.who)}</b> ${escapeHtml(event.text)}
+                       <div class="iv2-feed__when">${escapeHtml(fmtCreated(event.at))}</div></div>
+               </div>`).join('');
+    }
+
+    // =========================================================================
+    // Отрисовка: панель счёта (общая для очереди и карточки)
+    // =========================================================================
+
+    function lockReason(invoice) {
+        if (invoice.is_archived) return 'Счёт в архиве — правки закрыты. Верните его из архива, чтобы редактировать.';
+        if (invoice.status === 'sent_to_bank') return 'Платёжка уже ушла в банк — правки полей закрыты.';
+        if (invoice.status === 'paid') return 'Счёт оплачен — правки закрыты.';
+        return '';
+    }
+
+    /**
+     * Действия над счётом. Ручного селекта статуса нет (решение №16): статус
+     * двигают только эти кнопки, за каждой стоит решение.
+     *
+     * Кнопок, которых ещё нет на клиенте, здесь не рисуем — вместо них подпись,
+     * в какой фазе они появятся. Кнопка, которая «ничего не делает», хуже
+     * отсутствующей.
+     */
+    function actionsHtml(details) {
+        const invoice = details.invoice;
+        const isAdmin = state.user && state.user.role === 'admin';
+        if (!isAdmin) return '<div class="iv2-hint">Действия над счётом доступны согласующему</div>';
+
+        const buttons = [];
+        if (invoice.is_archived) {
+            buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="unarchive">Вернуть из архива</button>`);
+        } else if (invoice.status === 'on_approval') {
+            buttons.push(`<button class="bx-btn bx-btn--ok" type="button" data-act="approve">Согласовать</button>`);
+            buttons.push(`<button class="bx-btn bx-btn--danger" type="button" data-act="reject">Отклонить</button>`);
+        } else if (invoice.status === 'approved' || invoice.status === 'sent_to_bank') {
+            buttons.push(`<button class="bx-btn bx-btn--ok" type="button" data-act="paid">Отметить оплаченным</button>`);
+        }
+        if (!invoice.is_archived && (invoice.status === 'paid' || invoice.status === 'rejected')) {
+            buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="archive">В архив</button>`);
+        }
+
+        const soon = [];
+        if (!invoice.is_archived && invoice.status === 'on_approval') soon.push('«Вернуть на доработку» — Фаза 7');
+        if (invoice.status === 'approved') soon.push('«Отправить в банк» — Фаза 6');
+        if (lockReason(invoice) === '') soon.push('«Редактировать» и «Копировать счёт» — Фаза 5');
+
+        return buttons.join('')
+            + (soon.length ? `<div class="iv2-hint iv2-soon">Ещё приедет: ${escapeHtml(soon.join(' · '))}</div>` : '');
+    }
+
+    function paneHtml(details, compact) {
+        const invoice = details.invoice;
+        const warnings = requisiteWarnings(invoice);
+        const items = details.line_items || [];
+
+        const allocRows = items.length
+            ? items.map(item => `
+                <div class="iv2-alloc__row">
+                    <span>${escapeHtml(item.store_name || '—')} · ${escapeHtml(item.category_name || '—')}</span>
+                    <span>${escapeHtml(money(item.amount))}</span>
+                </div>`).join('')
+            : '<div class="iv2-alloc__row"><span class="iv2-hint">не распределён</span><span></span></div>';
+
+        const requisiteRows = [
+            ['ИНН', invoice.counterparty_inn],
+            ['КПП', invoice.counterparty_kpp],
+            ['Банк', invoice.counterparty_bank_name],
+            ['БИК', invoice.counterparty_bank_bik],
+            ['Расчётный счёт', invoice.counterparty_bank_account],
+            ['Корр. счёт', invoice.counterparty_bank_corr_account],
+        ].map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value || '—')}</dd>`).join('');
+
+        const requisiteBadge = warnings.length
+            ? `<span class="bx-badge b-warn">${withCount(warnings.length, 'замечание', 'замечания', 'замечаний')}</span>`
+            : (bankReady(invoice)
+                ? '<span class="bx-badge b-appr">полные</span>'
+                : '<span class="bx-badge b-rej">неполные</span>');
+
+        const locked = lockReason(invoice);
+        const draft = state.commentDrafts[invoice.id] || '';
+
+        return `
+            <div class="iv2-pane">
+                <div class="iv2-pane__head">
+                    <div>
+                        <div class="iv2-pane__title">
+                            <span class="bx-card__title">${escapeHtml(invoice.invoice_number || ('#' + invoice.id))}</span>
+                            ${statusBadge(invoice)}
+                        </div>
+                        <div class="iv2-hint">${escapeHtml(invoice.counterparty_name || 'без контрагента')} ·
+                            ИНН ${escapeHtml(invoice.counterparty_inn || '—')}</div>
+                    </div>
+                </div>
+
+                <div class="iv2-pane__amount">${escapeHtml(money(invoice.amount))}</div>
+                <div class="iv2-pane__purpose">${escapeHtml(invoice.payment_purpose || '')}</div>
+
+                <dl class="iv2-rows">
+                    <dt>Срок оплаты</dt><dd>${escapeHtml(fmtDue(invoice.due_date))} ${dueBadge(invoice)}</dd>
+                    <dt>Город</dt><dd>${escapeHtml(invoice.city_name || refName('cities', invoice.city_id) || '—')}</dd>
+                    <dt>На кого выставлен</dt><dd>${escapeHtml(invoice.payer_name || refName('payers', invoice.payer_id) || '—')}</dd>
+                    <dt>НДС</dt><dd>${escapeHtml(refName('vatOptions', invoice.vat_id) || '—')}</dd>
+                    <dt>Автор</dt><dd>${escapeHtml(invoice.created_by_full_name || invoice.created_by || '—')} ·
+                        ${escapeHtml(fmtCreated(invoice.created_at))}</dd>
+                    ${invoice.comment ? `<dt>Комментарий</dt><dd>${escapeHtml(invoice.comment)}</dd>` : ''}
+                </dl>
+
+                <div class="iv2-reqbox">
+                    <button class="iv2-reqbox__head" type="button" data-act="toggle-req">
+                        <span>Реквизиты контрагента ${requisiteBadge}</span>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                    </button>
+                    <div class="iv2-reqbox__body">
+                        <dl class="iv2-rows iv2-rows--req">${requisiteRows}</dl>
+                        ${warnings.length
+                            ? `<div class="iv2-warn">${warnings.map(w => escapeHtml(w)).join('<br>')}</div>`
+                            : ''}
+                    </div>
+                </div>
+
+                <div class="iv2-alloc">
+                    <div class="iv2-alloc__row"><span>Салон · статья</span><span>Сумма</span></div>
+                    ${allocRows}
+                </div>
+
+                <div class="iv2-feed">${feedHtml(details)}</div>
+
+                <div class="iv2-talk">
+                    <textarea class="iv2-textarea" rows="2" data-talk="${invoice.id}"
+                        placeholder="Написать сообщение по счёту — автор и согласующий увидят его здесь">${escapeHtml(draft)}</textarea>
+                    <button class="bx-btn bx-btn--ghost" type="button" data-act="send-comment">Отправить</button>
+                </div>
+                <div class="iv2-hint">Обсуждение доступно на любом этапе, включая архив. В банк не уходит.
+                    <kbd>Ctrl</kbd>+<kbd>Enter</kbd> отправляет.</div>
+
+                ${locked ? `<div class="iv2-locked">${escapeHtml(locked)}</div>` : ''}
+
+                <div class="iv2-pane__actions">${actionsHtml(details)}</div>
+                ${compact ? '' : `
+                    <div class="iv2-hint iv2-hotkeys">
+                        <kbd>A</kbd> согласовать · <kbd>R</kbd> отклонить ·
+                        <kbd>↑</kbd><kbd>↓</kbd> следующий счёт
+                    </div>`}
+            </div>`;
+    }
+
+    /**
+     * Обработчики панели. Вешаются заново после каждой перерисовки — панель
+     * пересобирается целиком, старые узлы вместе с обработчиками исчезают.
+     */
+    function bindPane(root, details) {
+        const invoiceId = details.invoice.id;
+
+        root.querySelectorAll('[data-act]').forEach(button => {
+            button.addEventListener('click', () => doAction(button.getAttribute('data-act'), invoiceId, button));
+        });
+
+        root.querySelectorAll('[data-doctab]').forEach(button => {
+            button.addEventListener('click', () => {
+                state.docIndex = Number(button.getAttribute('data-doctab'));
+                if (state.card.id === invoiceId) renderCard(); else renderQueue();
+            });
+        });
+
+        root.querySelectorAll('[data-talk]').forEach(textarea => {
+            textarea.addEventListener('input', () => {
+                state.commentDrafts[invoiceId] = textarea.value;
+            });
+            textarea.addEventListener('keydown', event => {
+                if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                    event.preventDefault();
+                    doAction('send-comment', invoiceId, textarea);
+                }
+            });
+        });
+    }
+
+    // =========================================================================
+    // Действия над счётом
+    // =========================================================================
+
+    async function apiPost(path, body) {
+        const response = await fetch(path, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body || {}),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        return data;
+    }
+
+    async function doAction(action, invoiceId, sourceElement) {
+        const details = state.details[invoiceId];
+        if (!details) return;
+
+        if (action === 'toggle-req') {
+            const box = sourceElement.closest('.iv2-reqbox');
+            if (box) box.classList.toggle('iv2-reqbox--open');
+            return;
+        }
+
+        if (action === 'send-comment') {
+            const text = (state.commentDrafts[invoiceId] || '').trim();
+            if (!text) {
+                toast('Сообщение пустое');
+                return;
+            }
+            try {
+                await apiPost(`/api/invoices/${invoiceId}/comments`, { message: text });
+                state.commentDrafts[invoiceId] = '';
+                await refreshDetails(invoiceId);
+                toast('Сообщение отправлено');
+            } catch (error) {
+                toast('Не удалось отправить: ' + error.message, 'error');
+            }
+            return;
+        }
+
+        // Нативные confirm/prompt в iframe Пульса молча игнорируются —
+        // кнопка выглядела бы сломанной. Только window.BarhatUI.
+        const invoice = details.invoice;
+        const label = invoice.invoice_number || ('#' + invoice.id);
+
+        try {
+            if (action === 'approve') {
+                const ok = await window.BarhatUI.confirm(
+                    `${label} · ${invoice.counterparty_name || 'без контрагента'} · ${money(invoice.amount)}`,
+                    { title: 'Согласовать счёт?', confirmText: 'Согласовать' });
+                if (!ok) return;
+                await apiPost(`/api/invoices/${invoiceId}/approve`);
+                toast('Счёт согласован', 'success');
+            } else if (action === 'reject') {
+                const reason = await window.BarhatUI.prompt(
+                    `${label} · ${money(invoice.amount)}. Причину можно не указывать, но с ней автору понятнее.`,
+                    '', { title: 'Отклонить счёт?', confirmText: 'Отклонить', placeholder: 'Причина отказа' });
+                if (reason === null) return;
+                await apiPost(`/api/invoices/${invoiceId}/reject`, { reason: reason || null });
+                toast('Счёт отклонён и отправлен в архив');
+            } else if (action === 'paid') {
+                const ok = await window.BarhatUI.confirm(
+                    `${label} · ${money(invoice.amount)}. Полностью распределённый счёт уйдёт в архив сам.`,
+                    { title: 'Отметить оплаченным?', confirmText: 'Отметить' });
+                if (!ok) return;
+                await apiPost(`/api/invoices/${invoiceId}/mark-paid`);
+                toast('Счёт отмечен оплаченным', 'success');
+            } else if (action === 'archive') {
+                const ok = await window.BarhatUI.confirm(`${label} уйдёт в архив.`,
+                    { title: 'В архив?', confirmText: 'В архив' });
+                if (!ok) return;
+                await apiPost(`/api/invoices/${invoiceId}/archive`);
+                toast('Счёт в архиве');
+            } else if (action === 'unarchive') {
+                await apiPost(`/api/invoices/${invoiceId}/unarchive`);
+                toast('Счёт возвращён из архива');
+            } else {
+                return;
+            }
+        } catch (error) {
+            toast('Не получилось: ' + error.message, 'error');
+            return;
+        }
+
+        // Действие сдвинуло статус: перечитываем и счёт, и список, и плитки —
+        // счёт мог уйти из очереди или вовсе в архив.
+        await refreshDetails(invoiceId);
+        loadSummary();
+        loadList(false);
+    }
+
+    async function refreshDetails(invoiceId) {
+        try {
+            await loadDetails(invoiceId, true);
+        } catch (error) {
+            console.error('invoices-v2: не удалось перечитать счёт:', error);
+        }
+        if (state.card.id === invoiceId) {
+            state.card.data = state.details[invoiceId];
+            renderCard();
+        }
+        if (state.view === 'queue') renderQueue();
+    }
+
+    // =========================================================================
+    // Отрисовка: вид «Очередь»
+    // =========================================================================
+
+    /**
+     * Что показывать в очереди. По умолчанию — то, что ждёт согласующего;
+     * но если человек сам выбрал статус или плитку, фильтр главнее режима,
+     * иначе счёт «пропадает» и непонятно почему.
+     */
+    function queueRows() {
+        if (state.filters.status || state.kpiFilter || state.showArchived) return state.rows;
+        return state.rows.filter(invoice => invoice.status === 'on_approval');
+    }
+
+    function renderQueue() {
+        const host = $('iv2ViewQueue');
+        if (!host) return;
+
+        const rows = queueRows();
+        if (!rows.length) {
+            host.innerHTML = `<div class="iv2-placeholder">
+                <h3 class="iv2-placeholder__title">${state.loading ? 'Загрузка…' : 'Очередь пуста'}</h3>
+                <p>${state.loading ? '' : 'Под текущие фильтры счетов на согласовании нет.'}</p>
+            </div>`;
+            return;
+        }
+
+        if (!state.queueActiveId || !rows.some(r => r.id === state.queueActiveId)) {
+            state.queueActiveId = rows[0].id;
+            state.docIndex = 0;
+        }
+
+        const items = rows.map(invoice => {
+            const waiting = daysSince(invoice.created_at);
+            return `
+                <button class="iv2-qitem${invoice.id === state.queueActiveId ? ' iv2-qitem--active' : ''}"
+                        type="button" data-queue="${invoice.id}">
+                    <span class="iv2-qitem__top">
+                        <span class="iv2-qitem__cp">${escapeHtml(invoice.counterparty_name || 'без контрагента')}</span>
+                        <span class="iv2-qitem__amt">${escapeHtml(money(invoice.amount))}</span>
+                    </span>
+                    <span class="iv2-qitem__meta">
+                        <span>${escapeHtml(invoice.invoice_number || ('#' + invoice.id))} ·
+                            ${escapeHtml(invoice.city_name || '—')}${waiting === null ? '' : ' · ждёт ' + withCount(waiting, 'день', 'дня', 'дней')}</span>
+                        ${dueBadge(invoice)}
+                    </span>
+                </button>`;
+        }).join('');
+
+        const rest = Math.max(0, state.total - state.rows.length);
+        const more = rest > 0
+            ? `<button class="bx-btn bx-btn--ghost bx-btn--sm iv2-queue__more" type="button" id="iv2QueueMore">
+                   Показать ещё · осталось ${rest}</button>`
+            : '';
+
+        const details = state.details[state.queueActiveId];
+        const pane = details
+            ? `${docHtml(details)}${paneHtml(details, false)}`
+            : `<div class="iv2-placeholder"><p>Загрузка счёта…</p></div>`;
+
+        host.innerHTML = `
+            <div class="iv2-queue">
+                <div class="iv2-queue__list">${items}${more}</div>
+                <div class="iv2-queue__pane">${pane}</div>
+            </div>`;
+
+        host.querySelectorAll('[data-queue]').forEach(button => {
+            button.addEventListener('click', () => selectQueueInvoice(Number(button.getAttribute('data-queue'))));
+        });
+        const moreButton = $('iv2QueueMore');
+        if (moreButton) moreButton.addEventListener('click', () => loadList(true));
+
+        if (details) bindPane(host, details);
+    }
+
+    async function selectQueueInvoice(invoiceId) {
+        state.queueActiveId = invoiceId;
+        state.docIndex = 0;
+        renderQueue();
+        try {
+            await loadDetails(invoiceId);
+        } catch (error) {
+            toast('Не удалось открыть счёт: ' + error.message, 'error');
+        }
+        if (state.queueActiveId === invoiceId) renderQueue();
+    }
+
+    function stepQueue(delta) {
+        const rows = queueRows();
+        const index = rows.findIndex(r => r.id === state.queueActiveId);
+        const next = rows[index + delta];
+        if (next) selectQueueInvoice(next.id);
+    }
+
+    // =========================================================================
+    // Отрисовка: карточка счёта (модалка) и адрес страницы
+    // =========================================================================
+
+    function renderCard() {
+        const host = $('iv2Modals');
+        if (!host) return;
+
+        if (!state.card.id) {
+            host.innerHTML = '';
+            return;
+        }
+
+        let body;
+        if (state.card.error) {
+            body = `
+                <div class="iv2-card-message">
+                    <h3 class="iv2-placeholder__title">${escapeHtml(state.card.error.title)}</h3>
+                    <p>${escapeHtml(state.card.error.text)}</p>
+                </div>`;
+        } else if (!state.card.data) {
+            body = '<div class="iv2-card-message"><p>Загрузка счёта…</p></div>';
+        } else {
+            body = `
+                <div class="iv2-card-grid">
+                    ${docHtml(state.card.data)}
+                    ${paneHtml(state.card.data, true)}
+                </div>`;
+        }
+
+        host.innerHTML = `
+            <div class="iv2-ovl" id="iv2CardOverlay"></div>
+            <div class="iv2-modal">
+                <div class="iv2-modal__box">
+                    <div class="iv2-modal__head">
+                        <h3 class="bx-card__title">Счёт</h3>
+                        <button class="iv2-x" type="button" id="iv2CardClose" aria-label="Закрыть">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                 stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                        </button>
+                    </div>
+                    <div class="iv2-modal__body">${body}</div>
+                </div>
+            </div>`;
+
+        const close = $('iv2CardClose');
+        if (close) close.addEventListener('click', closeCard);
+        const overlay = $('iv2CardOverlay');
+        if (overlay) overlay.addEventListener('click', closeCard);
+
+        if (state.card.data) bindPane(host, state.card.data);
+    }
+
+    /** Адрес карточки в браузере: «Назад» закрывает её, обновление — возвращает. */
+    function cardUrl(invoiceId) {
+        const embed = new URLSearchParams(window.location.search).get('embed');
+        return '/invoices-v2?invoice=' + invoiceId + (embed ? '&embed=' + encodeURIComponent(embed) : '');
+    }
+
+    async function openCard(invoiceId, fromUrl) {
+        state.card = { id: invoiceId, data: state.details[invoiceId] || null, loading: true, error: null };
+        state.docIndex = 0;
+
+        if (!fromUrl) {
+            history.pushState({ page: 'invoices_v2', invoice: invoiceId }, '', cardUrl(invoiceId));
+            state.cardPushed = true;
+        }
+
+        renderCard();
+
+        try {
+            const data = await loadDetails(invoiceId);
+            if (state.card.id !== invoiceId) return;
+            state.card.data = data;
+        } catch (error) {
+            if (state.card.id !== invoiceId) return;
+            // Внятный экран вместо тоста «Счёт не найден»: человек пришёл
+            // по ссылке и должен понять, что именно не так.
+            const message = String(error.message || '');
+            state.card.error = /нет доступа/i.test(message)
+                ? { title: 'Нет доступа к этому счёту', text: 'Счёт заведён по другому салону. Попросите доступ у администратора.' }
+                : { title: 'Счёт не найден', text: 'Возможно, его удалили или в ссылке опечатка.' };
+        } finally {
+            if (state.card.id === invoiceId) {
+                state.card.loading = false;
+                renderCard();
+            }
+        }
+    }
+
+    function closeCard() {
+        if (!state.card.id) return;
+        state.card = { id: null, data: null, loading: false, error: null };
+        renderCard();
+
+        if (state.cardPushed) {
+            state.cardPushed = false;
+            history.back();
+        } else {
+            // Карточку открыли прямой ссылкой — своей записи в истории нет,
+            // и history.back() увёл бы человека вообще из раздела.
+            history.replaceState({ page: 'invoices_v2' }, '', '/invoices-v2' + window.location.search.replace(/[?&]invoice=\d+/, '').replace(/^&/, '?'));
+        }
+    }
+
+    // =========================================================================
+    // Хоткеи и история браузера
+    // =========================================================================
+
+    function pageIsActive() {
+        const page = document.querySelector('.page[data-page="invoices_v2"]');
+        return Boolean(page && page.classList.contains('active'));
+    }
+
+    // Дашборд — одностраничное приложение: все разделы живут в одном DOM,
+    // поэтому обработчик на document обязан проверять, что открыт наш раздел.
+    document.addEventListener('keydown', function(event) {
+        if (!pageIsActive()) return;
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName || '')) return;
+
+        if (event.key === 'Escape' && state.card.id) {
+            closeCard();
+            return;
+        }
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (state.card.id || state.view !== 'queue' || !state.queueActiveId) return;
+
+        // Раскладку не переключают ради хоткея — принимаем и русские буквы
+        const key = String(event.key).toLowerCase();
+        if (key === 'a' || key === 'ф') {
+            doAction('approve', state.queueActiveId);
+            event.preventDefault();
+        } else if (key === 'r' || key === 'к') {
+            doAction('reject', state.queueActiveId);
+            event.preventDefault();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            stepQueue(event.key === 'ArrowDown' ? 1 : -1);
+            event.preventDefault();
+        }
+    });
+
+    // Обработчик вешается синхронно при загрузке файла — раньше, чем свой
+    // popstate заведёт script.js. Значит наш успевает прочитать адрес до того,
+    // как роутер дашборда заменит его на «/invoices-v2».
+    window.addEventListener('popstate', function() {
+        if (!pageIsActive()) return;
+        const invoiceId = readInvoiceIdFromUrl();
+        if (invoiceId) {
+            if (state.card.id !== invoiceId) {
+                state.cardPushed = false;
+                openCard(invoiceId, true);
+            }
+        } else if (state.card.id) {
+            state.card = { id: null, data: null, loading: false, error: null };
+            state.cardPushed = false;
+            renderCard();
+        }
+    });
 
     // =========================================================================
     // Точка входа
@@ -902,6 +1684,16 @@
 
         loadSummary();
         loadList(false);
+
+        // Пришли по адресу с номером счёта — открываем карточку. Своей записи
+        // в истории при этом не заводим: она уже там, человек пришёл по ссылке
+        // или обновил страницу.
+        if (pendingInvoiceId) {
+            const invoiceId = pendingInvoiceId;
+            pendingInvoiceId = null;
+            state.cardPushed = false;
+            openCard(invoiceId, true);
+        }
     }
 
     window.InvoicesV2Module = {

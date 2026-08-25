@@ -353,27 +353,55 @@ def get_invoice_authors():
 @invoices_bp.route("/<int:invoice_id>", methods=["GET"])
 @section_required("invoices")
 def get_invoice(invoice_id):
-    """Детали счёта — вместе со строками распределения и вложениями."""
+    """
+    Детали счёта — вместе со строками распределения и вложениями.
+
+    Query params: include=history,comments — добавить ленту событий тем же
+    запросом. Параметр необязателен: старый раздел его не передаёт и получает
+    прежний ответ. Нужен очереди согласования, где счета листаются стрелками:
+    без него каждый шаг — четыре запроса вместо одного.
+    """
     invoice = get_invoice_by_id(invoice_id)
     if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
     if not user_can_access_invoice(invoice, current_user.username, current_user.role):
         return jsonify({"error": "Нет доступа к этому счёту"}), 403
 
-    invoice_full_names = get_users_full_names(
-        [u for u in (invoice.get("created_by"), invoice.get("approved_by"), invoice.get("rejected_by")) if u]
-    )
-    invoice["created_by_full_name"] = invoice_full_names.get(invoice.get("created_by"))
-    invoice["approved_by_full_name"] = invoice_full_names.get(invoice.get("approved_by"))
-    invoice["rejected_by_full_name"] = invoice_full_names.get(invoice.get("rejected_by"))
+    include = {part.strip() for part in (request.args.get("include") or "").split(",") if part.strip()}
 
-    return jsonify({
+    history = get_invoice_history(invoice_id) if "history" in include else []
+    comments = get_invoice_comments(invoice_id) if "comments" in include else []
+
+    # Имена собираем одним запросом на всех участников сразу — иначе на счёт
+    # с длинной историей уходит по обращению к базе на каждую запись.
+    usernames = {invoice.get("created_by"), invoice.get("approved_by"), invoice.get("rejected_by")}
+    usernames.update(h["changed_by"] for h in history)
+    usernames.update(c["author"] for c in comments)
+    usernames.discard(None)
+    full_names = get_users_full_names(list(usernames))
+
+    invoice["created_by_full_name"] = full_names.get(invoice.get("created_by"))
+    invoice["approved_by_full_name"] = full_names.get(invoice.get("approved_by"))
+    invoice["rejected_by_full_name"] = full_names.get(invoice.get("rejected_by"))
+
+    result = {
         "invoice": invoice,
         "line_items": get_invoice_line_items(invoice_id),
         "attachments": get_invoice_attachments(invoice_id),
         "can_edit_fields": can_edit_invoice_fields(invoice, current_user.username, current_user.role),
         "can_edit_status": can_edit_invoice_status(invoice, current_user.role),
-    })
+    }
+
+    if "history" in include:
+        for h in history:
+            h["changed_by_full_name"] = full_names.get(h["changed_by"])
+        result["history"] = history
+    if "comments" in include:
+        for c in comments:
+            c["author_full_name"] = full_names.get(c["author"])
+        result["comments"] = comments
+
+    return jsonify(result)
 
 
 @invoices_bp.route("/<int:invoice_id>", methods=["PUT"])
@@ -883,6 +911,74 @@ def download_attachment(attachment_id):
         attachment["stored_filename"],
         download_name=attachment["original_filename"],
     )
+
+
+# Что и с каким Content-Type отдаём на просмотр прямо в браузере.
+# Тип берём по расширению из этого словаря, а не из запроса и не из заголовка
+# загрузки: иначе загруженный файл превращается в XSS на домене дашборда,
+# то есть в сессии админа. Всё, чего здесь нет, на просмотр не отдаём вовсе.
+_INLINE_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".pdf": "application/pdf",
+}
+
+
+@invoices_bp.route("/attachments/<int:attachment_id>/inline", methods=["GET"])
+@section_required("invoices")
+def preview_attachment(attachment_id):
+    """
+    Показать вложение прямо в интерфейсе, без скачивания на диск.
+
+    Отдельная ручка, а не переключение `download`: та безопасна именно потому,
+    что отдаёт файл вложением. Здесь же браузер файл исполняет, поэтому:
+    белый список типов, `nosniff` (иначе браузер угадает тип сам и картинка
+    с HTML внутри станет страницей) и CSP sandbox (изолирует содержимое от
+    домена дашборда).
+    """
+    attachment = get_attachment_by_id(attachment_id)
+    if not attachment:
+        return jsonify({"error": "Вложение не найдено"}), 404
+    invoice = get_invoice_by_id(attachment["invoice_id"])
+    if not invoice or not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому вложению"}), 403
+
+    extension = os.path.splitext(attachment["original_filename"])[1].lower()
+    content_type = _INLINE_CONTENT_TYPES.get(extension)
+    if not content_type:
+        return jsonify({"error": "Этот тип файла показывается только скачиванием"}), 415
+
+    directory = os.path.abspath(ATTACHMENTS_DIR)
+    if not os.path.exists(os.path.join(directory, attachment["stored_filename"])):
+        logger.error(
+            "Вложение %s (%s) есть в БД, но файла нет в %s",
+            attachment_id, attachment["original_filename"], directory
+        )
+        return jsonify({"error": "Файл вложения не найден на диске — загрузите его заново"}), 404
+
+    response = send_from_directory(directory, attachment["stored_filename"], mimetype=content_type)
+    response.headers["Content-Type"] = content_type
+    response.headers["X-Content-Type-Options"] = "nosniff"
+
+    # Главную защиту даёт связка «белый список расширений + nosniff»: HTML и SVG
+    # сюда не попадают вовсе, а браузеру запрещено угадывать тип самому.
+    # CSP — второй рубеж, и он разный для картинки и PDF:
+    #   • картинке подресурсы не нужны — запрещаем всё;
+    #   • у PDF пустой `sandbox` гасит встроенный просмотрщик, и вместо счёта
+    #     человек видит белый прямоугольник. `allow-scripts` БЕЗ
+    #     `allow-same-origin` оставляет файл в уникальном (opaque) источнике:
+    #     просмотрщик работает, а до сессии и DOM дашборда содержимое
+    #     дотянуться не может.
+    response.headers["Content-Security-Policy"] = (
+        "sandbox allow-scripts" if content_type == "application/pdf"
+        else "sandbox; default-src 'none'"
+    )
+    # Имя файла в заголовок не собираем: он тут только сообщает браузеру,
+    # что это просмотр, а не загрузка.
+    response.headers["Content-Disposition"] = "inline"
+    return response
 
 
 @invoices_bp.route("/attachments/<int:attachment_id>", methods=["DELETE"])
