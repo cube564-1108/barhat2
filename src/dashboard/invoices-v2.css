@@ -1610,3 +1610,71 @@
 /* Длинная колонка прокручивается внутри себя: иначе одна перегруженная
    колонка растягивает борд на несколько экранов вниз. */
 .iv2 .iv2-col__body { max-height: 62vh; overflow-y: auto; }
+
+/* === Файлы, выбранные в форме до сохранения ========================== */
+
+.iv2 .iv2-form-files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.iv2 .iv2-form-files__note { margin: 10px 0 0; }
+
+.iv2 .iv2-form-file {
+    position: relative;
+    width: 110px;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    padding: 6px;
+    background: #fff;
+}
+
+.iv2 .iv2-form-file__pic {
+    width: 100%;
+    height: 76px;
+    object-fit: cover;
+    border-radius: var(--bx-r-md);
+    display: block;
+}
+
+.iv2 .iv2-form-file__pdf {
+    height: 76px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--bx-r-md);
+    background: var(--bx-bg);
+    color: var(--bx-wine);
+    font-weight: 700;
+    font-size: 13px;
+}
+
+.iv2 .iv2-form-file__name {
+    font-size: 11px;
+    color: var(--bx-text-2);
+    margin-top: 5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.iv2 .iv2-form-file__del {
+    position: absolute;
+    top: -7px;
+    right: -7px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--bx-border);
+    border-radius: 50%;
+    background: #fff;
+    color: var(--bx-muted);
+    cursor: pointer;
+    line-height: 0;
+}
+
+.iv2 .iv2-form-file__del:hover { color: var(--bx-wine); border-color: var(--bx-pink); }

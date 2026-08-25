@@ -1599,9 +1599,9 @@
 
     /** Какому счёту сейчас адресована вставка: открытой карточке или очереди. */
     function attachTargetId() {
-        // Пока открыта форма счёта, вложениям адресата нет: у создаваемого
-        // счёта ещё нет id, а тихо приложить файл к соседнему счёту — худшее,
-        // что можно сделать
+        // Пока открыта форма счёта, готового адресата нет: у создаваемого счёта
+        // ещё нет id, а тихо приложить файл к соседнему счёту — худшее, что
+        // можно сделать. Файлы принимает сама форма (см. addFilesToForm).
         if (state.form.open) return null;
         if (state.card.id && state.card.data) return state.card.id;
         if (state.view === 'queue' && state.queueActiveId && state.details[state.queueActiveId]) {
@@ -1629,21 +1629,32 @@
      */
     document.addEventListener('paste', function(event) {
         if (!pageIsActive()) return;
-        const invoiceId = attachTargetId();
-        if (!invoiceId) return;
 
         const files = filesFromClipboard(event);
         if (!files.length) return;  // обычная вставка текста — не мешаем
 
-        event.preventDefault();
-        uploadAttachments(invoiceId, files.map(file => (
-            // У blob из буфера имени нет вовсе — задаём сами, иначе сервер
-            // отвергнет файл по расширению
+        // У blob из буфера имени нет вовсе — задаём сами, иначе сервер
+        // отвергнет файл по расширению
+        const named = files.map(file => (
             file.name && fileExtension(file.name)
                 ? file
                 : new File([file], timestampName(file.type === 'application/pdf' ? '.pdf' : '.png'),
                            { type: file.type || 'image/png' })
-        )));
+        ));
+
+        // Открытая форма забирает вставку себе: счёт ещё не создан, файлы
+        // ждут в ней и уедут сразу после создания
+        if (state.form.open) {
+            event.preventDefault();
+            addFilesToForm(named);
+            return;
+        }
+
+        const invoiceId = attachTargetId();
+        if (!invoiceId) return;
+
+        event.preventDefault();
+        uploadAttachments(invoiceId, named);
     });
 
     function draggingFiles(event) {
@@ -1672,14 +1683,20 @@
         event.preventDefault();
         highlightDropZone(null);
 
+        const files = event.dataTransfer.files;
+        if (!files || !files.length) return;
+
+        if (state.form.open) {
+            addFilesToForm(files);
+            return;
+        }
+
         const invoiceId = attachTargetId();
         if (!invoiceId) {
             toast('Откройте счёт, чтобы приложить к нему файл');
             return;
         }
-        if (event.dataTransfer.files && event.dataTransfer.files.length) {
-            uploadAttachments(invoiceId, event.dataTransfer.files);
-        }
+        uploadAttachments(invoiceId, files);
     });
 
     function highlightDropZone(zone) {
@@ -2548,7 +2565,12 @@
             invoiceId: null,
             values,
             items: [],
-            openSections: { main: true, requisites: false, allocation: true },
+            // Файлы, выбранные до сохранения: у нового счёта ещё нет id, поэтому
+            // они ждут здесь и уходят на сервер сразу после создания счёта.
+            // Каждый элемент — { file, url }, url нужен для миниатюры и его
+            // обязательно освобождать (см. releaseFormFiles).
+            files: [],
+            openSections: { main: true, documents: true, requisites: false, allocation: true },
             suggestions: [],
             source: '',
             saving: false,
@@ -2635,6 +2657,7 @@
     }
 
     function closeForm() {
+        releaseFormFiles();
         state.form = emptyForm();
         renderForm();
     }
@@ -2718,6 +2741,123 @@
                 </button>
                 <div class="iv2-sect__body">${body}</div>
             </div>`;
+    }
+
+    // ------------------------------------------------------------- Файлы в форме
+
+    /**
+     * Блок вложений прямо в форме счёта.
+     *
+     * У создаваемого счёта ещё нет id, поэтому загрузить файл сразу некуда:
+     * копим выбранное здесь и отправляем сразу после того, как счёт создан.
+     * Раньше приложить скан из формы было нельзя вовсе — приходилось создать
+     * счёт, найти его и открыть карточку.
+     */
+    function formDocumentsHtml() {
+        const already = state.form.mode === 'edit' && state.details[state.form.invoiceId]
+            ? (state.details[state.form.invoiceId].attachments || []).length
+            : 0;
+
+        return `
+            <div class="iv2-drop" data-drop="form">
+                <div class="iv2-drop__title">Приложите счёт</div>
+                <div class="iv2-drop__hint">Вставьте скрин из буфера (Ctrl+V), перетащите файл сюда
+                    или выберите на диске.
+                    <span class="iv2-only-touch">Можно сфотографировать счёт камерой.</span></div>
+                <div class="iv2-drop__btns">
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-form-act="pick-file">Выбрать файл</button>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm iv2-only-touch" type="button" data-form-act="take-photo">Сфотографировать</button>
+                </div>
+                <input type="file" class="iv2-hidden-input" data-form-file-input accept="image/*,.pdf" multiple>
+                <input type="file" class="iv2-hidden-input" data-form-camera-input accept="image/*" capture="environment">
+            </div>
+            ${already ? `<p class="iv2-hint iv2-form-files__note">К счёту уже приложено
+                ${withCount(already, 'файл', 'файла', 'файлов')} — они видны в карточке,
+                там же их можно удалить.</p>` : ''}
+            <div id="iv2FormFiles">${formFilesHtml()}</div>`;
+    }
+
+    function formFilesHtml() {
+        if (!state.form.files.length) return '';
+        return `<div class="iv2-form-files">${state.form.files.map((item, index) => `
+            <div class="iv2-form-file">
+                ${item.url
+                    ? `<img class="iv2-form-file__pic" src="${escapeHtml(item.url)}" alt="${escapeHtml(item.file.name)}">`
+                    : '<div class="iv2-form-file__pdf">PDF</div>'}
+                <div class="iv2-form-file__name" title="${escapeHtml(item.file.name)}">${escapeHtml(item.file.name)}</div>
+                <button class="iv2-form-file__del" type="button" data-form-file-del="${index}"
+                        aria-label="Убрать файл" title="Убрать файл">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>`).join('')}</div>`;
+    }
+
+    /** Перерисовываем только список файлов: полная перерисовка отбирает фокус. */
+    function renderFormFiles() {
+        const host = $('iv2FormFiles');
+        if (!host) return;
+        host.innerHTML = formFilesHtml();
+        host.querySelectorAll('[data-form-file-del]').forEach(button => {
+            button.addEventListener('click', () => removeFormFile(Number(button.getAttribute('data-form-file-del'))));
+        });
+
+        // Бейдж секции считает файлы — иначе он врёт до следующей перерисовки
+        const section = document.querySelector('[data-section="documents"] .iv2-sect__title .bx-badge');
+        if (section) {
+            section.className = 'bx-badge ' + (state.form.files.length ? 'b-appr' : 'b-warn');
+            section.textContent = state.form.files.length
+                ? withCount(state.form.files.length, 'файл', 'файла', 'файлов')
+                : 'не приложен';
+        }
+    }
+
+    /**
+     * Принять файлы в форму. Проверки те же, что и при загрузке к счёту:
+     * узнать о неподходящем файле лучше сразу, а не после создания счёта.
+     */
+    function addFilesToForm(files) {
+        const list = Array.from(files || []).filter(Boolean);
+        if (!list.length) return;
+
+        const skipped = [];
+        list.forEach(file => {
+            const extension = fileExtension(file.name);
+            if (ATTACHMENT_EXTENSIONS.indexOf(extension) === -1) {
+                skipped.push(`${file.name || 'файл'} — тип не поддерживается`);
+                return;
+            }
+            // Сжатие идёт при отправке (compressImage в uploadAttachments),
+            // поэтому здесь сверяем исходный размер только грубо
+            if (file.size > MAX_ATTACHMENT_BYTES && !isImage(file.name)) {
+                skipped.push(`${file.name} — больше 15 МБ`);
+                return;
+            }
+            state.form.files.push({
+                file,
+                url: isImage(file.name) ? URL.createObjectURL(file) : '',
+            });
+        });
+
+        renderFormFiles();
+        if (skipped.length) toast('Не приложено: ' + skipped.join('; '), 'error');
+        else toast(list.length === 1 ? 'Файл добавлен к счёту' : `Добавлено файлов: ${list.length}`);
+    }
+
+    function removeFormFile(index) {
+        const item = state.form.files[index];
+        if (!item) return;
+        if (item.url) URL.revokeObjectURL(item.url);
+        state.form.files.splice(index, 1);
+        renderFormFiles();
+    }
+
+    /** Ссылки на blob живут до перезагрузки страницы — освобождаем их сами. */
+    function releaseFormFiles() {
+        state.form.files.forEach(item => {
+            if (item.url) URL.revokeObjectURL(item.url);
+        });
+        state.form.files = [];
     }
 
     function renderForm() {
@@ -2805,6 +2945,11 @@
                     </div>`).join('')}
             </div>`;
 
+        const documentsBody = formDocumentsHtml();
+        const documentsBadge = state.form.files.length
+            ? `<span class="bx-badge b-appr">${withCount(state.form.files.length, 'файл', 'файла', 'файлов')}</span>`
+            : '<span class="bx-badge b-warn">не приложен</span>';
+
         const allocationBody = `
             ${allocationRowsHtml()}
             <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-form-act="alloc-add">Добавить строку</button>
@@ -2827,6 +2972,7 @@
                     </div>
                     <div class="iv2-modal__body">
                         ${sectionHtml('main', 'Основное', '', mainBody)}
+                        ${sectionHtml('documents', 'Документ (скан счёта)', documentsBadge, documentsBody)}
                         ${sectionHtml('requisites', 'Контрагент и реквизиты', requisitesBadge, requisitesBody)}
                         ${sectionHtml('allocation', 'Распределение по салонам и статьям', allocationBadge, allocationBody)}
                         ${state.form.error ? `<div class="iv2-form-error">${escapeHtml(state.form.error)}</div>` : ''}
@@ -2881,6 +3027,18 @@
 
         host.querySelectorAll('[data-form-act]').forEach(button => {
             button.addEventListener('click', () => formAction(button.getAttribute('data-form-act'), button));
+        });
+
+        host.querySelectorAll('[data-form-file-input], [data-form-camera-input]').forEach(input => {
+            input.addEventListener('change', () => {
+                addFilesToForm(input.files);
+                // Обнуляем, иначе повторный выбор того же файла не даст change
+                input.value = '';
+            });
+        });
+
+        host.querySelectorAll('[data-form-file-del]').forEach(button => {
+            button.addEventListener('click', () => removeFormFile(Number(button.getAttribute('data-form-file-del'))));
         });
 
         host.querySelectorAll('[data-cp]').forEach(button => {
@@ -2954,6 +3112,13 @@
     }
 
     function formAction(action, sourceElement) {
+        if (action === 'pick-file' || action === 'take-photo') {
+            const zone = sourceElement.closest('[data-drop]');
+            const input = zone && zone.querySelector(
+                action === 'pick-file' ? '[data-form-file-input]' : '[data-form-camera-input]');
+            if (input) input.click();
+            return;
+        }
         if (action === 'toggle-section') {
             const key = sourceElement.getAttribute('data-section-key');
             state.form.openSections[key] = !state.form.openSections[key];
@@ -3139,17 +3304,28 @@
             if (state.form.mode === 'edit') {
                 await apiPut('/api/invoices/' + state.form.invoiceId, payload);
                 const invoiceId = state.form.invoiceId;
+                const files = state.form.files.map(item => item.file);
+                releaseFormFiles();
                 state.form = emptyForm();
                 renderForm();
                 toast('Изменения сохранены', 'success');
-                await refreshDetails(invoiceId);
+                // Файлы грузим после сохранения полей: uploadAttachments сам
+                // перечитает счёт и покажет приложенное
+                if (files.length) await uploadAttachments(invoiceId, files);
+                else await refreshDetails(invoiceId);
             } else {
                 const data = await apiPost('/api/invoices', payload);
+                const newId = data.invoice && data.invoice.id;
+                const files = state.form.files.map(item => item.file);
+                releaseFormFiles();
                 state.form = emptyForm();
                 renderForm();
                 toast('Счёт создан и отправлен на согласование', 'success');
-                const newId = data.invoice && data.invoice.id;
                 if (newId) {
+                    // Счёт уже создан, поэтому неудача с файлом не должна
+                    // выглядеть как неудача создания: uploadAttachments скажет,
+                    // что именно не приложилось, а счёт всё равно откроется
+                    if (files.length) await uploadAttachments(newId, files);
                     delete state.details[newId];
                     openCard(newId);
                 }
