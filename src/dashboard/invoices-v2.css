@@ -1449,3 +1449,19 @@
 }
 
 .iv2 .iv2-tools-bank__btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.iv2 .iv2-tools-form {
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    background: #fdfbfd;
+}
+
+.iv2 .iv2-tools-form__title {
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 14.5px;
+    color: var(--bx-wine);
+    margin-bottom: 10px;
+}

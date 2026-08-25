@@ -3053,6 +3053,7 @@
         state.tools.open = key;
         renderTools();
         if (key === 'refs') loadRefList();
+        if (key === 'counterparties') loadCounterparties();
     }
 
     function closeTool() {
@@ -3078,6 +3079,7 @@
 
         let body = '';
         if (open === 'refs') body = refsBodyHtml();
+        else if (open === 'counterparties') body = counterpartiesBodyHtml();
 
         host.innerHTML = `
             <div class="iv2-ovl iv2-ovl--tools" id="iv2ToolsOverlay"></div>
@@ -3102,6 +3104,7 @@
         });
 
         if (open === 'refs') bindRefs();
+        else if (open === 'counterparties') bindCounterparties();
     }
 
     // ------------------------------------------------------------------ Справочники
@@ -3312,6 +3315,282 @@
             toast('Реквизиты плательщика сохранены', 'success');
         } catch (error) {
             toast('Не удалось сохранить реквизиты: ' + error.message, 'error');
+        }
+    }
+
+    // ------------------------------------------------------------------ Контрагенты
+
+    /**
+     * Поля справочника контрагентов — те же, что подставляются в счёт, и
+     * ровно в том же порядке. Собраны из COUNTERPARTY_FIELDS намеренно:
+     * разъехавшиеся списки означали бы, что в справочнике заполняют одно,
+     * а в счёт уходит другое. `from` — имя поля в справочнике.
+     */
+    const CP_FIELDS = COUNTERPARTY_FIELDS.map((field, index) => ({
+        key: field.from,
+        label: index === 0 ? 'Наименование' : field.label,
+        digits: field.digits,
+        required: index === 0,
+    }));
+
+    async function loadCounterparties() {
+        const cp = state.tools.cp;
+        cp.loading = true;
+        cp.error = '';
+        renderTools();
+        try {
+            const data = await apiGet('/api/invoices/counterparties');
+            cp.list = data.counterparties || [];
+            cp.loaded = true;
+        } catch (error) {
+            cp.list = [];
+            cp.error = error.message;
+        } finally {
+            cp.loading = false;
+            renderTools();
+        }
+    }
+
+    function counterpartiesBodyHtml() {
+        const cp = state.tools.cp;
+        return `
+            <p class="iv2-tools-note">
+                Справочник заполняется сам, когда счёт заводят с новыми реквизитами.
+                Правка здесь не меняет уже выставленные счета — в них своя копия реквизитов.
+            </p>
+            <div class="iv2-tools-add">
+                <input class="iv2-input" type="text" id="iv2CpSearch" autocomplete="off"
+                       placeholder="Поиск по названию, ИНН или счёту" value="${escapeHtml(cp.search || '')}">
+                <button class="bx-btn bx-btn--sm" type="button" id="iv2CpNew">Добавить контрагента</button>
+            </div>
+            <div id="iv2CpForm">${cpFormHtml()}</div>
+            <div id="iv2CpList">${cpListHtml()}</div>`;
+    }
+
+    function visibleCounterparties() {
+        const cp = state.tools.cp;
+        const needle = String(cp.search || '').trim().toLowerCase();
+        if (!needle) return cp.list;
+        const onlyDigits = needle.replace(/\D/g, '');
+        return cp.list.filter(item => {
+            if (String(item.name || '').toLowerCase().includes(needle)) return true;
+            if (!onlyDigits) return false;
+            return String(item.inn || '').includes(onlyDigits)
+                || String(item.bank_account || '').includes(onlyDigits);
+        });
+    }
+
+    function cpListHtml() {
+        const cp = state.tools.cp;
+        if (cp.loading) return '<p class="iv2-tools-empty">Загрузка…</p>';
+        if (cp.error) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(cp.error)}</p>`;
+
+        const visible = visibleCounterparties();
+        if (!visible.length) {
+            return `<p class="iv2-tools-empty">${cp.list.length ? 'Ничего не найдено' : 'Справочник пуст'}</p>`;
+        }
+
+        const problems = visible.filter(item => (item.requisite_warnings || []).length).length;
+        const summary = `<p class="iv2-hint">Записей: ${visible.length}${
+            problems ? `. С вопросами к реквизитам: ${problems}` : ''}.</p>`;
+
+        return summary + visible.map(item => {
+            const requisites = [
+                item.inn ? 'ИНН ' + item.inn : null,
+                item.kpp ? 'КПП ' + item.kpp : null,
+                item.bank_account ? 'р/с ' + item.bank_account : null,
+                item.bank_bik ? 'БИК ' + item.bank_bik : null,
+            ].filter(Boolean).join(' · ');
+
+            return `
+                <div class="iv2-tools-row">
+                    <div class="iv2-tools-row__main">
+                        <div class="iv2-tools-row__name">${escapeHtml(item.name)}</div>
+                        <div class="iv2-tools-row__req">${escapeHtml(requisites || 'реквизиты не заполнены')}</div>
+                        ${item.bank_name ? `<div class="iv2-tools-row__req">${escapeHtml(item.bank_name)}</div>` : ''}
+                        ${(item.requisite_warnings || []).map(warning =>
+                            `<div class="iv2-tools-row__warn">${escapeHtml(warning)}</div>`).join('')}
+                    </div>
+                    <div class="iv2-tools-row__btns">
+                        <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                                data-cp-act="edit" data-cp-id="${escapeHtml(item.id)}">Изменить</button>
+                        <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                                data-cp-act="delete" data-cp-id="${escapeHtml(item.id)}">Удалить</button>
+                    </div>
+                </div>`;
+        }).join('');
+    }
+
+    function cpFormHtml() {
+        const form = state.tools.cp.form;
+        if (!form) return '';
+        return `
+            <div class="iv2-tools-form">
+                <div class="iv2-tools-form__title">${form.id ? 'Изменить контрагента' : 'Новый контрагент'}</div>
+                <div class="iv2-tools-bank__grid">
+                    ${CP_FIELDS.map(field => {
+                        const value = form.values[field.key] || '';
+                        const issue = cpFieldIssue(field, value);
+                        return `
+                            <div class="iv2-field">
+                                <label class="iv2-field__label">${escapeHtml(field.label)}${field.required ? ' *' : ''}</label>
+                                <input class="iv2-input${issue ? ' iv2-input--bad' : ''}" type="text"
+                                       data-cp-field="${field.key}" value="${escapeHtml(value)}" autocomplete="off">
+                                ${issue ? `<div class="iv2-field__err">${escapeHtml(issue)}</div>` : ''}
+                            </div>`;
+                    }).join('')}
+                </div>
+                <div class="iv2-tools-bank__btns">
+                    <button class="bx-btn bx-btn--ok bx-btn--sm" type="button" id="iv2CpSave"
+                            ${state.tools.cp.saving ? 'disabled' : ''}>Сохранить</button>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2CpCancel">Отмена</button>
+                </div>
+            </div>`;
+    }
+
+    /** Претензия к длине реквизита — та же проверка, что в форме счёта. */
+    function cpFieldIssue(field, value) {
+        if (!field.digits) return '';
+        const onlyDigits = String(value || '').replace(/\D/g, '');
+        if (!onlyDigits || field.digits.indexOf(onlyDigits.length) !== -1) return '';
+        return `${field.label}: ${onlyDigits.length} ${plural(onlyDigits.length, 'цифра', 'цифры', 'цифр')}, `
+            + `нужно ${field.digits.join(' или ')}`;
+    }
+
+    /** Точечное обновление претензии к полю: подсветка и текст под ним. */
+    function updateCpFieldIssue(input, key) {
+        const field = CP_FIELDS.find(item => item.key === key);
+        if (!field) return;
+        const issue = cpFieldIssue(field, input.value);
+        input.classList.toggle('iv2-input--bad', Boolean(issue));
+
+        const wrap = input.parentNode;
+        if (!wrap) return;
+        let error = wrap.querySelector('.iv2-field__err');
+        if (issue) {
+            if (!error) {
+                error = document.createElement('div');
+                error.className = 'iv2-field__err';
+                wrap.appendChild(error);
+            }
+            error.textContent = issue;
+        } else if (error) {
+            error.remove();
+        }
+    }
+
+    function openCpForm(counterparty) {
+        const values = {};
+        CP_FIELDS.forEach(field => { values[field.key] = (counterparty && counterparty[field.key]) || ''; });
+        state.tools.cp.form = { id: counterparty ? counterparty.id : null, values };
+        renderTools();
+    }
+
+    function closeCpForm() {
+        state.tools.cp.form = null;
+        renderTools();
+    }
+
+    /** Перерисовать только список: поле поиска иначе теряет фокус на каждой букве. */
+    function renderCpList() {
+        const host = $('iv2CpList');
+        if (!host) return;
+        host.innerHTML = cpListHtml();
+        bindCpListActions();
+    }
+
+    function bindCounterparties() {
+        const search = $('iv2CpSearch');
+        if (search) {
+            search.addEventListener('input', () => {
+                state.tools.cp.search = search.value;
+                renderCpList();
+            });
+        }
+        const newButton = $('iv2CpNew');
+        if (newButton) newButton.addEventListener('click', () => openCpForm(null));
+
+        const save = $('iv2CpSave');
+        if (save) save.addEventListener('click', saveCounterparty);
+        const cancel = $('iv2CpCancel');
+        if (cancel) cancel.addEventListener('click', closeCpForm);
+
+        const formHost = $('iv2CpForm');
+        if (formHost) {
+            formHost.querySelectorAll('[data-cp-field]').forEach(input => {
+                const key = input.getAttribute('data-cp-field');
+                // Подсказку о длине правим точечно, без перерисовки формы.
+                // Перерисовка по `change` выглядела бы естественнее, но она
+                // пересоздаёт кнопки между mousedown и click, и «Сохранить»
+                // после правки поля перестала бы срабатывать.
+                input.addEventListener('input', () => {
+                    if (!state.tools.cp.form) return;
+                    state.tools.cp.form.values[key] = input.value;
+                    updateCpFieldIssue(input, key);
+                });
+            });
+        }
+
+        bindCpListActions();
+    }
+
+    function bindCpListActions() {
+        const host = $('iv2CpList');
+        if (!host) return;
+        host.querySelectorAll('[data-cp-act]').forEach(button => {
+            const id = Number(button.getAttribute('data-cp-id'));
+            const action = button.getAttribute('data-cp-act');
+            button.addEventListener('click', () => {
+                if (action === 'edit') openCpForm(state.tools.cp.list.find(item => item.id === id));
+                if (action === 'delete') removeCounterparty(id);
+            });
+        });
+    }
+
+    async function saveCounterparty() {
+        const form = state.tools.cp.form;
+        if (!form) return;
+
+        const payload = {};
+        CP_FIELDS.forEach(field => {
+            payload[field.key] = String(form.values[field.key] || '').trim() || null;
+        });
+        if (!payload.name) {
+            toast('Укажите наименование контрагента', 'error');
+            return;
+        }
+
+        state.tools.cp.saving = true;
+        renderTools();
+        try {
+            if (form.id) await apiPut('/api/invoices/counterparties/' + form.id, payload);
+            else await apiPost('/api/invoices/counterparties', payload);
+            state.tools.cp.form = null;
+            toast('Контрагент сохранён', 'success');
+            await loadCounterparties();
+        } catch (error) {
+            toast('Не удалось сохранить: ' + error.message, 'error');
+        } finally {
+            state.tools.cp.saving = false;
+            renderTools();
+        }
+    }
+
+    async function removeCounterparty(id) {
+        const item = state.tools.cp.list.find(row => row.id === id);
+        const confirmed = await window.BarhatUI.confirm(
+            `Убрать «${item ? item.name : id}» из справочника? Счета и их реквизиты останутся на месте.`,
+            { title: 'Удаление контрагента', confirmText: 'Убрать', danger: true }
+        );
+        if (!confirmed) return;
+
+        try {
+            await apiDelete('/api/invoices/counterparties/' + id);
+            if (state.tools.cp.form && state.tools.cp.form.id === id) state.tools.cp.form = null;
+            toast('Контрагент убран из справочника', 'success');
+            await loadCounterparties();
+        } catch (error) {
+            toast('Не удалось удалить: ' + error.message, 'error');
         }
     }
 
