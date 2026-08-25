@@ -1465,3 +1465,26 @@
     color: var(--bx-wine);
     margin-bottom: 10px;
 }
+
+.iv2 .iv2-pf-status { margin: 12px 0 8px; }
+
+.iv2 .iv2-pf-block { margin-bottom: 18px; }
+
+.iv2 .iv2-pf-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 5px 0;
+    flex-wrap: wrap;
+}
+
+.iv2 .iv2-pf-row__label {
+    flex: 1;
+    min-width: 180px;
+    font-size: 13.5px;
+    color: var(--bx-text);
+}
+
+.iv2 .iv2-pf-row .iv2-select,
+.iv2 .iv2-pf-row .iv2-input { width: 280px; max-width: 100%; }

@@ -191,8 +191,10 @@
                 result: null,
                 mapping: null,
                 mappingLoading: false,
+                mappingError: '',
                 unmatched: null,
                 unmatchedLoading: false,
+                unmatchedError: '',
             },
         };
     }
@@ -3054,6 +3056,7 @@
         renderTools();
         if (key === 'refs') loadRefList();
         if (key === 'counterparties') loadCounterparties();
+        if (key === 'planfact') state.tools.pf.tab = 'sync';
     }
 
     function closeTool() {
@@ -3080,6 +3083,7 @@
         let body = '';
         if (open === 'refs') body = refsBodyHtml();
         else if (open === 'counterparties') body = counterpartiesBodyHtml();
+        else if (open === 'planfact') body = planfactBodyHtml();
 
         host.innerHTML = `
             <div class="iv2-ovl iv2-ovl--tools" id="iv2ToolsOverlay"></div>
@@ -3105,6 +3109,7 @@
 
         if (open === 'refs') bindRefs();
         else if (open === 'counterparties') bindCounterparties();
+        else if (open === 'planfact') bindPlanfact();
     }
 
     // ------------------------------------------------------------------ Справочники
@@ -3592,6 +3597,317 @@
         } catch (error) {
             toast('Не удалось удалить: ' + error.message, 'error');
         }
+    }
+
+    // ------------------------------------------------------------------ ПланФакт
+
+    const PF_TABS = [
+        { key: 'sync', label: 'Синхронизация' },
+        { key: 'mapping', label: 'Сопоставление' },
+        { key: 'unmatched', label: 'Требует внимания' },
+    ];
+
+    const PF_POLL_INTERVAL_MS = 2000;
+    const PF_POLL_ATTEMPTS = 60;
+
+    function switchPlanfactTab(tab) {
+        state.tools.pf.tab = tab;
+        renderTools();
+        if (tab === 'mapping' && !state.tools.pf.mapping) loadPlanfactMapping();
+        if (tab === 'unmatched' && !state.tools.pf.unmatched) loadPlanfactUnmatched();
+    }
+
+    function planfactBodyHtml() {
+        const pf = state.tools.pf;
+        let body = '';
+        if (pf.tab === 'sync') body = planfactSyncHtml();
+        else if (pf.tab === 'mapping') body = planfactMappingHtml();
+        else body = planfactUnmatchedHtml();
+        return toolsTabsHtml(PF_TABS, pf.tab, 'data-pf-tab') + body;
+    }
+
+    function planfactSyncHtml() {
+        const pf = state.tools.pf;
+        return `
+            <p class="iv2-tools-note">
+                Ищет в ПланФакт операции с кодом счёта (REF-000123) в назначении платежа и разносит их
+                по проекту и статье из распределения счёта. «Проверить» ничего не меняет — только
+                показывает, что будет сделано.
+            </p>
+            <div class="iv2-tools-bank__btns">
+                <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2PfDryRun"
+                        ${pf.busy ? 'disabled' : ''}>Проверить (без записи)</button>
+                <button class="bx-btn bx-btn--sm" type="button" id="iv2PfRun"
+                        ${pf.busy ? 'disabled' : ''}>Синхронизировать</button>
+            </div>
+            ${pf.status ? `<p class="iv2-hint iv2-pf-status">${escapeHtml(pf.status)}</p>` : ''}
+            ${pf.result ? planfactResultHtml(pf.result) : ''}`;
+    }
+
+    function planfactResultHtml(result) {
+        const matched = result.matched || [];
+        const unmatched = result.unmatched || [];
+        if (!matched.length && !unmatched.length) {
+            return '<p class="iv2-tools-empty">Подходящих операций не найдено</p>';
+        }
+        return reportSection('Будут разнесены', matched.map(item => ({
+            id: item.invoice_id,
+            label: (item.invoice_number || item.match_code || ''),
+            amount: item.operation_amount,
+        })), true)
+            + reportSection('Требуют внимания', unmatched.map(item => ({
+                id: item.operation_id,
+                label: item.match_code || item.operation_id,
+                reason: item.reason,
+            })));
+    }
+
+    async function runPlanfactSync(dryRun) {
+        const pf = state.tools.pf;
+        pf.busy = true;
+        pf.status = dryRun ? 'Проверяю…' : 'Запускаю синхронизацию…';
+        pf.result = null;
+        renderTools();
+
+        try {
+            const data = await apiPost('/api/invoices/planfact/sync', { dry_run: dryRun });
+            if (dryRun) {
+                pf.status = 'Проверка завершена, в ПланФакт ничего не записано';
+                pf.result = data;
+            } else {
+                pf.status = 'Синхронизация идёт в фоне…';
+                pollPlanfactSync();
+            }
+        } catch (error) {
+            pf.status = 'Не удалось: ' + error.message;
+        } finally {
+            pf.busy = false;
+            renderTools();
+        }
+    }
+
+    /**
+     * Опрос статуса фонового прогона. Прекращается, как только модалку закрыли
+     * или ушли с раздела: висящий таймер продолжал бы дёргать сервер и писать
+     * в состояние закрытого окна.
+     */
+    async function pollPlanfactSync() {
+        for (let attempt = 0; attempt < PF_POLL_ATTEMPTS; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, PF_POLL_INTERVAL_MS));
+            if (state.tools.open !== 'planfact' || !pageIsActive()) return;
+
+            let status;
+            try {
+                status = (await apiGet('/api/invoices/planfact/sync-status')).status;
+            } catch (error) {
+                state.tools.pf.status = 'Статус синхронизации недоступен: ' + error.message;
+                renderTools();
+                return;
+            }
+
+            if (status && status.status === 'started') continue;
+
+            if (!status) {
+                state.tools.pf.status = 'Статус синхронизации недоступен';
+            } else if (status.status === 'completed') {
+                state.tools.pf.status = `Готово: разнесено ${status.matched_count}, `
+                    + `требует внимания ${status.unmatched_count}`;
+                // Список «требует внимания» мог измениться — перечитаем при
+                // следующем открытии вкладки
+                state.tools.pf.unmatched = null;
+            } else {
+                state.tools.pf.status = 'Ошибка: ' + (status.error_message || 'подробности в логах сервера');
+            }
+            renderTools();
+            loadSummary();
+            loadList(false);
+            return;
+        }
+        state.tools.pf.status = 'Синхронизация идёт дольше обычного — загляните позже';
+        renderTools();
+    }
+
+    async function loadPlanfactMapping() {
+        const pf = state.tools.pf;
+        pf.mappingLoading = true;
+        pf.mappingError = '';
+        renderTools();
+
+        try {
+            // Списки из ПланФакт живые и могут не приехать — тогда null и
+            // ручной ввод id вместо выпадающего списка. Своя часть (салоны и
+            // статьи) от этого не зависит и должна показаться в любом случае.
+            const [stores, categories, projects, pfCategories] = await Promise.all([
+                apiGet('/api/invoices/planfact/mappings/stores'),
+                apiGet('/api/invoices/categories'),
+                apiGet('/api/invoices/planfact/projects').catch(() => null),
+                apiGet('/api/invoices/planfact/categories').catch(() => null),
+            ]);
+            pf.mapping = {
+                stores: stores.stores || [],
+                categories: categories.categories || [],
+                pfProjects: projects ? (projects.projects || []) : null,
+                pfCategories: pfCategories ? (pfCategories.categories || []) : null,
+            };
+        } catch (error) {
+            pf.mapping = null;
+            pf.mappingError = error.message;
+        } finally {
+            pf.mappingLoading = false;
+            renderTools();
+        }
+    }
+
+    function planfactMappingHtml() {
+        const pf = state.tools.pf;
+        if (pf.mappingLoading) return '<p class="iv2-tools-empty">Загрузка…</p>';
+        if (pf.mappingError) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(pf.mappingError)}</p>`;
+        if (!pf.mapping) return '<p class="iv2-tools-empty">Нет данных</p>';
+
+        const { stores, categories, pfProjects, pfCategories } = pf.mapping;
+        return `
+            <div class="iv2-pf-block">
+                <div class="iv2-tools-form__title">Салоны → проекты ПланФакт</div>
+                ${pfProjects === null
+                    ? '<p class="iv2-hint">Список проектов из ПланФакт не пришёл — впишите id вручную.</p>' : ''}
+                ${stores.length
+                    ? stores.map(store => mappingRowHtml(store.id, store.name, store.planfact_project_id,
+                        pfProjects, 'store')).join('')
+                    : '<p class="iv2-tools-empty">Салонов нет</p>'}
+            </div>
+            <div class="iv2-pf-block">
+                <div class="iv2-tools-form__title">Статьи расхода → статьи ПланФакт</div>
+                ${pfCategories === null
+                    ? '<p class="iv2-hint">Список статей из ПланФакт не пришёл — впишите id вручную.</p>' : ''}
+                ${categories.length
+                    ? categories.map(category => mappingRowHtml(category.id, category.name,
+                        category.planfact_category_id, pfCategories, 'category')).join('')
+                    : '<p class="iv2-tools-empty">Статей нет</p>'}
+            </div>`;
+    }
+
+    /** Строка сопоставления: выпадающий список, а если ПланФакт молчит — поле ввода. */
+    function mappingRowHtml(id, label, currentValue, options, kind) {
+        const attribute = `data-pf-map="${kind}" data-pf-id="${escapeHtml(id)}"`;
+        const control = options
+            ? `<select class="iv2-select" ${attribute}>
+                   <option value="">— не сопоставлено —</option>
+                   ${options.map(option => {
+                       const value = option.projectId ?? option.operationCategoryId;
+                       const title = option.title ?? option.name ?? String(value);
+                       const selected = String(value) === String(currentValue ?? '') ? ' selected' : '';
+                       return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(title)}</option>`;
+                   }).join('')}
+               </select>`
+            : `<input class="iv2-input" type="text" placeholder="id в ПланФакт"
+                      value="${escapeHtml(currentValue || '')}" ${attribute}>`;
+
+        return `<div class="iv2-pf-row">
+                    <span class="iv2-pf-row__label">${escapeHtml(label)}</span>
+                    ${control}
+                </div>`;
+    }
+
+    async function savePlanfactMapping(kind, id, value) {
+        const path = kind === 'store'
+            ? `/api/invoices/planfact/mappings/stores/${id}`
+            : `/api/invoices/categories/${id}/planfact-mapping`;
+        const payload = kind === 'store'
+            ? { planfact_project_id: value }
+            : { planfact_category_id: value };
+        try {
+            await apiPut(path, payload);
+            // Держим состояние в согласии с сервером: вкладку можно закрыть и
+            // открыть заново, а перезапроса при этом нет.
+            const mapping = state.tools.pf.mapping;
+            if (mapping) {
+                const list = kind === 'store' ? mapping.stores : mapping.categories;
+                const row = (list || []).find(item => String(item.id) === String(id));
+                if (row) {
+                    if (kind === 'store') row.planfact_project_id = value || null;
+                    else row.planfact_category_id = value || null;
+                }
+            }
+        } catch (error) {
+            toast('Не удалось сохранить сопоставление: ' + error.message, 'error');
+        }
+    }
+
+    async function loadPlanfactUnmatched() {
+        const pf = state.tools.pf;
+        pf.unmatchedLoading = true;
+        pf.unmatchedError = '';
+        renderTools();
+        try {
+            const data = await apiGet('/api/invoices/planfact/unmatched');
+            pf.unmatched = data.unmatched || [];
+        } catch (error) {
+            pf.unmatched = [];
+            pf.unmatchedError = error.message;
+        } finally {
+            pf.unmatchedLoading = false;
+            renderTools();
+        }
+    }
+
+    function planfactUnmatchedHtml() {
+        const pf = state.tools.pf;
+        if (pf.unmatchedLoading) return '<p class="iv2-tools-empty">Загрузка…</p>';
+        if (pf.unmatchedError) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(pf.unmatchedError)}</p>`;
+        if (!pf.unmatched || !pf.unmatched.length) {
+            return '<p class="iv2-tools-empty">Нерешённых операций нет</p>';
+        }
+
+        return pf.unmatched.map(item => `
+            <div class="iv2-tools-row">
+                <div class="iv2-tools-row__main">
+                    <div class="iv2-tools-row__name">${escapeHtml(item.match_code || item.planfact_operation_id)}${
+                        item.operation_amount ? ' · ' + escapeHtml(money(item.operation_amount)) : ''}</div>
+                    <div class="iv2-tools-row__req">${escapeHtml(item.reason || '')}</div>
+                    <div class="iv2-hint">${escapeHtml(fmtCreated(item.detected_at))}</div>
+                </div>
+                <div class="iv2-tools-row__btns">
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                            data-pf-resolve="${escapeHtml(item.id)}">Разнесено вручную</button>
+                </div>
+            </div>`).join('');
+    }
+
+    async function resolvePlanfactUnmatched(id) {
+        try {
+            await apiPost(`/api/invoices/planfact/unmatched/${id}/resolve`, {});
+            toast('Операция убрана из списка', 'success');
+            await loadPlanfactUnmatched();
+        } catch (error) {
+            toast('Не удалось отметить: ' + error.message, 'error');
+        }
+    }
+
+    function bindPlanfact() {
+        const host = modalHost('tools');
+        if (!host) return;
+
+        host.querySelectorAll('[data-pf-tab]').forEach(tab => {
+            tab.addEventListener('click', () => switchPlanfactTab(tab.getAttribute('data-pf-tab')));
+        });
+
+        const dryRun = $('iv2PfDryRun');
+        if (dryRun) dryRun.addEventListener('click', () => runPlanfactSync(true));
+        const run = $('iv2PfRun');
+        if (run) run.addEventListener('click', () => runPlanfactSync(false));
+
+        host.querySelectorAll('[data-pf-map]').forEach(control => {
+            const kind = control.getAttribute('data-pf-map');
+            const id = control.getAttribute('data-pf-id');
+            // У выпадающего списка достаточно change, у поля ввода ждём ухода
+            // с него: сохранять на каждую набранную цифру id незачем.
+            const event = control.tagName === 'SELECT' ? 'change' : 'blur';
+            control.addEventListener(event, () => savePlanfactMapping(kind, id, control.value.trim()));
+        });
+
+        host.querySelectorAll('[data-pf-resolve]').forEach(button => {
+            button.addEventListener('click', () => resolvePlanfactUnmatched(button.getAttribute('data-pf-resolve')));
+        });
     }
 
     // =========================================================================
