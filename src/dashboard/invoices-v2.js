@@ -475,6 +475,20 @@
         badge.hidden = false;
     }
 
+    function renderHeaderActions() {
+        const host = $('iv2HeaderActions');
+        if (!host || host.dataset.ready === '1') return;
+        host.innerHTML = `
+            <button class="bx-btn bx-btn--light" type="button" id="iv2NewInvoice">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.75" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                Новый счёт
+            </button>`;
+        const button = $('iv2NewInvoice');
+        if (button) button.addEventListener('click', () => openForm('create'));
+        host.dataset.ready = '1';
+    }
+
     function renderKpis() {
         const host = $('iv2Kpis');
         if (!host) return;
@@ -1248,6 +1262,10 @@
 
     /** Какому счёту сейчас адресована вставка: открытой карточке или очереди. */
     function attachTargetId() {
+        // Пока открыта форма счёта, вложениям адресата нет: у создаваемого
+        // счёта ещё нет id, а тихо приложить файл к соседнему счёту — худшее,
+        // что можно сделать
+        if (state.form.open) return null;
         if (state.card.id && state.card.data) return state.card.id;
         if (state.view === 'queue' && state.queueActiveId && state.details[state.queueActiveId]) {
             return state.queueActiveId;
@@ -1336,15 +1354,28 @@
     // Отрисовка: лента событий и обсуждение
     // =========================================================================
 
+    /**
+     * Запись истории человеческим языком: «Сумма: 42 800 ₽ → 45 000 ₽».
+     * В базе лежат сырые значения — id справочников, числа, коды статусов;
+     * читать такое в ленте невозможно.
+     */
     function historyText(entry) {
         const field = HISTORY_FIELDS[entry.field_name] || entry.field_name;
         const asLabel = (value) => {
             if (value === null || value === undefined || value === '') return '—';
-            if (entry.field_name === 'status') {
-                const meta = STATUSES[value];
-                if (meta) return meta.label;
+            switch (entry.field_name) {
+                case 'status': return (STATUSES[value] || {}).label || String(value);
+                case 'amount': return money(value);
+                case 'due_date': return fmtDue(value);
+                case 'city_id': return refName('cities', value) || String(value);
+                case 'payer_id': return refName('payers', value) || String(value);
+                case 'vat_id': return refName('vatOptions', value) || String(value);
+                case 'is_archived': return String(value) === '1' ? 'да' : 'нет';
+                // «салон 6: 900.0» — id вместо названия читается не лучше кода
+                case 'распределение': return String(value).replace(/салон (\d+)/g,
+                    (match, id) => refName('stores', id) || match);
+                default: return String(value);
             }
-            return String(value);
         };
         if (entry.old_value === null || entry.old_value === undefined || entry.old_value === '') {
             return `${field}: ${asLabel(entry.new_value)}`;
@@ -1427,25 +1458,33 @@
     function actionsHtml(details) {
         const invoice = details.invoice;
         const isAdmin = state.user && state.user.role === 'admin';
-        if (!isAdmin) return '<div class="iv2-hint">Действия над счётом доступны согласующему</div>';
-
         const buttons = [];
-        if (invoice.is_archived) {
-            buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="unarchive">Вернуть из архива</button>`);
-        } else if (invoice.status === 'on_approval') {
-            buttons.push(`<button class="bx-btn bx-btn--ok" type="button" data-act="approve">Согласовать</button>`);
-            buttons.push(`<button class="bx-btn bx-btn--danger" type="button" data-act="reject">Отклонить</button>`);
-        } else if (invoice.status === 'approved' || invoice.status === 'sent_to_bank') {
-            buttons.push(`<button class="bx-btn bx-btn--ok" type="button" data-act="paid">Отметить оплаченным</button>`);
+
+        // Правку показываем по ответу сервера, а не по своей копии правил:
+        // can_edit_fields считает тот же can_edit_invoice_fields, что потом
+        // и разрешит запрос
+        if (details.can_edit_fields) {
+            buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="edit">Редактировать</button>`);
         }
-        if (!invoice.is_archived && (invoice.status === 'paid' || invoice.status === 'rejected')) {
-            buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="archive">В архив</button>`);
+        buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="copy">Копировать счёт</button>`);
+
+        if (isAdmin) {
+            if (invoice.is_archived) {
+                buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="unarchive">Вернуть из архива</button>`);
+            } else if (invoice.status === 'on_approval') {
+                buttons.unshift(`<button class="bx-btn bx-btn--danger" type="button" data-act="reject">Отклонить</button>`);
+                buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="approve">Согласовать</button>`);
+            } else if (invoice.status === 'approved' || invoice.status === 'sent_to_bank') {
+                buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="paid">Отметить оплаченным</button>`);
+            }
+            if (!invoice.is_archived && (invoice.status === 'paid' || invoice.status === 'rejected')) {
+                buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="archive">В архив</button>`);
+            }
         }
 
         const soon = [];
-        if (!invoice.is_archived && invoice.status === 'on_approval') soon.push('«Вернуть на доработку» — Фаза 7');
-        if (invoice.status === 'approved') soon.push('«Отправить в банк» — Фаза 6');
-        if (lockReason(invoice) === '') soon.push('«Редактировать» и «Копировать счёт» — Фаза 5');
+        if (isAdmin && !invoice.is_archived && invoice.status === 'on_approval') soon.push('«Вернуть на доработку» — Фаза 7');
+        if (isAdmin && invoice.status === 'approved') soon.push('«Отправить в банк» — Фаза 6');
 
         return buttons.join('')
             + (soon.length ? `<div class="iv2-hint iv2-soon">Ещё приедет: ${escapeHtml(soon.join(' · '))}</div>` : '');
@@ -1642,6 +1681,11 @@
             return;
         }
 
+        if (action === 'edit' || action === 'copy') {
+            openForm(action === 'edit' ? 'edit' : 'copy', invoiceId);
+            return;
+        }
+
         // Скрытый input открываем кликом: свой вид у него не настраивается,
         // а системный выглядит чужеродно рядом с кнопками раздела
         if (action === 'pick-file' || action === 'take-photo') {
@@ -1832,7 +1876,7 @@
     // =========================================================================
 
     function renderCard() {
-        const host = $('iv2Modals');
+        const host = modalHost('card');
         if (!host) return;
 
         if (!state.card.id) {
@@ -1933,6 +1977,652 @@
     }
 
     // =========================================================================
+    // Форма счёта: создание, копирование, правка
+    // =========================================================================
+
+    const COUNTERPARTY_FIELDS = [
+        { key: 'counterparty_name', label: 'Контрагент', from: 'name' },
+        { key: 'counterparty_inn', label: 'ИНН', from: 'inn', digits: [10, 12] },
+        { key: 'counterparty_kpp', label: 'КПП', from: 'kpp', digits: [9] },
+        { key: 'counterparty_bank_name', label: 'Банк', from: 'bank_name' },
+        { key: 'counterparty_bank_bik', label: 'БИК', from: 'bank_bik', digits: [9] },
+        { key: 'counterparty_bank_account', label: 'Расчётный счёт', from: 'bank_account', digits: [20] },
+        { key: 'counterparty_bank_corr_account', label: 'Корр. счёт', from: 'bank_corr_account', digits: [20] },
+    ];
+
+    const FORM_TITLES = {
+        create: 'Новый счёт',
+        copy: 'Копия счёта',
+        edit: 'Редактирование счёта',
+    };
+
+    function emptyForm() {
+        const values = {
+            city_id: '', payer_id: '', vat_id: '', due_date: '',
+            amount: '', payment_purpose: '', comment: '',
+        };
+        COUNTERPARTY_FIELDS.forEach(f => { values[f.key] = ''; });
+        return {
+            open: false,
+            mode: 'create',
+            invoiceId: null,
+            values,
+            items: [],
+            openSections: { main: true, requisites: false, allocation: true },
+            suggestions: [],
+            source: '',
+            saving: false,
+            error: '',
+        };
+    }
+
+    state.form = emptyForm();
+    let counterpartySearchTimer = null;
+
+    /**
+     * Модалки живут в двух отдельных хостах внутри #iv2Modals: карточка и форма
+     * могут быть открыты одновременно (правка вызывается из карточки), а общий
+     * innerHTML стирал бы одну при перерисовке другой.
+     */
+    function modalHost(name) {
+        const root = $('iv2Modals');
+        if (!root) return null;
+        const id = name === 'card' ? 'iv2CardHost' : 'iv2FormHost';
+        let host = $(id);
+        if (!host) {
+            host = document.createElement('div');
+            host.id = id;
+            root.appendChild(host);
+        }
+        return host;
+    }
+
+    function openForm(mode, invoiceId) {
+        const form = emptyForm();
+        form.open = true;
+        form.mode = mode;
+
+        if (mode === 'create') {
+            form.values.due_date = today();
+            form.items = [{ store_id: '', expense_category_id: '', amount: '' }];
+        } else {
+            const details = state.details[invoiceId];
+            if (!details) {
+                toast('Счёт ещё не загрузился, попробуйте ещё раз');
+                return;
+            }
+            const invoice = details.invoice;
+            form.invoiceId = mode === 'edit' ? invoiceId : null;
+            form.values.city_id = invoice.city_id || '';
+            form.values.payer_id = invoice.payer_id || '';
+            form.values.vat_id = invoice.vat_id || '';
+            form.values.payment_purpose = invoice.payment_purpose || '';
+            form.values.comment = invoice.comment || '';
+            COUNTERPARTY_FIELDS.forEach(f => { form.values[f.key] = invoice[f.key] || ''; });
+
+            if (mode === 'edit') {
+                form.values.due_date = invoice.due_date || '';
+                form.values.amount = invoice.amount;
+                form.items = (details.line_items || []).map(item => ({
+                    store_id: item.store_id,
+                    expense_category_id: item.expense_category_id,
+                    amount: item.amount,
+                }));
+            } else {
+                // Копия: сумма и суммы строк — ровно то, что меняется от счёта
+                // к счёту, поэтому переносим только разрезы
+                form.values.due_date = today();
+                form.values.amount = '';
+                form.items = (details.line_items || []).map(item => ({
+                    store_id: item.store_id,
+                    expense_category_id: item.expense_category_id,
+                    amount: '',
+                }));
+            }
+            if (!form.items.length) form.items = [{ store_id: '', expense_category_id: '', amount: '' }];
+        }
+
+        state.form = form;
+        renderForm();
+    }
+
+    function closeForm() {
+        state.form = emptyForm();
+        renderForm();
+    }
+
+    function formAllocated() {
+        return state.form.items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    }
+
+    function formAmount() {
+        return Number(state.form.values.amount) || 0;
+    }
+
+    /** Претензии к реквизитам прямо в форме — те же правила, что на сервере. */
+    function formRequisiteIssues() {
+        const issues = {};
+        COUNTERPARTY_FIELDS.filter(f => f.digits).forEach(f => {
+            const value = digits(state.form.values[f.key]);
+            if (value && f.digits.indexOf(value.length) === -1) {
+                issues[f.key] = `${f.label}: ${value.length} ${plural(value.length, 'цифра', 'цифры', 'цифр')}, `
+                    + `нужно ${f.digits.join(' или ')}`;
+            }
+        });
+        return issues;
+    }
+
+    function requisitesFilled() {
+        return BANK_FIELDS.every(field => String(state.form.values[field] || '').trim());
+    }
+
+    function selectOptions(items, current, anyLabel) {
+        return `<option value="">${escapeHtml(anyLabel)}</option>` + (items || []).map(item =>
+            `<option value="${escapeHtml(item.id)}"${String(item.id) === String(current) ? ' selected' : ''}>${escapeHtml(item.name)}</option>`
+        ).join('');
+    }
+
+    function allocationRowsHtml() {
+        return state.form.items.map((item, index) => `
+            <div class="iv2-arow">
+                <select class="iv2-select" data-item="${index}" data-item-field="store_id">
+                    ${selectOptions(state.refs.stores, item.store_id, 'Салон / проект')}
+                </select>
+                <select class="iv2-select" data-item="${index}" data-item-field="expense_category_id">
+                    ${selectOptions(state.refs.categories, item.expense_category_id, 'Статья расхода')}
+                </select>
+                <input class="iv2-input" type="number" step="0.01" min="0" placeholder="Сумма"
+                       data-item="${index}" data-item-field="amount"
+                       value="${escapeHtml(item.amount === '' || item.amount === null ? '' : item.amount)}">
+                <button class="iv2-arow__del" type="button" data-item-del="${index}"
+                        aria-label="Удалить строку" title="Удалить строку">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>`).join('');
+    }
+
+    function allocationSummaryHtml() {
+        const amount = formAmount();
+        const allocated = formAllocated();
+        const rest = Math.round((amount - allocated) * 100) / 100;
+        const ok = amount > 0 && Math.abs(rest) < 0.01;
+        return `
+            <div class="iv2-alloc-total ${ok ? 'iv2-alloc-total--ok' : 'iv2-alloc-total--bad'}">
+                <span>Распределено <b>${escapeHtml(money(allocated))}</b> из <b>${escapeHtml(money(amount))}</b>${
+                    ok ? '' : ` · осталось <b>${escapeHtml(money(rest))}</b>`}</span>
+                <span class="iv2-alloc-total__btns">
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-form-act="alloc-rest">Остаток в последнюю строку</button>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-form-act="alloc-even">Разделить поровну</button>
+                </span>
+            </div>`;
+    }
+
+    function sectionHtml(key, title, badge, body) {
+        const open = state.form.openSections[key];
+        return `
+            <div class="iv2-sect${open ? ' iv2-sect--open' : ''}" data-section="${key}">
+                <button class="iv2-sect__head" type="button" data-form-act="toggle-section" data-section-key="${key}">
+                    <span class="iv2-sect__title">${escapeHtml(title)} ${badge}</span>
+                    <svg class="iv2-sect__chev" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+                         stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="iv2-sect__body">${body}</div>
+            </div>`;
+    }
+
+    function renderForm() {
+        const host = modalHost('form');
+        if (!host) return;
+        if (!state.form.open) {
+            host.innerHTML = '';
+            return;
+        }
+
+        const values = state.form.values;
+        const issues = formRequisiteIssues();
+        const issueCount = Object.keys(issues).length;
+
+        const requisitesBadge = issueCount
+            ? `<span class="bx-badge b-warn">${withCount(issueCount, 'замечание', 'замечания', 'замечаний')}</span>`
+            : (requisitesFilled() ? '<span class="bx-badge b-appr">полные</span>'
+                                  : '<span class="bx-badge b-rej">неполные</span>');
+
+        const mainBody = `
+            <div class="iv2-grid2">
+                <div class="iv2-field">
+                    <label class="iv2-field__label" for="iv2form-city_id">Город <span class="iv2-req">*</span></label>
+                    <select class="iv2-select" id="iv2form-city_id" data-form-field="city_id">
+                        ${selectOptions(state.refs.cities, values.city_id, 'Выберите город')}
+                    </select>
+                </div>
+                <div class="iv2-field">
+                    <label class="iv2-field__label" for="iv2form-payer_id">На кого выставлен <span class="iv2-req">*</span></label>
+                    <select class="iv2-select" id="iv2form-payer_id" data-form-field="payer_id">
+                        ${selectOptions(state.refs.payers, values.payer_id, 'Выберите плательщика')}
+                    </select>
+                </div>
+                <div class="iv2-field">
+                    <label class="iv2-field__label" for="iv2form-due_date">Дата оплаты (план) <span class="iv2-req">*</span></label>
+                    <input class="iv2-input" type="date" id="iv2form-due_date" data-form-field="due_date"
+                           value="${escapeHtml(values.due_date)}">
+                </div>
+                <div class="iv2-field">
+                    <label class="iv2-field__label" for="iv2form-amount">Сумма счёта, ₽ <span class="iv2-req">*</span></label>
+                    <input class="iv2-input" type="number" step="0.01" min="0" id="iv2form-amount"
+                           data-form-field="amount" value="${escapeHtml(values.amount)}">
+                </div>
+                <div class="iv2-field">
+                    <label class="iv2-field__label" for="iv2form-vat_id">НДС</label>
+                    <select class="iv2-select" id="iv2form-vat_id" data-form-field="vat_id">
+                        ${selectOptions(state.refs.vatOptions, values.vat_id, 'Не указан')}
+                    </select>
+                </div>
+            </div>
+            <div class="iv2-field">
+                <label class="iv2-field__label" for="iv2form-payment_purpose">Назначение платежа <span class="iv2-req">*</span></label>
+                <textarea class="iv2-textarea" id="iv2form-payment_purpose" rows="2"
+                          data-form-field="payment_purpose">${escapeHtml(values.payment_purpose)}</textarea>
+            </div>
+            <div class="iv2-field">
+                <label class="iv2-field__label" for="iv2form-comment">Комментарий (в банк не уходит)</label>
+                <textarea class="iv2-textarea" id="iv2form-comment" rows="2"
+                          data-form-field="comment">${escapeHtml(values.comment)}</textarea>
+            </div>`;
+
+        const suggestions = state.form.suggestions.length
+            ? `<div class="iv2-suggest">${state.form.suggestions.map((cp, i) => `
+                <button class="iv2-suggest__item" type="button" data-cp="${i}">
+                    <span class="iv2-suggest__name">${escapeHtml(cp.name || 'без названия')}</span>
+                    <span class="iv2-suggest__meta">ИНН ${escapeHtml(cp.inn || '—')}
+                        · счёт ${escapeHtml(cp.bank_account || '—')}</span>
+                </button>`).join('')}</div>`
+            : '';
+
+        const requisitesBody = `
+            <div class="iv2-field">
+                <label class="iv2-field__label" for="iv2form-cp-search">Найти в справочнике</label>
+                <input class="iv2-input" id="iv2form-cp-search" placeholder="название, ИНН или расчётный счёт">
+                ${suggestions}
+                ${state.form.source ? `<div class="iv2-hint">${escapeHtml(state.form.source)}</div>` : ''}
+            </div>
+            <div class="iv2-grid2">
+                ${COUNTERPARTY_FIELDS.map(f => `
+                    <div class="iv2-field">
+                        <label class="iv2-field__label" for="iv2form-${f.key}">${escapeHtml(f.label)}</label>
+                        <input class="iv2-input${issues[f.key] ? ' iv2-input--bad' : ''}" id="iv2form-${f.key}"
+                               data-form-field="${f.key}" value="${escapeHtml(values[f.key])}">
+                        ${issues[f.key] ? `<div class="iv2-field__err">${escapeHtml(issues[f.key])}</div>` : ''}
+                    </div>`).join('')}
+            </div>`;
+
+        const allocationBody = `
+            ${allocationRowsHtml()}
+            <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-form-act="alloc-add">Добавить строку</button>
+            ${allocationSummaryHtml()}`;
+
+        const allocationBadge = Math.abs(formAmount() - formAllocated()) < 0.01 && formAmount() > 0
+            ? '<span class="bx-badge b-appr">сходится</span>'
+            : '<span class="bx-badge b-warn">не сходится</span>';
+
+        host.innerHTML = `
+            <div class="iv2-ovl iv2-ovl--form" id="iv2FormOverlay"></div>
+            <div class="iv2-modal iv2-modal--form">
+                <div class="iv2-modal__box">
+                    <div class="iv2-modal__head">
+                        <h3 class="bx-card__title">${escapeHtml(FORM_TITLES[state.form.mode])}</h3>
+                        <button class="iv2-x" type="button" id="iv2FormClose" aria-label="Закрыть">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                 stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                        </button>
+                    </div>
+                    <div class="iv2-modal__body">
+                        ${sectionHtml('main', 'Основное', '', mainBody)}
+                        ${sectionHtml('requisites', 'Контрагент и реквизиты', requisitesBadge, requisitesBody)}
+                        ${sectionHtml('allocation', 'Распределение по салонам и статьям', allocationBadge, allocationBody)}
+                        ${state.form.error ? `<div class="iv2-form-error">${escapeHtml(state.form.error)}</div>` : ''}
+                    </div>
+                    <div class="iv2-modal__foot">
+                        <button class="bx-btn bx-btn--ghost" type="button" id="iv2FormCancel">Отмена</button>
+                        <button class="bx-btn" type="button" id="iv2FormSave"${state.form.saving ? ' disabled' : ''}>
+                            ${state.form.mode === 'edit' ? 'Сохранить изменения' : 'Создать счёт'}
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+
+        bindForm(host);
+    }
+
+    function bindForm(host) {
+        host.querySelectorAll('[data-form-field]').forEach(input => {
+            const field = input.getAttribute('data-form-field');
+            input.addEventListener('input', () => {
+                state.form.values[field] = input.value;
+                // Перерисовываем только то, что зависит от значения, — иначе
+                // поле теряет фокус на каждом набранном символе
+                if (field === 'amount') updateAllocationSummary(host);
+                if (COUNTERPARTY_FIELDS.some(f => f.key === field)) updateRequisiteHints(host, input, field);
+            });
+            if (input.tagName === 'SELECT') {
+                input.addEventListener('change', () => { state.form.values[field] = input.value; });
+            }
+        });
+
+        host.querySelectorAll('[data-item]').forEach(input => {
+            const index = Number(input.getAttribute('data-item'));
+            const field = input.getAttribute('data-item-field');
+            const handler = () => {
+                state.form.items[index][field] = input.value;
+                if (field === 'amount') updateAllocationSummary(host);
+            };
+            input.addEventListener('input', handler);
+            input.addEventListener('change', handler);
+        });
+
+        host.querySelectorAll('[data-item-del]').forEach(button => {
+            button.addEventListener('click', () => {
+                state.form.items.splice(Number(button.getAttribute('data-item-del')), 1);
+                if (!state.form.items.length) {
+                    state.form.items = [{ store_id: '', expense_category_id: '', amount: '' }];
+                }
+                renderForm();
+            });
+        });
+
+        host.querySelectorAll('[data-form-act]').forEach(button => {
+            button.addEventListener('click', () => formAction(button.getAttribute('data-form-act'), button));
+        });
+
+        host.querySelectorAll('[data-cp]').forEach(button => {
+            button.addEventListener('click', () => applyCounterparty(Number(button.getAttribute('data-cp'))));
+        });
+
+        const search = $('iv2form-cp-search');
+        if (search) {
+            search.addEventListener('input', () => {
+                clearTimeout(counterpartySearchTimer);
+                const query = search.value;
+                counterpartySearchTimer = setTimeout(() => searchCounterparties(query), TEXT_FILTER_DELAY_MS);
+            });
+        }
+
+        const close = $('iv2FormClose');
+        if (close) close.addEventListener('click', confirmCloseForm);
+        const cancel = $('iv2FormCancel');
+        if (cancel) cancel.addEventListener('click', confirmCloseForm);
+        const overlay = $('iv2FormOverlay');
+        if (overlay) overlay.addEventListener('click', confirmCloseForm);
+        const save = $('iv2FormSave');
+        if (save) save.addEventListener('click', saveForm);
+    }
+
+    /** Точечное обновление итога — чтобы не перерисовывать форму на каждый символ. */
+    function updateAllocationSummary(host) {
+        const box = host.querySelector('.iv2-alloc-total');
+        if (!box) return;
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = allocationSummaryHtml();
+        const fresh = wrapper.firstElementChild;
+        box.className = fresh.className;
+        box.innerHTML = fresh.innerHTML;
+        box.querySelectorAll('[data-form-act]').forEach(button => {
+            button.addEventListener('click', () => formAction(button.getAttribute('data-form-act'), button));
+        });
+        const badge = host.querySelector('[data-section="allocation"] .iv2-sect__title .bx-badge');
+        if (badge) {
+            const ok = Math.abs(formAmount() - formAllocated()) < 0.01 && formAmount() > 0;
+            badge.className = 'bx-badge ' + (ok ? 'b-appr' : 'b-warn');
+            badge.textContent = ok ? 'сходится' : 'не сходится';
+        }
+    }
+
+    /** Подсветка поля реквизита прямо на вводе, без перерисовки всей формы. */
+    function updateRequisiteHints(host, input, field) {
+        const issues = formRequisiteIssues();
+        input.classList.toggle('iv2-input--bad', Boolean(issues[field]));
+
+        let error = input.parentElement.querySelector('.iv2-field__err');
+        if (issues[field]) {
+            if (!error) {
+                error = document.createElement('div');
+                error.className = 'iv2-field__err';
+                input.parentElement.appendChild(error);
+            }
+            error.textContent = issues[field];
+        } else if (error) {
+            error.remove();
+        }
+
+        const badge = host.querySelector('[data-section="requisites"] .iv2-sect__title .bx-badge');
+        if (badge) {
+            const count = Object.keys(issues).length;
+            badge.className = 'bx-badge ' + (count ? 'b-warn' : (requisitesFilled() ? 'b-appr' : 'b-rej'));
+            badge.textContent = count
+                ? withCount(count, 'замечание', 'замечания', 'замечаний')
+                : (requisitesFilled() ? 'полные' : 'неполные');
+        }
+    }
+
+    function formAction(action, sourceElement) {
+        if (action === 'toggle-section') {
+            const key = sourceElement.getAttribute('data-section-key');
+            state.form.openSections[key] = !state.form.openSections[key];
+            const section = sourceElement.closest('[data-section]');
+            if (section) section.classList.toggle('iv2-sect--open', state.form.openSections[key]);
+            return;
+        }
+        if (action === 'alloc-add') {
+            state.form.items.push({ store_id: '', expense_category_id: '', amount: '' });
+            renderForm();
+            return;
+        }
+        if (action === 'alloc-rest') {
+            const rest = Math.round((formAmount() - formAllocated()) * 100) / 100;
+            const last = state.form.items[state.form.items.length - 1];
+            if (!last) return;
+            const next = Math.round(((Number(last.amount) || 0) + rest) * 100) / 100;
+            // Отрицательная сумма строки не пройдёт ни клиентскую проверку, ни
+            // серверную — честнее сказать, в чём дело, чем подставить минус
+            if (next <= 0) {
+                toast('Распределено больше суммы счёта — уменьшите строки', 'error');
+                return;
+            }
+            last.amount = next;
+            renderForm();
+            return;
+        }
+        if (action === 'alloc-even') {
+            const count = state.form.items.length;
+            const amount = formAmount();
+            if (!count || amount <= 0) return;
+            const share = Math.floor((amount / count) * 100) / 100;
+            state.form.items.forEach(item => { item.amount = share; });
+            // Копейки округления кладём в последнюю строку, иначе сумма не сойдётся
+            const last = state.form.items[count - 1];
+            last.amount = Math.round((amount - share * (count - 1)) * 100) / 100;
+            renderForm();
+        }
+    }
+
+    async function searchCounterparties(query) {
+        if (!state.form.open) return;
+        if (String(query || '').trim().length < 2) {
+            state.form.suggestions = [];
+            renderSuggestions();
+            return;
+        }
+        try {
+            const data = await apiGet('/api/invoices/counterparties?query=' + encodeURIComponent(query));
+            if (!state.form.open) return;
+            state.form.suggestions = data.counterparties || [];
+
+            // Одно совпадение — подставляем сразу: гадать, какой из одного
+            // варианта выбрать, человеку не нужно
+            if (state.form.suggestions.length === 1) {
+                applyCounterparty(0);
+                return;
+            }
+            renderSuggestions();
+        } catch (error) {
+            console.error('invoices-v2: поиск контрагента не удался:', error);
+        }
+    }
+
+    /**
+     * Подсказки перерисовываем точечно, а не всей формой: полная перерисовка
+     * отбирает фокус у поля поиска, и человек не может продолжить набор.
+     */
+    function renderSuggestions() {
+        const search = $('iv2form-cp-search');
+        if (!search) return;
+        const field = search.parentElement;
+        let box = field.querySelector('.iv2-suggest');
+
+        if (!state.form.suggestions.length) {
+            if (box) box.remove();
+            return;
+        }
+
+        if (!box) {
+            box = document.createElement('div');
+            box.className = 'iv2-suggest';
+            search.insertAdjacentElement('afterend', box);
+        }
+        box.innerHTML = state.form.suggestions.map((cp, i) => `
+            <button class="iv2-suggest__item" type="button" data-cp="${i}">
+                <span class="iv2-suggest__name">${escapeHtml(cp.name || 'без названия')}</span>
+                <span class="iv2-suggest__meta">ИНН ${escapeHtml(cp.inn || '—')}
+                    · счёт ${escapeHtml(cp.bank_account || '—')}</span>
+            </button>`).join('');
+        box.querySelectorAll('[data-cp]').forEach(button => {
+            button.addEventListener('click', () => applyCounterparty(Number(button.getAttribute('data-cp'))));
+        });
+    }
+
+    function applyCounterparty(index) {
+        const counterparty = state.form.suggestions[index];
+        if (!counterparty) return;
+        COUNTERPARTY_FIELDS.forEach(f => {
+            state.form.values[f.key] = counterparty[f.from] || '';
+        });
+        state.form.suggestions = [];
+        state.form.openSections.requisites = true;
+        state.form.source = 'Реквизиты подставлены из справочника контрагентов'
+            + (counterparty.updated_at ? ` · обновлены ${fmtCreated(counterparty.updated_at)}` : '');
+        renderForm();
+    }
+
+    function formValidationError() {
+        const values = state.form.values;
+        if (!values.city_id) return 'Выберите город';
+        if (!values.payer_id) return 'Выберите, на кого выставлен счёт';
+        if (!values.due_date) return 'Укажите планируемую дату оплаты';
+        if (!(Number(values.amount) > 0)) return 'Сумма счёта должна быть больше нуля';
+        if (!String(values.payment_purpose).trim()) return 'Заполните назначение платежа';
+
+        // Распределение обязательно (решение №15): нераспределённый счёт не
+        // попадает ни в один разрез по салонам — теряется ровно та аналитика,
+        // ради которой модуль и делался
+        const filled = state.form.items.filter(item => item.store_id || item.expense_category_id || item.amount);
+        if (!filled.length) return 'Распределите счёт по салонам и статьям — без этого он не попадёт в аналитику';
+        for (const item of filled) {
+            if (!item.store_id) return 'В распределении не выбран салон';
+            if (!item.expense_category_id) return 'В распределении не выбрана статья расхода';
+            if (!(Number(item.amount) > 0)) return 'Сумма строки распределения должна быть больше нуля';
+        }
+        if (Math.abs(formAllocated() - Number(values.amount)) >= 0.01) {
+            return 'Распределение не сходится с суммой счёта';
+        }
+        return '';
+    }
+
+    async function apiPut(path, body) {
+        const response = await fetch(path, {
+            method: 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body || {}),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        return data;
+    }
+
+    function formPayload() {
+        const values = state.form.values;
+        const payload = {
+            city_id: Number(values.city_id),
+            payer_id: Number(values.payer_id),
+            vat_id: values.vat_id ? Number(values.vat_id) : null,
+            due_date: values.due_date,
+            amount: Number(values.amount),
+            payment_purpose: String(values.payment_purpose).trim(),
+            comment: String(values.comment || '').trim(),
+            line_items: state.form.items
+                .filter(item => item.store_id && item.expense_category_id && Number(item.amount) > 0)
+                .map(item => ({
+                    store_id: Number(item.store_id),
+                    expense_category_id: Number(item.expense_category_id),
+                    amount: Number(item.amount),
+                })),
+        };
+        COUNTERPARTY_FIELDS.forEach(f => {
+            payload[f.key] = String(values[f.key] || '').trim() || null;
+        });
+        return payload;
+    }
+
+    async function saveForm() {
+        const error = formValidationError();
+        if (error) {
+            state.form.error = error;
+            renderForm();
+            return;
+        }
+
+        state.form.saving = true;
+        state.form.error = '';
+        renderForm();
+
+        try {
+            const payload = formPayload();
+            if (state.form.mode === 'edit') {
+                await apiPut('/api/invoices/' + state.form.invoiceId, payload);
+                const invoiceId = state.form.invoiceId;
+                state.form = emptyForm();
+                renderForm();
+                toast('Изменения сохранены', 'success');
+                await refreshDetails(invoiceId);
+            } else {
+                const data = await apiPost('/api/invoices', payload);
+                state.form = emptyForm();
+                renderForm();
+                toast('Счёт создан и отправлен на согласование', 'success');
+                const newId = data.invoice && data.invoice.id;
+                if (newId) {
+                    delete state.details[newId];
+                    openCard(newId);
+                }
+            }
+            loadSummary();
+            loadList(false);
+        } catch (saveError) {
+            state.form.saving = false;
+            state.form.error = saveError.message;
+            renderForm();
+        }
+    }
+
+    async function confirmCloseForm() {
+        // Форма длинная, случайный клик мимо стоит дорого
+        const ok = await window.BarhatUI.confirm('Введённые данные не сохранятся.',
+            { title: 'Закрыть форму?', confirmText: 'Закрыть', cancelText: 'Продолжить ввод' });
+        if (ok) closeForm();
+    }
+
+    // =========================================================================
     // Хоткеи и история браузера
     // =========================================================================
 
@@ -1945,14 +2635,18 @@
     // поэтому обработчик на document обязан проверять, что открыт наш раздел.
     document.addEventListener('keydown', function(event) {
         if (!pageIsActive()) return;
-        if (/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName || '')) return;
 
-        if (event.key === 'Escape' && state.card.id) {
-            closeCard();
+        // Escape обрабатываем до проверки поля ввода: закрыть форму хочется и
+        // из середины заполнения. Форма поверх карточки — закрываем верхнюю.
+        if (event.key === 'Escape') {
+            if (state.form.open) confirmCloseForm();
+            else if (state.card.id) closeCard();
             return;
         }
+
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName || '')) return;
         if (event.ctrlKey || event.metaKey || event.altKey) return;
-        if (state.card.id || state.view !== 'queue' || !state.queueActiveId) return;
+        if (state.form.open || state.card.id || state.view !== 'queue' || !state.queueActiveId) return;
 
         // Раскладку не переключают ради хоткея — принимаем и русские буквы
         const key = String(event.key).toLowerCase();
@@ -1998,6 +2692,7 @@
     async function onPageActivated(user) {
         state.user = user || state.user;
 
+        renderHeaderActions();
         renderFiltersPanel();
         renderTabs();
         renderViews();

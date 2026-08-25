@@ -66,6 +66,7 @@ from .storage import (
     can_edit_invoice_fields,
     can_edit_invoice_status,
     update_invoice,
+    update_invoice_with_line_items,
     update_invoice_status,
     get_invoice_history,
     add_invoice_comment,
@@ -404,6 +405,27 @@ def get_invoice(invoice_id):
     return jsonify(result)
 
 
+def _validate_line_items(line_items):
+    """
+    Проверить строки распределения. Возвращает текст ошибки или None.
+
+    Общая для создания и правки: два набора правил на одни данные обязательно
+    разъедутся. Сумму строк со суммой счёта здесь не сверяем — при правке
+    сумма счёта может меняться тем же запросом, поэтому сверка идёт там, где
+    известно итоговое значение.
+    """
+    for item in line_items:
+        if not isinstance(item, dict):
+            return "Строка распределения должна быть объектом"
+        if not get_store_by_id(item.get("store_id")):
+            return "Некорректный проект (салон) в распределении"
+        if not get_expense_category_by_id(item.get("expense_category_id")):
+            return "Некорректная статья расхода в распределении"
+        if not isinstance(item.get("amount"), (int, float)) or item["amount"] <= 0:
+            return "Сумма строки распределения должна быть положительным числом"
+    return None
+
+
 @invoices_bp.route("/<int:invoice_id>", methods=["PUT"])
 @section_required("invoices")
 def edit_invoice(invoice_id):
@@ -463,12 +485,32 @@ def edit_invoice(invoice_id):
     if "comment" in data:
         changes["comment"] = (data["comment"] or "").strip() or None
 
-    if not changes:
+    # Распределение можно править тем же запросом, что и поля. Без этого правка
+    # «сумма + распределение» рвётся на два запроса, и при обрыве второго счёт
+    # остаётся с новой суммой и старым распределением — см.
+    # update_invoice_with_line_items.
+    line_items = None
+    if "line_items" in data:
+        line_items = data["line_items"] or []
+        if not isinstance(line_items, list):
+            return jsonify({"error": "line_items должен быть списком"}), 400
+        error = _validate_line_items(line_items)
+        if error:
+            return jsonify({"error": error}), 400
+        if invoice["is_archived"]:
+            return jsonify({"error": "Счёт в архиве — распределение изменить нельзя"}), 409
+
+    if not changes and line_items is None:
         return jsonify({"error": "Нет полей для изменения"}), 400
 
-    updated = update_invoice(invoice_id, changes, current_user.username)
-    log_action(current_user.username, "edit_invoice", f"{invoice['invoice_number']}: {list(changes.keys())}")
-    return jsonify({"ok": True, "invoice": updated})
+    result = update_invoice_with_line_items(invoice_id, changes, line_items, current_user.username)
+    if not result["ok"]:
+        return jsonify({"error": result["error"]}), 400
+
+    log_action(current_user.username, "edit_invoice",
+               f"{invoice['invoice_number']}: {list(changes.keys())}"
+               + (" + распределение" if line_items is not None else ""))
+    return jsonify({"ok": True, "invoice": result["invoice"]})
 
 
 @invoices_bp.route("/<int:invoice_id>/status", methods=["PUT"])
@@ -534,13 +576,9 @@ def add_invoice():
         return jsonify({"error": "Некорректный вариант НДС"}), 400
 
     line_items = data.get("line_items") or []
-    for item in line_items:
-        if not get_store_by_id(item.get("store_id")):
-            return jsonify({"error": "Некорректный проект (салон) в распределении"}), 400
-        if not get_expense_category_by_id(item.get("expense_category_id")):
-            return jsonify({"error": "Некорректная статья расхода в распределении"}), 400
-        if not isinstance(item.get("amount"), (int, float)) or item["amount"] <= 0:
-            return jsonify({"error": "Сумма строки распределения должна быть положительным числом"}), 400
+    error = _validate_line_items(line_items)
+    if error:
+        return jsonify({"error": error}), 400
 
     if line_items:
         total = sum(item["amount"] for item in line_items)

@@ -1131,6 +1131,149 @@
 
 .iv2 .iv2-linkish--num { font-size: 13px; }
 
+.iv2 .iv2-modal__foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 14px 22px;
+    border-top: 1px solid var(--bx-border);
+    background: #fdfbfd;
+    flex-wrap: wrap;
+}
+
+/* Форма поверх карточки: правку вызывают из открытого счёта */
+.iv2 .iv2-ovl--form { z-index: 2002; }
+.iv2 .iv2-modal--form { z-index: 2003; }
+.iv2 .iv2-modal--form .iv2-modal__box { max-width: 860px; }
+
+/* === Форма счёта: сворачиваемые секции ============================== */
+
+.iv2 .iv2-sect {
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    margin-bottom: 14px;
+    overflow: hidden;
+}
+
+.iv2 .iv2-sect__head {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 13px 16px;
+    background: #fdfbfd;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+}
+
+.iv2 .iv2-sect__title {
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--bx-wine);
+}
+
+.iv2 .iv2-sect__body { display: none; padding: 16px; border-top: 1px solid var(--bx-border); }
+.iv2 .iv2-sect--open .iv2-sect__body { display: block; }
+.iv2 .iv2-sect__chev { transition: transform 0.15s; color: var(--bx-muted); }
+.iv2 .iv2-sect--open .iv2-sect__chev { transform: rotate(180deg); }
+
+.iv2 .iv2-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+@media (max-width: 720px) {
+    .iv2 .iv2-grid2 { grid-template-columns: 1fr; }
+}
+
+.iv2 .iv2-field { margin-bottom: 12px; }
+.iv2 .iv2-grid2 .iv2-field { margin-bottom: 0; }
+.iv2 .iv2-req { color: var(--bx-down); }
+.iv2 .iv2-field__err { font-size: 11.5px; color: #b45309; margin-top: 4px; }
+.iv2 .iv2-input--bad { border-color: #fbbf24; background: #fffdf5; }
+
+.iv2 .iv2-form-error {
+    padding: 10px 12px;
+    border-radius: var(--bx-r-xl);
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    font-size: 13px;
+}
+
+/* Подсказки справочника контрагентов */
+
+.iv2 .iv2-suggest {
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    margin-top: 6px;
+    overflow: hidden;
+}
+
+.iv2 .iv2-suggest__item {
+    width: 100%;
+    display: block;
+    text-align: left;
+    padding: 8px 12px;
+    background: #fff;
+    border: none;
+    border-top: 1px solid var(--bx-border);
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.iv2 .iv2-suggest__item:first-child { border-top: none; }
+.iv2 .iv2-suggest__item:hover { background: var(--bx-bg); }
+.iv2 .iv2-suggest__name { display: block; font-size: 13px; color: var(--bx-wine); font-weight: 600; }
+.iv2 .iv2-suggest__meta { display: block; font-size: 11.5px; color: var(--bx-muted); margin-top: 2px; }
+
+/* === Форма: строки распределения ==================================== */
+
+.iv2 .iv2-arow {
+    display: grid;
+    grid-template-columns: 1fr 1fr 150px 38px;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+@media (max-width: 720px) {
+    .iv2 .iv2-arow { grid-template-columns: 1fr 1fr; }
+}
+
+.iv2 .iv2-arow__del {
+    background: none;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-lg);
+    cursor: pointer;
+    color: var(--bx-muted);
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.iv2 .iv2-arow__del:hover { color: var(--bx-down); border-color: #fecaca; }
+
+.iv2 .iv2-alloc-total {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    border-radius: var(--bx-r-xl);
+    background: var(--bx-bg);
+    font-size: 13px;
+    margin-top: 10px;
+}
+
+.iv2 .iv2-alloc-total b { font-variant-numeric: tabular-nums; }
+.iv2 .iv2-alloc-total--ok { background: #ecfdf5; color: #047857; }
+.iv2 .iv2-alloc-total--bad { background: #fffbeb; color: #b45309; }
+.iv2 .iv2-alloc-total__btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
 /* === Заглушка на месте ещё не сделанных видов ======================== */
 
 .iv2 .iv2-placeholder {

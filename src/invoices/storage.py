@@ -1353,6 +1353,97 @@ def update_invoice(invoice_id: int, changes: Dict[str, Any], changed_by: str) ->
     return get_invoice_by_id(invoice_id)
 
 
+def update_invoice_with_line_items(
+    invoice_id: int,
+    changes: Dict[str, Any],
+    items: Optional[List[Dict[str, Any]]],
+    changed_by: str,
+) -> Dict[str, Any]:
+    """
+    Обновить поля счёта и распределение ОДНОЙ транзакцией.
+
+    Зачем отдельная функция, а не два вызова подряд:
+    1. `set_invoice_line_items` сверяет сумму строк с текущей `invoices.amount`,
+       поэтому порядок жёстко задан — сначала сумма, потом строки. Обратный
+       порядок даёт отказ на ровном месте.
+    2. Если бы это были два запроса и второй не дошёл, счёт остался бы с новой
+       суммой и старым распределением — тихое противоречие, которое никто не
+       заметит до отчёта.
+
+    История и автоархивация — строго ПОСЛЕ commit и close: они открывают свои
+    соединения, и вызов при живой незакоммиченной транзакции даёт
+    "database is locked" (эти грабли в модуле уже ловили дважды).
+
+    Возвращает {"ok", "error", "invoice"}.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return {"ok": False, "error": "Счёт не найден", "invoice": None}
+
+    new_amount = changes.get("amount", invoice["amount"])
+    if items is not None and items:
+        total = sum(item["amount"] for item in items)
+        if abs(total - new_amount) >= 0.01:
+            return {
+                "ok": False,
+                "error": f"Сумма строк распределения ({total}) не равна сумме счёта ({new_amount})",
+                "invoice": None,
+            }
+
+    conn = get_db()
+    actually_changed = []
+    allocation_change = None
+    try:
+        # Явная блокировка на запись: два воркера могут править один счёт
+        conn.execute("BEGIN IMMEDIATE")
+
+        for field, new_value in changes.items():
+            if field not in _EDITABLE_INVOICE_FIELDS:
+                continue
+            old_value = invoice.get(field)
+            if old_value == new_value:
+                continue
+            conn.execute(f"UPDATE invoices SET {field} = ? WHERE id = ?", (new_value, invoice_id))
+            actually_changed.append((field, old_value, new_value))
+
+        if items is not None:
+            old_rows = conn.execute(
+                "SELECT * FROM invoice_line_items WHERE invoice_id = ?", (invoice_id,)
+            ).fetchall()
+            old_summary = ", ".join(f"салон {r['store_id']}: {r['amount']}" for r in old_rows) or "—"
+            new_summary = ", ".join(f"салон {i['store_id']}: {i['amount']}" for i in items) or "—"
+
+            conn.execute("DELETE FROM invoice_line_items WHERE invoice_id = ?", (invoice_id,))
+            for item in items:
+                conn.execute(
+                    """
+                    INSERT INTO invoice_line_items (invoice_id, store_id, expense_category_id, amount)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (invoice_id, item["store_id"], item["expense_category_id"], item["amount"])
+                )
+            if old_summary != new_summary:
+                allocation_change = (old_summary, new_summary)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    for field, old_value, new_value in actually_changed:
+        add_invoice_history(invoice_id, changed_by, field,
+                             None if old_value is None else str(old_value),
+                             None if new_value is None else str(new_value))
+    if allocation_change:
+        add_invoice_history(invoice_id, changed_by, "распределение", allocation_change[0], allocation_change[1])
+
+    _auto_archive_if_ready(invoice_id)
+
+    return {"ok": True, "error": None, "invoice": get_invoice_by_id(invoice_id)}
+
+
 def update_invoice_status(invoice_id: int, new_status: str, changed_by: str) -> Dict[str, Any]:
     """
     Прямая смена статуса счёта админом — в обход стандартных переходов
