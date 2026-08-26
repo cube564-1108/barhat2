@@ -16,7 +16,7 @@ import logging
 import os
 import sqlite3
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from storage_paths import resolve as resolve_data_path
 
@@ -1745,13 +1745,49 @@ def _clarification_column_exists() -> bool:
     return _HAS_CLARIFICATION_COLUMN
 
 
+def _filter_values(value: Any) -> List[Any]:
+    """
+    Значение фильтра → список значений.
+
+    Фильтры-справочники (статус, город, салон, статья, плательщик, автор)
+    принимают и одно значение, и несколько: старый раздел счетов и скрипты
+    зовут их скаляром, новый — списком из мультивыбора. Приводим к одному
+    виду здесь, чтобы условие в WHERE строилось единообразно.
+
+    Пустые значения выбрасываем: `store_id=""` из строки запроса не должен
+    превращаться в условие, которое не выполняется никогда.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [v for v in value if v is not None and str(v).strip() != ""]
+        # Порядок сохраняем (важен только для читаемости логов), дубли убираем
+        seen = set()
+        unique = []
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return unique
+    return [value]
+
+
+def _in_clause(column: str, values: Sequence[Any]) -> str:
+    """`column IN (?, ?, ?)` — или `column = ?` для единственного значения."""
+    if len(values) == 1:
+        return f" {column} = ?"
+    placeholders = ",".join("?" * len(values))
+    return f" {column} IN ({placeholders})"
+
+
 def _build_invoice_filters(
-    status: Optional[str] = None,
-    store_id: Optional[int] = None,
-    city_id: Optional[int] = None,
-    payer_id: Optional[int] = None,
-    expense_category_id: Optional[int] = None,
-    created_by: Optional[str] = None,
+    status: Optional[Union[str, Sequence[str]]] = None,
+    store_id: Optional[Union[int, Sequence[int]]] = None,
+    city_id: Optional[Union[int, Sequence[int]]] = None,
+    payer_id: Optional[Union[int, Sequence[int]]] = None,
+    expense_category_id: Optional[Union[int, Sequence[int]]] = None,
+    created_by: Optional[Union[str, Sequence[str]]] = None,
     counterparty: Optional[str] = None,
     payment_purpose: Optional[str] = None,
     created_from: Optional[str] = None,
@@ -1771,6 +1807,12 @@ def _build_invoice_filters(
     Вынесено из list_invoices, потому что теми же фильтрами считаются итоги
     «найдено N на сумму X» (count_invoices). Держать два набора условий
     отдельно — верный способ получить список и счётчик, которые не сходятся.
+
+    Справочные фильтры (status, store_id, city_id, payer_id,
+    expense_category_id, created_by) принимают как одно значение, так и список:
+    в новом разделе они мультивыборные. Несколько значений внутри одного
+    фильтра — это ИЛИ (город Москва ИЛИ Казань), разные фильтры между собой —
+    по-прежнему И.
 
     restrict_username/restrict_store_ids — ограничение видимости для не-админов:
     показываем счёт, если его создал сам пользователь (restrict_username),
@@ -1795,13 +1837,14 @@ def _build_invoice_filters(
             where += " AND i.created_by = ?"
             params.append(restrict_username)
 
-    if status:
-        where += " AND i.status = ?"
-        params.append(status)
+    statuses = _filter_values(status)
+    if statuses:
+        where += " AND" + _in_clause("i.status", statuses)
+        params.extend(statuses)
 
     # Переключатель «Показывать оплаченные» в новом разделе. Отдельным флагом,
-    # а не через status: статус там выбирается одним значением, и «всё, кроме
-    # оплаченных» им не выразить.
+    # а не через status: «всё, кроме оплаченных» иначе пришлось бы каждый раз
+    # набирать перечислением всех остальных статусов.
     if hide_paid:
         where += " AND i.status != 'paid'"
 
@@ -1818,30 +1861,37 @@ def _build_invoice_filters(
         where += (" AND i.clarification_at IS NOT NULL" if clarification == "only"
                   else " AND i.clarification_at IS NULL")
 
-    if store_id:
-        where += " AND i.id IN (SELECT invoice_id FROM invoice_line_items WHERE store_id = ?)"
-        params.append(store_id)
+    store_ids = _filter_values(store_id)
+    if store_ids:
+        where += (" AND i.id IN (SELECT invoice_id FROM invoice_line_items WHERE"
+                  + _in_clause("store_id", store_ids) + ")")
+        params.extend(store_ids)
 
     # Статья расхода живёт в строках распределения — тем же подзапросом, что и
     # салон. Счёт без распределения под такой фильтр не попадает, но и не
     # исчезает при пустом фильтре.
-    if expense_category_id:
-        where += " AND i.id IN (SELECT invoice_id FROM invoice_line_items WHERE expense_category_id = ?)"
-        params.append(expense_category_id)
+    category_ids = _filter_values(expense_category_id)
+    if category_ids:
+        where += (" AND i.id IN (SELECT invoice_id FROM invoice_line_items WHERE"
+                  + _in_clause("expense_category_id", category_ids) + ")")
+        params.extend(category_ids)
 
-    if city_id:
-        where += " AND i.city_id = ?"
-        params.append(city_id)
+    city_ids = _filter_values(city_id)
+    if city_ids:
+        where += " AND" + _in_clause("i.city_id", city_ids)
+        params.extend(city_ids)
 
     # На кого выставлен счёт (юрлицо/ИП Бархата) — поле payer_id самого счёта,
     # а не строк распределения, поэтому фильтр прямой, без подзапроса.
-    if payer_id:
-        where += " AND i.payer_id = ?"
-        params.append(payer_id)
+    payer_ids = _filter_values(payer_id)
+    if payer_ids:
+        where += " AND" + _in_clause("i.payer_id", payer_ids)
+        params.extend(payer_ids)
 
-    if created_by:
-        where += " AND i.created_by = ?"
-        params.append(created_by)
+    authors = _filter_values(created_by)
+    if authors:
+        where += " AND" + _in_clause("i.created_by", authors)
+        params.extend(authors)
 
     # py_lower, а не голый LIKE: SQLite приводит регистр только у латиницы,
     # и фильтр по «ромашка» не находил счёт «ООО Ромашка» (см. get_db).
@@ -1900,12 +1950,12 @@ def _build_invoice_order_by(sort: Optional[str], order: Optional[str]) -> str:
 
 
 def list_invoices(
-    status: Optional[str] = None,
-    store_id: Optional[int] = None,
-    city_id: Optional[int] = None,
-    payer_id: Optional[int] = None,
-    expense_category_id: Optional[int] = None,
-    created_by: Optional[str] = None,
+    status: Optional[Union[str, Sequence[str]]] = None,
+    store_id: Optional[Union[int, Sequence[int]]] = None,
+    city_id: Optional[Union[int, Sequence[int]]] = None,
+    payer_id: Optional[Union[int, Sequence[int]]] = None,
+    expense_category_id: Optional[Union[int, Sequence[int]]] = None,
+    created_by: Optional[Union[str, Sequence[str]]] = None,
     counterparty: Optional[str] = None,
     payment_purpose: Optional[str] = None,
     created_from: Optional[str] = None,
@@ -1929,6 +1979,9 @@ def list_invoices(
     Новые параметры (expense_category_id, hide_paid, sort, order) имеют
     значения по умолчанию, при которых поведение ровно прежнее: старый раздел
     их не передаёт и получает тот же список, что и раньше.
+
+    Справочные фильтры принимают и одно значение, и список значений
+    (см. _build_invoice_filters).
     """
     where, params = _build_invoice_filters(
         status=status, store_id=store_id, city_id=city_id, payer_id=payer_id,

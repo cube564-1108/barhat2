@@ -83,6 +83,10 @@
     /**
      * Поля панели фильтров — тоже декларативно. `key` совпадает с параметром
      * запроса везде, кроме дат: их отдаём серверу пересчитанными в UTC.
+     *
+     * Поля `type: 'select'` — мультивыбор: значений может быть несколько, они
+     * уходят повторами параметра (`?city_id=1&city_id=2`) и означают ИЛИ.
+     * `any` — подпись, когда не выбрано ничего.
      */
     const FILTERS = [
         { key: 'counterparty',        label: 'Контрагент',          type: 'text',   placeholder: 'название или ИНН' },
@@ -117,6 +121,14 @@
 
     const PAGE_SIZE = 25;
     const TEXT_FILTER_DELAY_MS = 350;
+
+    // Мультивыбор: галочки ставятся пачкой, и каждая не должна уходить своим
+    // запросом — воркеров на проде два. Ждём паузу в кликах; закрытие списка
+    // отправляет запрос сразу, не дожидаясь её.
+    const SELECT_FILTER_DELAY_MS = 400;
+
+    // Сколько выбранных названий показываем в свёрнутом виде, дальше — «Выбрано N»
+    const MULTI_LABEL_LIMIT = 2;
 
     // Человеческие названия полей в истории изменений
     const HISTORY_FIELDS = {
@@ -248,11 +260,35 @@
     let summaryToken = 0;
     let filtersRendered = false;
     let textFilterTimer = null;
+    let selectFilterTimer = null;
 
     function emptyFilters() {
         const empty = {};
-        FILTERS.forEach(f => { empty[f.key] = ''; });
+        // У справочных фильтров значение — массив (мультивыбор), у текстовых
+        // и дат — строка. Пустое значение обоих типов ложно по-разному,
+        // поэтому «задан ли фильтр» спрашиваем через hasFilter().
+        FILTERS.forEach(f => { empty[f.key] = f.type === 'select' ? [] : ''; });
         return empty;
+    }
+
+    /** Выбранные значения справочного фильтра — всегда массивом. */
+    function filterValues(key) {
+        const value = state.filters[key];
+        if (Array.isArray(value)) return value;
+        return value ? [value] : [];
+    }
+
+    /** Задан ли фильтр — одинаково для мультивыбора, текста и даты. */
+    function hasFilter(key) {
+        const value = state.filters[key];
+        if (Array.isArray(value)) return value.length > 0;
+        return Boolean(String(value || '').trim());
+    }
+
+    /** Сбросить одно поле в его «пустое» значение нужного типа. */
+    function clearFilter(key) {
+        const field = FILTERS.find(f => f.key === key);
+        state.filters[key] = field && field.type === 'select' ? [] : '';
     }
 
     // =========================================================================
@@ -358,6 +394,12 @@
         const time = window.BarhatTime;
 
         FILTERS.forEach(f => {
+            // Мультивыбор уходит повторами параметра: ?status=paid&status=approved.
+            // Так его кодирует URLSearchParams и так же читает Flask (getlist).
+            if (f.type === 'select') {
+                filterValues(f.key).forEach(value => params.append(f.key, value));
+                return;
+            }
             const value = (state.filters[f.key] || '').trim();
             if (!value) return;
             if (f.key === 'created_from') {
@@ -378,7 +420,7 @@
         // «Показывать оплаченные» имеет смысл, только пока статус не выбран
         // явно: иначе выбор «Оплачен» и снятая галочка дали бы пустой список
         // и вопрос «куда всё делось».
-        if (!state.showPaid && !state.filters.status) params.set('hide_paid', 'true');
+        if (!state.showPaid && !hasFilter('status')) params.set('hide_paid', 'true');
 
         // Оплачен, но в ПланФакт не уехал — сам по себе срез, статус в нём
         // всегда «Оплачен», поэтому hide_paid к нему не применяем
@@ -493,6 +535,13 @@
     async function loadList(append) {
         const token = ++listToken;
         state.loading = true;
+
+        // Любая перезагрузка списка отменяет отложенную: иначе снятие чипа или
+        // сброс фильтров даёт второй запрос с тем же результатом.
+        if (!append) {
+            clearTimeout(selectFilterTimer);
+            selectFilterTimer = null;
+        }
 
         const params = buildListParams();
         params.set('limit', String(PAGE_SIZE));
@@ -719,7 +768,7 @@
             <div class="iv2-field">
                 <label class="iv2-field__label" for="iv2f-${f.key}">${escapeHtml(f.label)}</label>
                 ${f.type === 'select'
-                    ? `<select class="iv2-select" id="iv2f-${f.key}"></select>`
+                    ? multiSelectHtml(f)
                     : `<input class="iv2-input" id="iv2f-${f.key}"
                               type="${f.type === 'date' ? 'date' : 'text'}"
                               ${f.placeholder ? `placeholder="${escapeHtml(f.placeholder)}"` : ''}>`}
@@ -762,16 +811,214 @@
         bindFilters();
     }
 
-    function fillFilterSelects() {
-        FILTERS.filter(f => f.type === 'select').forEach(f => {
-            const select = $('iv2f-' + f.key);
-            if (!select) return;
-            const items = state.refs[f.ref] || [];
-            const current = state.filters[f.key];
-            select.innerHTML = `<option value="">${escapeHtml(f.any)}</option>` + items.map(item =>
-                `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('');
-            select.value = current || '';
+    // =========================================================================
+    // Отрисовка: мультивыбор в фильтрах
+    //
+    // Свой компонент, а не <select multiple>: нативный список нельзя закрыть,
+    // он занимает высоту всех вариантов, снятие галочки требует Ctrl и
+    // не поддаётся оформлению по DESIGN-SPEC. Здесь — кнопка со сводкой и
+    // выпадающая панель с чекбоксами и поиском.
+    // =========================================================================
+
+    function multiSelectHtml(f) {
+        return `
+            <div class="iv2-ms" id="iv2ms-${f.key}">
+                <button type="button" class="iv2-ms__btn" id="iv2f-${f.key}"
+                        aria-haspopup="listbox" aria-expanded="false">
+                    <span class="iv2-ms__value" data-ms-label>${escapeHtml(f.any)}</span>
+                    <svg class="iv2-ms__chev" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+                         stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="iv2-ms__panel" data-ms-panel hidden>
+                    <input type="text" class="iv2-ms__search" data-ms-search
+                           placeholder="Поиск" aria-label="Поиск по списку">
+                    <div class="iv2-ms__list" role="listbox" aria-multiselectable="true" data-ms-list></div>
+                    <div class="iv2-ms__foot">
+                        <button type="button" class="iv2-ms__link" data-ms-all>Выбрать все</button>
+                        <button type="button" class="iv2-ms__link" data-ms-clear>Сбросить</button>
+                    </div>
+                </div>
+            </div>`;
+    }
+
+    /** Название значения по справочнику; неизвестное показываем как есть. */
+    function refName(f, value) {
+        const item = (state.refs[f.ref] || []).find(x => String(x.id) === String(value));
+        return item ? item.name : String(value);
+    }
+
+    /** Что написано на кнопке свёрнутого мультивыбора. */
+    function multiSelectLabel(f) {
+        const chosen = filterValues(f.key);
+        if (!chosen.length) return f.any;
+        if (chosen.length <= MULTI_LABEL_LIMIT) return chosen.map(v => refName(f, v)).join(', ');
+        return 'Выбрано ' + chosen.length;
+    }
+
+    /** Варианты, подходящие под строку поиска (пустая строка — все). */
+    function multiSelectItems(f, query) {
+        const items = state.refs[f.ref] || [];
+        const needle = String(query || '').trim().toLowerCase();
+        if (!needle) return items;
+        return items.filter(item => String(item.name).toLowerCase().includes(needle));
+    }
+
+    function renderMultiOptions(f, query) {
+        const items = multiSelectItems(f, query);
+        if (!items.length) return '<div class="iv2-ms__empty">Ничего не найдено</div>';
+        const chosen = new Set(filterValues(f.key).map(String));
+        return items.map(item => `
+            <label class="iv2-ms__opt">
+                <input type="checkbox" class="iv2-cbx" data-ms-value="${escapeHtml(item.id)}"
+                       ${chosen.has(String(item.id)) ? 'checked' : ''}>
+                <span>${escapeHtml(item.name)}</span>
+            </label>`).join('');
+    }
+
+    /** Привести кнопку и галочки в соответствие с state.filters. */
+    function syncMultiSelect(f) {
+        const root = $('iv2ms-' + f.key);
+        if (!root) return;
+        const chosen = filterValues(f.key);
+        const label = root.querySelector('[data-ms-label]');
+        if (label) label.textContent = multiSelectLabel(f);
+        root.classList.toggle('iv2-ms--active', chosen.length > 0);
+        const chosenSet = new Set(chosen.map(String));
+        root.querySelectorAll('[data-ms-value]').forEach(box => {
+            box.checked = chosenSet.has(box.getAttribute('data-ms-value'));
         });
+    }
+
+    function openMultiSelect(f) {
+        const root = $('iv2ms-' + f.key);
+        if (!root) return;
+        const panel = root.querySelector('[data-ms-panel]');
+        const search = root.querySelector('[data-ms-search]');
+        const list = root.querySelector('[data-ms-list]');
+        const button = $('iv2f-' + f.key);
+        if (search) search.value = '';
+        if (list) list.innerHTML = renderMultiOptions(f, '');
+        if (panel) panel.hidden = false;
+        root.classList.add('iv2-ms--open');
+        if (button) button.setAttribute('aria-expanded', 'true');
+        if (search) search.focus();
+    }
+
+    /**
+     * Закрыть все открытые списки и отправить отложенный запрос сразу:
+     * человек закончил выбирать, ждать ещё 400 мс незачем.
+     */
+    function closeAllMultiSelects() {
+        document.querySelectorAll('.iv2 .iv2-ms--open').forEach(root => {
+            root.classList.remove('iv2-ms--open');
+            const panel = root.querySelector('[data-ms-panel]');
+            if (panel) panel.hidden = true;
+            const button = root.querySelector('.iv2-ms__btn');
+            if (button) button.setAttribute('aria-expanded', 'false');
+        });
+        flushFilterReload();
+    }
+
+    function scheduleFilterReload() {
+        clearTimeout(selectFilterTimer);
+        selectFilterTimer = setTimeout(() => {
+            selectFilterTimer = null;
+            loadList(false);
+        }, SELECT_FILTER_DELAY_MS);
+    }
+
+    function flushFilterReload() {
+        if (!selectFilterTimer) return;
+        clearTimeout(selectFilterTimer);
+        selectFilterTimer = null;
+        loadList(false);
+    }
+
+    /** Записать новый набор значений фильтра и показать это везде. */
+    function setFilterValues(f, values) {
+        state.filters[f.key] = values;
+        syncMultiSelect(f);
+        renderChips();
+        scheduleFilterReload();
+    }
+
+    function bindMultiSelect(f) {
+        const root = $('iv2ms-' + f.key);
+        if (!root) return;
+        const button = $('iv2f-' + f.key);
+        const search = root.querySelector('[data-ms-search]');
+        const list = root.querySelector('[data-ms-list]');
+
+        if (button) {
+            button.addEventListener('click', () => {
+                const wasOpen = root.classList.contains('iv2-ms--open');
+                closeAllMultiSelects();
+                if (!wasOpen) openMultiSelect(f);
+            });
+        }
+
+        if (search) {
+            search.addEventListener('input', () => {
+                if (list) list.innerHTML = renderMultiOptions(f, search.value);
+            });
+        }
+
+        if (list) {
+            list.addEventListener('change', event => {
+                const box = event.target.closest('[data-ms-value]');
+                if (!box) return;
+                const value = box.getAttribute('data-ms-value');
+                const values = filterValues(f.key).map(String).filter(v => v !== value);
+                if (box.checked) values.push(value);
+                setFilterValues(f, values);
+            });
+        }
+
+        // «Выбрать все» — только то, что сейчас видно в списке: при заданном
+        // поиске человек ждёт именно найденное, а не весь справочник.
+        const all = root.querySelector('[data-ms-all]');
+        if (all) {
+            all.addEventListener('click', () => {
+                const visible = multiSelectItems(f, search ? search.value : '').map(item => String(item.id));
+                const values = filterValues(f.key).map(String);
+                visible.forEach(id => { if (!values.includes(id)) values.push(id); });
+                setFilterValues(f, values);
+            });
+        }
+
+        const clear = root.querySelector('[data-ms-clear]');
+        if (clear) clear.addEventListener('click', () => setFilterValues(f, []));
+    }
+
+    /**
+     * Наполнить списки мультивыбора справочниками.
+     * Заодно выбрасываем выбранное, чего в справочнике больше нет (статью или
+     * салон могли удалить в модалке справочников): иначе фильтр молча отдаёт
+     * пустой список, а на кнопке остаётся название удалённого.
+     */
+    function fillFilterSelects() {
+        let pruned = false;
+        FILTERS.filter(f => f.type === 'select').forEach(f => {
+            const known = new Set((state.refs[f.ref] || []).map(item => String(item.id)));
+            const chosen = filterValues(f.key).map(String);
+            const kept = chosen.filter(value => known.has(value));
+            if (kept.length !== chosen.length) {
+                state.filters[f.key] = kept;
+                pruned = true;
+            }
+            const root = $('iv2ms-' + f.key);
+            if (root) {
+                const list = root.querySelector('[data-ms-list]');
+                const search = root.querySelector('[data-ms-search]');
+                if (list) list.innerHTML = renderMultiOptions(f, search ? search.value : '');
+            }
+            syncMultiSelect(f);
+        });
+        if (pruned) {
+            renderChips();
+            loadList(false);
+        }
     }
 
     function bindFilters() {
@@ -785,9 +1032,14 @@
 
         // Кнопки «Применить» нет (решение владельца): список пересобирается сам.
         // Текстовые поля ждут паузы в наборе — иначе каждый символ уходит
-        // запросом, а воркеров на проде всего два. Селекты, даты и
-        // переключатели срабатывают сразу: там одно осознанное действие.
+        // запросом, а воркеров на проде всего два. Той же паузой отвечает
+        // мультивыбор: галочки ставят пачкой. Даты и переключатели
+        // срабатывают сразу: там одно осознанное действие.
         FILTERS.forEach(f => {
+            if (f.type === 'select') {
+                bindMultiSelect(f);
+                return;
+            }
             const el = $('iv2f-' + f.key);
             if (!el) return;
             if (f.type === 'text') {
@@ -837,6 +1089,19 @@
 
         const reset = $('iv2FiltersReset');
         if (reset) reset.addEventListener('click', resetFilters);
+
+        // Клик мимо списка и Esc закрывают мультивыбор. Слушатели вешаем один
+        // раз на документ: панель фильтров пересобирается только целиком.
+        document.addEventListener('click', event => {
+            const target = event.target;
+            if (target && target.closest && target.closest('.iv2-ms')) return;
+            closeAllMultiSelects();
+        });
+        document.addEventListener('keydown', event => {
+            if (event.key !== 'Escape') return;
+            if (!document.querySelector('.iv2 .iv2-ms--open')) return;
+            closeAllMultiSelects();
+        });
     }
 
     function resetFilters() {
@@ -853,6 +1118,10 @@
 
     function syncFilterInputs() {
         FILTERS.forEach(f => {
+            if (f.type === 'select') {
+                syncMultiSelect(f);
+                return;
+            }
             const el = $('iv2f-' + f.key);
             if (el) el.value = state.filters[f.key] || '';
         });
@@ -866,12 +1135,16 @@
 
     /** Человеческая подпись значения фильтра для чипа. */
     function filterValueLabel(f) {
+        if (f.type === 'select') {
+            // В чипе названия важнее краткости: он и есть ответ на вопрос
+            // «почему видно именно это». Сворачиваем только длинный хвост.
+            const names = filterValues(f.key).map(value => refName(f, value));
+            if (names.length <= MULTI_LABEL_LIMIT) return names.join(', ');
+            const head = names.slice(0, MULTI_LABEL_LIMIT).join(', ');
+            return `${head} и ещё ${names.length - MULTI_LABEL_LIMIT}`;
+        }
         const value = state.filters[f.key];
         if (!value) return '';
-        if (f.type === 'select') {
-            const item = (state.refs[f.ref] || []).find(x => String(x.id) === String(value));
-            return item ? item.name : value;
-        }
         if (f.type === 'date') return fmtDue(value);
         return value;
     }
@@ -882,7 +1155,7 @@
 
         const chips = [];
         FILTERS.forEach(f => {
-            if (!state.filters[f.key]) return;
+            if (!hasFilter(f.key)) return;
             chips.push({ kind: 'filter', key: f.key, text: `${f.label}: ${filterValueLabel(f)}` });
         });
         if (state.showArchived) chips.push({ kind: 'archived', key: 'archived', text: 'Только архив' });
@@ -910,7 +1183,7 @@
                 else if (kind === 'unsynced') state.onlyUnsynced = false;
                 else if (kind === 'paid') state.showPaid = true;
                 else if (kind === 'kpi') state.kpiFilter = null;
-                else state.filters[key] = '';
+                else clearFilter(key);
                 syncFilterInputs();
                 renderChips();
                 loadList(false);
@@ -1039,7 +1312,7 @@
         // Архив и оплаченные на борде не нужны: он про то, что ещё предстоит
         // заплатить. Явный фильтр по статусу человек всё же вправе задать сам.
         params.delete('archived');
-        if (!state.filters.status) params.set('hide_paid', 'true');
+        if (!hasFilter('status')) params.set('hide_paid', 'true');
 
         try {
             const data = await apiGet('/api/invoices?' + params.toString());
@@ -2376,7 +2649,7 @@
      * иначе счёт «пропадает» и непонятно почему.
      */
     function queueRows() {
-        if (state.filters.status || state.kpiFilter || state.showArchived) return state.rows;
+        if (hasFilter('status') || state.kpiFilter || state.showArchived) return state.rows;
         return state.rows.filter(invoice => invoice.status === 'on_approval');
     }
 

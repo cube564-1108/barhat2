@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import List, Optional
 
 from flask import Blueprint, jsonify, request, send_from_directory
 from flask_login import current_user, login_required
@@ -247,6 +247,40 @@ def set_payer_bank_requisites(payer_id):
 # СЧЕТА НА ОПЛАТУ
 # =============================================================================
 
+# Максимум значений в одном мультифильтре. Ограничение не про интерфейс
+# (в справочниках столько не наберётся), а про запрос руками: без него
+# `?store_id=` можно повторить тысячи раз и получить SQL с тысячей плейсхолдеров.
+MAX_FILTER_VALUES = 200
+
+
+def _arg_list(name: str) -> List[str]:
+    """
+    Значения query-параметра, который может повторяться: `?status=a&status=b`.
+
+    Мультивыбор в фильтрах нового раздела шлёт по одному параметру на значение —
+    так его штатно кодирует URLSearchParams, и так же читает Flask. Старый
+    раздел шлёт один параметр и получает список из одного элемента, то есть
+    прежний фильтр.
+    """
+    values = []
+    for raw in request.args.getlist(name):
+        value = (raw or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return values[:MAX_FILTER_VALUES]
+
+
+def _arg_int_list(name: str) -> List[int]:
+    """То же для числовых id справочников. Нечисловое значение молча отбрасываем."""
+    result = []
+    for value in _arg_list(name):
+        try:
+            result.append(int(value))
+        except ValueError:
+            continue
+    return result
+
+
 @invoices_bp.route("", methods=["GET"])
 @section_required(*INVOICE_SECTIONS)
 def get_invoices():
@@ -260,9 +294,14 @@ def get_invoices():
     Параметры expense_category_id, hide_paid, sort, order и with_total добавлены
     для раздела «Согласование счетов v2» и все необязательны: старый раздел их
     не передаёт и получает ровно прежний ответ.
+
+    Справочные фильтры (status, store_id, city_id, payer_id,
+    expense_category_id, created_by) можно повторять — `?city_id=1&city_id=2`
+    означает «Москва ИЛИ Казань». Одно значение работает как раньше.
     """
-    status = request.args.get("status")
-    if status and status not in STATUSES:
+    statuses = _arg_list("status")
+    unknown = [s for s in statuses if s not in STATUSES]
+    if unknown:
         return jsonify({"error": f"Неизвестный статус. Доступны: {list(STATUSES)}"}), 400
 
     sort = request.args.get("sort")
@@ -287,12 +326,12 @@ def get_invoices():
         restrict_store_ids = get_user_stores(current_user.username)
 
     filters = {
-        "status": status,
-        "store_id": request.args.get("store_id", type=int),
-        "city_id": request.args.get("city_id", type=int),
-        "payer_id": request.args.get("payer_id", type=int),
-        "expense_category_id": request.args.get("expense_category_id", type=int),
-        "created_by": request.args.get("created_by"),
+        "status": statuses,
+        "store_id": _arg_int_list("store_id"),
+        "city_id": _arg_int_list("city_id"),
+        "payer_id": _arg_int_list("payer_id"),
+        "expense_category_id": _arg_int_list("expense_category_id"),
+        "created_by": _arg_list("created_by"),
         "counterparty": request.args.get("counterparty"),
         "payment_purpose": request.args.get("payment_purpose"),
         "created_from": request.args.get("created_from"),
