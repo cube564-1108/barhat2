@@ -29,6 +29,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from flask import Flask
 from werkzeug.security import generate_password_hash
 
+from auth import flush_audit_log
+
 from cashshifts.storage import (
     init_cashshifts_tables,
     get_db,
@@ -177,6 +179,10 @@ def main():
 
         res = client.delete(f"/api/cash-shifts/categories/{new_id}")
         check(res.status_code == 404, "повторный DELETE — 404")
+
+        # Аудит пишется фоновым потоком (auth.log_action), поэтому читать его
+        # сразу после запроса можно только через flush — иначе тест плавающий.
+        flush_audit_log()
 
         conn = get_db()
         actions = [r[0] for r in conn.execute(

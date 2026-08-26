@@ -14,6 +14,8 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 from dotenv import load_dotenv
 
+from sqlite_conn import connect as sqlite_connect
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -42,23 +44,10 @@ class PyrusStorage:
     @contextmanager
     def _get_connection(self):
         """Контекст менеджер для подключения к SQLite"""
-        # timeout + busy_timeout, как в остальных модулях: воркеров теперь не 2,
-        # а 2 × 8 потоков (см. amvera.yml), и без запаса на ожидание блокировки
-        # параллельный запрос получил бы "database is locked" вместо очереди.
-        conn = sqlite3.connect(self.db_path, timeout=20)
-        conn.row_factory = sqlite3.Row  # Доступ по имени колонки
-        # journal_mode здесь больше не выставляется: это персистентное свойство
-        # файла БД, и переключать его на каждом соединении — лишняя запись на
-        # общий диск /data при каждом запросе. Ставится один раз в _init_db.
-        #
-        # busy_timeout и synchronous, наоборот, живут в соединении и нужны
-        # каждому: без первого параллельный запрос получает "database is locked"
-        # вместо очереди, а synchronous=NORMAL в паре с WAL даёт fsync только на
-        # чекпойнте, а не на каждой транзакции — на сетевом диске Amvera именно
-        # fsync съедал дисковую очередь и тормозил соседние базы, включая
-        # авторизацию всего сайта.
-        conn.execute("PRAGMA busy_timeout=20000")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        # Все PRAGMA (busy_timeout, synchronous=NORMAL, однократный WAL) живут
+        # в sqlite_conn — там же разобрано, почему на сетевом диске Amvera
+        # именно они решают, тормозит сайт или нет.
+        conn = sqlite_connect(self.db_path, timeout=20)
         try:
             yield conn
             conn.commit()
@@ -72,17 +61,8 @@ class PyrusStorage:
     def _init_db(self) -> None:
         """Создание таблиц если не существуют"""
         with self._get_connection() as conn:
-            # Переключение журнала требует эксклюзивной блокировки и, в отличие
-            # от обычной записи, НЕ ждёт по busy_timeout: если базу в этот момент
-            # держит второй воркер gunicorn (оба стартуют одновременно), PRAGMA
-            # падает с "database is locked" и уронила бы весь _init_db. Проиграть
-            # гонку здесь безобидно — либо база уже в WAL, либо её переключает
-            # сосед.
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError as e:
-                logger.info(f"journal_mode=WAL выставляет параллельный воркер: {e}")
-
+            # WAL включается внутри sqlite_conn.connect() — один раз на файл
+            # за жизнь процесса, с обработкой гонки двух воркеров.
             cursor = conn.cursor()
 
             # Таблица форм (метаданные)

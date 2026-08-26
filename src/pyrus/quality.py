@@ -21,6 +21,8 @@ import threading
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+from sqlite_conn import connect as sqlite_connect
+
 logger = logging.getLogger(__name__)
 
 QUALITY_FORM_ID = 1327961
@@ -95,14 +97,11 @@ def _connect() -> sqlite3.Connection:
     """
     Соединение для чтения отчётов.
 
-    PRAGMA journal_mode здесь намеренно не трогаем: смена режима журнала пишет
-    в заголовок базы, и делать это на каждом соединении читателя — лишняя
-    запись на общий диск. Режим WAL один раз выставляет storage._init_db.
+    Настройки соединения — в sqlite_conn: смена режима журнала пишет в
+    заголовок базы, и делать это на каждом соединении читателя было бы лишней
+    записью на общий диск. WAL там включается один раз на файл за процесс.
     """
-    conn = sqlite3.connect(_db_path(), timeout=20)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA busy_timeout=20000')
-    return conn
+    return sqlite_connect(_db_path(), timeout=20)
 
 
 # ===== Разбор задачи формы =====

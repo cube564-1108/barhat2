@@ -39,7 +39,14 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # ============================================================================
 
 SYNC_LOCK = "courier_orders"
-SYNC_LOCK_TTL = 600  # продлевается после каждой страницы
+SYNC_LOCK_TTL = 600
+
+# Как часто продлевать лок. Раньше продление шло после КАЖДОЙ страницы CRM —
+# то есть отдельное соединение, UPDATE и commit на общий диск /data по нескольку
+# раз в минуту, пока идёт прогон. При TTL в 10 минут продлевать чаще раза в
+# минуту незачем: запас десятикратный, а диск, за который дерутся все базы
+# сразу (barhat.db — это авторизация всего сайта), заметно свободнее.
+LOCK_RENEW_INTERVAL_SECONDS = 60
 
 # Окно регулярного прогона: заказ доставляют сегодня, а статус «Выполнен» и
 # себестоимость проставляют позже — вчерашние дни обязаны перечитываться.
@@ -61,6 +68,11 @@ MAX_MANUAL_PERIOD_DAYS = 400
 SYNC_BUDGET_SECONDS = 25 * 60
 
 SCHEDULER_INTERVAL_SECONDS = 30 * 60
+
+# Задержка перед первым прогоном. У МойСклада интервал такой же (30 минут),
+# и при одинаковой задержке два синка стартовали одновременно и оставались
+# синхронными до самого рестарта — то есть били по общему диску /data одной
+# волной. Разные задержки разводят их на 5 минут навсегда.
 SCHEDULER_START_DELAY_SECONDS = 120
 DEEP_SYNC_AT_KEY = "deep_sync_at"
 DEEP_SYNC_NIGHT_HOURS_UTC = (21, 22, 23)
@@ -115,6 +127,7 @@ def _sync_range(date_from: str, date_to: str) -> int:
 
     total = 0
     log_id = storage.start_sync_log()
+    last_renew = time.monotonic()
     try:
         for chunk_from, chunk_to in _chunks(date_from, date_to, CHUNK_DAYS):
             rows: List[Dict[str, Any]] = []
@@ -134,8 +147,11 @@ def _sync_range(date_from: str, date_to: str) -> int:
                         continue
                     rows.append(parsed)
                 # Долгий прогон обязан продлевать лок, иначе по TTL его
-                # подхватит соседний воркер и оба пойдут качать одно и то же
-                storage.renew_sync_lock(SYNC_LOCK, SYNC_LOCK_TTL)
+                # подхватит соседний воркер и оба пойдут качать одно и то же.
+                # Но не на каждой странице — см. LOCK_RENEW_INTERVAL_SECONDS.
+                if time.monotonic() - last_renew >= LOCK_RENEW_INTERVAL_SECONDS:
+                    storage.renew_sync_lock(SYNC_LOCK, SYNC_LOCK_TTL)
+                    last_renew = time.monotonic()
 
             storage.replace_orders_window(chunk_from, chunk_to, rows)
             total += len(rows)

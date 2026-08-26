@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from sqlite_conn import connect as sqlite_connect
 from storage_paths import resolve as resolve_data_path
 
 logger = logging.getLogger(__name__)
@@ -45,11 +46,8 @@ def get_db():
     получает "database is locked" вместо того, чтобы дождаться очереди.
     """
     _ensure_parent_dir(DB_PATH)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite_connect(DB_PATH, timeout=30)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
         yield conn
         conn.commit()
     except Exception:

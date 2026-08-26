@@ -18,6 +18,7 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from sqlite_conn import connect as sqlite_connect
 from storage_paths import resolve as resolve_data_path
 
 from .seed_data import EXPENSE_CATEGORIES
@@ -74,14 +75,7 @@ def get_db():
     в один и тот же файл SQLite; без запаса воркер получает
     "database is locked" вместо того, чтобы просто дождаться своей очереди.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.row_factory = sqlite3.Row
-    # WAL вместо дефолтного rollback-journal: читатели не блокируют писателя
-    # и наоборот — резко меньше "database is locked" при нескольких воркерах
-    # на одном файле. Настройка хранится в самом файле БД, но выставляем на
-    # каждом соединении — дёшево и идемпотентно, если уже включено.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=20000")
+    conn = sqlite_connect(DB_PATH, timeout=20)
     # Встроенные LOWER() и COLLATE NOCASE в SQLite работают только с латиницей:
     # 'Ромашка' и 'ромашка' для них разные строки, и поиск по названию
     # кириллицей молча не находит ничего. Отдаём приведение регистра Python.

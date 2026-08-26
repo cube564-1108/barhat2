@@ -11,6 +11,7 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional
 
+from sqlite_conn import connect as sqlite_connect
 from storage_paths import resolve as resolve_data_path
 
 logger = logging.getLogger(__name__)
@@ -36,11 +37,7 @@ def get_db():
     в один и тот же файл SQLite; без запаса воркер получает
     "database is locked" вместо того, чтобы просто дождаться своей очереди.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=20000")
-    return conn
+    return sqlite_connect(DB_PATH, timeout=20)
 
 
 def init_writeoffs_tables():

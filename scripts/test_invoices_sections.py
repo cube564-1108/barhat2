@@ -48,7 +48,7 @@ from flask import Flask  # noqa: E402
 from werkzeug.security import generate_password_hash  # noqa: E402
 
 import auth  # noqa: E402
-from auth import auth_bp, login_manager, init_auth_tables, get_db  # noqa: E402
+from auth import auth_bp, login_manager, init_auth_tables, get_db, flush_audit_log  # noqa: E402
 from cashshifts.storage import init_cashshifts_tables  # noqa: E402
 from invoices.storage import init_invoices_tables  # noqa: E402
 from invoices.server import invoices_bp, INVOICE_SECTIONS  # noqa: E402
@@ -157,6 +157,9 @@ def main():
     print()
 
     print("отказ пишется в аудит-лог с обеими секциями")
+    # Аудит пишется фоновым потоком (auth.log_action) — без flush запись может
+    # ещё стоять в очереди, и проверка станет плавающей.
+    flush_audit_log()
     conn = get_db()
     row = conn.execute(
         "SELECT details FROM audit_log WHERE username = 't_none' AND action = 'access_denied' "

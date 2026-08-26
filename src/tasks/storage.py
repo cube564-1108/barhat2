@@ -12,6 +12,8 @@ import os
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+from sqlite_conn import connect as sqlite_connect
+
 logger = logging.getLogger(__name__)
 
 # Путь к БД из переменной окружения или дефолт — та же база, что у auth/cashshifts/invoices
@@ -54,11 +56,7 @@ def get_db():
     воркеров (amvera.yml), пишущих в один файл SQLite; без запаса можно словить
     "database is locked" вместо того, чтобы дождаться своей очереди.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=20000")
-    return conn
+    return sqlite_connect(DB_PATH, timeout=20)
 
 
 def init_tasks_tables():

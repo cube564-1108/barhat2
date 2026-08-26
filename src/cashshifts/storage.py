@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
+from sqlite_conn import connect as sqlite_connect
+
 from .seed_data import (
     STORES,
     EXPENSE_CATEGORIES,
@@ -22,14 +24,9 @@ DB_PATH = os.environ.get("BARHAT_DB_PATH", "barhat.db")
 
 def get_db():
     """Получить соединение с БД."""
-    # timeout увеличен против дефолтных 5с — 2 воркера gunicorn (amvera.yml)
-    # пишут в один файл SQLite параллельно, см. auth.get_db()
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.row_factory = sqlite3.Row
-    # WAL — читатели не блокируют писателя и наоборот, см. auth.get_db()
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=20000")
-    return conn
+    # Настройки соединения — в sqlite_conn, одни на все модули: они делят
+    # с auth один и тот же файл barhat.db на медленном сетевом диске.
+    return sqlite_connect(DB_PATH, timeout=20)
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str):

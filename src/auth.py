@@ -13,17 +13,22 @@
 
 import os
 import re
+import queue
 import sqlite3
 import logging
+import threading
+import time
 from functools import wraps
 from datetime import datetime
 
-from flask import Blueprint, request, jsonify, session, current_app
+from flask import Blueprint, request, jsonify, session, current_app, has_request_context
 from flask_login import (
     LoginManager, UserMixin, login_user, logout_user,
     login_required, current_user
 )
 from werkzeug.security import generate_password_hash, check_password_hash
+
+from sqlite_conn import connect as sqlite_connect
 
 logger = logging.getLogger("barhat.auth")
 
@@ -104,17 +109,10 @@ def _email_taken_message(email, row):
 
 
 def get_db():
-    # timeout увеличен против дефолтных 5с — на проде gunicorn поднимает
-    # 2 воркера (amvera.yml), пишущих в один файл SQLite; без запаса
-    # конкурентная запись (например log_action во время чужой транзакции)
-    # падает с "database is locked" вместо того, чтобы дождаться очереди
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.row_factory = sqlite3.Row
-    # WAL — читатели не блокируют писателя и наоборот, резко меньше
-    # "database is locked" при нескольких воркерах на одном файле
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=20000")
-    return conn
+    # Все настройки соединения (busy_timeout, synchronous, однократный WAL)
+    # живут в sqlite_conn — там же объяснено, почему на сетевом диске Amvera
+    # они решают судьбу отзывчивости всего сайта.
+    return sqlite_connect(DB_PATH, timeout=20)
 
 
 def migrate_users_from_old_db():
@@ -483,7 +481,12 @@ def init_auth_tables():
 
 
 class User(UserMixin):
-    def __init__(self, row):
+    def __init__(self, row, permissions=None):
+        # permissions передаёт load_user — он забирает их тем же соединением,
+        # что и саму учётку. Если не передали (вход, SSO), сработает ленивая
+        # догрузка в свойстве ниже.
+        if permissions is not None:
+            self._permissions = set(permissions)
         self.id = row["id"]
         self.username = row["username"]
         # Фоллбэк на username если full_name отсутствует
@@ -523,20 +526,142 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
+    """Пользователь и его права — за одно соединение.
+
+    Права раньше догружались лениво, отдельным соединением: на защищённой
+    ручке (а это почти все) один HTTP-запрос открывал базу дважды. На сетевом
+    диске Amvera открытие соединения — это уже три файла (.db, -wal, -shm) и
+    десятки миллисекунд, поэтому второй SELECT по тому же соединению дешевле
+    второго соединения на порядок.
+    """
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
-    return User(row) if row else None
+    try:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            return None
+        permissions = {
+            r["module_name"] for r in conn.execute(
+                "SELECT module_name FROM permissions WHERE username = ? AND can_view = 1",
+                (row["username"],)
+            )
+        }
+    finally:
+        conn.close()
+
+    return User(row, permissions=permissions)
+
+
+# ============================================================================
+# Аудит действий — пишется асинхронно
+#
+# log_action() зовётся из горячего пути: каждое согласование счёта, закрытие
+# смены, вход. Раньше он открывал СВОЁ соединение и делал commit прямо посреди
+# обработки запроса, то есть добавлял к каждому действию открытие базы плюс
+# fsync — на сетевом диске /data это десятки-сотни миллисекунд, а во время
+# фонового синка, когда дисковая очередь занята, и секунды.
+#
+# Побочно это лечит давнюю ловушку с вложенными соединениями: log_action,
+# вызванный, пока у вызывающего кода открыта своя незакоммиченная транзакция
+# к тому же файлу, ждал сам себя до busy_timeout. Из очереди запись уходит
+# уже после того, как обработчик отпустил своё соединение.
+# ============================================================================
+
+# maxsize — предохранитель от утечки памяти, если писатель умрёт: аудит важен,
+# но не настолько, чтобы ради него съесть память воркера. Переполнение только
+# логируется и никогда не роняет пользовательский запрос.
+_audit_queue = queue.Queue(maxsize=10000)
+_audit_writer_started = False
+_audit_writer_lock = threading.Lock()
+
+# Сколько записей писать одной транзакцией. Пачка из накопившегося — это один
+# fsync на всю пачку вместо одного на каждое действие.
+_AUDIT_BATCH_SIZE = 200
+
+
+def _audit_writer_loop():
+    while True:
+        # Блокирующее ожидание первой записи: поток спит, пока никто ничего
+        # не делает, и не крутит пустой цикл (такой цикл однажды уже
+        # подъедал CPU в фоновом синке).
+        batch = [_audit_queue.get()]
+        while len(batch) < _AUDIT_BATCH_SIZE:
+            try:
+                batch.append(_audit_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        conn = None
+        try:
+            conn = get_db()
+            conn.executemany(
+                "INSERT INTO audit_log (username, action, details, ip, created_at)"
+                " VALUES (?,?,?,?,?)",
+                batch,
+            )
+            conn.commit()
+        except Exception as e:
+            # Потерянная строка аудита не повод убивать писателя: следующая
+            # пачка должна записаться.
+            logger.error(f"Не удалось записать аудит ({len(batch)} строк): {e}")
+        finally:
+            if conn is not None:
+                conn.close()
+            # task_done ровно столько раз, сколько было get() — иначе
+            # flush_audit_log() зависнет на join().
+            for _ in batch:
+                _audit_queue.task_done()
+
+
+def _ensure_audit_writer():
+    """Поднять писателя при первом использовании.
+
+    Именно лениво, а не при импорте: gunicorn форкает воркеры, и поток,
+    созданный до форка, в них бы не выжил.
+    """
+    global _audit_writer_started
+
+    if _audit_writer_started:
+        return
+
+    with _audit_writer_lock:
+        if _audit_writer_started:
+            return
+        threading.Thread(
+            target=_audit_writer_loop, daemon=True, name="audit-log-writer"
+        ).start()
+        _audit_writer_started = True
+
+
+def flush_audit_log(timeout=5.0):
+    """Дождаться записи всего, что стоит в очереди.
+
+    Нужно там, где аудит читают сразу после действия: диагностика SSO-входа
+    и тесты. В обычной работе звать не надо — смысл очереди в том, чтобы
+    пользователь её не ждал.
+
+    Returns: True — очередь разошлась, False — не успела за timeout.
+    """
+    if not _audit_writer_started:
+        return _audit_queue.empty()
+
+    deadline = time.monotonic() + timeout
+    while _audit_queue.unfinished_tasks:
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def log_action(username, action, details=""):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO audit_log (username, action, details, ip, created_at) VALUES (?,?,?,?,?)",
-        (username, action, details, request.remote_addr, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    # remote_addr снимаем здесь: в фоновом потоке контекста запроса уже нет.
+    ip = request.remote_addr if has_request_context() else None
+    record = (username, action, details, ip, datetime.utcnow().isoformat())
+
+    _ensure_audit_writer()
+    try:
+        _audit_queue.put_nowait(record)
+    except queue.Full:
+        logger.error(f"Очередь аудита переполнена, запись потеряна: {username} {action}")
 
 
 def role_required(*allowed_roles):
