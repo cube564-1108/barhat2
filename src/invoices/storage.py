@@ -2060,7 +2060,11 @@ def approve_invoice(invoice_id: int, approved_by: str) -> bool:
 def reject_invoice(invoice_id: int, rejected_by: str, reason: Optional[str] = None) -> bool:
     """
     Отклонить счёт. Возвращает False, если счёт не в статусе on_approval.
-    Отклонённый счёт сразу архивируется — по нему больше нет работы.
+
+    В архив счёт при этом НЕ уезжает (решение владельца 2026-08-26, заодно
+    с отменой автоархивации оплаченных): отказ должен оставаться на виду,
+    пока его не убрали руками или массовым действием. Иначе автор счёта
+    узнаёт об отказе, только если специально включит фильтр архива.
     """
     conn = get_db()
     row = conn.execute("SELECT status FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
@@ -2071,8 +2075,7 @@ def reject_invoice(invoice_id: int, rejected_by: str, reason: Optional[str] = No
     conn.execute(
         """
         UPDATE invoices
-        SET status = 'rejected', rejected_by = ?, rejected_reason = ?,
-            is_archived = 1, archived_at = datetime('now')
+        SET status = 'rejected', rejected_by = ?, rejected_reason = ?
         WHERE id = ?
         """,
         (rejected_by, reason, invoice_id)

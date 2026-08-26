@@ -1339,6 +1339,33 @@
 .iv2 .iv2-report__list li { margin-bottom: 4px; }
 .iv2 .iv2-report__list b { color: var(--bx-wine); }
 
+/* Собранный для банка документ: нужен редко, поэтому свёрнут */
+.iv2 .iv2-report__doc { margin-top: 14px; }
+
+.iv2 .iv2-report__doc > summary {
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--bx-muted);
+    user-select: none;
+}
+
+.iv2 .iv2-report__doc > summary:hover { color: var(--bx-wine); }
+
+.iv2 .iv2-report__pre {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    max-height: 320px;
+    overflow: auto;
+    background: var(--bx-bg);
+    border: 1px solid var(--bx-border);
+    border-radius: 10px;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 /* === Заглушка на месте ещё не сделанных видов ======================== */
 
 .iv2 .iv2-placeholder {

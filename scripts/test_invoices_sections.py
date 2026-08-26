@@ -177,6 +177,33 @@ def main():
         check(status == 200, f"GET /api/invoices по роли -> {status} (ждём 200)")
     print()
 
+    print("перевод сотрудников: init_auth_tables выдаёт invoices_v2 тем, у кого его нет")
+    # t_old и t_new заведены выше без invoices_v2 / без invoices — повторный
+    # старт приложения должен догрузить право на новый раздел обоим
+    make_user('t_sso', 'sso_viewer', ['invoices'])
+    init_auth_tables()
+    conn = get_db()
+    granted = {
+        row['username']
+        for row in conn.execute(
+            "SELECT username FROM permissions WHERE module_name = 'invoices_v2' AND can_view = 1"
+        ).fetchall()
+    }
+    still_old = {
+        row['username']
+        for row in conn.execute(
+            "SELECT username FROM permissions WHERE module_name = 'invoices' AND can_view = 1"
+        ).fetchall()
+    }
+    conn.close()
+    for username in ('t_old', 't_sso'):
+        check(username in granted, f"{username} получил invoices_v2")
+    # Старую секцию не снимаем намеренно: на ней держится доступ к данным
+    # у тех, кого забыли перевести
+    check('t_old' in still_old, "t_old сохранил старую секцию invoices")
+    check('t_none' not in granted, "t_none (florist) invoices_v2 не получил")
+    print()
+
     print("пустой вызов section_required() запрещён")
     try:
         auth.section_required()

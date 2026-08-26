@@ -148,7 +148,9 @@ def test_invoices():
         return False
     print("   ✓ Несовпадение суммы строк с суммой счёта корректно отклонено\n")
 
-    print("8. Оплата и авто-архивация (счёт уже полностью распределён):")
+    # Автоархивация отменена владельцем 2026-08-25: оплаченный счёт остаётся
+    # в списке, в архив его кладёт человек (кнопкой или массовым действием).
+    print("8. Оплата — счёт остаётся в списке, сам в архив не уходит:")
     if not mark_invoice_paid(invoice["id"]):
         print("   ✗ Ошибка: пометить оплаченным не удалось")
         return False
@@ -159,10 +161,10 @@ def test_invoices():
     if not is_invoice_fully_allocated(invoice["id"]):
         print("   ✗ Ошибка: счёт должен считаться полностью распределённым")
         return False
-    if not paid["is_archived"]:
-        print("   ✗ Ошибка: полностью оплаченный и распределённый счёт должен автоматически архивироваться")
+    if paid["is_archived"]:
+        print("   ✗ Ошибка: оплаченный счёт не должен уезжать в архив сам (автоархивация отменена)")
         return False
-    print("   ✓ Счёт оплачен и автоматически архивирован\n")
+    print("   ✓ Счёт оплачен и остался в списке\n")
 
     print("9. Ручной возврат из архива и обратно:")
     set_invoice_archived(invoice["id"], False)
@@ -172,7 +174,9 @@ def test_invoices():
     set_invoice_archived(invoice["id"], True)
     print("   ✓ Ручное управление архивом работает\n")
 
-    print("10. Отклонение отдельного счёта (без распределения) -> сразу в архив:")
+    # Отклонённый счёт тоже остаётся на виду (решение владельца 2026-08-26):
+    # иначе автор узнаёт об отказе, только если включит фильтр архива.
+    print("10. Отклонение отдельного счёта (без распределения) -> остаётся в списке:")
     invoice2 = create_invoice(
         amount=5000,
         payment_purpose="Дублирующий счёт на отклонение",
@@ -185,17 +189,26 @@ def test_invoices():
         print("   ✗ Ошибка: отклонение не удалось")
         return False
     rejected = get_invoice_by_id(invoice2["id"])
-    if rejected["status"] != "rejected" or not rejected["is_archived"]:
-        print(f"   ✗ Ошибка: отклонённый счёт должен быть archived, получено status={rejected['status']}, is_archived={rejected['is_archived']}")
+    if rejected["status"] != "rejected":
+        print(f"   ✗ Ошибка: статус после отклонения {rejected['status']}")
         return False
-    print("   ✓ Счёт отклонён и архивирован\n")
+    if rejected["is_archived"]:
+        print("   ✗ Ошибка: отклонённый счёт не должен уезжать в архив сам — отказ должен остаться на виду")
+        return False
+    print("   ✓ Счёт отклонён и остался в списке\n")
 
     print("11. Фильтры списка счетов:")
-    if not any(i["id"] == invoice2["id"] for i in list_invoices(status="rejected", is_archived=True)):
-        print("   ✗ Ошибка: отклонённый счёт не найден в архиве с фильтром по статусу")
+    if not any(i["id"] == invoice2["id"] for i in list_invoices(status="rejected", is_archived=False)):
+        print("   ✗ Ошибка: отклонённый счёт не найден в основном списке с фильтром по статусу")
         return False
+    # Убираем в архив руками — так теперь и работает интерфейс — и проверяем,
+    # что архивный счёт из основного списка пропадает
+    set_invoice_archived(invoice2["id"], True)
     if any(i["id"] == invoice2["id"] for i in list_invoices(is_archived=False)):
         print("   ✗ Ошибка: архивный счёт не должен попадать в основной список")
+        return False
+    if not any(i["id"] == invoice2["id"] for i in list_invoices(status="rejected", is_archived=True)):
+        print("   ✗ Ошибка: убранный в архив счёт не найден в архиве")
         return False
     if not any(i["id"] == invoice["id"] for i in list_invoices(store_id=store_id, is_archived=True)):
         print("   ✗ Ошибка: фильтр по салону (через invoice_line_items) не нашёл счёт")

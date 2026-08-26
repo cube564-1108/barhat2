@@ -21,8 +21,8 @@
         'calculator': 'Калькулятор букетов',
         'quality': 'Качество сборки',
         'cash_shifts': 'Кассовые смены',
-        'invoices': 'Счета на оплату',
-        'invoices_v2': 'Согласование счетов v2',
+        'invoices': 'Счета (архив) — только админ',
+        'invoices_v2': 'Согласование счетов',
         'writeoffs': 'Списания товара',
         'abc_analysis': 'ABC-анализ товаров',
         'courier_payouts': 'Оплата курьерам',
@@ -31,9 +31,10 @@
 
     // === Пресеты permissions для ролей ===
     const ROLE_PERMISSIONS = {
-        // invoices_v2 — пилот, пока только у админа (см. ROLE_SECTIONS в src/auth.py)
+        // invoices_v2 — основной раздел счетов; invoices (старый) остаётся в
+        // пресетах, но пункт меню виден только админу (см. ROLE_SECTIONS в src/auth.py)
         'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'abc_analysis', 'courier_payouts', 'users_manage'],
-        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'writeoffs', 'courier_payouts'],
+        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'courier_payouts'],
         'florist': ['cash_shifts', 'writeoffs'],
         'florist_analyst': ['quality']
     };

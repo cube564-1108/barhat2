@@ -37,13 +37,17 @@ login_manager = LoginManager()
 # Роли и какие разделы им доступны.
 # Меняйте под свои реальные разделы дашборда.
 ROLE_SECTIONS = {
-    # invoices_v2 — раздел «Согласование счетов v2» (plans/2026-08-24-счета-новый-раздел.md).
-    # Пока только у админа: сотрудники продолжают работать в старом разделе.
-    # Ручки счетов проверяют @section_required("invoices", "invoices_v2") — пускает
-    # любая из двух секций, поэтому снятие старой секции у переведённого сотрудника
-    # данные ему не закрывает (INVOICE_SECTIONS в src/invoices/server.py).
+    # invoices_v2 — раздел «Согласование счетов» (plans/2026-08-24-счета-новый-раздел.md).
+    # С 2026-08-26 это основной раздел счетов для всех, старый «Счета (архив)»
+    # остаётся рабочим, но виден только админу.
+    #
+    # Секция invoices у сотрудников намеренно ОСТАЁТСЯ: пункт меню всё равно
+    # скрыт (script.js прячет старый раздел у всех, кроме админа), а лишнее
+    # снятие права закрыло бы доступ к данным тем, кого забыли перевести.
+    # Ручки счетов проверяют @section_required("invoices", "invoices_v2") —
+    # пускает любая из двух секций (INVOICE_SECTIONS в src/invoices/server.py).
     "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts"},
-    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "writeoffs", "courier_payouts"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts"},
     "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
     # Пользователи, залогиненные через SSO из портала БАРХАТ Пульс (см. src/sso.py).
@@ -51,7 +55,7 @@ ROLE_SECTIONS = {
     # все входящие через портал получают один и тот же набор — всё, КРОМЕ
     # управления пользователями. Админку через внешний JWT не открываем, иначе
     # пропуск Пульса позволял бы заводить и править учётки в нашем сервисе.
-    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "abc_analysis", "writeoffs", "courier_payouts"},
+    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts"},
 }
 
 
@@ -317,7 +321,7 @@ ALL_MODULES = [
     'quality',        # Качество сборки
     'cash_shifts',    # Кассовые смены
     'invoices',       # Счета на оплату
-    'invoices_v2',    # Согласование счетов v2 (пилот, пока только admin)
+    'invoices_v2',    # Согласование счетов (основной раздел с 2026-08-26)
     'abc_analysis',   # ABC-анализ товаров
     'users_manage',   # Управление пользователями
     'writeoffs',      # Списания товара
@@ -334,6 +338,7 @@ SSO_MODULES = [
     'quality',
     'cash_shifts',
     'invoices',
+    'invoices_v2',
     'abc_analysis',
     'writeoffs',
     'courier_payouts',
@@ -465,10 +470,11 @@ def init_auth_tables():
     # Догрузка права на модуль courier_payouts (оплата курьерам)
     migrate_new_module_permissions("courier_payouts", ["admin", "manager"])
 
-    # Догрузка права на пилотный раздел invoices_v2 («Согласование счетов v2»).
-    # Только admin — раздать manager/sso_viewer можно будет после приёмки (Фаза 10),
-    # причём одновременно с обучением section_required двум секциям.
-    migrate_new_module_permissions("invoices_v2", ["admin"])
+    # Догрузка права на раздел invoices_v2 («Согласование счетов»).
+    # С приёмкой Фазы 10 (2026-08-26) он стал основным разделом счетов, поэтому
+    # выдаётся всем, у кого раньше был старый раздел. Старую секцию `invoices`
+    # при этом НЕ снимаем — см. комментарий у ROLE_SECTIONS.
+    migrate_new_module_permissions("invoices_v2", ["admin", "manager", "sso_viewer"])
 
     # Догрузка прав SSO-пользователям: первые из них были заведены, когда
     # sso_viewer имел доступ только к "quality" (см. SSO_MODULES выше).

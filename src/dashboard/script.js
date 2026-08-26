@@ -99,11 +99,22 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Сохраняем permissions пользователя
     const userPermissions = currentUser.sections || [];
 
+    // Старый раздел счетов заморожен и оставлен только админу как архив
+    // (Фаза 10 плана plans/2026-08-24-счета-новый-раздел.md). Право `invoices`
+    // сотрудникам оставили намеренно — на нём держится доступ к данным, —
+    // поэтому прячем пункт по роли, а не по отсутствию права.
+    const ADMIN_ONLY_PAGES = ['invoices'];
+
     // Скрываем пункты меню к которым нет доступа
     navItems.forEach(item => {
         const pageName = item.getAttribute('data-page');
         // users_manage проверяется отдельно через роль
         if (pageName === 'users') return;
+
+        if (ADMIN_ONLY_PAGES.includes(pageName) && currentUser.role !== 'admin') {
+            item.style.display = 'none';
+            return;
+        }
 
         // Скрываем модуль если его нет в permissions
         if (pageName && !userPermissions.includes(pageName)) {
@@ -118,10 +129,19 @@ document.addEventListener('DOMContentLoaded', async function() {
     function navigateToPage(pageName, replaceUrl = false) {
         // Проверяем permissions
         // users_manage проверяется отдельно через роль admin
-        if (pageName !== 'users' && !userPermissions.includes(pageName)) {
+        // Право `invoices` у сотрудника осталось, поэтому проверка по
+        // permissions ниже его пропустит и раздел откроется по прямой ссылке
+        // /invoices — прячем ещё и здесь, по роли
+        const hiddenByRole = ADMIN_ONLY_PAGES.includes(pageName) && currentUser.role !== 'admin';
+
+        if (hiddenByRole || (pageName !== 'users' && !userPermissions.includes(pageName))) {
             console.warn('Нет доступа к модулю:', pageName);
-            // Редирект на первую доступную страницу
-            const firstAllowed = userPermissions[0] || 'dashboard';
+            // Редирект на первую доступную страницу. Скрытые по роли из
+            // кандидатов убираем, иначе редирект зациклится на самом себе.
+            const allowed = userPermissions.filter(
+                name => !(ADMIN_ONLY_PAGES.includes(name) && currentUser.role !== 'admin'));
+            const firstAllowed = allowed[0] || 'dashboard';
+            if (firstAllowed === pageName) return;  // деваться некуда — не зацикливаемся
             navigateToPage(firstAllowed, true);
             return;
         }
@@ -232,8 +252,8 @@ document.addEventListener('DOMContentLoaded', async function() {
             'calculator': 'КАЛЬКУЛЯТОР БУКЕТОВ',
             'quality': 'КАЧЕСТВО СБОРКИ БУКЕТОВ',
             'cash_shifts': 'КАССОВЫЕ СМЕНЫ',
-            'invoices': 'СЧЕТА НА ОПЛАТУ',
-            'invoices_v2': 'СОГЛАСОВАНИЕ СЧЕТОВ V2',
+            'invoices': 'СЧЕТА (АРХИВ)',
+            'invoices_v2': 'СОГЛАСОВАНИЕ СЧЕТОВ',
             'writeoffs': 'СПИСАНИЯ ТОВАРА',
             'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
             'courier_payouts': 'ОПЛАТА КУРЬЕРАМ',

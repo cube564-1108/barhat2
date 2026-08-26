@@ -1,5 +1,8 @@
 /**
- * Раздел «Согласование счетов v2» — пилот поверх существующих таблиц и API.
+ * Раздел «Согласование счетов» — основной раздел счетов, поверх существующих
+ * таблиц и API. Имена файлов и секции прав остались с приставкой v2 намеренно:
+ * переименовывать их — это ломать URL, права в базе и историю правок ради
+ * косметики. Наружу приставка не показывается нигде.
  *
  * План:    plans/2026-08-24-счета-новый-раздел.md
  * Эталон:  prototypes/invoices/index.html
@@ -1946,6 +1949,13 @@
             } else if (invoice.status === 'approved' || invoice.status === 'sent_to_bank') {
                 buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="paid">Отметить оплаченным</button>`);
             }
+            // Отправка в банк по одному счёту. Массовое действие живёт только
+            // в виде «Таблица», а согласовывают в очереди — без этой кнопки
+            // приходилось переключать вид ради одного счёта.
+            if (invoice.status === 'approved' && !invoice.is_archived) {
+                buttons.unshift(`<button class="bx-btn bx-btn--ghost" type="button" data-act="bank-test">Проверить сборку</button>`);
+                buttons.unshift(`<button class="bx-btn" type="button" data-act="bank">Отправить в банк</button>`);
+            }
             if (!invoice.is_archived && (invoice.status === 'paid' || invoice.status === 'rejected')) {
                 buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="archive">В архив</button>`);
             }
@@ -2214,7 +2224,7 @@
                     '', { title: 'Отклонить счёт?', confirmText: 'Отклонить', placeholder: 'Причина отказа' });
                 if (reason === null) return;
                 await apiPost(`/api/invoices/${invoiceId}/reject`, { reason: reason || null });
-                toast('Счёт отклонён и отправлен в архив');
+                toast('Счёт отклонён. Остаётся в списке — уберите в архив, когда разберётесь');
             } else if (action === 'clarify') {
                 const reason = await window.BarhatUI.prompt(
                     `${label}: что нужно уточнить? Текст уйдёт автору в обсуждение счёта.`,
@@ -2252,6 +2262,11 @@
             } else if (action === 'unarchive') {
                 await apiPost(`/api/invoices/${invoiceId}/unarchive`);
                 toast('Счёт возвращён из архива');
+            } else if (action === 'bank' || action === 'bank-test') {
+                // false = отменили в диалоге или это была проверка сборки:
+                // статус не двигался, перечитывать нечего
+                const moved = await sendOneToBank(invoiceId, invoice, action === 'bank-test');
+                if (!moved) return;
             } else {
                 return;
             }
@@ -2265,6 +2280,46 @@
         await refreshDetails(invoiceId);
         loadSummary();
         loadList(false);
+    }
+
+    /**
+     * Отправка платёжки по одному счёту (то же, что делает массовое действие,
+     * но из карточки).
+     *
+     * `test = true` — сборка документа уходит в тестовый контур банка: статус
+     * счёта не меняется, а в ответ приходит собранный документ. Это
+     * единственный способ увидеть, что именно уедет в банк, до боевой отправки.
+     *
+     * Возвращает true, если статус счёта мог измениться (значит вызывающему
+     * нужно перечитать счёт и список).
+     */
+    async function sendOneToBank(invoiceId, invoice, test) {
+        const label = invoice.invoice_number || ('#' + invoice.id);
+
+        if (!test) {
+            const warnings = requisiteWarnings(invoice);
+            const ok = await window.BarhatUI.confirm(
+                `${label} · ${invoice.counterparty_name || 'без контрагента'} · ${money(invoice.amount)}.\n\n`
+                + 'Банк создаст черновик платёжки — подписывать её всё равно нужно вручную '
+                + 'в личном кабинете.'
+                + (warnings.length ? '\n\nВ реквизитах есть замечания: ' + warnings.join('; ') : ''),
+                { title: 'Отправить платёжку в банк?', confirmText: 'Отправить', danger: true });
+            if (!ok) return false;
+        }
+
+        let data;
+        try {
+            data = await apiPost(`/api/invoices/${invoiceId}/send-to-bank`, { sandbox: Boolean(test) });
+        } catch (error) {
+            // Отказ банка приезжает с 502 и текстом ошибки — показываем его в
+            // том же отчёте, что и у массовой отправки, а не одним тостом:
+            // текст банка бывает длинным и его надо успеть прочитать
+            showBulkReport(test ? 'bank-test' : 'bank-one', { error: error.message });
+            return !test;
+        }
+
+        showBulkReport(test ? 'bank-test' : 'bank-one', data);
+        return !test;
     }
 
     async function refreshDetails(invoiceId) {
@@ -2633,6 +2688,20 @@
             </div>`;
     }
 
+    /**
+     * Собранный документ платёжки — под спойлером: нужен он редко, а занимает
+     * весь экран. Формат 1С — обычный текст, поэтому <pre> с переносами.
+     */
+    function bankDocumentHtml(result) {
+        const document_ = result && result.document;
+        if (!document_) return '';
+        return `
+            <details class="iv2-report__doc">
+                <summary>Показать документ, собранный для банка</summary>
+                <pre class="iv2-report__pre">${escapeHtml(document_)}</pre>
+            </details>`;
+    }
+
     function showBulkReport(actionKey, data) {
         state.report = { actionKey, data };
         renderBulkReport();
@@ -2651,7 +2720,26 @@
 
         if (data.error) {
             body = `<div class="iv2-form-error">${escapeHtml(data.error)}</div>`
-                + reportSection('Не отправлены', data.skipped);
+                + reportSection('Не отправлены', data.skipped)
+                + bankDocumentHtml(data.result);
+        } else if (actionKey === 'bank-test') {
+            // Проверка сборки: главное здесь — сам документ, а не статус.
+            // Банк на тестовом контуре может и отклонить — это тоже результат.
+            body = `<div class="iv2-report__head">${data.ok
+                        ? 'Тестовый контур принял черновик — сборка документа в порядке.'
+                        : 'Тестовый контур черновик отклонил.'}</div>`
+                + ((data.result && data.result.errors && data.result.errors.length)
+                    ? reportSection('Что сказал банк',
+                                    data.result.errors.map(text => ({ label: text })))
+                    : '')
+                + `<p class="iv2-hint">Статус счёта не менялся: в боевой банк ничего не уходило.</p>`
+                + bankDocumentHtml(data.result);
+        } else if (actionKey === 'bank-one') {
+            body = `<div class="iv2-report__head">Платёжка загружена в банк черновиком
+                        на ${escapeHtml(money((data.invoice && data.invoice.amount) || 0))}.</div>`
+                + `<p class="iv2-hint">Подпишите её вручную в личном кабинете банка —
+                        сама по себе загрузка деньги не двигает.</p>`
+                + bankDocumentHtml(data.result);
         } else if (actionKey === 'approve') {
             body = `<div class="iv2-report__head">Согласовано ${withCount((data.approved || []).length, 'счёт', 'счёта', 'счетов')}
                         на ${escapeHtml(money(data.approved_amount || 0))}</div>`
