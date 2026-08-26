@@ -2010,11 +2010,12 @@
             if (!stillOurs()) return;
             host.innerHTML = isImage(attachment.original_filename)
                 ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(attachment.original_filename)}">`
-                // sandbox без allow-same-origin повторяет ту же изоляцию, что
-                // ручка inline задаёт заголовком CSP. allow-scripts обязателен:
-                // без него встроенный просмотрщик PDF гаснет и остаётся белый лист.
-                : `<iframe class="iv2-doc__pdf" src="${escapeHtml(url)}" title="Скан счёта"
-                           sandbox="allow-scripts"></iframe>`;
+                // Без sandbox — и это осознанно. Просмотрщик PDF в Chromium
+                // живёт расширением браузера, а в песочнице с opaque-источником
+                // расширение не поднимается: кадр отдаёт ERR_BLOCKED_BY_CLIENT
+                // и выглядит как блокировка. Исполнить файл как HTML нельзя:
+                // тип blob'а мы ставим сами по расширению (inlineMimeType).
+                : `<iframe class="iv2-doc__pdf" src="${escapeHtml(url)}" title="Скан счёта"></iframe>`;
         } catch (error) {
             if (!stillOurs()) return;
             host.innerHTML = docFailedHtml(attachment, error);
