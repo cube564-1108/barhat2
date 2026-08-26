@@ -202,6 +202,7 @@
             open: null,           // 'refs' | 'counterparties' | 'planfact'
             refs: { type: 'categories', list: [], loading: false, error: '', bankEditId: null, newName: '' },
             cp: { list: [], loaded: false, loading: false, error: '', search: '', form: null, saving: false },
+            templates: { list: [], loading: false, error: '' },
             pf: {
                 tab: 'sync',
                 busy: false,
@@ -1917,6 +1918,9 @@
             buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="edit">Редактировать</button>`);
         }
         buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="copy">Копировать счёт</button>`);
+        if (admin) {
+            buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="save-template">Сохранить как шаблон</button>`);
+        }
 
         if (admin) {
             if (invoice.is_archived) {
@@ -2127,6 +2131,14 @@
         if (action === 'toggle-req') {
             const box = sourceElement.closest('.iv2-reqbox');
             if (box) box.classList.toggle('iv2-reqbox--open');
+            return;
+        }
+
+        if (action === 'save-template') {
+            saveAsTemplate({
+                invoiceId,
+                suggestedName: details.invoice.counterparty_name || details.invoice.payment_purpose || '',
+            });
             return;
         }
 
@@ -2692,6 +2704,8 @@
             openSections: { main: true, documents: true, requisites: false, allocation: true },
             suggestions: [],
             source: '',
+            // Расхождение реквизитов шаблона со справочником (см. applyTemplate)
+            templateMismatch: null,
             saving: false,
             error: '',
         };
@@ -3048,6 +3062,7 @@
             : '';
 
         const requisitesBody = `
+            ${mismatchHtml(state.form.templateMismatch, 'iv2-form-mismatch')}
             <div class="iv2-field">
                 <label class="iv2-field__label" for="iv2form-cp-search">Найти в справочнике</label>
                 <input class="iv2-input" id="iv2form-cp-search" placeholder="название, ИНН или расчётный счёт">
@@ -3097,6 +3112,12 @@
                         ${state.form.error ? `<div class="iv2-form-error">${escapeHtml(state.form.error)}</div>` : ''}
                     </div>
                     <div class="iv2-modal__foot">
+                        ${state.form.mode === 'create'
+                            ? `<button class="bx-btn bx-btn--ghost" type="button" id="iv2FormFromTemplate">Из шаблона</button>`
+                            : ''}
+                        ${isAdmin()
+                            ? `<button class="bx-btn bx-btn--ghost" type="button" id="iv2FormSaveTemplate">Сохранить как шаблон</button>`
+                            : ''}
                         <button class="bx-btn bx-btn--ghost" type="button" id="iv2FormCancel">Отмена</button>
                         <button class="bx-btn" type="button" id="iv2FormSave"${state.form.saving ? ' disabled' : ''}>
                             ${state.form.mode === 'edit' ? 'Сохранить изменения' : 'Создать счёт'}
@@ -3181,6 +3202,17 @@
         if (overlay) overlay.addEventListener('click', confirmCloseForm);
         const save = $('iv2FormSave');
         if (save) save.addEventListener('click', saveForm);
+
+        const fromTemplate = $('iv2FormFromTemplate');
+        if (fromTemplate) fromTemplate.addEventListener('click', () => openTool('templates'));
+
+        const saveTemplate = $('iv2FormSaveTemplate');
+        if (saveTemplate) {
+            saveTemplate.addEventListener('click', () => saveAsTemplate({
+                payload: formTemplatePayload(),
+                suggestedName: state.form.values.counterparty_name || '',
+            }));
+        }
     }
 
     /** Точечное обновление итога — чтобы не перерисовывать форму на каждый символ. */
@@ -3535,12 +3567,14 @@
     // =========================================================================
 
     const TOOL_BUTTONS = [
+        { key: 'templates', label: 'Шаблоны' },
         { key: 'refs', label: 'Справочники' },
         { key: 'counterparties', label: 'Контрагенты' },
         { key: 'planfact', label: 'ПланФакт' },
     ];
 
     const TOOL_TITLES = {
+        templates: 'Шаблоны счетов',
         refs: 'Справочники счетов',
         counterparties: 'Контрагенты',
         planfact: 'ПланФакт — авторазноска оплаченных счетов',
@@ -3602,6 +3636,7 @@
         renderTools();
         if (key === 'refs') loadRefList();
         if (key === 'counterparties') loadCounterparties();
+        if (key === 'templates') loadTemplates();
         if (key === 'planfact') state.tools.pf.tab = 'sync';
     }
 
@@ -3627,7 +3662,8 @@
         }
 
         let body = '';
-        if (open === 'refs') body = refsBodyHtml();
+        if (open === 'templates') body = templatesBodyHtml();
+        else if (open === 'refs') body = refsBodyHtml();
         else if (open === 'counterparties') body = counterpartiesBodyHtml();
         else if (open === 'planfact') body = planfactBodyHtml();
 
@@ -3653,9 +3689,225 @@
             if (element) element.addEventListener('click', closeTool);
         });
 
-        if (open === 'refs') bindRefs();
+        if (open === 'templates') bindTemplates();
+        else if (open === 'refs') bindRefs();
         else if (open === 'counterparties') bindCounterparties();
         else if (open === 'planfact') bindPlanfact();
+    }
+
+
+    // ------------------------------------------------------------------ Шаблоны
+
+    async function loadTemplates() {
+        const templates = state.tools.templates;
+        templates.loading = true;
+        templates.error = '';
+        renderTools();
+        try {
+            const data = await apiGet('/api/invoices/templates');
+            templates.list = data.templates || [];
+        } catch (error) {
+            templates.list = [];
+            templates.error = error.message;
+        } finally {
+            templates.loading = false;
+            renderTools();
+        }
+    }
+
+    function templatesBodyHtml() {
+        const templates = state.tools.templates;
+        if (templates.loading) return '<p class="iv2-tools-empty">Загрузка…</p>';
+        if (templates.error) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(templates.error)}</p>`;
+        if (!templates.list.length) {
+            return `<p class="iv2-tools-note">Шаблонов пока нет. Заведите счёт и нажмите в нём
+                    «Сохранить как шаблон» — повторяющийся счёт (аренда, постоянный поставщик)
+                    будет заводиться в два клика.</p>`;
+        }
+
+        return `<p class="iv2-tools-note">Шаблон подставляет всё, кроме суммы и даты оплаты —
+                    их вы вводите каждый раз.</p>`
+            + state.tools.templates.list.map(template => {
+                const meta = [
+                    template.counterparty_name,
+                    template.city_name,
+                    template.payer_name,
+                    template.vat_name,
+                    template.line_items && template.line_items.length
+                        ? withCount(template.line_items.length, 'строка', 'строки', 'строк') + ' распределения'
+                        : 'без распределения',
+                ].filter(Boolean).join(' · ');
+
+                return `
+                    <div class="iv2-tools-row">
+                        <div class="iv2-tools-row__main">
+                            <div class="iv2-tools-row__name">${escapeHtml(template.name)}</div>
+                            <div class="iv2-tools-row__req">${escapeHtml(meta)}</div>
+                            ${template.payment_purpose
+                                ? `<div class="iv2-hint">${escapeHtml(template.payment_purpose)}</div>` : ''}
+                            ${mismatchHtml(template.requisite_mismatch)}
+                        </div>
+                        <div class="iv2-tools-row__btns">
+                            <button class="bx-btn bx-btn--sm" type="button"
+                                    data-tpl-act="use" data-tpl-id="${escapeHtml(template.id)}">Создать счёт</button>
+                            <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                                    data-tpl-act="rename" data-tpl-id="${escapeHtml(template.id)}">Переименовать</button>
+                            <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                                    data-tpl-act="delete" data-tpl-id="${escapeHtml(template.id)}">Удалить</button>
+                        </div>
+                    </div>`;
+            }).join('');
+    }
+
+    /**
+     * Расхождение реквизитов шаблона со справочником.
+     * Показываем и в списке шаблонов, и в форме после подстановки: узнать о
+     * смене банка поставщика надо до отправки платёжки, а не от банка.
+     */
+    function mismatchText(mismatch) {
+        if (!mismatch) return '';
+        const directoryBank = mismatch.directory_bank_name ? ` (${mismatch.directory_bank_name})` : '';
+        return 'Реквизиты в шаблоне отличаются от справочника: расчётный счёт '
+            + (mismatch.template_account || '—') + ', в справочнике '
+            + (mismatch.directory_account || '—') + directoryBank
+            + '. Проверьте перед отправкой в банк.';
+    }
+
+    function mismatchHtml(mismatch, extraClass) {
+        if (!mismatch) return '';
+        return `<div class="iv2-tools-row__warn${extraClass ? ' ' + extraClass : ''}">${
+            escapeHtml(mismatchText(mismatch))}</div>`;
+    }
+
+    function bindTemplates() {
+        const host = modalHost('tools');
+        if (!host) return;
+        host.querySelectorAll('[data-tpl-act]').forEach(button => {
+            button.addEventListener('click', () => templateAction(
+                button.getAttribute('data-tpl-act'), Number(button.getAttribute('data-tpl-id'))));
+        });
+    }
+
+    async function templateAction(action, templateId) {
+        const template = state.tools.templates.list.find(item => item.id === templateId);
+        if (!template) return;
+
+        if (action === 'use') {
+            applyTemplate(template);
+            return;
+        }
+        if (action === 'rename') {
+            const name = await window.BarhatUI.prompt('Новое название шаблона:', template.name,
+                { title: 'Переименовать шаблон', confirmText: 'Сохранить' });
+            if (!name || !name.trim()) return;
+            try {
+                await apiPut('/api/invoices/templates/' + templateId, { name: name.trim() });
+                await loadTemplates();
+                toast('Название сохранено', 'success');
+            } catch (error) {
+                toast('Не удалось переименовать: ' + error.message, 'error');
+            }
+            return;
+        }
+        if (action === 'delete') {
+            const ok = await window.BarhatUI.confirm(
+                `Шаблон «${template.name}» пропадёт из списка. Счета, заведённые по нему, останутся.`,
+                { title: 'Удалить шаблон?', confirmText: 'Удалить', danger: true });
+            if (!ok) return;
+            try {
+                await apiDelete('/api/invoices/templates/' + templateId);
+                await loadTemplates();
+                toast('Шаблон удалён', 'success');
+            } catch (error) {
+                toast('Не удалось удалить: ' + error.message, 'error');
+            }
+        }
+    }
+
+    /**
+     * Открыть форму нового счёта, заполненную из шаблона.
+     *
+     * Сумму счёта подставляем из сумм распределения: у аренды они те же из
+     * месяца в месяц, и тогда счёт действительно заводится в два клика.
+     * Если в шаблоне сумм нет — поле остаётся пустым.
+     */
+    function applyTemplate(template) {
+        const form = emptyForm();
+        form.open = true;
+        form.mode = 'create';
+        form.values.due_date = today();
+        form.values.city_id = template.city_id || '';
+        form.values.payer_id = template.payer_id || '';
+        form.values.vat_id = template.vat_id || '';
+        form.values.payment_purpose = template.payment_purpose || '';
+        COUNTERPARTY_FIELDS.forEach(field => {
+            form.values[field.key] = template[field.key] || '';
+        });
+
+        form.items = (template.line_items || []).map(item => ({
+            store_id: item.store_id,
+            expense_category_id: item.expense_category_id,
+            amount: item.amount || '',
+        }));
+        if (!form.items.length) {
+            form.items = [{ store_id: '', expense_category_id: '', amount: '' }];
+        }
+
+        const fromItems = form.items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+        if (fromItems > 0) form.values.amount = fromItems;
+
+        form.source = `Реквизиты из шаблона «${template.name}»`;
+        form.templateMismatch = template.requisite_mismatch || null;
+        // Реквизиты разошлись со справочником — раскрываем секцию, иначе
+        // предупреждение окажется в свёрнутом блоке и его не увидят
+        if (form.templateMismatch) form.openSections.requisites = true;
+
+        state.form = form;
+        closeTool();
+        renderForm();
+        toast(`Форма заполнена по шаблону «${template.name}»`);
+    }
+
+    /** «Сохранить как шаблон» — из формы счёта и из карточки. */
+    async function saveAsTemplate(source) {
+        const suggested = source.suggestedName || '';
+        const name = await window.BarhatUI.prompt(
+            'Название шаблона — по нему вы будете его находить:', suggested,
+            { title: 'Сохранить как шаблон', confirmText: 'Сохранить', placeholder: 'Например: Аренда «Лазурная»' });
+        if (name === null || !String(name).trim()) return;
+
+        try {
+            if (source.invoiceId) {
+                await apiPost(`/api/invoices/${source.invoiceId}/save-as-template`, { name: name.trim() });
+            } else {
+                await apiPost('/api/invoices/templates', Object.assign({ name: name.trim() }, source.payload));
+            }
+            toast('Шаблон сохранён — он в кнопке «Шаблоны» наверху', 'success');
+        } catch (error) {
+            toast('Не удалось сохранить шаблон: ' + error.message, 'error');
+        }
+    }
+
+    /** Что из открытой формы уходит в шаблон: всё, кроме суммы и даты оплаты. */
+    function formTemplatePayload() {
+        const values = state.form.values;
+        const payload = {
+            city_id: values.city_id ? Number(values.city_id) : null,
+            payer_id: values.payer_id ? Number(values.payer_id) : null,
+            vat_id: values.vat_id ? Number(values.vat_id) : null,
+            payment_purpose: String(values.payment_purpose || '').trim(),
+            line_items: state.form.items
+                .filter(item => item.store_id && item.expense_category_id)
+                .map(item => ({
+                    store_id: Number(item.store_id),
+                    expense_category_id: Number(item.expense_category_id),
+                    amount: Number(item.amount) || 0,
+                })),
+        };
+        COUNTERPARTY_FIELDS.forEach(field => {
+            payload[field.key] = String(values[field.key] || '').trim() || null;
+        });
+        return payload;
     }
 
     // ------------------------------------------------------------------ Справочники
