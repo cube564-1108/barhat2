@@ -71,12 +71,19 @@ def _find_or_create_sso_user(email: str, full_name: str):
     try:
         row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         if row:
-            conn.execute(
-                "UPDATE users SET full_name = ?, is_sso = 1 WHERE email = ?",
-                (full_name, email),
-            )
-            conn.commit()
-            row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            # Пишем, только если что-то реально изменилось. Вход из Пульса —
+            # это не «раз в день»: логи прода 2026-08-26 показали шесть входов
+            # одного человека за минуту сорок, потому что Пульс выписывает
+            # свежий токен на каждый переход по меню. Безусловный UPDATE плюс
+            # commit означал столько же записей с fsync на медленный сетевой
+            # диск — и всё впустую, имя от клика к клику не меняется.
+            if row["full_name"] != full_name or not row["is_sso"]:
+                conn.execute(
+                    "UPDATE users SET full_name = ?, is_sso = 1 WHERE email = ?",
+                    (full_name, email),
+                )
+                conn.commit()
+                row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
             return row
 
         username = _unique_username(conn, email.split("@")[0])
@@ -218,6 +225,19 @@ def sso():
         _log_sso_attempt("NO_EMAIL", "claims без email", unverified)
         abort(403)
 
+    # Значение без «@» — это логин Пульса, а не адрес. Вход мы не рвём (иначе
+    # человек вообще не попадёт в раздел), но предупреждаем громко: учётка
+    # ищется строго по users.email, поэтому такой «email» ни с кем не свяжется
+    # и человеку молча заведут дубль с урезанной ролью sso_viewer. Именно так
+    # владелец, заходя через Пульс, оказывался без прав администратора.
+    if "@" not in email:
+        logger.warning(
+            "SSO: в поле email пришёл логин, а не адрес (%r, sub=%s). Учётка ищется "
+            "строго по users.email — будет создан дубль с ролью %s. Исправлять на "
+            "стороне Пульса: слать рабочий email, совпадающий с учёткой.",
+            email, claims.get("sub"), SSO_ROLE,
+        )
+
     full_name = claims.get("name") or email
 
     row = _find_or_create_sso_user(email, full_name)
@@ -235,8 +255,14 @@ def sso():
     # server.py по этому флагу выставляет SameSite=None + Partitioned на
     # cookie именно для неё, не трогая SameSite обычных сессий по паролю.
     session["sso"] = True
+    # Успешный вход в audit_log пишет log_action — асинхронно, пачками.
+    # Отдельной диагностики здесь больше нет: _log_sso_attempt делает
+    # синхронный INSERT со своим соединением и commit, и на успешных входах
+    # это стало постоянной нагрузкой — Пульс выписывает токен на каждый
+    # переход по меню, то есть таких «попыток» идут сотни в час. Диагностика
+    # заводилась под разбор 403 и на отказах остаётся: они редки, и там
+    # каждая запись на вес золота.
     log_action(user.username, "sso_login", f"email={email} salon={claims.get('salon')}")
-    _log_sso_attempt("OK", f"user={user.username}", unverified)
 
     return redirect(next_path)
 
