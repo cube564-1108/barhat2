@@ -372,6 +372,56 @@ def init_invoices_tables():
         ON invoice_planfact_unmatched(resolved) WHERE resolved = 0
     """)
 
+    # ========================================================================
+    # 11. Шаблоны счетов (план 2026-08-24, §3.2, Фаза 8)
+    #
+    # Суммы счёта и даты оплаты в шаблоне нет — это ровно то, что меняется от
+    # счёта к счёту. Суммы строк распределения хранятся, но как подсказка.
+    # Реквизиты копируются в шаблон, а не берутся ссылкой (как и в самом
+    # счёте), поэтому при подстановке они сверяются со справочником —
+    # см. counterparty_matches_directory.
+    #
+    # UNIQUE(name) намеренно НЕТ: у шаблонов мягкое удаление, а уникальное имя
+    # рядом с ним уже давало в этом модуле «имя занято невидимой записью».
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            city_id INTEGER REFERENCES invoice_cities(id),
+            payer_id INTEGER REFERENCES invoice_payers(id),
+            vat_id INTEGER REFERENCES invoice_vat_options(id),
+            counterparty_name TEXT,
+            counterparty_inn TEXT,
+            counterparty_kpp TEXT,
+            counterparty_bank_name TEXT,
+            counterparty_bank_bik TEXT,
+            counterparty_bank_account TEXT,
+            counterparty_bank_corr_account TEXT,
+            payment_purpose TEXT,
+            created_by TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_invoice_templates_active
+        ON invoice_templates(is_active) WHERE is_active = 1
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_template_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL REFERENCES invoice_templates(id),
+            store_id INTEGER NOT NULL REFERENCES stores(id),
+            expense_category_id INTEGER NOT NULL REFERENCES invoice_expense_categories(id),
+            amount REAL NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_invoice_template_items_template
+        ON invoice_template_items(template_id)
+    """)
+
     conn.commit()
 
     # ========================================================================
@@ -2533,3 +2583,254 @@ def remember_counterparty_from_invoice(invoice: Dict[str, Any]) -> Optional[Dict
     except Exception:
         logger.exception("Не удалось запомнить контрагента из счёта")
         return None
+
+
+# =============================================================================
+# ШАБЛОНЫ СЧЕТОВ (план 2026-08-24, §3.2, Фаза 8)
+# =============================================================================
+
+# Поля реквизитов, которые шаблон переносит в счёт. Тот же набор и в том же
+# порядке, что подставляется из справочника контрагентов, — иначе шаблон и
+# справочник заполнят счёт по-разному.
+TEMPLATE_COUNTERPARTY_FIELDS = (
+    "counterparty_name",
+    "counterparty_inn",
+    "counterparty_kpp",
+    "counterparty_bank_name",
+    "counterparty_bank_bik",
+    "counterparty_bank_account",
+    "counterparty_bank_corr_account",
+)
+
+TEMPLATE_FIELDS = ("name", "city_id", "payer_id", "vat_id", "payment_purpose") \
+    + TEMPLATE_COUNTERPARTY_FIELDS
+
+
+def _clean_template_values(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Привести тело запроса к колонкам таблицы: пустые строки — в NULL."""
+    cleaned: Dict[str, Any] = {}
+    for field in TEMPLATE_FIELDS:
+        if field not in values:
+            continue
+        value = values.get(field)
+        if field in ("city_id", "payer_id", "vat_id"):
+            cleaned[field] = int(value) if value not in (None, "", 0) else None
+        else:
+            text = str(value).strip() if value is not None else ""
+            cleaned[field] = text or None
+    return cleaned
+
+
+def _validate_template_items(items: Any) -> Optional[str]:
+    """Строки распределения шаблона. Сумма может быть нулевой — это подсказка."""
+    if items is None:
+        return None
+    if not isinstance(items, list):
+        return "Распределение должно быть списком"
+    for item in items:
+        if not isinstance(item, dict):
+            return "Строка распределения должна быть объектом"
+        if not item.get("store_id") or not item.get("expense_category_id"):
+            return "В строке распределения нужны салон и статья расхода"
+        amount = item.get("amount", 0) or 0
+        try:
+            if float(amount) < 0:
+                return "Сумма строки не может быть отрицательной"
+        except (TypeError, ValueError):
+            return "Сумма строки должна быть числом"
+    return None
+
+
+def _template_items(conn: sqlite3.Connection, template_id: int) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT ti.id, ti.store_id, ti.expense_category_id, ti.amount,
+               s.name AS store_name, c.name AS category_name
+        FROM invoice_template_items ti
+        LEFT JOIN stores s ON s.id = ti.store_id
+        LEFT JOIN invoice_expense_categories c ON c.id = ti.expense_category_id
+        WHERE ti.template_id = ?
+        ORDER BY ti.id
+        """,
+        (template_id,)
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_invoice_templates(include_inactive: bool = False) -> List[Dict[str, Any]]:
+    """
+    Шаблоны со строками распределения и названиями справочников.
+
+    Названия городов и плательщиков подтягиваем здесь же: список шаблонов
+    показывает их человеку, а отдавать голые id значит заставить клиент
+    держать свою копию справочников и однажды показать прочерк.
+    """
+    conn = get_db()
+    where = "" if include_inactive else "WHERE t.is_active = 1"
+    rows = conn.execute(
+        f"""
+        SELECT t.*, ci.name AS city_name, p.name AS payer_name, v.name AS vat_name
+        FROM invoice_templates t
+        LEFT JOIN invoice_cities ci ON ci.id = t.city_id
+        LEFT JOIN invoice_payers p ON p.id = t.payer_id
+        LEFT JOIN invoice_vat_options v ON v.id = t.vat_id
+        {where}
+        ORDER BY t.name COLLATE NOCASE
+        """
+    ).fetchall()
+
+    templates = []
+    for row in rows:
+        template = dict(row)
+        template["line_items"] = _template_items(conn, template["id"])
+        templates.append(template)
+    conn.close()
+    return templates
+
+
+def get_invoice_template(template_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    row = conn.execute(
+        """
+        SELECT t.*, ci.name AS city_name, p.name AS payer_name, v.name AS vat_name
+        FROM invoice_templates t
+        LEFT JOIN invoice_cities ci ON ci.id = t.city_id
+        LEFT JOIN invoice_payers p ON p.id = t.payer_id
+        LEFT JOIN invoice_vat_options v ON v.id = t.vat_id
+        WHERE t.id = ?
+        """,
+        (template_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    template = dict(row)
+    template["line_items"] = _template_items(conn, template_id)
+    conn.close()
+    return template
+
+
+def create_invoice_template(values: Dict[str, Any], items: Optional[List[Dict[str, Any]]],
+                            created_by: str) -> Dict[str, Any]:
+    """Завести шаблон. Кидает ValueError, если нет названия."""
+    cleaned = _clean_template_values(values)
+    if not cleaned.get("name"):
+        raise ValueError("Название шаблона обязательно")
+
+    columns = list(cleaned.keys()) + ["created_by"]
+    placeholders = ", ".join("?" for _ in columns)
+    params = [cleaned[field] for field in cleaned] + [created_by]
+
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            f"INSERT INTO invoice_templates ({', '.join(columns)}) VALUES ({placeholders})",
+            params
+        )
+        template_id = cursor.lastrowid
+        for item in items or []:
+            conn.execute(
+                """
+                INSERT INTO invoice_template_items (template_id, store_id, expense_category_id, amount)
+                VALUES (?, ?, ?, ?)
+                """,
+                (template_id, int(item["store_id"]), int(item["expense_category_id"]),
+                 float(item.get("amount") or 0))
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_invoice_template(template_id)
+
+
+def update_invoice_template(template_id: int, values: Dict[str, Any],
+                            items: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    """
+    Обновить шаблон. Строки распределения переписываются целиком — как и в
+    самом счёте: частичная правка списка строк даёт больше способов
+    разойтись с тем, что видит человек, чем пользы.
+    """
+    cleaned = _clean_template_values(values)
+    if "name" in cleaned and not cleaned["name"]:
+        raise ValueError("Название шаблона обязательно")
+
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT 1 FROM invoice_templates WHERE id = ?", (template_id,)).fetchone():
+            return None
+        if cleaned:
+            assignments = ", ".join(f"{field} = ?" for field in cleaned)
+            conn.execute(
+                f"UPDATE invoice_templates SET {assignments} WHERE id = ?",
+                list(cleaned.values()) + [template_id]
+            )
+        if items is not None:
+            conn.execute("DELETE FROM invoice_template_items WHERE template_id = ?", (template_id,))
+            for item in items:
+                conn.execute(
+                    """
+                    INSERT INTO invoice_template_items (template_id, store_id, expense_category_id, amount)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (template_id, int(item["store_id"]), int(item["expense_category_id"]),
+                     float(item.get("amount") or 0))
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_invoice_template(template_id)
+
+
+def delete_invoice_template(template_id: int) -> bool:
+    """Мягкое удаление: шаблон пропадает из списка, счета по нему не трогаются."""
+    conn = get_db()
+    row = conn.execute("SELECT is_active FROM invoice_templates WHERE id = ?", (template_id,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    conn.execute("UPDATE invoice_templates SET is_active = 0 WHERE id = ?", (template_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def template_requisite_mismatch(template: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Разошлись ли реквизиты шаблона со справочником контрагентов.
+
+    Реквизиты копируются в шаблон, а не берутся ссылкой, — иначе правка
+    справочника молча меняла бы уже сохранённые шаблоны. Обратная сторона:
+    поставщик сменит банк, а шаблон будет годами подставлять старый счёт, и
+    узнаем мы об этом от банка. Поэтому при подстановке сверяем.
+
+    Ищем контрагента по ИНН (расчётный счёт не берём в ключ — именно он и мог
+    смениться) и сравниваем расчётный счёт.
+    """
+    inn = normalize_inn(template.get("counterparty_inn"))
+    if not inn:
+        return None
+
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM invoice_counterparties WHERE is_active = 1 AND inn = ?", (inn,)
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return None
+
+    template_account = normalize_account(template.get("counterparty_bank_account"))
+    directory = [dict(row) for row in rows]
+
+    # Счёт из шаблона всё ещё есть у контрагента — расхождения нет
+    if any(normalize_account(item.get("bank_account")) == template_account for item in directory):
+        return None
+
+    current = directory[0]
+    return {
+        "counterparty_name": current.get("name"),
+        "template_account": template.get("counterparty_bank_account"),
+        "directory_account": current.get("bank_account"),
+        "directory_bank_name": current.get("bank_name"),
+        "directory_bank_bik": current.get("bank_bik"),
+        "directory_bank_corr_account": current.get("bank_corr_account"),
+    }

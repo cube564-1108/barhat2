@@ -80,6 +80,14 @@ from .storage import (
     mark_invoice_paid,
     set_invoice_archived,
     find_auto_archived_invoices,
+    list_invoice_templates,
+    get_invoice_template,
+    create_invoice_template,
+    update_invoice_template,
+    delete_invoice_template,
+    template_requisite_mismatch,
+    _validate_template_items,
+    TEMPLATE_COUNTERPARTY_FIELDS,
     get_invoice_line_items,
     set_invoice_line_items,
     counterparty_data_report,
@@ -1881,3 +1889,123 @@ def remove_counterparty(counterparty_id):
     delete_counterparty(counterparty_id)
     log_action(current_user.username, "delete_counterparty", f"{counterparty_id}: {counterparty['name']}")
     return jsonify({"ok": True})
+
+
+# =============================================================================
+# ШАБЛОНЫ СЧЕТОВ (план 2026-08-24, Фаза 8)
+# =============================================================================
+
+@invoices_bp.route("/templates", methods=["GET"])
+@section_required("invoices")
+def get_templates():
+    """
+    Список шаблонов. Читать может любой, у кого есть раздел, — счёт из
+    шаблона заводит тот же человек, что и обычный. Править — только админ.
+
+    К каждому шаблону сразу считаем расхождение реквизитов со справочником:
+    предупредить надо в момент выбора шаблона, а не после отказа банка.
+    """
+    templates = list_invoice_templates()
+    for template in templates:
+        template["requisite_mismatch"] = template_requisite_mismatch(template)
+    return jsonify({"templates": templates})
+
+
+@invoices_bp.route("/templates", methods=["POST"])
+@role_required("admin")
+def add_template():
+    """Завести шаблон. Body: поля шаблона + line_items."""
+    data = request.get_json(silent=True) or {}
+    items = data.get("line_items")
+    error = _validate_template_items(items)
+    if error:
+        return jsonify({"error": error}), 400
+
+    try:
+        template = create_invoice_template(data, items, current_user.username)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except sqlite3.Error:
+        logger.exception("Не удалось создать шаблон счёта")
+        return jsonify({"error": "Не удалось сохранить шаблон"}), 500
+
+    log_action(current_user.username, "create_invoice_template", template["name"])
+    return jsonify({"ok": True, "template": template}), 201
+
+
+@invoices_bp.route("/templates/<int:template_id>", methods=["PUT"])
+@role_required("admin")
+def edit_template(template_id):
+    """Поправить шаблон. Уже заведённые по нему счета не меняются."""
+    data = request.get_json(silent=True) or {}
+    items = data.get("line_items")
+    error = _validate_template_items(items)
+    if error:
+        return jsonify({"error": error}), 400
+
+    try:
+        template = update_invoice_template(template_id, data, items)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except sqlite3.Error:
+        logger.exception("Не удалось обновить шаблон счёта %s", template_id)
+        return jsonify({"error": "Не удалось сохранить шаблон"}), 500
+
+    if not template:
+        return jsonify({"error": "Шаблон не найден"}), 404
+
+    log_action(current_user.username, "update_invoice_template", f"{template_id}: {template['name']}")
+    return jsonify({"ok": True, "template": template})
+
+
+@invoices_bp.route("/templates/<int:template_id>", methods=["DELETE"])
+@role_required("admin")
+def remove_template(template_id):
+    """Мягкое удаление: шаблон пропадает из списка, счета по нему остаются."""
+    template = get_invoice_template(template_id)
+    if not template:
+        return jsonify({"error": "Шаблон не найден"}), 404
+
+    delete_invoice_template(template_id)
+    log_action(current_user.username, "delete_invoice_template", f"{template_id}: {template['name']}")
+    return jsonify({"ok": True})
+
+
+@invoices_bp.route("/<int:invoice_id>/save-as-template", methods=["POST"])
+@role_required("admin")
+def save_invoice_as_template(invoice_id):
+    """
+    Сделать шаблон из существующего счёта. Body: {"name": "..."}.
+
+    Сумма и дата оплаты не переносятся — это ровно то, что меняется от счёта
+    к счёту. Разрезы распределения переносим вместе с суммами строк: у аренды
+    они из месяца в месяц те же, а обнулить их в форме — одно действие.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Название шаблона обязательно"}), 400
+
+    values = {"name": name, "city_id": invoice["city_id"], "payer_id": invoice["payer_id"],
+              "vat_id": invoice["vat_id"], "payment_purpose": invoice["payment_purpose"]}
+    for field in TEMPLATE_COUNTERPARTY_FIELDS:
+        values[field] = invoice[field]
+
+    items = [{"store_id": item["store_id"], "expense_category_id": item["expense_category_id"],
+              "amount": item["amount"]}
+             for item in get_invoice_line_items(invoice_id)]
+
+    try:
+        template = create_invoice_template(values, items, current_user.username)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    log_action(current_user.username, "create_invoice_template_from_invoice",
+               f"{invoice['invoice_number']} -> {name}")
+    return jsonify({"ok": True, "template": template}), 201
