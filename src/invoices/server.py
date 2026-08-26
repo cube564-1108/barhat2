@@ -130,6 +130,13 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 invoices_bp = Blueprint("invoices", __name__, url_prefix="/api/invoices")
 
+# Ручки счетов обслуживают ДВА раздела дашборда сразу: старый «Счета на оплату»
+# (секция invoices) и новый «Согласование счетов» (секция invoices_v2).
+# Проверять только `invoices` нельзя: как только сотрудника переведут на новый
+# раздел и снимут старую секцию, у него отвалятся все данные — раздел откроется
+# пустым (Фаза 10 плана plans/2026-08-24-счета-новый-раздел.md).
+INVOICE_SECTIONS = ("invoices", "invoices_v2")
+
 
 # =============================================================================
 # СПРАВОЧНИКИ (для форм на фронте) — общий паттерн для 4 простых словарей
@@ -186,14 +193,14 @@ def _register_reference_crud(name, get_all, get_by_id, create, update, delete):
         return jsonify({"ok": True})
     delete_view.__name__ = f"remove_{name}"
 
-    invoices_bp.route(f"/{name}", methods=["GET"])(section_required("invoices")(list_view))
+    invoices_bp.route(f"/{name}", methods=["GET"])(section_required(*INVOICE_SECTIONS)(list_view))
     invoices_bp.route(f"/{name}", methods=["POST"])(role_required("admin")(create_view))
     invoices_bp.route(f"/{name}/<int:item_id>", methods=["PUT"])(role_required("admin")(update_view))
     invoices_bp.route(f"/{name}/<int:item_id>", methods=["DELETE"])(role_required("admin")(delete_view))
 
 
 @invoices_bp.route("/stores", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_stores():
     """Список салонов (=проектов ПланФакт) для распределения (переиспользуем cashshifts.stores)."""
     return jsonify({"stores": get_all_stores()})
@@ -240,7 +247,7 @@ def set_payer_bank_requisites(payer_id):
 # =============================================================================
 
 @invoices_bp.route("", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_invoices():
     """
     Список счетов с фильтрами.
@@ -331,7 +338,7 @@ def get_invoices():
 
 
 @invoices_bp.route("/summary", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_invoices_summary_view():
     """
     Четыре KPI-плитки раздела v2 одним запросом.
@@ -358,7 +365,7 @@ def get_invoices_summary_view():
 
 
 @invoices_bp.route("/authors", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_invoice_authors():
     """Авторы счетов для фильтра «Автор» — только те, чьи счета видны этому пользователю."""
     restrict_username = None
@@ -374,7 +381,7 @@ def get_invoice_authors():
 
 
 @invoices_bp.route("/<int:invoice_id>", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_invoice(invoice_id):
     """
     Детали счёта — вместе со строками распределения и вложениями.
@@ -449,7 +456,7 @@ def _validate_line_items(line_items):
 
 
 @invoices_bp.route("/<int:invoice_id>", methods=["PUT"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def edit_invoice(invoice_id):
     """
     Частично отредактировать поля счёта (не статус — см. /<id>/status).
@@ -581,7 +588,7 @@ def edit_invoice_status(invoice_id):
 
 
 @invoices_bp.route("", methods=["POST"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def add_invoice():
     """
     Создать счёт на оплату. Сразу уходит на согласование (status=on_approval).
@@ -739,7 +746,7 @@ def clarify(invoice_id):
 
 
 @invoices_bp.route("/<int:invoice_id>/resubmit", methods=["POST"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def resubmit(invoice_id):
     """
     Автор поправил счёт и возвращает его в очередь. Body: {"comment": "..."} —
@@ -1335,7 +1342,7 @@ def unarchive_invoice_view(invoice_id):
 # =============================================================================
 
 @invoices_bp.route("/<int:invoice_id>/line-items", methods=["PUT"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def update_line_items(invoice_id):
     """
     Полностью заменить распределение счёта по проектам/статьям.
@@ -1390,7 +1397,7 @@ def update_line_items(invoice_id):
 # =============================================================================
 
 @invoices_bp.route("/<int:invoice_id>/attachments", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def list_attachments(invoice_id):
     invoice = get_invoice_by_id(invoice_id)
     if not invoice:
@@ -1401,7 +1408,7 @@ def list_attachments(invoice_id):
 
 
 @invoices_bp.route("/<int:invoice_id>/attachments", methods=["POST"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def upload_attachment(invoice_id):
     """Загрузить вложение (скрин/скан счёта). multipart/form-data, поле 'file'."""
     invoice = get_invoice_by_id(invoice_id)
@@ -1423,7 +1430,7 @@ def upload_attachment(invoice_id):
 
 
 @invoices_bp.route("/attachments/<int:attachment_id>/download", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def download_attachment(attachment_id):
     attachment = get_attachment_by_id(attachment_id)
     if not attachment:
@@ -1468,7 +1475,7 @@ _INLINE_CONTENT_TYPES = {
 
 
 @invoices_bp.route("/attachments/<int:attachment_id>/inline", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def preview_attachment(attachment_id):
     """
     Показать вложение прямо в интерфейсе, без скачивания на диск.
@@ -1539,7 +1546,7 @@ def remove_attachment(attachment_id):
 # =============================================================================
 
 @invoices_bp.route("/<int:invoice_id>/history", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_history(invoice_id):
     invoice = get_invoice_by_id(invoice_id)
     if not invoice:
@@ -1560,7 +1567,7 @@ def get_history(invoice_id):
 # =============================================================================
 
 @invoices_bp.route("/<int:invoice_id>/comments", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def list_comments(invoice_id):
     invoice = get_invoice_by_id(invoice_id)
     if not invoice:
@@ -1577,7 +1584,7 @@ def list_comments(invoice_id):
 
 
 @invoices_bp.route("/<int:invoice_id>/comments", methods=["POST"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def add_comment(invoice_id):
     """Body: {"message": str}. Доступно, пока есть доступ к счёту — даже после архивации (обсуждение не редактирование)."""
     invoice = get_invoice_by_id(invoice_id)
@@ -1940,7 +1947,7 @@ def counterparties_data_report():
 # =============================================================================
 
 @invoices_bp.route("/counterparties", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_counterparties():
     """
     Справочник контрагентов. С ?query= — подсказки для формы счёта
@@ -2009,7 +2016,7 @@ def remove_counterparty(counterparty_id):
 # =============================================================================
 
 @invoices_bp.route("/templates", methods=["GET"])
-@section_required("invoices")
+@section_required(*INVOICE_SECTIONS)
 def get_templates():
     """
     Список шаблонов. Читать может любой, у кого есть раздел, — счёт из

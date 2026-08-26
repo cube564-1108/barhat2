@@ -37,11 +37,11 @@ login_manager = LoginManager()
 # Роли и какие разделы им доступны.
 # Меняйте под свои реальные разделы дашборда.
 ROLE_SECTIONS = {
-    # invoices_v2 — пилотный раздел «Согласование счетов v2» (plans/2026-08-24-счета-новый-раздел.md).
+    # invoices_v2 — раздел «Согласование счетов v2» (plans/2026-08-24-счета-новый-раздел.md).
     # Пока только у админа: сотрудники продолжают работать в старом разделе.
-    # ВАЖНО: эта секция даёт только пункт меню. Все ручки счетов проверяют
-    # @section_required("invoices"), поэтому доступ к данным идёт по старой секции —
-    # снимать её у сотрудников нельзя, пока section_required не примет обе (Фаза 10).
+    # Ручки счетов проверяют @section_required("invoices", "invoices_v2") — пускает
+    # любая из двух секций, поэтому снятие старой секции у переведённого сотрудника
+    # данные ему не закрывает (INVOICE_SECTIONS в src/invoices/server.py).
     "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts"},
     "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "writeoffs", "courier_payouts"},
     "florist": {"cash_shifts", "writeoffs"},
@@ -547,23 +547,33 @@ def role_required(*allowed_roles):
     return decorator
 
 
-def section_required(section_name):
+def section_required(*section_names):
     """Декоратор по названию раздела дашборда.
-    Проверяет permissions в БД, с фоллбэком на ROLE_SECTIONS для обратной совместимости."""
+    Проверяет permissions в БД, с фоллбэком на ROLE_SECTIONS для обратной совместимости.
+
+    Секций можно передать несколько — тогда пускает ЛЮБАЯ из них
+    (`@section_required("invoices", "invoices_v2")`). Это нужно там, где один
+    набор ручек обслуживает два раздела сразу: счета живут в старом разделе
+    (`invoices`) и в новом (`invoices_v2`), и сотруднику, переведённому на
+    новый раздел, старую секцию снимут — данные он терять при этом не должен.
+    """
+    if not section_names:
+        raise ValueError("section_required требует хотя бы одну секцию")
+
     def decorator(fn):
         @wraps(fn)
         @login_required
         def wrapper(*args, **kwargs):
             # Сначала проверяем по permissions (новая система)
-            if current_user.has_module_access(section_name):
+            if any(current_user.has_module_access(name) for name in section_names):
                 return fn(*args, **kwargs)
 
             # Фоллбэк на ROLE_SECTIONS для обратной совместимости
             allowed = ROLE_SECTIONS.get(current_user.role, set())
-            if section_name in allowed:
+            if any(name in allowed for name in section_names):
                 return fn(*args, **kwargs)
 
-            log_action(current_user.username, "access_denied", section_name)
+            log_action(current_user.username, "access_denied", " / ".join(section_names))
             return jsonify({"error": "Недостаточно прав"}), 403
         return wrapper
     return decorator
