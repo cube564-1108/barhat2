@@ -206,6 +206,7 @@ def init_invoices_tables():
 
     # Поле «Комментарий» (план 2026-08-24, Фаза 1) — добавлено позже остальных.
     _ensure_invoice_comment_column(conn)
+    _ensure_invoice_clarification_columns(conn)
 
     # ========================================================================
     # 3.1. Справочник контрагентов (план 2026-08-24, Фаза 3)
@@ -550,6 +551,38 @@ def _ensure_invoice_comment_column(conn: sqlite3.Connection):
     except Exception:
         conn.rollback()
         raise
+
+
+def _ensure_invoice_clarification_columns(conn: sqlite3.Connection):
+    """
+    Добивка полей уточнения у автора (план 2026-08-24, §3.1, Фаза 7).
+
+    Статус счёта при этом не меняется — остаётся on_approval, а «сейчас у
+    автора» показывает clarification_at. Так счёт не выпадает из выборок и
+    отчётов, а старый раздел продолжает показывать его корректно.
+
+    Блокировка та же, что в _ensure_invoice_comment_column: ADD COLUMN дёшев,
+    но два gunicorn-воркера на проде стартуют параллельно и без BEGIN
+    IMMEDIATE падают на "duplicate column name".
+    """
+    if not _table_exists(conn, "invoices"):
+        return
+    columns = ("clarification_reason", "clarification_at", "clarification_by")
+    if all(_column_exists(conn, "invoices", column) for column in columns):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for column in columns:
+            if not _column_exists(conn, "invoices", column):
+                conn.execute(f"ALTER TABLE invoices ADD COLUMN {column} TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    global _HAS_CLARIFICATION_COLUMN
+    _HAS_CLARIFICATION_COLUMN = True
 
 
 def _finish_migration_from_old_table(conn: sqlite3.Connection, old_table_name: str):
@@ -1591,6 +1624,23 @@ INVOICE_SORT_FIELDS = {
 }
 
 
+# Колонка уточнения появляется миграцией при старте и больше не исчезает,
+# поэтому результат проверки кэшируем: спрашивать схему на каждый запрос
+# списка — это лишнее открытие соединения на самом горячем пути модуля.
+_HAS_CLARIFICATION_COLUMN: Optional[bool] = None
+
+
+def _clarification_column_exists() -> bool:
+    global _HAS_CLARIFICATION_COLUMN
+    if _HAS_CLARIFICATION_COLUMN is None:
+        conn = get_db()
+        try:
+            _HAS_CLARIFICATION_COLUMN = _column_exists(conn, "invoices", "clarification_at")
+        finally:
+            conn.close()
+    return _HAS_CLARIFICATION_COLUMN
+
+
 def _build_invoice_filters(
     status: Optional[str] = None,
     store_id: Optional[int] = None,
@@ -1606,6 +1656,7 @@ def _build_invoice_filters(
     due_to: Optional[str] = None,
     is_archived: bool = False,
     hide_paid: bool = False,
+    clarification: Optional[str] = None,
     restrict_username: Optional[str] = None,
     restrict_store_ids: Optional[List[int]] = None,
 ) -> Tuple[str, List[Any]]:
@@ -1648,6 +1699,14 @@ def _build_invoice_filters(
     # оплаченных» им не выразить.
     if hide_paid:
         where += " AND i.status != 'paid'"
+
+    # Уточнение у автора (Фаза 7): 'only' — счета, которые сейчас у автора,
+    # 'exclude' — очередь согласующего без них. Колонка появляется миграцией,
+    # поэтому до неё фильтр молча ничего не сужает: старый раздел параметр
+    # не шлёт, а новый переживёт откат миграции без 500-х.
+    if clarification in ("only", "exclude") and _clarification_column_exists():
+        where += (" AND i.clarification_at IS NOT NULL" if clarification == "only"
+                  else " AND i.clarification_at IS NULL")
 
     if store_id:
         where += " AND i.id IN (SELECT invoice_id FROM invoice_line_items WHERE store_id = ?)"
@@ -1745,6 +1804,7 @@ def list_invoices(
     due_to: Optional[str] = None,
     is_archived: bool = False,
     hide_paid: bool = False,
+    clarification: Optional[str] = None,
     sort: Optional[str] = None,
     order: Optional[str] = None,
     limit: int = 100,
@@ -1765,7 +1825,7 @@ def list_invoices(
         counterparty=counterparty, payment_purpose=payment_purpose,
         created_from=created_from, created_to=created_to,
         due_from=due_from, due_to=due_to, is_archived=is_archived,
-        hide_paid=hide_paid, restrict_username=restrict_username,
+        hide_paid=hide_paid, clarification=clarification, restrict_username=restrict_username,
         restrict_store_ids=restrict_store_ids,
     )
 
@@ -1832,19 +1892,19 @@ def get_invoices_summary(
     и «сегодня» у них наступает раньше: взяв дату сервера, мы бы полдня
     показывали вчерашний срок оплаты как сегодняшний.
 
-    Колонка rework_at появляется только в Фазе 7 — до неё плитка «на доработке»
-    честно показывает ноль, а условие «ждут согласования» не сужается. Так
-    summary не придётся переписывать после миграции.
+    Колонка clarification_at появляется только в Фазе 7 — до неё плитка
+    «на уточнении» честно показывает ноль, а условие «ждут согласования» не
+    сужается. Так summary не приходится переписывать после миграции.
     """
     conn = get_db()
     try:
-        has_rework = _column_exists(conn, "invoices", "rework_at")
+        has_clarification = _column_exists(conn, "invoices", "clarification_at")
 
         wait_cond = "i.status = 'on_approval'"
-        rework_cond = "0"
-        if has_rework:
-            wait_cond = "i.status = 'on_approval' AND i.rework_at IS NULL"
-            rework_cond = "i.status = 'on_approval' AND i.rework_at IS NOT NULL"
+        clarification_cond = "0"
+        if has_clarification:
+            wait_cond = "i.status = 'on_approval' AND i.clarification_at IS NULL"
+            clarification_cond = "i.status = 'on_approval' AND i.clarification_at IS NOT NULL"
 
         # Отклонённые счета архивируются сразу (см. reject_invoice), поэтому
         # is_archived = 0 их уже отсекает — отдельного условия не нужно.
@@ -1876,8 +1936,8 @@ def get_invoices_summary(
                 COALESCE(SUM(CASE WHEN {due_open} AND i.due_date = ? THEN i.amount ELSE 0 END), 0) AS today_amount,
                 SUM(CASE WHEN {due_open} AND i.due_date < ? THEN 1 ELSE 0 END) AS overdue_count,
                 COALESCE(SUM(CASE WHEN {due_open} AND i.due_date < ? THEN i.amount ELSE 0 END), 0) AS overdue_amount,
-                SUM(CASE WHEN {rework_cond} THEN 1 ELSE 0 END) AS rework_count,
-                COALESCE(SUM(CASE WHEN {rework_cond} THEN i.amount ELSE 0 END), 0) AS rework_amount
+                SUM(CASE WHEN {clarification_cond} THEN 1 ELSE 0 END) AS clarification_count,
+                COALESCE(SUM(CASE WHEN {clarification_cond} THEN i.amount ELSE 0 END), 0) AS clarification_amount
             FROM invoices i
             {where}
             """,
@@ -1894,10 +1954,10 @@ def get_invoices_summary(
         },
         "due_today": {"count": row["today_count"] or 0, "amount": row["today_amount"] or 0},
         "overdue": {"count": row["overdue_count"] or 0, "amount": row["overdue_amount"] or 0},
-        "rework": {
-            "count": row["rework_count"] or 0,
-            "amount": row["rework_amount"] or 0,
-            "available": has_rework,
+        "clarification": {
+            "count": row["clarification_count"] or 0,
+            "amount": row["clarification_amount"] or 0,
+            "available": has_clarification,
         },
     }
 
@@ -2834,3 +2894,66 @@ def template_requisite_mismatch(template: Dict[str, Any]) -> Optional[Dict[str, 
         "directory_bank_bik": current.get("bank_bik"),
         "directory_bank_corr_account": current.get("bank_corr_account"),
     }
+
+
+# =============================================================================
+# УТОЧНЕНИЕ У АВТОРА (план 2026-08-24, §3.1, Фаза 7)
+# =============================================================================
+
+def send_invoice_to_clarification(invoice_id: int, changed_by: str, reason: str) -> bool:
+    """
+    Отправить счёт автору на уточнение.
+
+    Статус остаётся on_approval — счёт не выпадает из существующих выборок и
+    отчётов, а старый раздел продолжает показывать его как «На согласовании»,
+    просто без нового нюанса. Признак «сейчас у автора» — clarification_at.
+
+    Возвращает False, если счёт не на согласовании или уже на уточнении.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT status, clarification_at FROM invoices WHERE id = ?", (invoice_id,)
+    ).fetchone()
+    if not row or row["status"] != "on_approval" or row["clarification_at"]:
+        conn.close()
+        return False
+
+    conn.execute(
+        """
+        UPDATE invoices
+        SET clarification_at = datetime('now'), clarification_by = ?, clarification_reason = ?
+        WHERE id = ?
+        """,
+        (changed_by, reason, invoice_id)
+    )
+    conn.commit()
+    conn.close()
+
+    # История — после commit своего соединения: add_invoice_history открывает
+    # своё, и вызов при живой транзакции даёт «database is locked».
+    add_invoice_history(invoice_id, changed_by, "clarification", None, reason)
+    return True
+
+
+def resubmit_invoice(invoice_id: int, changed_by: str, comment: Optional[str] = None) -> bool:
+    """
+    Автор поправил счёт и возвращает его в очередь согласования.
+
+    Причину уточнения не стираем: она остаётся в карточке и в истории —
+    видно, что именно просили поправить.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT status, clarification_at FROM invoices WHERE id = ?", (invoice_id,)
+    ).fetchone()
+    if not row or row["status"] != "on_approval" or not row["clarification_at"]:
+        conn.close()
+        return False
+
+    conn.execute("UPDATE invoices SET clarification_at = NULL WHERE id = ?", (invoice_id,))
+    conn.commit()
+    conn.close()
+
+    add_invoice_history(invoice_id, changed_by, "clarification", "на уточнении",
+                        comment or "отправлен снова")
+    return True

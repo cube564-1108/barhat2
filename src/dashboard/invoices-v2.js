@@ -101,7 +101,7 @@
         { key: 'wait',      label: 'Ждут согласования' },
         { key: 'due_today', label: 'К оплате сегодня' },
         { key: 'overdue',   label: 'Просрочено' },
-        { key: 'rework',    label: 'На доработке у авторов' },
+        { key: 'clarification', label: 'На уточнении' },
     ];
 
     // Очередь первой и по умолчанию (решение №4 плана): раздел делался ради
@@ -366,6 +366,10 @@
 
         if (state.showArchived) params.set('archived', 'true');
 
+        // В очереди согласующего нет счетов, которые сейчас у автора: работа
+        // по ним не его. В таблице и на борде они видны как обычно.
+        if (state.view === 'queue' && !state.kpiFilter) params.set('clarification', 'exclude');
+
         // «Показывать оплаченные» имеет смысл, только пока статус не выбран
         // явно: иначе выбор «Оплачен» и снятая галочка дали бы пустой список
         // и вопрос «куда всё делось».
@@ -397,8 +401,10 @@
         } else if (state.kpiFilter === 'overdue') {
             params.delete('due_from');
             params.set('due_to', yesterday(now));
+        } else if (state.kpiFilter === 'clarification') {
+            params.set('status', 'on_approval');
+            params.set('clarification', 'only');
         }
-        // 'rework' появится в Фазе 7 вместе с колонкой rework_at
     }
 
     /**
@@ -652,9 +658,10 @@
         host.innerHTML = KPI_TILES.map(tile => {
             const data = state.summary[tile.key] || { count: 0, amount: 0 };
             const active = state.kpiFilter === tile.key ? ' iv2-kpi--active' : '';
-            // Плитка «на доработке» до Фазы 7 не кликается: колонки rework_at
-            // ещё нет, фильтровать нечем — честнее показать ноль без действия.
-            const clickable = tile.key !== 'rework';
+            // Плитка уточнения кликается только когда миграция прошла:
+            // до неё фильтровать нечем, честнее показать ноль без действия
+            const clickable = tile.key !== 'clarification'
+                || Boolean(state.summary.clarification && state.summary.clarification.available);
             return `
                 <button class="iv2-kpi${active}" data-kpi="${tile.key}"${clickable ? '' : ' disabled'}>
                     <span class="iv2-kpi__label">${escapeHtml(tile.label)}</span>
@@ -680,10 +687,10 @@
         }
         if (key === 'due_today') return 'по плановой дате';
         if (key === 'overdue') return data.count ? '▼ требует решения сегодня' : '▲ просрочек нет';
-        if (key === 'rework') {
-            return state.summary && state.summary.rework && state.summary.rework.available
-                ? 'вернулись к сотрудникам'
-                : 'появится вместе с возвратом на доработку';
+        if (key === 'clarification') {
+            return state.summary && state.summary.clarification && state.summary.clarification.available
+                ? 'ждут ответа автора'
+                : 'появится после обновления';
         }
         return '';
     }
@@ -1202,7 +1209,12 @@
         const archived = invoice.is_archived
             ? ' <span class="bx-badge b-arch">Архив</span>'
             : '';
-        return `<span class="bx-badge ${meta.cls}">${escapeHtml(meta.label)}</span>${archived}`;
+        // Счёт на уточнении формально «на согласовании», но лежит у автора —
+        // без отдельного бейджа он неотличим от тех, что ждут согласующего
+        const clarification = invoice.clarification_at
+            ? ' <span class="bx-badge b-warn">На уточнении</span>'
+            : '';
+        return `<span class="bx-badge ${meta.cls}">${escapeHtml(meta.label)}</span>${clarification}${archived}`;
     }
 
     function dueBadge(invoice) {
@@ -1926,8 +1938,11 @@
             if (invoice.is_archived) {
                 buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="unarchive">Вернуть из архива</button>`);
             } else if (invoice.status === 'on_approval') {
-                buttons.unshift(`<button class="bx-btn bx-btn--danger" type="button" data-act="reject">Отклонить</button>`);
-                buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="approve">Согласовать</button>`);
+                if (!invoice.clarification_at) {
+                    buttons.unshift(`<button class="bx-btn bx-btn--danger" type="button" data-act="reject">Отклонить</button>`);
+                    buttons.unshift(`<button class="bx-btn bx-btn--ghost" type="button" data-act="clarify">На уточнение</button>`);
+                    buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="approve">Согласовать</button>`);
+                }
             } else if (invoice.status === 'approved' || invoice.status === 'sent_to_bank') {
                 buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="paid">Отметить оплаченным</button>`);
             }
@@ -1936,8 +1951,14 @@
             }
         }
 
+        // Счёт у автора: согласовать его нельзя, пока автор не ответил, —
+        // иначе уточнение теряет смысл
+        if (invoice.status === 'on_approval' && invoice.clarification_at
+            && (admin || invoice.created_by === (state.user && state.user.username))) {
+            buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="resubmit">Отправить снова</button>`);
+        }
+
         const soon = [];
-        if (admin && !invoice.is_archived && invoice.status === 'on_approval') soon.push('«Вернуть на доработку» — Фаза 7');
 
         return buttons.join('')
             + (soon.length ? `<div class="iv2-hint iv2-soon">Ещё приедет: ${escapeHtml(soon.join(' · '))}</div>` : '');
@@ -2035,7 +2056,7 @@
                 ${compact ? '' : `
                     <div class="iv2-hint iv2-hotkeys">
                         <kbd>A</kbd> согласовать · <kbd>R</kbd> отклонить ·
-                        <kbd>↑</kbd><kbd>↓</kbd> следующий счёт
+                        <kbd>U</kbd> на уточнение · <kbd>↑</kbd><kbd>↓</kbd> следующий счёт
                     </div>`}
             </div>`;
     }
@@ -2194,6 +2215,27 @@
                 if (reason === null) return;
                 await apiPost(`/api/invoices/${invoiceId}/reject`, { reason: reason || null });
                 toast('Счёт отклонён и отправлен в архив');
+            } else if (action === 'clarify') {
+                const reason = await window.BarhatUI.prompt(
+                    `${label}: что нужно уточнить? Текст уйдёт автору в обсуждение счёта.`,
+                    '', { title: 'Отправить на уточнение', confirmText: 'Отправить',
+                          placeholder: 'Например: нет скана счёта' });
+                if (reason === null) return;
+                if (!String(reason).trim()) {
+                    toast('Без пояснения автору непонятно, что исправлять', 'error');
+                    return;
+                }
+                await apiPost(`/api/invoices/${invoiceId}/clarify`, { reason: String(reason).trim() });
+                toast('Счёт отправлен автору на уточнение', 'success');
+            } else if (action === 'resubmit') {
+                const comment = await window.BarhatUI.prompt(
+                    `${label}: что исправлено? Можно не заполнять.`,
+                    '', { title: 'Отправить снова на согласование', confirmText: 'Отправить',
+                          placeholder: 'Например: приложил скан' });
+                if (comment === null) return;
+                await apiPost(`/api/invoices/${invoiceId}/resubmit`,
+                              { comment: String(comment || '').trim() || null });
+                toast('Счёт вернулся в очередь согласования', 'success');
             } else if (action === 'paid') {
                 const ok = await window.BarhatUI.confirm(
                     `${label} · ${money(invoice.amount)}. Счёт останется в списке — в архив его убираете вы.`,
@@ -3532,6 +3574,9 @@
             event.preventDefault();
         } else if (key === 'r' || key === 'к') {
             doAction('reject', state.queueActiveId);
+            event.preventDefault();
+        } else if (key === 'u' || key === 'г') {
+            doAction('clarify', state.queueActiveId);
             event.preventDefault();
         } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             stepQueue(event.key === 'ArrowDown' ? 1 : -1);

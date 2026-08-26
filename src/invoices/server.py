@@ -80,6 +80,8 @@ from .storage import (
     mark_invoice_paid,
     set_invoice_archived,
     find_auto_archived_invoices,
+    send_invoice_to_clarification,
+    resubmit_invoice,
     list_invoice_templates,
     get_invoice_template,
     create_invoice_template,
@@ -291,6 +293,9 @@ def get_invoices():
         "due_to": request.args.get("due_to"),
         "is_archived": request.args.get("archived", "false").lower() == "true",
         "hide_paid": request.args.get("hide_paid", "false").lower() == "true",
+        # Фаза 7: 'only' — счета, которые сейчас у автора на уточнении,
+        # 'exclude' — очередь согласующего без них
+        "clarification": request.args.get("clarification"),
         "restrict_username": restrict_username,
         "restrict_store_ids": restrict_store_ids,
     }
@@ -700,6 +705,63 @@ def reject(invoice_id):
         return jsonify({"error": f"Счёт в статусе '{invoice['status']}', отклонить нельзя"}), 409
 
     log_action(current_user.username, "reject_invoice", f"{invoice['invoice_number']}: {reason or ''}")
+    return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
+
+
+@invoices_bp.route("/<int:invoice_id>/clarify", methods=["POST"])
+@role_required("admin")
+def clarify(invoice_id):
+    """
+    Отправить счёт автору на уточнение. Body: {"reason": "..."} — обязательно.
+
+    Отличается от отклонения: отклонённый счёт — отказ и сразу архив, а
+    уточнение оставляет счёт в работе. Статус не меняется (остаётся
+    on_approval), поэтому старый раздел показывает счёт корректно.
+
+    Причина обязательна и уходит в обсуждение счёта: «верните, тут что-то не
+    так» без объяснения означает второй круг тех же вопросов.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+
+    data = request.get_json(silent=True) or {}
+    reason = (data.get("reason") or "").strip()
+    if not reason:
+        return jsonify({"error": "Напишите, что нужно уточнить — автору иначе непонятно"}), 400
+
+    if not send_invoice_to_clarification(invoice_id, current_user.username, reason):
+        return jsonify({"error": "Счёт не на согласовании или уже на уточнении"}), 409
+
+    add_invoice_comment(invoice_id, current_user.username, f"На уточнение: {reason}")
+    log_action(current_user.username, "clarify_invoice", f"{invoice['invoice_number']}: {reason}")
+    return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
+
+
+@invoices_bp.route("/<int:invoice_id>/resubmit", methods=["POST"])
+@section_required("invoices")
+def resubmit(invoice_id):
+    """
+    Автор поправил счёт и возвращает его в очередь. Body: {"comment": "..."} —
+    необязательно, но полезно: согласующему видно, что именно исправлено.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not user_can_access_invoice(invoice, current_user.username, current_user.role):
+        return jsonify({"error": "Нет доступа к этому счёту"}), 403
+    if current_user.role != "admin" and invoice["created_by"] != current_user.username:
+        return jsonify({"error": "Вернуть счёт в очередь может автор или администратор"}), 403
+
+    data = request.get_json(silent=True) or {}
+    comment = (data.get("comment") or "").strip()
+
+    if not resubmit_invoice(invoice_id, current_user.username, comment or None):
+        return jsonify({"error": "Счёт не на уточнении"}), 409
+
+    if comment:
+        add_invoice_comment(invoice_id, current_user.username, f"Отправлен снова: {comment}")
+    log_action(current_user.username, "resubmit_invoice", invoice["invoice_number"])
     return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
 
 
