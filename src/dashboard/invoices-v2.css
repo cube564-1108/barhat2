@@ -875,6 +875,43 @@
 
 .iv2 .iv2-doc__pdf { width: 100%; height: 58vh; border: none; background: #fff; }
 
+.iv2 .iv2-doc__loading {
+    padding: 40px 10px;
+    color: var(--bx-muted);
+    font-size: 13px;
+}
+
+/* Документ не дошёл: чаще всего его срезал блокировщик браузера.
+   Объяснение и обходные пути вместо пустого прямоугольника. */
+.iv2 .iv2-doc__failed {
+    padding: 22px 16px;
+    text-align: center;
+    max-width: 460px;
+}
+
+.iv2 .iv2-doc__failed-title {
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 15.5px;
+    color: var(--bx-wine);
+    margin-bottom: 8px;
+}
+
+.iv2 .iv2-doc__failed-text {
+    font-size: 13px;
+    color: var(--bx-text-2);
+    margin: 0 0 14px;
+    line-height: 1.5;
+}
+
+.iv2 .iv2-doc__failed-btns {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
 .iv2 .iv2-doc__actions { display: flex; gap: 8px; align-items: center; }
 
 .iv2 .iv2-doc__name {

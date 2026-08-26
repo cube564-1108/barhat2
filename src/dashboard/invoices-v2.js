@@ -1809,6 +1809,92 @@
         return '/api/invoices/attachments/' + attachmentId + '/inline';
     }
 
+    function downloadUrl(attachmentId) {
+        return '/api/invoices/attachments/' + attachmentId + '/download';
+    }
+
+    /**
+     * Готовые blob-ссылки на вложения: attachmentId -> objectURL.
+     *
+     * Документ показываем не прямой ссылкой в <iframe>/<img>, а скачанным
+     * заранее blob'ом. Причина из прода (26.08.2026): встроенный блокировщик
+     * Яндекс.Браузера резал подзапрос кадра, и вместо счёта человек видел
+     * чёрный прямоугольник с ERR_BLOCKED_BY_CLIENT. Такой отказ происходит
+     * на уровне браузера — код о нём не узнаёт и ничего объяснить не может.
+     * Через fetch отказ виден нам, и вместо тупика показывается объяснение
+     * с кнопками «открыть в новой вкладке» и «повторить».
+     */
+    const docBlobs = new Map();
+
+    // Незавершённые загрузки: очередь перерисовывается дважды подряд (сначала
+    // «Загрузка счёта…», потом данные), и без этого один файл качался бы дважды
+    const docLoading = new Map();
+
+    // Сколько blob'ов держим. Просмотр очереди — это десятки счетов подряд,
+    // каждый скан весит мегабайты, а объектные ссылки сами не освобождаются.
+    const DOC_BLOB_CACHE = 8;
+
+    const DOC_LOADING_HTML = '<div class="iv2-doc__loading">Загрузка документа…</div>';
+
+    /** MIME по расширению — тот же белый список, что у ручки inline на сервере. */
+    function inlineMimeType(filename) {
+        const name = String(filename || '').toLowerCase();
+        if (name.endsWith('.png')) return 'image/png';
+        if (name.endsWith('.webp')) return 'image/webp';
+        if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+        if (name.endsWith('.pdf')) return 'application/pdf';
+        return '';
+    }
+
+    /**
+     * Скачать вложение и отдать ссылку на локальную копию.
+     *
+     * Тип blob'а ставим свой, по расширению, а не берём из ответа: браузер
+     * рисует blob именно по нему, и файл, который вдруг приехал бы как HTML,
+     * так и останется картинкой или PDF. Это тот же запрет, что даёт связка
+     * «белый список + nosniff» на сервере, только продублированный на клиенте.
+     */
+    function attachmentObjectUrl(attachment) {
+        const cached = docBlobs.get(attachment.id);
+        if (cached) return Promise.resolve(cached);
+
+        const pending = docLoading.get(attachment.id);
+        if (pending) return pending;
+
+        const request = fetchAttachmentBlob(attachment)
+            .finally(() => docLoading.delete(attachment.id));
+        docLoading.set(attachment.id, request);
+        return request;
+    }
+
+    async function fetchAttachmentBlob(attachment) {
+        const response = await fetch(inlineUrl(attachment.id), { credentials: 'include' });
+        if (!response.ok) {
+            let message = 'HTTP ' + response.status;
+            try {
+                const body = await response.json();
+                if (body && body.error) message = body.error;
+            } catch (e) { /* тело не JSON — оставляем код статуса */ }
+            const error = new Error(message);
+            // Сервер ответил — значит, до него дошли, и объяснять блокировщиком
+            // нечего. Пропавший с диска файл или отказ в доступе — это оно
+            error.fromServer = true;
+            throw error;
+        }
+
+        const buffer = await response.arrayBuffer();
+        const type = inlineMimeType(attachment.original_filename);
+        const url = URL.createObjectURL(new Blob([buffer], type ? { type } : undefined));
+
+        docBlobs.set(attachment.id, url);
+        while (docBlobs.size > DOC_BLOB_CACHE) {
+            const oldest = docBlobs.keys().next().value;
+            URL.revokeObjectURL(docBlobs.get(oldest));
+            docBlobs.delete(oldest);
+        }
+        return url;
+    }
+
     /**
      * Зона «приложите счёт»: вставка из буфера, перетаскивание и обычный выбор
      * файла. Кнопка съёмки и подсказка про камеру — только там, где ввод
@@ -1842,7 +1928,8 @@
                 <button class="iv2-thumb__pick" type="button" data-doctab="${i}"
                         title="${escapeHtml(a.original_filename)}">
                     ${isImage(a.original_filename)
-                        ? `<img src="${escapeHtml(inlineUrl(a.id))}" alt="${escapeHtml(a.original_filename)}">`
+                        ? `<img src="${escapeHtml(inlineUrl(a.id))}" data-inline-img
+                                alt="${escapeHtml(a.original_filename)}">`
                         : `<span class="iv2-thumb__pdf">PDF<br>${escapeHtml(shortName(a.original_filename))}</span>`}
                 </button>
                 ${canDelete
@@ -1875,13 +1962,11 @@
 
         const index = Math.min(state.docIndex, attachments.length - 1);
         const active = attachments[index];
-        const downloadUrl = '/api/invoices/attachments/' + active.id + '/download';
         const canDelete = state.user && state.user.role === 'admin';
 
-        const frame = isImage(active.original_filename)
-            ? `<img src="${escapeHtml(inlineUrl(active.id))}" alt="${escapeHtml(active.original_filename)}">`
-            : `<iframe class="iv2-doc__pdf" src="${escapeHtml(inlineUrl(active.id))}" title="Скан счёта"></iframe>`;
-
+        // Сам документ подставляет hydrateDocFrame после вставки разметки:
+        // файл сначала скачивается (см. attachmentObjectUrl), и только потом
+        // показывается из локальной копии.
         return `
             <div class="iv2-doc">
                 <div class="iv2-doc__bar">
@@ -1891,15 +1976,108 @@
                             ? `<button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
                                        data-del-att="${active.id}">Удалить</button>`
                             : ''}
-                        <a class="bx-btn bx-btn--ghost bx-btn--sm" href="${escapeHtml(downloadUrl)}"
+                        <a class="bx-btn bx-btn--ghost bx-btn--sm" href="${escapeHtml(downloadUrl(active.id))}"
                            target="_blank" rel="noopener">Скачать</a>
                     </span>
                 </div>
                 ${thumbsHtml(details, index)}
-                <div class="iv2-doc__frame">${frame}</div>
+                <div class="iv2-doc__frame" data-doc-frame="${escapeHtml(active.id)}">${DOC_LOADING_HTML}</div>
                 <div class="iv2-doc__name">${escapeHtml(active.original_filename)}</div>
                 ${dropZoneHtml(invoiceId)}
             </div>`;
+    }
+
+    /**
+     * Подставить документ в кадр после вставки разметки.
+     *
+     * Кадр помечен id вложения: пока файл качается, человек мог переключить
+     * вкладку миниатюр или уйти на другой счёт — тогда результат уже не наш
+     * и подставлять его в чужой кадр нельзя.
+     */
+    async function hydrateDocFrame(root, details) {
+        const host = root.querySelector('[data-doc-frame]');
+        if (!host) return;
+
+        const attachmentId = Number(host.getAttribute('data-doc-frame'));
+        const attachment = (details.attachments || []).find(a => a.id === attachmentId);
+        if (!attachment) return;
+
+        const stillOurs = () => host.isConnected
+            && Number(host.getAttribute('data-doc-frame')) === attachmentId;
+
+        try {
+            const url = await attachmentObjectUrl(attachment);
+            if (!stillOurs()) return;
+            host.innerHTML = isImage(attachment.original_filename)
+                ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(attachment.original_filename)}">`
+                // sandbox без allow-same-origin повторяет ту же изоляцию, что
+                // ручка inline задаёт заголовком CSP. allow-scripts обязателен:
+                // без него встроенный просмотрщик PDF гаснет и остаётся белый лист.
+                : `<iframe class="iv2-doc__pdf" src="${escapeHtml(url)}" title="Скан счёта"
+                           sandbox="allow-scripts"></iframe>`;
+        } catch (error) {
+            if (!stillOurs()) return;
+            host.innerHTML = docFailedHtml(attachment, error);
+            const retry = host.querySelector('[data-doc-retry]');
+            if (retry) {
+                retry.addEventListener('click', () => {
+                    host.innerHTML = DOC_LOADING_HTML;
+                    hydrateDocFrame(root, details);
+                });
+            }
+        }
+    }
+
+    /**
+     * Что показать вместо документа, когда его не удалось получить.
+     * Главное здесь — не оставить человека перед пустым прямоугольником:
+     * счёт согласовывают по скану, и «ничего не видно» без объяснения
+     * означает либо слепое решение, либо остановку работы.
+     */
+    function docFailedHtml(attachment, error) {
+        // Ответ сервера и молчание сети — разные беды, и лечатся по-разному:
+        // «файла нет на диске» списывать на блокировщик значит отправить
+        // человека чинить не то.
+        const fromServer = Boolean(error && error.fromServer);
+        const title = fromServer ? 'Документ недоступен' : 'Документ не удалось показать здесь';
+        const text = fromServer
+            ? `Сервер не отдал файл. Если он пропал с диска — приложите скан заново,
+               в остальных случаях покажите эту ошибку администратору.`
+            : `Чаще всего запрос режет блокировщик рекламы или встроенная защита браузера
+               (в Яндекс.Браузере это ошибка ERR_BLOCKED_BY_CLIENT). Файл на месте —
+               откройте его в новой вкладке или скачайте.`;
+
+        return `
+            <div class="iv2-doc__failed">
+                <div class="iv2-doc__failed-title">${escapeHtml(title)}</div>
+                <p class="iv2-doc__failed-text">${escapeHtml(text)}</p>
+                <div class="iv2-doc__failed-btns">
+                    <a class="bx-btn bx-btn--sm" href="${escapeHtml(inlineUrl(attachment.id))}"
+                       target="_blank" rel="noopener">Открыть в новой вкладке</a>
+                    <a class="bx-btn bx-btn--ghost bx-btn--sm" href="${escapeHtml(downloadUrl(attachment.id))}"
+                       target="_blank" rel="noopener">Скачать</a>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-doc-retry>Повторить</button>
+                </div>
+                <div class="iv2-hint">Причина: ${escapeHtml(error && error.message ? error.message : 'запрос не дошёл')}</div>
+            </div>`;
+    }
+
+    /**
+     * Миниатюры и картинки в ленте грузятся обычным <img> — их тот же
+     * блокировщик оставил бы значком битой картинки. Заменяем на подпись
+     * с именем файла, чтобы вложение было хотя бы видно в списке.
+     */
+    function bindInlineImageFallback(root) {
+        root.querySelectorAll('img[data-inline-img]').forEach(img => {
+            img.addEventListener('error', () => {
+                const name = img.getAttribute('alt') || 'файл';
+                const box = document.createElement('span');
+                box.className = 'iv2-thumb__pdf';
+                box.textContent = shortName(name);
+                box.title = name;
+                if (img.parentNode) img.parentNode.replaceChild(box, img);
+            });
+        });
     }
 
     // =========================================================================
@@ -2200,6 +2378,7 @@
                    <div><b>${escapeHtml(event.who)}</b> ${escapeHtml(event.text)}
                        ${event.attachment
                            ? `<div class="iv2-feed__pic"><img src="${escapeHtml(inlineUrl(event.attachment.id))}"
+                                   data-inline-img
                                    alt="${escapeHtml(event.attachment.original_filename)}"></div>`
                            : ''}
                        <div class="iv2-feed__when">${escapeHtml(fmtCreated(event.at))}</div></div>
@@ -2382,6 +2561,11 @@
     function bindPane(root, details) {
         const invoiceId = details.invoice.id;
 
+        // Документ подставляется отдельно и асинхронно — он единственное,
+        // что здесь не собирается из уже загруженных данных
+        hydrateDocFrame(root, details);
+        bindInlineImageFallback(root);
+
         root.querySelectorAll('[data-act]').forEach(button => {
             button.addEventListener('click', () => doAction(button.getAttribute('data-act'), invoiceId, button));
         });
@@ -2435,6 +2619,11 @@
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+            // Локальную копию удалённого файла тоже отпускаем
+            if (docBlobs.has(attachmentId)) {
+                URL.revokeObjectURL(docBlobs.get(attachmentId));
+                docBlobs.delete(attachmentId);
+            }
             state.docIndex = 0;
             toast('Вложение удалено');
             await refreshDetails(invoiceId);
