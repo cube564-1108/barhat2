@@ -1679,12 +1679,29 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
                     f"или статья «{category['name'] if category else li['expense_category_id']}»"
                 ),
             }
+        # id сопоставления вводят руками, когда ПланФакт не отвечает и
+        # выпадающего списка нет. Нечисловое значение раньше роняло int()
+        # прямо внутри цикла по операциям — обрывался весь прогон, и
+        # остальные счета не разносились из-за одной опечатки в настройке.
+        try:
+            category_id_int = int(str(pf_category_id).strip())
+            project_id_int = int(str(project_id).strip())
+        except (TypeError, ValueError):
+            return {
+                "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
+                "invoice_id": invoice["id"],
+                "reason": (
+                    f"В сопоставлении с ПланФакт нечисловой id: проект «{project_id}», "
+                    f"статья «{pf_category_id}» — поправьте на вкладке «Сопоставление»"
+                ),
+            }
+
         pf_items.append({
             "calculationDate": op.get("operationDate"),
             "isCalculationCommitted": bool(op.get("isCommitted", True)),
             "contrAgentId": (op.get("contrAgent") or {}).get("contrAgentId"),
-            "operationCategoryId": int(pf_category_id),
-            "projectId": int(project_id),
+            "operationCategoryId": category_id_int,
+            "projectId": project_id_int,
             "value": li["amount"],
         })
 
@@ -1757,7 +1774,19 @@ def _run_planfact_sync(dry_run: bool = False) -> dict:
             break
 
         for op in ops:
-            result = _match_planfact_operation(op, client, store_map, category_map, dry_run)
+            # Одна операция не должна уносить весь прогон: раньше любое
+            # неожиданное исключение обрывало цикл, и всё, что стояло в
+            # очереди после неё, оставалось неразнесённым без объяснений.
+            try:
+                result = _match_planfact_operation(op, client, store_map, category_map, dry_run)
+            except Exception as error:
+                logger.exception("Разноска операции %s упала", op.get("operationId"))
+                result = {
+                    "status": "unmatched",
+                    "operation_id": str(op.get("operationId") or op.get("id") or ""),
+                    "match_code": None,
+                    "reason": f"Внутренняя ошибка при разноске: {type(error).__name__}",
+                }
             if result["status"] == "matched":
                 matched.append(result)
             elif result["status"] == "unmatched":

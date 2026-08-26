@@ -4730,7 +4730,10 @@
                        return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(title)}</option>`;
                    }).join('')}
                </select>`
-            : `<input class="iv2-input" type="text" placeholder="id в ПланФакт"
+            // Только цифры: id ПланФакта числовой, а нечисловое значение
+            // отсюда роняло разноску на сервере (см. план от 2026-08-26)
+            : `<input class="iv2-input" type="text" inputmode="numeric" pattern="[0-9]*"
+                      placeholder="id в ПланФакт (только цифры)"
                       value="${escapeHtml(currentValue || '')}" ${attribute}>`;
 
         return `<div class="iv2-pf-row">
@@ -4833,6 +4836,14 @@
             // У выпадающего списка достаточно change, у поля ввода ждём ухода
             // с него: сохранять на каждую набранную цифру id незачем.
             const event = control.tagName === 'SELECT' ? 'change' : 'blur';
+            if (control.tagName !== 'SELECT') {
+                // Отсекаем нецифры на вводе, а не при сохранении: иначе человек
+                // видит в поле одно, а уходит на сервер другое
+                control.addEventListener('input', () => {
+                    const digitsOnly = control.value.replace(/\D/g, '');
+                    if (control.value !== digitsOnly) control.value = digitsOnly;
+                });
+            }
             control.addEventListener(event, () => savePlanfactMapping(kind, id, control.value.trim()));
         });
 
