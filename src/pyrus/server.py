@@ -1605,6 +1605,13 @@ def _scheduler_loop():
         time.sleep(SCHEDULER_INTERVAL_SECONDS)
 
         try:
+            # Талон на тик: планировщик крутится в каждом воркере, и лок внутри
+            # _launch_import ловит только одновременный запуск. Без талона
+            # второй воркер повторял загрузку тех же дней целиком.
+            if not storage.try_claim_scheduled_run('quality', SCHEDULER_INTERVAL_SECONDS):
+                logger.info("Тик синхронизации Pyrus уже отработал соседний воркер")
+                continue
+
             end_date = datetime.now()
             start_date = end_date - timedelta(days=SCHEDULER_DAYS)
             started, payload = _launch_import(

@@ -228,7 +228,13 @@ def _scheduler_loop() -> None:
     time.sleep(SCHEDULER_START_DELAY_SECONDS)
     while True:
         try:
-            _scheduled_run()
+            # Талон на тик берётся до всякой работы: планировщик крутится в
+            # каждом воркере, и без этого второй воркер повторял весь прогон
+            # заново через полминуты после первого (см. try_claim_scheduled_run).
+            if storage.try_claim_scheduled_run(SYNC_LOCK, SCHEDULER_INTERVAL_SECONDS):
+                _scheduled_run()
+            else:
+                logger.info("Тик синхронизации курьеров уже отработал соседний воркер")
         except Exception as e:
             logger.error(f"Ошибка планировщика синхронизации курьеров: {e}")
         time.sleep(SCHEDULER_INTERVAL_SECONDS)

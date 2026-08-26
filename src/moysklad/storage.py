@@ -1133,6 +1133,42 @@ class MoySkladStorage:
         except Exception as e:
             logger.error(f"Ошибка записи sync_state[{key}]: {e}")
 
+    def try_claim_scheduled_run(self, name: str, interval_seconds: int) -> bool:
+        """
+        Занять талон на очередной тик расписания. False — тик уже отработан.
+
+        Лок отвечает только на вопрос «идёт ли прогон прямо сейчас» и
+        освобождается сразу по завершении. Планировщик крутится в КАЖДОМ
+        воркере, тики разъезжаются на десятки секунд — и второй воркер,
+        проснувшись, видит лок свободным и повторяет ту же работу. В логах
+        прода 2026-08-26 это два прогона подряд с интервалом в пять секунд.
+
+        В value лежит время, раньше которого следующий тик не разрешён. Талон
+        не освобождается — истекает сам. Ручной запуск с дашборда сюда не
+        заходит и по-прежнему доступен человеку в любой момент.
+        """
+        key = f'schedule:{name}'
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        next_allowed = (
+            datetime.utcnow() + timedelta(seconds=interval_seconds)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sync_state (key, value, updated_at) VALUES (?, '', CURRENT_TIMESTAMP)",
+                    (key,)
+                )
+                cursor = conn.execute('''
+                    UPDATE sync_state
+                    SET value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE key = ? AND (value = '' OR value <= ?)
+                ''', (next_allowed, key, now))
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка захвата тика расписания {name}: {e}")
+            # Пропустить тик безопаснее, чем отработать его дважды.
+            return False
+
     def try_acquire_sync_lock(self, name: str, ttl_seconds: int) -> bool:
         """
         Захватить лок с таймаутом. True — лок наш, False — держит кто-то другой.

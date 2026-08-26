@@ -855,6 +855,42 @@ class PyrusStorage:
     # В value лежит время истечения: держатель мог умереть вместе с воркером
     # (деплой, OOM) и не позвать release — по TTL лок освободится сам.
 
+    def try_claim_scheduled_run(self, name: str, interval_seconds: int) -> bool:
+        """
+        Занять талон на очередной тик расписания. False — тик уже отработан.
+
+        Лок ловит только одновременный прогон и освобождается сразу по
+        завершении. Планировщик крутится в каждом воркере, тики разъезжаются
+        во времени — и второй воркер повторяет ту же загрузку целиком. На
+        проде 2026-08-26 это видно у курьеров и МойСклада дословно, здесь
+        болезнь та же, просто интервал час и заметить труднее.
+
+        Талон не освобождается — истекает сам через interval_seconds. Ручной
+        запуск с дашборда идёт мимо и остаётся доступен в любой момент.
+        """
+        key = f'schedule:{name}'
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        next_allowed = (
+            datetime.utcnow() + timedelta(seconds=interval_seconds)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sync_state (key, value, updated_at)"
+                    " VALUES (?, '', CURRENT_TIMESTAMP)",
+                    (key,)
+                )
+                cursor = conn.execute('''
+                    UPDATE sync_state
+                    SET value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE key = ? AND (value = '' OR value <= ?)
+                ''', (next_allowed, key, now))
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка захвата тика расписания {name}: {e}")
+            # Пропустить тик безопаснее, чем отработать его дважды.
+            return False
+
     def try_acquire_sync_lock(self, name: str, ttl_seconds: int) -> bool:
         """Захватить лок. True — лок наш, False — держит кто-то другой"""
         key = f'lock:{name}'

@@ -742,12 +742,18 @@ def _scheduler_loop():
 
     while True:
         try:
-            mode = _scheduled_mode(get_db())
-            if mode:
-                # Лок внутри _run_orders_sync решает две задачи разом: не даёт двум
-                # воркерам гнать один и тот же прогон и не даёт планировщику влезть
-                # в ручную синхронизацию, запущенную админом с дашборда.
-                _run_orders_sync(mode=mode)
+            # Талон на тик берётся ДО выбора режима и до всякой работы: лок
+            # внутри _run_orders_sync ловит только одновременный прогон, а тики
+            # двух воркеров разъезжаются во времени, и второй повторял работу
+            # первого целиком (см. try_claim_scheduled_run).
+            if not get_db().try_claim_scheduled_run('orders', SCHEDULER_INTERVAL_SECONDS):
+                logger.info("Тик синхронизации МойСклад уже отработал соседний воркер")
+            else:
+                mode = _scheduled_mode(get_db())
+                if mode:
+                    # Лок внутри _run_orders_sync остаётся: он не даёт планировщику
+                    # влезть в ручную синхронизацию, запущенную админом с дашборда.
+                    _run_orders_sync(mode=mode)
         except Exception as e:
             logger.error(f"Ошибка планировщика синхронизации МойСклад: {e}")
 

@@ -489,6 +489,55 @@ def set_sync_state(key: str, value: str) -> None:
         )
 
 
+def try_claim_scheduled_run(name: str, interval_seconds: int) -> bool:
+    """
+    Занять талон на очередной тик расписания. False — тик уже отработан.
+
+    Лока для этого мало, и это стоило нам дорого. Лок отвечает на вопрос «идёт
+    ли прогон прямо сейчас» и освобождается сразу по завершении. Планировщик же
+    крутится в КАЖДОМ воркере, и их тики разъезжаются на десятки секунд: первый
+    воркер отработал и отпустил лок, через полминуты просыпается второй, видит
+    лок свободным и честно делает ровно ту же работу заново. В логах прода
+    2026-08-26 это видно дословно:
+
+        14:20:29 Курьеры: 2026-08-19—2026-08-25 → 442 заказов
+        14:20:58 Курьеры: 2026-08-19—2026-08-25 → 442 заказов
+
+    То есть каждые полчаса весь объём записи на общий диск /data шёл дважды.
+
+    Здесь в value лежит время, раньше которого следующий тик не разрешён.
+    Талон НЕ освобождается по завершении прогона — он истекает сам через
+    interval_seconds. Захват атомарен: один UPDATE ... WHERE.
+
+    Ручной запуск с дашборда сюда не заходит — он идёт через лок, и человек
+    по-прежнему может обновить данные в любой момент.
+    """
+    key = f"schedule:{name}"
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    next_allowed = (
+        datetime.utcnow() + timedelta(seconds=interval_seconds)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO sync_state (key, value) VALUES (?, '')",
+                (key,),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE sync_state SET value = ?, updated_at = datetime('now')
+                WHERE key = ? AND (value = '' OR value <= ?)
+                """,
+                (next_allowed, key, now),
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Ошибка захвата тика расписания {name}: {e}")
+        # Не смогли отметиться — считаем тик занятым. Пропустить прогон
+        # безопаснее, чем сделать его дважды: следующий будет через интервал.
+        return False
+
+
 def try_acquire_sync_lock(name: str, ttl_seconds: int) -> bool:
     """
     Захватить лок синхронизации. False — держит кто-то другой.
