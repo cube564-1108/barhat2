@@ -368,6 +368,76 @@
         return nativePrompt(message, defaultValue);
     };
 
+    // === Единая реакция на потерянную сессию (401) ===
+    //
+    // Авторизацию дашборд проверяет один раз, при загрузке страницы
+    // (checkAuth в script.js). Дальше вкладка живёт часами, и когда сессия
+    // отваливается, каждый модуль показывает свою невнятную ошибку: «HTTP 401»,
+    // «Не удалось: HTTP 401». Человек читает это как поломку функции и идёт
+    // чинить не то — так 26.08.2026 «сломалась» синхронизация с ПланФактом,
+    // хотя сломался вход.
+    //
+    // Обёртка вокруг fetch стоит здесь, а не в каждом модуле: ui-dialog.js
+    // подключён первым и грузится на каждой странице, поэтому новый раздел
+    // получает эту защиту сам, без строчки кода.
+
+    const nativeFetch = window.fetch ? window.fetch.bind(window) : null;
+
+    // Реагируем один раз: параллельных запросов на странице десятки, и без
+    // флага человек получил бы столько же диалогов подряд
+    let sessionLostHandled = false;
+
+    function requestPath(input) {
+        const raw = typeof input === 'string' ? input
+            : (input && typeof input.url === 'string' ? input.url : '');
+        if (!raw) return null;
+        try {
+            const url = new URL(raw, window.location.href);
+            // Чужие домены нас не касаются: 401 от внешнего API — это забота
+            // того модуля, который его дёргает
+            if (url.origin !== window.location.origin) return null;
+            return url.pathname;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function handleUnauthorized(input) {
+        const path = requestPath(input);
+        if (!path || !path.startsWith('/api/')) return;
+
+        // Ручки входа отвечают 401 по делу: проверка сессии на старте страницы
+        // и неверный пароль в форме. Диалог «войдите заново» там лишний.
+        if (path.startsWith('/api/auth/') || path.startsWith('/api/sso/')) return;
+
+        if (sessionLostHandled) return;
+        sessionLostHandled = true;
+
+        // Внутри Пульса своя страница входа, и увести его iframe на нашу форму
+        // значит показать пароль тому, кто заходит через портал по SSO
+        if (inIframe) {
+            toast('Сессия истекла — обновите страницу портала, чтобы войти заново', 'error', 15000);
+            return;
+        }
+
+        confirmDialog(
+            'Сервер не принял запрос: сессия истекла или вход больше не действует. '
+            + 'Несохранённое на странице пропадёт.',
+            { title: 'Нужно войти заново', confirmText: 'Войти заново', cancelText: 'Остаться' }
+        ).then(function (ok) {
+            if (ok) window.location.href = '/login';
+        });
+    }
+
+    if (nativeFetch) {
+        window.fetch = function (input, init) {
+            return nativeFetch(input, init).then(function (response) {
+                if (response && response.status === 401) handleUnauthorized(input);
+                return response;
+            });
+        };
+    }
+
     window.BarhatUI = {
         alert: toast,
         toast,
