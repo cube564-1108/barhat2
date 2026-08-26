@@ -226,6 +226,10 @@ def sso():
         abort(403)
 
     user = User(row)
+    # Тот же срок жизни, что и у входа по паролю (см. auth.py): иначе сессия
+    # из Пульса умирает вместе с браузером, а внутри iframe это выглядит
+    # особенно глухо — вернуть человека на форму входа там нельзя.
+    session.permanent = True
     login_user(user, remember=False)
     # Помечает сессию как SSO-сессию — _PartitionedSsoSessionInterface в
     # server.py по этому флагу выставляет SameSite=None + Partitioned на
