@@ -304,6 +304,8 @@ def get_invoices():
         # Фаза 7: 'only' — счета, которые сейчас у автора на уточнении,
         # 'exclude' — очередь согласующего без них
         "clarification": request.args.get("clarification"),
+        # 'unsynced' — оплачен, но в ПланФакт не уехал
+        "planfact": request.args.get("planfact"),
         "restrict_username": restrict_username,
         "restrict_store_ids": restrict_store_ids,
     }

@@ -168,6 +168,8 @@
         filters: emptyFilters(),
         showArchived: false,
         showPaid: true,
+        // Только оплаченные, не уехавшие в ПланФакт
+        onlyUnsynced: false,
         kpiFilter: null,
         sort: { key: 'created_at', dir: 'desc' },
         rows: [],
@@ -377,6 +379,13 @@
         // явно: иначе выбор «Оплачен» и снятая галочка дали бы пустой список
         // и вопрос «куда всё делось».
         if (!state.showPaid && !state.filters.status) params.set('hide_paid', 'true');
+
+        // Оплачен, но в ПланФакт не уехал — сам по себе срез, статус в нём
+        // всегда «Оплачен», поэтому hide_paid к нему не применяем
+        if (state.onlyUnsynced) {
+            params.set('planfact', 'unsynced');
+            params.delete('hide_paid');
+        }
 
         applyKpiFilter(params);
 
@@ -741,6 +750,9 @@
                         <label class="iv2-switch">
                             <input type="checkbox" class="iv2-cbx" id="iv2fPaid" checked> Показывать оплаченные
                         </label>
+                        <label class="iv2-switch" title="Оплачены, но операция в ПланФакт не разнесена">
+                            <input type="checkbox" class="iv2-cbx" id="iv2fUnsynced"> Не разнесены в ПланФакт
+                        </label>
                     </div>
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" id="iv2FiltersReset" type="button">Сбросить всё</button>
                 </div>
@@ -814,6 +826,15 @@
             });
         }
 
+        const unsynced = $('iv2fUnsynced');
+        if (unsynced) {
+            unsynced.addEventListener('change', () => {
+                state.onlyUnsynced = unsynced.checked;
+                renderChips();
+                loadList(false);
+            });
+        }
+
         const reset = $('iv2FiltersReset');
         if (reset) reset.addEventListener('click', resetFilters);
     }
@@ -822,6 +843,7 @@
         state.filters = emptyFilters();
         state.showArchived = false;
         state.showPaid = true;
+        state.onlyUnsynced = false;
         state.kpiFilter = null;
         syncFilterInputs();
         renderChips();
@@ -838,6 +860,8 @@
         if (archived) archived.checked = state.showArchived;
         const paid = $('iv2fPaid');
         if (paid) paid.checked = state.showPaid;
+        const unsynced = $('iv2fUnsynced');
+        if (unsynced) unsynced.checked = state.onlyUnsynced;
     }
 
     /** Человеческая подпись значения фильтра для чипа. */
@@ -862,6 +886,7 @@
             chips.push({ kind: 'filter', key: f.key, text: `${f.label}: ${filterValueLabel(f)}` });
         });
         if (state.showArchived) chips.push({ kind: 'archived', key: 'archived', text: 'Только архив' });
+        if (state.onlyUnsynced) chips.push({ kind: 'unsynced', key: 'unsynced', text: 'Не разнесены в ПланФакт' });
         if (!state.showPaid) chips.push({ kind: 'paid', key: 'paid', text: 'Без оплаченных' });
         if (state.kpiFilter) {
             const tile = KPI_TILES.find(t => t.key === state.kpiFilter);
@@ -882,6 +907,7 @@
                 const kind = button.getAttribute('data-chip');
                 const key = button.getAttribute('data-chip-key');
                 if (kind === 'archived') state.showArchived = false;
+                else if (kind === 'unsynced') state.onlyUnsynced = false;
                 else if (kind === 'paid') state.showPaid = true;
                 else if (kind === 'kpi') state.kpiFilter = null;
                 else state.filters[key] = '';
@@ -1217,7 +1243,12 @@
         const clarification = invoice.clarification_at
             ? ' <span class="bx-badge b-warn">На уточнении</span>'
             : '';
-        return `<span class="bx-badge ${meta.cls}">${escapeHtml(meta.label)}</span>${clarification}${archived}`;
+        // Оплачен, но операция в ПланФакт не разнесена. Раньше это было
+        // неотличимо от разнесённого счёта, и сбой не видел никто.
+        const unsynced = invoice.status === 'paid' && !invoice.planfact_synced_at
+            ? ' <span class="bx-badge b-warn" title="Операция в ПланФакт не разнесена">Не разнесён</span>'
+            : '';
+        return `<span class="bx-badge ${meta.cls}">${escapeHtml(meta.label)}</span>${clarification}${unsynced}${archived}`;
     }
 
     function dueBadge(invoice) {
@@ -2747,7 +2778,9 @@
                 + reportSection('Пропущены', data.skipped);
         } else if (actionKey === 'paid') {
             body = `<div class="iv2-report__head">Отмечено оплаченными ${withCount((data.paid || []).length, 'счёт', 'счёта', 'счетов')}
-                        на ${escapeHtml(money(data.paid_amount || 0))}</div>`
+                        на ${escapeHtml(money(data.paid_amount || 0))}</div>
+                    <p class="iv2-hint">Разноска в ПланФакт пойдёт следующим прогоном синхронизации.
+                        Пока она не прошла, счета помечены «Не разнесён».</p>`
                 + reportSection('Оплачены', data.paid, true)
                 + reportSection('Пропущены', data.skipped);
         } else if (actionKey === 'archive') {

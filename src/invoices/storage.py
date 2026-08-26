@@ -1720,6 +1720,20 @@ _HAS_CLARIFICATION_COLUMN: Optional[bool] = None
 _HAS_PLANFACT_SYNC_COLUMNS: Optional[bool] = None
 
 
+def _planfact_sync_columns_exist() -> bool:
+    """Есть ли колонки признака разноски. Кэшируем по той же причине, что и
+    у уточнения: миграция идёт один раз при старте, а спрашивать схему на
+    каждый запрос списка — лишнее соединение на горячем пути."""
+    global _HAS_PLANFACT_SYNC_COLUMNS
+    if _HAS_PLANFACT_SYNC_COLUMNS is None:
+        conn = get_db()
+        try:
+            _HAS_PLANFACT_SYNC_COLUMNS = _column_exists(conn, "invoices", "planfact_synced_at")
+        finally:
+            conn.close()
+    return _HAS_PLANFACT_SYNC_COLUMNS
+
+
 def _clarification_column_exists() -> bool:
     global _HAS_CLARIFICATION_COLUMN
     if _HAS_CLARIFICATION_COLUMN is None:
@@ -1747,6 +1761,7 @@ def _build_invoice_filters(
     is_archived: bool = False,
     hide_paid: bool = False,
     clarification: Optional[str] = None,
+    planfact: Optional[str] = None,
     restrict_username: Optional[str] = None,
     restrict_store_ids: Optional[List[int]] = None,
 ) -> Tuple[str, List[Any]]:
@@ -1794,6 +1809,11 @@ def _build_invoice_filters(
     # 'exclude' — очередь согласующего без них. Колонка появляется миграцией,
     # поэтому до неё фильтр молча ничего не сужает: старый раздел параметр
     # не шлёт, а новый переживёт откат миграции без 500-х.
+    # Оплачен, но в ПланФакт не уехал. Раньше такие счета были неотличимы от
+    # разнесённых — из-за этого сбой разноски был полностью беззвучным.
+    if planfact == "unsynced" and _planfact_sync_columns_exist():
+        where += " AND i.status = 'paid' AND i.planfact_synced_at IS NULL"
+
     if clarification in ("only", "exclude") and _clarification_column_exists():
         where += (" AND i.clarification_at IS NOT NULL" if clarification == "only"
                   else " AND i.clarification_at IS NULL")
@@ -1895,6 +1915,7 @@ def list_invoices(
     is_archived: bool = False,
     hide_paid: bool = False,
     clarification: Optional[str] = None,
+    planfact: Optional[str] = None,
     sort: Optional[str] = None,
     order: Optional[str] = None,
     limit: int = 100,
@@ -1915,7 +1936,8 @@ def list_invoices(
         counterparty=counterparty, payment_purpose=payment_purpose,
         created_from=created_from, created_to=created_to,
         due_from=due_from, due_to=due_to, is_archived=is_archived,
-        hide_paid=hide_paid, clarification=clarification, restrict_username=restrict_username,
+        hide_paid=hide_paid, clarification=clarification, planfact=planfact,
+        restrict_username=restrict_username,
         restrict_store_ids=restrict_store_ids,
     )
 
