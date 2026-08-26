@@ -520,6 +520,25 @@ def edit_invoice(invoice_id):
     if not changes and line_items is None:
         return jsonify({"error": "Нет полей для изменения"}), 400
 
+    # Распределение обязательно и при правке, но только когда правка трогает
+    # деньги: меняется сумма или сами строки. Иначе перенос срока оплаты
+    # (борд шлёт один due_date) упирался бы в старый счёт без распределения,
+    # а таких в базе хватает — задним числом их никто не дозаполнял (§3.3).
+    if "amount" in changes or line_items is not None:
+        final_amount = changes.get("amount", invoice["amount"])
+        final_items = line_items if line_items is not None else get_invoice_line_items(invoice_id)
+        if not final_items:
+            return jsonify({
+                "error": "Распределите счёт по салонам и статьям расхода — "
+                         "без этого не видно, куда ушли деньги"
+            }), 400
+        allocated = round(sum(item["amount"] for item in final_items), 2)
+        if abs(allocated - final_amount) >= 0.01:
+            return jsonify({
+                "error": f"Распределено {allocated} из {final_amount} — суммы строк должны "
+                         f"в точности складываться в сумму счёта"
+            }), 400
+
     result = update_invoice_with_line_items(invoice_id, changes, line_items, current_user.username)
     if not result["ok"]:
         return jsonify({"error": result["error"]}), 400
@@ -597,10 +616,27 @@ def add_invoice():
     if error:
         return jsonify({"error": error}), 400
 
-    if line_items:
-        total = sum(item["amount"] for item in line_items)
-        if abs(total - amount) >= 0.01:
-            return jsonify({"error": f"Сумма строк распределения ({total}) не равна сумме счёта ({amount})"}), 400
+    # Распределение обязательно (решение №15 плана, включено владельцем
+    # 2026-08-25). Проверка стоит на сервере, а не только в форме нового
+    # раздела: иначе требование обходится любым другим путём. Отсюда же
+    # следствие — старый раздел тоже начал требовать распределение и
+    # показывает этот текст в тосте.
+    #
+    # Массовых операций это не касается: bulk-approve и bulk-send-to-bank
+    # намеренно не проверяют распределение, иначе разбор накопившихся
+    # счетов встал бы (§3.3 плана).
+    if not line_items:
+        return jsonify({
+            "error": "Распределите счёт по салонам и статьям расхода — "
+                     "без этого не видно, куда ушли деньги"
+        }), 400
+
+    total = round(sum(item["amount"] for item in line_items), 2)
+    if abs(total - amount) >= 0.01:
+        return jsonify({
+            "error": f"Распределено {total} из {amount} — суммы строк должны "
+                     f"в точности складываться в сумму счёта"
+        }), 400
 
     try:
         invoice = create_invoice(
@@ -1263,6 +1299,21 @@ def update_line_items(invoice_id):
             return jsonify({"error": "Некорректная статья расхода"}), 400
         if not isinstance(item.get("amount"), (int, float)) or item["amount"] <= 0:
             return jsonify({"error": "Сумма строки должна быть положительным числом"}), 400
+
+    # Та же обязательность, что в создании и правке счёта: через эту ручку
+    # распределение иначе можно было бы просто обнулить, и требование
+    # обходилось бы в один запрос.
+    if not items:
+        return jsonify({
+            "error": "Распределите счёт по салонам и статьям расхода — "
+                     "без этого не видно, куда ушли деньги"
+        }), 400
+    allocated = round(sum(item["amount"] for item in items), 2)
+    if abs(allocated - invoice["amount"]) >= 0.01:
+        return jsonify({
+            "error": f"Распределено {allocated} из {invoice['amount']} — суммы строк должны "
+                     f"в точности складываться в сумму счёта"
+        }), 400
 
     result = set_invoice_line_items(invoice_id, items, current_user.username)
     if not result["ok"]:
