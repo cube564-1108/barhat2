@@ -80,6 +80,7 @@ from .storage import (
     mark_invoice_paid,
     set_invoice_archived,
     find_auto_archived_invoices,
+    mark_invoice_planfact_synced,
     send_invoice_to_clarification,
     resubmit_invoice,
     list_invoice_templates,
@@ -1638,10 +1639,16 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
             "reason": f"Нет счёта с кодом {match_code}",
         }
 
-    if invoice["status"] == "paid":
+    # Признак «уже разнесён» — отдельное поле, а НЕ статус. Статус paid
+    # ставится и вручную (кнопка, массовое действие), и раньше синк принимал
+    # его за «уже разнесено» и молча пропускал такие счета навсегда — операция
+    # в ПланФакте оставалась нераспределённой, и в «Требует внимания» она тоже
+    # не попадала, потому что этот выход стоит до записи туда.
+    if invoice.get("planfact_synced_at"):
         return {"status": "skip"}
 
-    if invoice["status"] not in ("approved", "sent_to_bank"):
+    # Оплаченный, но не разнесённый счёт — нормальный кандидат на разноску
+    if invoice["status"] not in ("approved", "sent_to_bank", "paid"):
         return {
             "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
             "invoice_id": invoice["id"],
@@ -1714,6 +1721,11 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
             "reason": "Ошибка записи в ПланФакт (подробности в логах сервера)",
         }
 
+    # Сначала признак разноски, потом статус: если процесс упадёт между этими
+    # шагами, лучше «разнесён, но не отмечен оплаченным» (человек увидит и
+    # поправит), чем «оплачен, но не отмечен разнесённым» — второе синк
+    # попробует разнести ещё раз и создаст дубль в ПланФакте.
+    mark_invoice_planfact_synced(invoice["id"], operation_id)
     mark_invoice_paid(invoice["id"], changed_by="planfact-sync")
     return preview
 

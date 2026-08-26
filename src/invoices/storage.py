@@ -431,6 +431,12 @@ def init_invoices_tables():
     _seed_categories_if_empty(conn)
     _backfill_match_codes(conn)
 
+    # Здесь, а не рядом с остальными ALTER: бэкфилл признака разноски читает
+    # invoice_history, а она создаётся ниже по этой же функции. При вызове
+    # раньше вся инициализация падала на "no such table", и таблицы, которые
+    # создаются после, не появлялись вовсе.
+    _ensure_planfact_sync_columns(conn)
+
     conn.close()
 
 
@@ -583,6 +589,89 @@ def _ensure_invoice_clarification_columns(conn: sqlite3.Connection):
 
     global _HAS_CLARIFICATION_COLUMN
     _HAS_CLARIFICATION_COLUMN = True
+
+
+def _ensure_planfact_sync_columns(conn: sqlite3.Connection):
+    """
+    Добивка признака «счёт разнесён в ПланФакт» (план 2026-08-26, Фаза 1).
+
+    До этого признаком служил сам статус `paid`, но он ставится и вручную
+    (кнопка и массовое действие), и синком. Из-за перегруженного признака
+    синк молча пропускал счета, оплаченные руками: видел `paid` и считал их
+    уже разнесёнными. Теперь «оплачен» и «разнесён» — два разных факта.
+
+    Блокировка как в остальных миграциях модуля: два gunicorn-воркера
+    стартуют параллельно и без BEGIN IMMEDIATE падают на "duplicate column".
+
+    Здесь же — разовый бэкфилл, и он обязан пройти ДО того, как синк
+    перестанет смотреть на статус. Иначе первый же прогон посчитает все
+    ранее разнесённые счета кандидатами и перезапишет операции в ПланФакте
+    повторно. Разнесённые видно по истории: статус `paid` им проставил
+    `planfact-sync`, а не человек.
+    """
+    if not _table_exists(conn, "invoices"):
+        return
+    columns = ("planfact_operation_id", "planfact_synced_at")
+
+    if not all(_column_exists(conn, "invoices", column) for column in columns):
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for column in columns:
+                if not _column_exists(conn, "invoices", column):
+                    conn.execute(f"ALTER TABLE invoices ADD COLUMN {column} TEXT")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    # Бэкфилл идёт КАЖДЫЙ старт, а не только вместе с ALTER: если он один раз
+    # не доедет (упал процесс, оборвалась сборка), ранее разнесённые счета
+    # останутся без признака, и следующий же прогон синка разнесёт их повторно
+    # — то есть создаст дубли в ПланФакте. Запрос идемпотентен и трогает только
+    # пустые значения, поэтому повторы безвредны.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # operation_id у старых записей взять неоткуда — в истории его нет,
+        # признаком служит время разноски.
+        conn.execute(
+            """
+            UPDATE invoices
+            SET planfact_synced_at = (
+                SELECT MAX(h.changed_at)
+                FROM invoice_history h
+                WHERE h.invoice_id = invoices.id
+                  AND h.field_name = 'status'
+                  AND h.new_value = 'paid'
+                  AND h.changed_by = 'planfact-sync'
+            )
+            WHERE planfact_synced_at IS NULL
+              AND EXISTS (
+                SELECT 1 FROM invoice_history h
+                WHERE h.invoice_id = invoices.id
+                  AND h.field_name = 'status'
+                  AND h.new_value = 'paid'
+                  AND h.changed_by = 'planfact-sync'
+              )
+            """
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    global _HAS_PLANFACT_SYNC_COLUMNS
+    _HAS_PLANFACT_SYNC_COLUMNS = True
+
+
+def mark_invoice_planfact_synced(invoice_id: int, operation_id: Optional[str]) -> None:
+    """Отметить, что счёт разнесён в ПланФакт (вызывать после успешной записи)."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE invoices SET planfact_operation_id = ?, planfact_synced_at = datetime('now') WHERE id = ?",
+        (str(operation_id) if operation_id is not None else None, invoice_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 def _finish_migration_from_old_table(conn: sqlite3.Connection, old_table_name: str):
@@ -1628,6 +1717,7 @@ INVOICE_SORT_FIELDS = {
 # поэтому результат проверки кэшируем: спрашивать схему на каждый запрос
 # списка — это лишнее открытие соединения на самом горячем пути модуля.
 _HAS_CLARIFICATION_COLUMN: Optional[bool] = None
+_HAS_PLANFACT_SYNC_COLUMNS: Optional[bool] = None
 
 
 def _clarification_column_exists() -> bool:
