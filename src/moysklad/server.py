@@ -785,6 +785,58 @@ def start_sync_scheduler() -> None:
         f"(интервал {SCHEDULER_INTERVAL_SECONDS // 60} мин)"
     )
 
+    start_index_maintenance()
+
+
+# Задержка перед постройкой индексов. Операция разовая, но тяжёлая: читает
+# гигабайтные таблицы целиком. Пусть воркер сначала спокойно поднимется и
+# отдаст первые страницы людям.
+INDEX_BUILD_DELAY_SECONDS = 90
+
+# Талон, чтобы индексы строил ОДИН воркер, а не оба разом. Сутки — с запасом:
+# после успешной постройки CREATE INDEX IF NOT EXISTS отрабатывает мгновенно,
+# так что повторные заходы ничего не стоят.
+INDEX_BUILD_CLAIM_SECONDS = 24 * 60 * 60
+
+_index_maintenance_started = False
+
+
+def _index_maintenance_loop() -> None:
+    time.sleep(INDEX_BUILD_DELAY_SECONDS)
+    try:
+        storage = get_db()
+        if not storage.try_claim_scheduled_run('reporting_indexes', INDEX_BUILD_CLAIM_SECONDS):
+            logger.info("Индексы отчётов проверяет соседний воркер")
+            return
+        if storage.ensure_reporting_indexes():
+            logger.info("Индексы отчётов МойСклад достроены")
+    except Exception as e:
+        # Отчёты без индексов работают, просто медленно. Ронять воркер нельзя.
+        logger.error(f"Не удалось построить индексы отчётов МойСклад: {e}")
+
+
+def start_index_maintenance() -> None:
+    """Достроить покрывающие индексы под ABC-анализ — фоном, один раз.
+
+    Без них ABC читал с диска ~1 ГБ вместо ~11 МБ (в таблицах лежит raw_data
+    от МойСклада, 21 и 9 КБ на строку) и занимал 24-57 секунд, подвешивая на
+    это время весь сайт: диск /data общий для всех баз. Подробности — в
+    MoySkladStorage.ensure_reporting_indexes.
+
+    Отдельным потоком, а не в _init_db: построение читает таблицы целиком, и
+    в горячем пути это повесило бы первый запрос к модулю.
+    """
+    global _index_maintenance_started
+
+    if _index_maintenance_started:
+        return
+    _index_maintenance_started = True
+
+    thread = threading.Thread(
+        target=_index_maintenance_loop, daemon=True, name='moysklad-index-maintenance'
+    )
+    thread.start()
+
 
 # ========== Синхронизация каталога товаров (для справочников) ==========
 # /sync выше тянет заказы для ABC-анализа и никогда не трогал products.

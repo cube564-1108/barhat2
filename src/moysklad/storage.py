@@ -8,6 +8,7 @@ import sqlite3
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
@@ -1132,6 +1133,70 @@ class MoySkladStorage:
                 ''', (key, value))
         except Exception as e:
             logger.error(f"Ошибка записи sync_state[{key}]: {e}")
+
+    # Индексы под отчёты. Создаются НЕ в _init_db, а фоном (см.
+    # ensure_reporting_indexes): таблицы гигабайтные, и построение индекса
+    # читает их целиком — в горячем пути старта это повесило бы первый же
+    # запрос к /api/moysklad/*, а соседний воркер словил бы «database is
+    # locked» и отдал 500 на все ручки модуля.
+    _REPORTING_INDEXES = (
+        # Порядок колонок не косметика. assortment_id первым — по этому же
+        # индексу идёт GROUP BY ABC-анализа, а остальные колонки берутся
+        # прямо из индекса, поэтому строки таблицы читать не нужно вовсе.
+        ('idx_order_positions_abc',
+         '''CREATE INDEX IF NOT EXISTS idx_order_positions_abc
+            ON order_positions(assortment_id, assortment_name, order_id,
+                               sum, quantity, product_folder_id)'''),
+        ('idx_sales_orders_abc',
+         '''CREATE INDEX IF NOT EXISTS idx_sales_orders_abc
+            ON sales_orders(id, state_name, created, sales_channel_id)'''),
+    )
+
+    def ensure_reporting_indexes(self) -> bool:
+        """Построить покрывающие индексы под ABC-анализ. True — что-то создали.
+
+        Зачем. В `sales_orders` и `order_positions` лежит `raw_data` — полный
+        JSON от МойСклада, 21 КБ и 9 КБ на строку соответственно, суммарно
+        около гигабайта. ABC-анализу из строки нужны три числа, но без
+        покрывающего индекса SQLite читает страницы целиком, вместе с этим
+        JSON. На сетевом диске Amvera это давало 24-57 секунд на запрос, и
+        всё это время сайт стоял у всех: логи прода 2026-08-27 показывают три
+        посторонних ручки, вставшие ровно на те же 32,6 секунды, пока считался
+        ABC.
+
+        С индексами план становится полностью покрывающим (COVERING INDEX по
+        обеим таблицам), и с диска читается ~11 МБ вместо ~1 ГБ.
+
+        Идемпотентно: если индексы уже есть, CREATE INDEX IF NOT EXISTS
+        отрабатывает мгновенно и метод возвращает False.
+        """
+        created = False
+        for name, ddl in self._REPORTING_INDEXES:
+            exists = self._get_connection_scalar(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)
+            )
+            if exists:
+                continue
+
+            started = time.monotonic()
+            try:
+                with self._get_connection() as conn:
+                    conn.execute(ddl)
+                logger.info(
+                    "Индекс %s построен за %.1f c", name, time.monotonic() - started
+                )
+                created = True
+            except sqlite3.OperationalError as e:
+                # Соседний воркер строит тот же индекс прямо сейчас — это
+                # штатный исход гонки, ронять из-за него ничего нельзя.
+                logger.info("Индекс %s строит параллельный воркер: %s", name, e)
+
+        return created
+
+    def _get_connection_scalar(self, query: str, params: tuple = ()):
+        with self._get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+        return row[0] if row else None
 
     def try_claim_scheduled_run(self, name: str, interval_seconds: int) -> bool:
         """
