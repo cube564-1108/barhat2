@@ -111,6 +111,43 @@ PULSE_ORIGIN = os.environ.get(
 )
 
 
+# Порог, после которого запрос попадает в лог как медленный. 1 секунда —
+# это уже заметно человеку, но ещё не шум: обычная ручка укладывается в
+# сотни миллисекунд даже на сетевом диске Amvera.
+SLOW_REQUEST_SECONDS = float(os.environ.get("SLOW_REQUEST_SECONDS", "1.0"))
+
+
+@app.before_request
+def _start_request_timer():
+    request._started_at = time.monotonic()
+
+
+@app.after_request
+def _log_slow_request(response):
+    """Записать в лог запросы, которые шли дольше порога.
+
+    Без этого «сайт виснет» невозможно разобрать: снаружи видно только общее
+    время, а какая именно ручка встала — нет. Замеры прода 2026-08-26 дали
+    диагноз про диск, но конкретного виновника пиков в 15-33 секунды не
+    показали, потому что мерили /health, а не то, что нажимает человек.
+
+    Логируется только превышение порога, поэтому статика и быстрые ручки шум
+    не создают. Заголовки ответа хук не трогает — только читает статус.
+    """
+    started = getattr(request, "_started_at", None)
+    if started is not None:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_REQUEST_SECONDS:
+            # Путь БЕЗ query-строки: через ?token= приезжает JWT-пропуск Пульса,
+            # а это учётные данные — в логах Amvera им не место. Для ответа на
+            # вопрос «какая ручка встала» пути достаточно.
+            logger.warning(
+                "Медленный запрос: %s %s — %.1f c (статус %s)",
+                request.method, request.path, elapsed, response.status_code,
+            )
+    return response
+
+
 @app.after_request
 def _apply_frame_ancestors(response):
     """Разрешаем встраивать наши ответы в <iframe> только со своего домена
