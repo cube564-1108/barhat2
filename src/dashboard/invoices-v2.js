@@ -73,7 +73,12 @@
         { key: 'approve', label: 'Согласовать', statuses: ['on_approval'], style: 'bx-btn--ok' },
         { key: 'bank', label: 'Отправить в банк', statuses: ['approved'], style: '' },
         { key: 'paid', label: 'Отметить оплаченными', statuses: ['approved', 'sent_to_bank'], style: 'bx-btn--ok' },
-        { key: 'archive', label: 'Убрать в архив', statuses: ['paid', 'rejected'], style: 'bx-btn--ghost-light' },
+        // В архив уходит счёт в любом статусе (решение владельца 2026-08-28):
+        // зависают не только оплаченные и отклонённые. Возврат из архива —
+        // соседней кнопкой, поэтому цена ошибки нулевая.
+        { key: 'archive', label: 'Убрать в архив',
+          statuses: ['on_approval', 'approved', 'sent_to_bank', 'paid', 'rejected'],
+          style: 'bx-btn--ghost-light' },
         // Возврат из архива живёт по своим правилам: он касается только
         // архивных счетов, а остальные действия — только не архивных
         { key: 'unarchive', label: 'Вернуть из архива', statuses: ['paid', 'rejected', 'on_approval', 'approved', 'sent_to_bank'],
@@ -2433,6 +2438,13 @@
             } else if (invoice.status === 'approved' || invoice.status === 'sent_to_bank') {
                 buttons.unshift(`<button class="bx-btn bx-btn--ok" type="button" data-act="paid">Отметить оплаченным</button>`);
             }
+            // Уточнение у согласованного счёта (решение владельца 2026-08-28):
+            // ошибку чаще видно уже после согласования, и раньше её нечем было
+            // вернуть автору, кроме отклонения. Счёт при этом уходит обратно
+            // на согласование — об этом предупреждает диалог.
+            if (invoice.status === 'approved' && !invoice.is_archived && !invoice.clarification_at) {
+                buttons.unshift(`<button class="bx-btn bx-btn--ghost" type="button" data-act="clarify">На уточнение</button>`);
+            }
             // Отправка в банк по одному счёту. Массовое действие живёт только
             // в виде «Таблица», а согласовывают в очереди — без этой кнопки
             // приходилось переключать вид ради одного счёта.
@@ -2440,9 +2452,16 @@
                 buttons.unshift(`<button class="bx-btn bx-btn--ghost" type="button" data-act="bank-test">Проверить сборку</button>`);
                 buttons.unshift(`<button class="bx-btn" type="button" data-act="bank">Отправить в банк</button>`);
             }
-            if (!invoice.is_archived && (invoice.status === 'paid' || invoice.status === 'rejected')) {
+            if (!invoice.is_archived) {
                 buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="archive">В архив</button>`);
             }
+        }
+
+        // Удаление — по ответу сервера, а не по своей копии правил (как и
+        // правка): can_delete считает тот же can_delete_invoice, который потом
+        // и разрешит запрос. Кнопка последняя и красная: действие необратимое.
+        if (details.can_delete) {
+            buttons.push(`<button class="bx-btn bx-btn--danger" type="button" data-act="delete">Удалить счёт</button>`);
         }
 
         // Счёт у автора: согласовать его нельзя, пока автор не ответил, —
@@ -2704,6 +2723,36 @@
         const invoice = details.invoice;
         const label = invoice.invoice_number || ('#' + invoice.id);
 
+        // Удаление стоит до общего блока действий: после него перечитывать
+        // нечего — счёта больше нет, и общий хвост doAction ушёл бы за
+        // деталями удалённого счёта и словил «Счёт не найден».
+        if (action === 'delete') {
+            const ok = await window.BarhatUI.confirm(
+                `${label} · ${invoice.counterparty_name || 'без контрагента'} · ${money(invoice.amount)}.\n\n`
+                + 'Счёт удалится насовсем — вместе с вложениями, обсуждением и историей, отменить нельзя. '
+                + 'Если счёт просто отработан, уберите его в архив: оттуда он возвращается кнопкой.'
+                + (invoice.status === 'sent_to_bank'
+                    ? '\n\nПлатёжка по этому счёту уже ушла в банк — удаление здесь её не отменит.'
+                    : ''),
+                { title: 'Удалить счёт?', confirmText: 'Удалить', danger: true });
+            if (!ok) return;
+
+            try {
+                await apiDelete(`/api/invoices/${invoiceId}`);
+            } catch (error) {
+                toast('Не получилось удалить: ' + error.message, 'error');
+                return;
+            }
+
+            delete state.details[invoiceId];
+            state.selected.delete(invoiceId);
+            if (state.card.id === invoiceId) closeCard();
+            toast('Счёт удалён');
+            loadSummary();
+            loadList(false);
+            return;
+        }
+
         try {
             if (action === 'approve') {
                 const ok = await window.BarhatUI.confirm(
@@ -2721,7 +2770,10 @@
                 toast('Счёт отклонён. Остаётся в списке — уберите в архив, когда разберётесь');
             } else if (action === 'clarify') {
                 const reason = await window.BarhatUI.prompt(
-                    `${label}: что нужно уточнить? Текст уйдёт автору в обсуждение счёта.`,
+                    `${label}: что нужно уточнить? Текст уйдёт автору в обсуждение счёта.`
+                    + (invoice.status === 'approved'
+                        ? '\n\nСчёт согласован — согласование снимется, и после ответа автора его нужно будет согласовать заново.'
+                        : ''),
                     '', { title: 'Отправить на уточнение', confirmText: 'Отправить',
                           placeholder: 'Например: нет скана счёта' });
                 if (reason === null) return;

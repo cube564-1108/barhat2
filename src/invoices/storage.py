@@ -1432,18 +1432,26 @@ def user_can_access_invoice(invoice: Dict[str, Any], username: str, role: str) -
 # изменения в счёте закрыты").
 _CLOSED_FOR_EDIT_STATUSES = ("sent_to_bank", "paid")
 
+# Роли, которые правят чужой счёт, пока он на согласовании. Менеджер добавлен
+# 2026-08-28 по решению владельца: до «Согласован» счёт ещё черновик, и правка
+# опечатки в реквизитах не должна требовать ни автора, ни админа. Дальше
+# статуса «Согласован» менеджер не идёт — согласованное меняет только админ.
+# Доступ к конкретному счёту всё равно ограничен user_can_access_invoice:
+# менеджер видит только свои салоны.
+_PRE_APPROVAL_EDITOR_ROLES = ("admin", "manager")
+
 
 def can_edit_invoice_fields(invoice: Dict[str, Any], username: str, role: str) -> bool:
     """
     Может ли пользователь редактировать обычные поля счёта (не статус).
 
-    До согласования — автор счёта или админ. После согласования — только
-    админ. После отправки в банк/оплаты (или архивации) — никто.
+    До согласования — автор счёта, менеджер или админ. После согласования —
+    только админ. После отправки в банк/оплаты (или архивации) — никто.
     """
     if invoice["is_archived"] or invoice["status"] in _CLOSED_FOR_EDIT_STATUSES:
         return False
     if invoice["status"] == "on_approval":
-        return role == "admin" or invoice["created_by"] == username
+        return role in _PRE_APPROVAL_EDITOR_ROLES or invoice["created_by"] == username
     return role == "admin"
 
 
@@ -2352,6 +2360,81 @@ def set_invoice_archived(invoice_id: int, archived: bool, changed_by: str = "sys
     return True
 
 
+# Статус, из которого счёт уже не удалить (решение владельца 2026-08-28).
+# Оплаченный счёт — свершившийся факт движения денег: он попадает в разноску
+# ПланФакта и в отчёты, поэтому убирается только в архив.
+_UNDELETABLE_STATUSES = ("paid",)
+
+
+def can_delete_invoice(invoice: Dict[str, Any], role: str) -> bool:
+    """
+    Может ли пользователь удалить счёт насовсем.
+
+    Только админ и только до оплаты. Архивный счёт удалить можно: архив — это
+    «работа закончена», а не «трогать нельзя».
+    """
+    return role == "admin" and invoice["status"] not in _UNDELETABLE_STATUSES
+
+
+def delete_invoice(invoice_id: int, deleted_by: str) -> Optional[Dict[str, Any]]:
+    """
+    Удалить счёт вместе со всем, что к нему привязано.
+
+    Удаление настоящее, а не мягкое: мягкий флаг пришлось бы дописывать в
+    каждую выборку модуля (их тут десятки), и первый же забытый `WHERE` вернул
+    бы «удалённый» счёт в список и в суммы. Роль «спрятать, но сохранить»
+    уже занята архивом — см. set_invoice_archived.
+
+    Возвращает данные удалённого счёта (для записи в аудит) или None, если
+    счёт не найден либо уже оплачен. Проверку статуса дублируем здесь, а не
+    только в ручке: удаление необратимо, и второй рубеж дешевле разбора.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id, invoice_number, amount, status, counterparty_name FROM invoices WHERE id = ?",
+        (invoice_id,)
+    ).fetchone()
+    if not row or row["status"] in _UNDELETABLE_STATUSES:
+        conn.close()
+        return None
+
+    invoice = dict(row)
+    stored_files = [
+        attachment["stored_filename"] for attachment in conn.execute(
+            "SELECT stored_filename FROM invoice_attachments WHERE invoice_id = ?", (invoice_id,)
+        ).fetchall()
+    ]
+
+    # Одной транзакцией: частично удалённый счёт (без строк, но в списке)
+    # хуже, чем неудалённый. FOREIGN KEY в SQLite по умолчанию выключены,
+    # каскада нет — чистим руками, и порядок здесь неважен.
+    conn.execute("DELETE FROM invoice_line_items WHERE invoice_id = ?", (invoice_id,))
+    conn.execute("DELETE FROM invoice_attachments WHERE invoice_id = ?", (invoice_id,))
+    conn.execute("DELETE FROM invoice_comments WHERE invoice_id = ?", (invoice_id,))
+    conn.execute("DELETE FROM invoice_history WHERE invoice_id = ?", (invoice_id,))
+    # Операцию ПланФакта не трогаем — она существует в ПланФакте независимо от
+    # нашего счёта. Обнуляем только ссылку, иначе в списке «не разнесено»
+    # останется строка, ведущая в никуда.
+    conn.execute(
+        "UPDATE invoice_planfact_unmatched SET invoice_id = NULL WHERE invoice_id = ?",
+        (invoice_id,)
+    )
+    conn.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
+    conn.commit()
+    conn.close()
+
+    # Файлы — после коммита: если удаление в базе откатится, файлы должны
+    # остаться на месте, а не пропасть у живого счёта.
+    for stored_filename in stored_files:
+        try:
+            os.remove(os.path.join(ATTACHMENTS_DIR, stored_filename))
+        except OSError:
+            logger.warning(f"Не удалось удалить файл вложения {stored_filename} с диска")
+
+    logger.info(f"Счёт {invoice['invoice_number']} удалён пользователем {deleted_by}")
+    return invoice
+
+
 # =============================================================================
 # СПРАВОЧНИК КОНТРАГЕНТОВ (план 2026-08-24)
 # =============================================================================
@@ -3062,23 +3145,40 @@ def template_requisite_mismatch(template: Dict[str, Any]) -> Optional[Dict[str, 
 # УТОЧНЕНИЕ У АВТОРА (план 2026-08-24, §3.1, Фаза 7)
 # =============================================================================
 
+# Из каких статусов счёт можно вернуть автору на уточнение. «Согласован»
+# добавлен 2026-08-28 по решению владельца: ошибку в реквизитах чаще всего
+# видно уже после согласования, и до этого единственным выходом было
+# отклонить счёт — то есть закрыть его совсем вместо «поправьте вот это».
+_CLARIFIABLE_STATUSES = ("on_approval", "approved")
+
+
 def send_invoice_to_clarification(invoice_id: int, changed_by: str, reason: str) -> bool:
     """
     Отправить счёт автору на уточнение.
 
-    Статус остаётся on_approval — счёт не выпадает из существующих выборок и
-    отчётов, а старый раздел продолжает показывать его как «На согласовании»,
-    просто без нового нюанса. Признак «сейчас у автора» — clarification_at.
+    Из «На согласовании» статус не меняется — счёт не выпадает из существующих
+    выборок и отчётов, а старый раздел продолжает показывать его как
+    «На согласовании», просто без нового нюанса. Признак «сейчас у автора» —
+    clarification_at.
 
-    Возвращает False, если счёт не на согласовании или уже на уточнении.
+    Из «Согласован» счёт возвращается в статус on_approval, а отметка о
+    согласовании снимается: пока автор правит, счёт не согласован — иначе его
+    можно отправить в банк прямо с уточнения, да и в карточке висело бы
+    «Согласовал такой-то» на документе, который ещё переделывают. После
+    ответа автора счёт проходит согласование заново.
+
+    Возвращает False, если счёт не в подходящем статусе или уже на уточнении.
     """
     conn = get_db()
     row = conn.execute(
         "SELECT status, clarification_at FROM invoices WHERE id = ?", (invoice_id,)
     ).fetchone()
-    if not row or row["status"] != "on_approval" or row["clarification_at"]:
+    if not row or row["status"] not in _CLARIFIABLE_STATUSES or row["clarification_at"]:
         conn.close()
         return False
+
+    old_status = row["status"]
+    revoke_approval = old_status == "approved"
 
     conn.execute(
         """
@@ -3088,11 +3188,22 @@ def send_invoice_to_clarification(invoice_id: int, changed_by: str, reason: str)
         """,
         (changed_by, reason, invoice_id)
     )
+    if revoke_approval:
+        conn.execute(
+            """
+            UPDATE invoices
+            SET status = 'on_approval', approved_by = NULL, approved_at = NULL
+            WHERE id = ?
+            """,
+            (invoice_id,)
+        )
     conn.commit()
     conn.close()
 
     # История — после commit своего соединения: add_invoice_history открывает
     # своё, и вызов при живой транзакции даёт «database is locked».
+    if revoke_approval:
+        add_invoice_history(invoice_id, changed_by, "status", old_status, "on_approval")
     add_invoice_history(invoice_id, changed_by, "clarification", None, reason)
     return True
 

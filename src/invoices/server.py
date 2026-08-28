@@ -66,6 +66,8 @@ from .storage import (
     user_can_access_invoice,
     can_edit_invoice_fields,
     can_edit_invoice_status,
+    can_delete_invoice,
+    delete_invoice,
     update_invoice,
     update_invoice_with_line_items,
     update_invoice_status,
@@ -462,6 +464,7 @@ def get_invoice(invoice_id):
         "attachments": get_invoice_attachments(invoice_id),
         "can_edit_fields": can_edit_invoice_fields(invoice, current_user.username, current_user.role),
         "can_edit_status": can_edit_invoice_status(invoice, current_user.role),
+        "can_delete": can_delete_invoice(invoice, current_user.role),
     }
 
     if "history" in include:
@@ -503,8 +506,8 @@ def edit_invoice(invoice_id):
     """
     Частично отредактировать поля счёта (не статус — см. /<id>/status).
 
-    До согласования — автор счёта или админ. После согласования — только
-    админ. После отправки в банк/оплаты или в архиве — нельзя никому.
+    До согласования — автор счёта, менеджер или админ. После согласования —
+    только админ. После отправки в банк/оплаты или в архиве — нельзя никому.
     Body: любое подмножество редактируемых полей (см. can_edit_invoice_fields).
     """
     invoice = get_invoice_by_id(invoice_id)
@@ -601,6 +604,38 @@ def edit_invoice(invoice_id):
                f"{invoice['invoice_number']}: {list(changes.keys())}"
                + (" + распределение" if line_items is not None else ""))
     return jsonify({"ok": True, "invoice": result["invoice"]})
+
+
+@invoices_bp.route("/<int:invoice_id>", methods=["DELETE"])
+@role_required("admin")
+def remove_invoice(invoice_id):
+    """
+    Удалить счёт насовсем — админ, до оплаты.
+
+    Нужно для ошибочно заведённых и дублирующих счетов: до 2026-08-28 их
+    можно было только отклонить или убрать в архив, и мусор оставался в
+    выборках и суммах навсегда. Оплаченный счёт не удаляется ни в каком
+    случае — для него есть архив (см. can_delete_invoice).
+
+    След остаётся в общем аудите (log_action): собственная история счёта
+    удаляется вместе с ним.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+    if not can_delete_invoice(invoice, current_user.role):
+        return jsonify({
+            "error": "Оплаченный счёт удалить нельзя — уберите его в архив"
+        }), 409
+
+    deleted = delete_invoice(invoice_id, current_user.username)
+    if not deleted:
+        return jsonify({"error": "Счёт уже удалён или оплачен"}), 409
+
+    log_action(current_user.username, "delete_invoice",
+               f"{deleted['invoice_number']} · {deleted.get('counterparty_name') or 'без контрагента'} · "
+               f"{deleted['amount']} · статус {deleted['status']}")
+    return jsonify({"ok": True})
 
 
 @invoices_bp.route("/<int:invoice_id>/status", methods=["PUT"])
@@ -764,8 +799,9 @@ def clarify(invoice_id):
     Отправить счёт автору на уточнение. Body: {"reason": "..."} — обязательно.
 
     Отличается от отклонения: отклонение — окончательный отказ, а уточнение
-    оставляет счёт в работе. Статус не меняется (остаётся on_approval),
-    поэтому старый раздел показывает счёт корректно.
+    оставляет счёт в работе. Со счёта «На согласовании» статус не меняется,
+    поэтому старый раздел показывает счёт корректно; согласованный счёт
+    возвращается на согласование (см. send_invoice_to_clarification).
 
     Причина обязательна и уходит в обсуждение счёта: «верните, тут что-то не
     так» без объяснения означает второй круг тех же вопросов.
@@ -780,7 +816,10 @@ def clarify(invoice_id):
         return jsonify({"error": "Напишите, что нужно уточнить — автору иначе непонятно"}), 400
 
     if not send_invoice_to_clarification(invoice_id, current_user.username, reason):
-        return jsonify({"error": "Счёт не на согласовании или уже на уточнении"}), 409
+        return jsonify({
+            "error": "На уточнение можно вернуть счёт на согласовании или согласованный, "
+                     "и только если он ещё не у автора"
+        }), 409
 
     add_invoice_comment(invoice_id, current_user.username, f"На уточнение: {reason}")
     log_action(current_user.username, "clarify_invoice", f"{invoice['invoice_number']}: {reason}")
@@ -1124,12 +1163,6 @@ def bulk_mark_paid():
     return jsonify({"ok": True, "paid": done, "skipped": skipped, "paid_amount": total})
 
 
-# Что вообще имеет смысл убирать в архив: счёт в работе прятать нельзя, его
-# ещё согласовывать и платить. Тот же набор, при котором кнопка «В архив»
-# показывается в карточке.
-ARCHIVABLE_STATUSES = ("paid", "rejected")
-
-
 @invoices_bp.route("/admin/auto-archived", methods=["GET"])
 @role_required("admin")
 def list_auto_archived():
@@ -1222,8 +1255,8 @@ def bulk_archive():
     больше не уходит в архив сам, убирать отработанные счета надо уметь пачкой,
     иначе список растёт бесконечно.
 
-    Архивируем то же, что разрешает кнопка в карточке, — оплаченные и
-    отклонённые: счёт в работе прятать нельзя, его ещё согласовывать.
+    Статус значения не имеет: админ убирает в архив любой счёт (то же, что
+    разрешает кнопка в карточке).
     """
     data = request.get_json(silent=True) or {}
     ids, error = _read_bulk_ids(data)
@@ -1239,10 +1272,6 @@ def bulk_archive():
         if invoice["is_archived"]:
             skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
                             "reason": "уже в архиве"})
-            continue
-        if invoice["status"] not in ARCHIVABLE_STATUSES:
-            skipped.append({"id": invoice_id, "label": _bulk_label(invoice, invoice_id),
-                            "reason": "счёт ещё в работе — в архив убираются оплаченные и отклонённые"})
             continue
         try:
             if set_invoice_archived(invoice_id, True, current_user.username):
@@ -1360,7 +1389,14 @@ def bulk_send_to_bank():
 @invoices_bp.route("/<int:invoice_id>/archive", methods=["POST"])
 @role_required("admin")
 def archive_invoice_view(invoice_id):
-    """Вручную перенести счёт в архив."""
+    """
+    Вручную перенести счёт в архив — в любом статусе.
+
+    Ограничение «только оплаченные и отклонённые» снято 2026-08-28 (решение
+    владельца): в работе зависают и черновики, и счета, по которым
+    договорились иначе, — убрать их было нечем, и список рос. Архив ничего
+    не портит: счёт возвращается оттуда кнопкой.
+    """
     if not get_invoice_by_id(invoice_id):
         return jsonify({"error": "Счёт не найден"}), 404
     set_invoice_archived(invoice_id, True, current_user.username)
