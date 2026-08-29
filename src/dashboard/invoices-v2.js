@@ -221,8 +221,16 @@
 
     function emptyTools() {
         return {
-            open: null,           // 'refs' | 'counterparties' | 'planfact'
+            open: null,           // 'refs' | 'counterparties' | 'planfact' | 'cards'
             refs: { type: 'categories', list: [], loading: false, error: '', bankEditId: null, newName: '' },
+            cards: {
+                list: [], loading: false, error: '',
+                // Счета ПланФакта для выпадающих списков. accountsError не
+                // блокирует работу: id счёта можно вписать руками, поэтому
+                // поле остаётся текстовым, а список — только подсказкой.
+                accounts: [], accountsError: '',
+                editId: null, draft: null, saving: false,
+            },
             cp: { list: [], loaded: false, loading: false, error: '', search: '', form: null, saving: false },
             templates: { list: [], loading: false, error: '' },
             pf: {
@@ -4250,6 +4258,7 @@
     const TOOL_BUTTONS = [
         { key: 'templates', label: 'Шаблоны' },
         { key: 'refs', label: 'Справочники' },
+        { key: 'cards', label: 'Рабочие карты' },
         { key: 'counterparties', label: 'Контрагенты' },
         { key: 'planfact', label: 'ПланФакт' },
     ];
@@ -4257,6 +4266,7 @@
     const TOOL_TITLES = {
         templates: 'Шаблоны счетов',
         refs: 'Справочники счетов',
+        cards: 'Рабочие карты',
         counterparties: 'Контрагенты',
         planfact: 'ПланФакт — авторазноска оплаченных счетов',
     };
@@ -4316,6 +4326,7 @@
         state.tools.open = key;
         renderTools();
         if (key === 'refs') loadRefList();
+        if (key === 'cards') loadCards();
         if (key === 'counterparties') loadCounterparties();
         if (key === 'templates') loadTemplates();
         if (key === 'planfact') state.tools.pf.tab = 'sync';
@@ -4345,6 +4356,7 @@
         let body = '';
         if (open === 'templates') body = templatesBodyHtml();
         else if (open === 'refs') body = refsBodyHtml();
+        else if (open === 'cards') body = cardsBodyHtml();
         else if (open === 'counterparties') body = counterpartiesBodyHtml();
         else if (open === 'planfact') body = planfactBodyHtml();
 
@@ -4372,6 +4384,7 @@
 
         if (open === 'templates') bindTemplates();
         else if (open === 'refs') bindRefs();
+        else if (open === 'cards') bindCards();
         else if (open === 'counterparties') bindCounterparties();
         else if (open === 'planfact') bindPlanfact();
     }
@@ -4799,6 +4812,317 @@
             toast('Реквизиты плательщика сохранены', 'success');
         } catch (error) {
             toast('Не удалось сохранить реквизиты: ' + error.message, 'error');
+        }
+    }
+
+    // ------------------------------------------------------------------ Рабочие карты
+
+    /**
+     * Справочник рабочих карт (план 2026-08-29, Фаза 0).
+     *
+     * Карта — подотчётный счёт в ПланФакте, привязанный к ГОРОДУ, а не к
+     * сотруднику: управляющие меняются, карта остаётся. Отсюда две вещи в
+     * форме — список салонов карты (обычно все салоны города) и счёт, с
+     * которого карта пополняется: он свой у каждой карты, а не общий у
+     * компании.
+     *
+     * Отдельным инструментом, а не вкладкой «Справочников»: те построены на
+     * шаблоне «одно поле — название», а у карты четыре поля и список салонов.
+     */
+
+    function emptyCardDraft() {
+        return {
+            title: '',
+            planfact_account_id: '',
+            planfact_account_title: '',
+            source_planfact_account_id: '',
+            source_planfact_account_title: '',
+            store_ids: [],
+        };
+    }
+
+    async function loadCards() {
+        const cards = state.tools.cards;
+        cards.loading = true;
+        cards.error = '';
+        renderTools();
+        try {
+            const data = await apiGet('/api/invoices/work-cards?all=true');
+            cards.list = data.work_cards || [];
+        } catch (error) {
+            cards.error = error.message;
+        } finally {
+            cards.loading = false;
+            renderTools();
+        }
+
+        // Счета ПланФакта грузим отдельно и уже после карт: это живой внешний
+        // вызов, он может отвалиться или отвечать долго, и справочник не
+        // должен из-за него оставаться пустым.
+        try {
+            const data = await apiGet('/api/invoices/planfact/accounts');
+            cards.accounts = data.accounts || [];
+            cards.accountsError = data.error || '';
+        } catch (error) {
+            cards.accountsError = error.message;
+        }
+        renderCardList();
+    }
+
+    function cardsBodyHtml() {
+        return `<p class="iv2-tools-note">Карта — подотчётный счёт в ПланФакте. Пополнение
+                    приходит на неё перемещением с указанного счёта, траты списываются с неё.
+                    Одна карта обслуживает все салоны своего города.</p>
+                <div class="iv2-tools-add">
+                    <button class="bx-btn bx-btn--sm" type="button" id="iv2CardAdd">Добавить карту</button>
+                </div>
+                <div id="iv2CardList">${cardsListHtml()}</div>`;
+    }
+
+    function cardsListHtml() {
+        const cards = state.tools.cards;
+        if (cards.loading) return '<p class="iv2-tools-empty">Загрузка…</p>';
+        if (cards.error) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(cards.error)}</p>`;
+
+        const draftForNew = cards.editId === 'new' ? cardFormHtml(null) : '';
+        if (!cards.list.length && !draftForNew) return '<p class="iv2-tools-empty">Карт пока нет</p>';
+
+        return draftForNew + cards.list.map(card => {
+            const storeNames = (card.store_ids || [])
+                .map(storeId => refName('stores', storeId))
+                .filter(Boolean);
+            const isEditing = String(cards.editId) === String(card.id);
+            return `
+            <div class="iv2-tools-row">
+                <div class="iv2-tools-row__main">
+                    <div class="iv2-tools-row__name">${escapeHtml(card.title)}${
+                        card.is_active ? '' : ' <span class="iv2-hint">(отключена)</span>'}</div>
+                    <div class="iv2-hint">счёт ${escapeHtml(card.planfact_account_id)}${
+                        card.planfact_account_title ? ' · ' + escapeHtml(card.planfact_account_title) : ''
+                    } · пополняется с ${escapeHtml(card.source_planfact_account_id)}${
+                        card.source_planfact_account_title ? ' · ' + escapeHtml(card.source_planfact_account_title) : ''}</div>
+                    <div class="iv2-hint">${storeNames.length
+                        ? 'салоны: ' + escapeHtml(storeNames.join(', '))
+                        : 'салоны не привязаны — карта не появится ни у одного управляющего'}</div>
+                </div>
+                <div class="iv2-tools-row__btns">
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                            data-card-act="edit" data-card-id="${escapeHtml(card.id)}">Изменить</button>
+                    ${card.is_active ? `<button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                            data-card-act="delete" data-card-id="${escapeHtml(card.id)}">Отключить</button>` : ''}
+                </div>
+                ${isEditing ? cardFormHtml(card) : ''}
+            </div>`;
+        }).join('');
+    }
+
+    function cardAccountOptionsHtml(selectedId) {
+        const cards = state.tools.cards;
+        if (!cards.accounts.length) return '';
+        const options = cards.accounts.map(account => `
+            <option value="${escapeHtml(account.account_id)}"${
+                String(account.account_id) === String(selectedId) ? ' selected' : ''
+            }>${escapeHtml(account.title)}${account.company ? ' — ' + escapeHtml(account.company) : ''}</option>`).join('');
+        return `<option value="">— выбрать из ПланФакта —</option>${options}`;
+    }
+
+    function cardFormHtml(card) {
+        const draft = state.tools.cards.draft || emptyCardDraft();
+        const stores = state.refs.stores || [];
+        const selected = new Set((draft.store_ids || []).map(String));
+
+        const accountField = (idKey, titleKey, label, hint) => {
+            const selectHtml = cardAccountOptionsHtml(draft[idKey]);
+            return `
+            <div class="iv2-field">
+                <label class="iv2-field__label">${escapeHtml(label)}</label>
+                ${selectHtml ? `<select class="iv2-input" data-card-field="${idKey}"
+                                        data-card-select="${titleKey}">${selectHtml}</select>` : ''}
+                <input class="iv2-input" type="text" inputmode="numeric" data-card-field="${idKey}"
+                       placeholder="id счёта" value="${escapeHtml(draft[idKey] || '')}">
+                <div class="iv2-hint">${escapeHtml(hint)}</div>
+            </div>`;
+        };
+
+        return `
+        <div class="iv2-tools-bank">
+            <div class="iv2-tools-bank__grid">
+                <div class="iv2-field">
+                    <label class="iv2-field__label">Название карты</label>
+                    <input class="iv2-input" type="text" data-card-field="title"
+                           value="${escapeHtml(draft.title || '')}">
+                </div>
+                ${accountField('planfact_account_id', 'planfact_account_title', 'Счёт карты в ПланФакте',
+                    'Списываем с него траты управляющего')}
+                ${accountField('source_planfact_account_id', 'source_planfact_account_title',
+                    'Пополняется со счёта', 'С него уходит перемещение при пополнении карты')}
+            </div>
+            <div class="iv2-field">
+                <label class="iv2-field__label">Салоны карты</label>
+                <div class="iv2-card-stores">
+                    ${stores.map(store => `
+                        <label class="iv2-card-stores__item">
+                            <input type="checkbox" data-card-store="${escapeHtml(store.id)}"
+                                   ${selected.has(String(store.id)) ? 'checked' : ''}>
+                            <span>${escapeHtml(store.name)}</span>
+                        </label>`).join('')}
+                </div>
+                <div class="iv2-hint">Управляющий видит карту, если его салон отмечен здесь</div>
+            </div>
+            ${state.tools.cards.accountsError
+                ? `<div class="iv2-hint">${escapeHtml(state.tools.cards.accountsError)}</div>` : ''}
+            <div class="iv2-tools-bank__btns">
+                <button class="bx-btn bx-btn--ok bx-btn--sm" type="button" data-card-act="save"
+                        data-card-id="${escapeHtml(card ? card.id : 'new')}"
+                        ${state.tools.cards.saving ? 'disabled' : ''}>Сохранить</button>
+                <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-card-act="cancel">Отмена</button>
+            </div>
+        </div>`;
+    }
+
+    /** Перерисовать только список: иначе поля открытой формы теряют ввод. */
+    function renderCardList() {
+        const host = $('iv2CardList');
+        if (!host) return;
+        host.innerHTML = cardsListHtml();
+        bindCardListActions();
+    }
+
+    function bindCards() {
+        const addButton = $('iv2CardAdd');
+        if (addButton) {
+            addButton.addEventListener('click', () => {
+                state.tools.cards.editId = 'new';
+                state.tools.cards.draft = emptyCardDraft();
+                renderCardList();
+            });
+        }
+        bindCardListActions();
+    }
+
+    function bindCardListActions() {
+        const host = $('iv2CardList');
+        if (!host) return;
+
+        host.querySelectorAll('[data-card-act]').forEach(button => {
+            button.addEventListener('click', () => {
+                cardAction(button.getAttribute('data-card-act'), button.getAttribute('data-card-id'));
+            });
+        });
+
+        // Ввод пишем в черновик сразу: список перерисовывается при каждом
+        // изменении набора салонов, и без этого форма теряла бы набранное.
+        host.querySelectorAll('[data-card-field]').forEach(input => {
+            input.addEventListener('input', () => {
+                const key = input.getAttribute('data-card-field');
+                let value = input.value;
+                // id счёта — только цифры, и фильтруем НА ВВОДЕ, а не при
+                // сохранении: иначе в поле видно одно, а на сервер уходит
+                // другое. Нечисловой id роняет разноску в ПланФакт.
+                if (key.endsWith('account_id') && input.tagName === 'INPUT') {
+                    value = value.replace(/\D/g, '');
+                    if (input.value !== value) input.value = value;
+                }
+                state.tools.cards.draft[key] = value;
+
+                // Выбор из списка ПланФакта заполняет и текстовое поле id,
+                // и человекочитаемое название счёта
+                if (input.tagName === 'SELECT') {
+                    const titleKey = input.getAttribute('data-card-select');
+                    const account = state.tools.cards.accounts
+                        .find(item => String(item.account_id) === String(value));
+                    state.tools.cards.draft[titleKey] = account ? account.title : '';
+                    const twin = host.querySelector(`input[data-card-field="${key}"]`);
+                    if (twin) twin.value = value;
+                }
+            });
+        });
+
+        host.querySelectorAll('[data-card-store]').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                const storeId = Number(checkbox.getAttribute('data-card-store'));
+                const draft = state.tools.cards.draft;
+                const ids = new Set((draft.store_ids || []).map(Number));
+                if (checkbox.checked) ids.add(storeId); else ids.delete(storeId);
+                draft.store_ids = Array.from(ids);
+            });
+        });
+    }
+
+    async function cardAction(action, id) {
+        const cards = state.tools.cards;
+
+        if (action === 'cancel') {
+            cards.editId = null;
+            cards.draft = null;
+            renderCardList();
+            return;
+        }
+
+        if (action === 'edit') {
+            const card = cards.list.find(row => String(row.id) === String(id));
+            if (!card) return;
+            cards.editId = String(cards.editId) === String(id) ? null : id;
+            cards.draft = cards.editId ? {
+                title: card.title || '',
+                planfact_account_id: card.planfact_account_id || '',
+                planfact_account_title: card.planfact_account_title || '',
+                source_planfact_account_id: card.source_planfact_account_id || '',
+                source_planfact_account_title: card.source_planfact_account_title || '',
+                store_ids: (card.store_ids || []).slice(),
+            } : null;
+            renderCardList();
+            return;
+        }
+
+        if (action === 'delete') {
+            const card = cards.list.find(row => String(row.id) === String(id));
+            // Только BarhatUI: раздел открывается в iframe Пульса, где нативный
+            // confirm молча игнорируется и кнопка выглядит нерабочей.
+            const confirmed = await window.BarhatUI.confirm(
+                `Отключить карту «${card ? card.title : id}»? Заявки прошлых месяцев останутся, ` +
+                'но новые с этой картой создать будет нельзя.',
+                { title: 'Отключение карты', confirmText: 'Отключить', danger: true });
+            if (!confirmed) return;
+            try {
+                await apiDelete(`/api/invoices/work-cards/${id}`);
+                await loadCards();
+                toast('Карта отключена', 'success');
+            } catch (error) {
+                toast('Не удалось отключить карту: ' + error.message, 'error');
+            }
+            return;
+        }
+
+        if (action === 'save') {
+            const draft = cards.draft || emptyCardDraft();
+            const payload = {
+                title: (draft.title || '').trim(),
+                planfact_account_id: (draft.planfact_account_id || '').trim(),
+                planfact_account_title: draft.planfact_account_title || '',
+                source_planfact_account_id: (draft.source_planfact_account_id || '').trim(),
+                source_planfact_account_title: draft.source_planfact_account_title || '',
+                store_ids: (draft.store_ids || []).map(Number),
+            };
+            if (!payload.title) { toast('Укажите название карты', 'error'); return; }
+            if (!payload.planfact_account_id || !payload.source_planfact_account_id) {
+                toast('Укажите оба счёта ПланФакта', 'error');
+                return;
+            }
+
+            cards.saving = true;
+            try {
+                if (id === 'new') await apiPost('/api/invoices/work-cards', payload);
+                else await apiPut(`/api/invoices/work-cards/${id}`, payload);
+                cards.editId = null;
+                cards.draft = null;
+                await loadCards();
+                toast('Карта сохранена', 'success');
+            } catch (error) {
+                toast('Не удалось сохранить карту: ' + error.message, 'error');
+            } finally {
+                cards.saving = false;
+            }
         }
     }
 

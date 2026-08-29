@@ -1645,6 +1645,33 @@
 
 .iv2 .iv2-tools-bank__btns { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* Салоны рабочей карты: чекбоксов немного (9 салонов), поэтому плоский список
+   без поиска — он читается быстрее мультиселекта и виден целиком. */
+.iv2 .iv2-card-stores {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 4px 12px;
+    margin-bottom: 6px;
+}
+
+.iv2 .iv2-card-stores__item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: var(--bx-r-md);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.iv2 .iv2-card-stores__item:hover { background: var(--bx-bg-2); }
+
+.iv2 .iv2-card-stores__item input { accent-color: var(--bx-accent); }
+
+/* Два поля счёта — выпадающий список из ПланФакта и текстовый id под ним:
+   если ПланФакт не ответил, списка нет, а id всё равно можно вписать руками. */
+.iv2 .iv2-tools-bank .iv2-field select + input { margin-top: 6px; }
+
 .iv2 .iv2-tools-form {
     border: 1px solid var(--bx-border);
     border-radius: var(--bx-r-2xl);
