@@ -257,6 +257,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'writeoffs': 'СПИСАНИЯ ТОВАРА',
             'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
             'courier_payouts': 'ОПЛАТА КУРЬЕРАМ',
+            'link_watch': 'ССЫЛКИ НА ТОВАРЫ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'
         };

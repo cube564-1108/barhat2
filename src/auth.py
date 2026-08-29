@@ -51,7 +51,7 @@ ROLE_SECTIONS = {
     # снятие права закрыло бы доступ к данным тем, кого забыли перевести.
     # Ручки счетов проверяют @section_required("invoices", "invoices_v2") —
     # пускает любая из двух секций (INVOICE_SECTIONS в src/invoices/server.py).
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts"},
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "link_watch"},
     "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts"},
     "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
@@ -324,6 +324,7 @@ ALL_MODULES = [
     'users_manage',   # Управление пользователями
     'writeoffs',      # Списания товара
     'courier_payouts',  # Оплата курьерам
+    'link_watch',     # Ссылки на товары (сторож)
 ]
 
 # Модули, доступные пользователям, вошедшим через SSO из портала БАРХАТ Пульс.
@@ -467,6 +468,11 @@ def init_auth_tables():
 
     # Догрузка права на модуль courier_payouts (оплата курьерам)
     migrate_new_module_permissions("courier_payouts", ["admin", "manager"])
+
+    # Догрузка права на раздел link_watch (сторож ссылок на товары).
+    # Только админ: раздел технический — он про исправность выгрузки каталога
+    # в CRM, а не про ежедневную работу с заказами.
+    migrate_new_module_permissions("link_watch", ["admin"])
 
     # Догрузка права на раздел invoices_v2 («Согласование счетов»).
     # С приёмкой Фазы 10 (2026-08-26) он стал основным разделом счетов, поэтому

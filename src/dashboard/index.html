@@ -127,6 +127,14 @@
                         </svg>
                         <span>Оплата курьерам</span>
                     </a>
+                    <a href="/link-watch" class="nav-item" data-page="link_watch">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                        </svg>
+                        <span>Ссылки на товары</span>
+                    </a>
                 </div>
 
                 <!-- Качество -->
@@ -1055,6 +1063,34 @@
                             </div>
                         </div>
                     </div>
+                </div>
+
+                <!-- Ссылки на товары (сторож) -->
+                <div class="page" data-page="link_watch">
+                    <section class="section">
+                        <h2 class="section-title">ССЫЛКИ НА ТОВАРЫ</h2>
+                        <p class="section-description">
+                            Проверка того, что ссылка на товар из карточки в RetailCRM реально
+                            открывает эту карточку на сайте. Идёт сама раз в сутки ночью.
+                        </p>
+
+                        <div id="linkWatchSummary" class="bx-kpi" style="margin: 24px 0;">
+                            <p class="empty-state">Загрузка...</p>
+                        </div>
+
+                        <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 20px;">
+                            <button id="linkWatchRunBtn" class="btn btn-primary">Проверить сейчас</button>
+                            <button id="linkWatchExportBtn" class="btn btn-secondary">Выгрузить в CSV</button>
+                            <span id="linkWatchState" class="section-description" style="margin: 0;"></span>
+                        </div>
+
+                        <div class="card calculator-card">
+                            <h3 class="card-title">Товары со сломанной ссылкой</h3>
+                            <div id="linkWatchTableWrap" style="overflow-x: auto;">
+                                <p class="empty-state">Загрузка...</p>
+                            </div>
+                        </div>
+                    </section>
                 </div>
 
                 <!-- Управление пользователями (только для admin) -->
@@ -2276,5 +2312,6 @@
     <script defer src="/writeoffs.js"></script>
     <script defer src="/courier-payouts.js"></script>
     <script defer src="/invoices-v2.js"></script>
+    <script defer src="/link-watch.js"></script>
 </body>
 </html>

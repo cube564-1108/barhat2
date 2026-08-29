@@ -288,6 +288,22 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint оплаты курьерам: {e}")
 
+# Регистрируем blueprint сторожа ссылок на товары
+try:
+    from linkwatch.server import linkwatch_bp, start_scheduler as start_linkwatch_scheduler
+    from linkwatch.storage import init_tables as init_linkwatch_tables
+    app.register_blueprint(linkwatch_bp)
+    init_linkwatch_tables()
+    logger.info("Blueprint сторожа ссылок зарегистрирован")
+    # Ссылки проверяются раз в сутки ночью: обход сайта идёт ~30 минут, днём
+    # это лишняя нагрузка на витрину. Планировщик стартует в каждом воркере,
+    # прогон делает один — талон и лок в linkwatch/storage.py.
+    start_linkwatch_scheduler()
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint сторожа ссылок: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint сторожа ссылок: {e}")
+
 # Регистрируем blueprint задач дашборда
 try:
     from tasks.server import tasks_bp
@@ -875,6 +891,19 @@ def courier_payouts_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/link-watch')
+def link_watch_page():
+    """Страница сторожа ссылок на товары"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return _serve_dashboard_shell()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /link-watch: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 # === Static File Routes ===
 
 @app.route('/styles.css')
@@ -953,6 +982,11 @@ def serve_writeoffs():
 def serve_courier_payouts():
     """Отдаёт скрипт раздела оплаты курьерам"""
     return send_from_directory(DASHBOARD_DIR, 'courier-payouts.js')
+
+@app.route('/link-watch.js')
+def serve_link_watch():
+    """Отдаёт скрипт раздела ссылок на товары"""
+    return send_from_directory(DASHBOARD_DIR, 'link-watch.js')
 
 @app.route('/brand/<path:filename>')
 def serve_brand(filename):
