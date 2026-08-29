@@ -534,8 +534,14 @@ def test_editing_history_comments():
     if not s.can_edit_invoice_fields(invoice, "creator_x", "manager"):
         print("   ✗ Ошибка: автор должен редактировать свой счёт до согласования")
         return False
-    if s.can_edit_invoice_fields(invoice, "other_user", "manager"):
-        print("   ✗ Ошибка: чужой не-админ не должен редактировать чужой счёт")
+    # С 2026-08-28 (коммит 16f8988) менеджер правит и чужой счёт, пока тот на
+    # согласовании: разбирать очередь вдвоём иначе не получалось. Проверяем
+    # действующее правило — роль без права правки здесь флорист.
+    if not s.can_edit_invoice_fields(invoice, "other_user", "manager"):
+        print("   ✗ Ошибка: менеджер должен править чужой счёт до согласования")
+        return False
+    if s.can_edit_invoice_fields(invoice, "other_user", "florist"):
+        print("   ✗ Ошибка: флорист не должен редактировать чужой счёт")
         return False
     if not s.can_edit_invoice_fields(invoice, "anyone", "admin"):
         print("   ✗ Ошибка: админ должен редактировать любой счёт до согласования")
