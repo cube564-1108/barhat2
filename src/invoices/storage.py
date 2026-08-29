@@ -440,6 +440,15 @@ def init_invoices_tables():
     from .cards import init_cards_tables
     init_cards_tables()
 
+    # Колонки трёх типов заявки — после таблиц карт: card_id ссылается на
+    # work_cards, и хотя SQLite внешние ключи не проверяет, порядок оставляем
+    # честным, чтобы схема читалась сверху вниз.
+    conn = get_db()
+    try:
+        _ensure_card_invoice_columns(conn)
+    finally:
+        conn.close()
+
 
 def _ensure_invoices_migrated(conn: sqlite3.Connection):
     """
@@ -662,6 +671,45 @@ def _ensure_planfact_sync_columns(conn: sqlite3.Connection):
 
     global _HAS_PLANFACT_SYNC_COLUMNS
     _HAS_PLANFACT_SYNC_COLUMNS = True
+
+
+def _ensure_card_invoice_columns(conn: sqlite3.Connection):
+    """
+    Три типа заявки в одной таблице (план 2026-08-29, Фаза 1):
+    'invoice' — счёт на оплату (всё как раньше), 'card_expense' — трата с
+    рабочей карты, 'card_topup' — пополнение карты.
+
+    Проверку допустимых значений `kind` делает приложение, а не CHECK: добавить
+    ограничение к существующей таблице SQLite умеет только через её
+    пересоздание, а пересоздавать боевую таблицу счетов ради этого не стоит.
+
+    Блокировка как в остальных миграциях модуля: два gunicorn-воркера стартуют
+    параллельно и без BEGIN IMMEDIATE падают на "duplicate column".
+    """
+    if not _table_exists(conn, "invoices"):
+        return
+
+    columns = {
+        "kind": "TEXT NOT NULL DEFAULT 'invoice'",
+        "card_id": "INTEGER REFERENCES work_cards(id)",
+        "spent_at": "TEXT",          # дата траты; у счёта роль даты играет due_date
+        "planfact_error": "TEXT",    # почему заявка не уехала в ПланФакт
+    }
+    if all(_column_exists(conn, "invoices", column) for column in columns):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for column, definition in columns.items():
+            if not _column_exists(conn, "invoices", column):
+                conn.execute(f"ALTER TABLE invoices ADD COLUMN {column} {definition}")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_invoices_kind ON invoices(kind)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def mark_invoice_planfact_synced(invoice_id: int, operation_id: Optional[str]) -> None:
@@ -1340,10 +1388,18 @@ def create_invoice(
     due_date: Optional[str] = None,
     comment: Optional[str] = None,
     line_items: Optional[List[Dict[str, Any]]] = None,
+    kind: str = "invoice",
+    card_id: Optional[int] = None,
+    spent_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Создать счёт на оплату. Статус сразу 'on_approval' — черновиков нет,
-    как только сотрудник заполнил форму, счёт уходит на согласование.
+    Создать заявку. Статус сразу 'on_approval' — черновиков нет,
+    как только сотрудник заполнил форму, заявка уходит на согласование.
+
+    kind: 'invoice' — счёт на оплату, 'card_expense' — трата с рабочей карты
+    (деньги уже потрачены, дата в spent_at), 'card_topup' — пополнение карты.
+    Правила по типам проверяет вызывающая сторона (server.add_invoice), здесь
+    поля просто сохраняются.
 
     Номер счёта (человекочитаемый, СЧ-000123) и match_code (машиночитаемый,
     REF-000123) генерируются после вставки из ID, чтобы гарантировать
@@ -1365,14 +1421,14 @@ def create_invoice(
             city_id, payer_id, vat_id, counterparty_name, counterparty_inn, counterparty_kpp,
             counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
             counterparty_bank_corr_account, amount, payment_purpose, comment, due_date,
-            created_by, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'on_approval')
+            created_by, status, kind, card_id, spent_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'on_approval', ?, ?, ?)
         """,
         (
             city_id, payer_id, vat_id, counterparty_name, counterparty_inn, counterparty_kpp,
             counterparty_bank_name, counterparty_bank_bik, counterparty_bank_account,
             counterparty_bank_corr_account, amount, payment_purpose, comment, due_date,
-            created_by,
+            created_by, kind, card_id, spent_at,
         )
     )
     invoice_id = cursor.lastrowid
@@ -1429,6 +1485,16 @@ def user_can_access_invoice(invoice: Dict[str, Any], username: str, role: str) -
     allowed_store_ids = set(get_user_stores(username))
     if not allowed_store_ids:
         return False
+
+    # Пополнение карты распределения не имеет вовсе (это перемещение денег, а
+    # не расход), поэтому по строкам его не найти. Доступ к нему даёт сама
+    # карта: в НСК, Барнауле и Челябинске она одна на несколько салонов, то
+    # есть заявку вполне создаёт один управляющий, а искать её будет другой.
+    if invoice.get("card_id"):
+        from .cards import get_card_by_id
+        card = get_card_by_id(invoice["card_id"])
+        if card and allowed_store_ids.intersection(card["store_ids"]):
+            return True
 
     line_items = get_invoice_line_items(invoice["id"])
     return any(item["store_id"] in allowed_store_ids for item in line_items)
@@ -1526,6 +1592,10 @@ _EDITABLE_INVOICE_FIELDS = (
     "city_id", "payer_id", "vat_id", "counterparty_name", "counterparty_inn", "counterparty_kpp",
     "counterparty_bank_name", "counterparty_bank_bik", "counterparty_bank_account",
     "counterparty_bank_corr_account", "amount", "payment_purpose", "comment", "due_date",
+    # Заявки по рабочим картам. Тип (kind) сюда сознательно не входит: он
+    # выбирается один раз при создании и определяет и маршрут согласования, и
+    # то, какая операция уедет в ПланФакт — менять его на полпути нельзя.
+    "card_id", "spent_at",
 )
 
 
@@ -2083,6 +2153,13 @@ def get_invoices_summary(
         # Отклонённые счета архивируются сразу (см. reject_invoice), поэтому
         # is_archived = 0 их уже отсекает — отдельного условия не нужно.
         due_open = "i.status != 'paid' AND i.due_date IS NOT NULL"
+
+        # Расход с рабочей карты в платёжные плитки не попадает: деньги по нему
+        # уже потрачены, платить нечего, и статус 'paid' он не получает никогда.
+        # Без этого условия такие заявки навсегда осели бы в «просрочено».
+        # Пополнение карты, наоборот, ждёт перевода и в плитках нужно.
+        if _column_exists(conn, "invoices", "kind"):
+            due_open += " AND i.kind != 'card_expense'"
 
         where = "WHERE i.is_archived = 0"
         params: List[Any] = []

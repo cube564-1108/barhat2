@@ -127,6 +127,7 @@ from .cards import (
     update_card,
     deactivate_card,
     is_valid_account_id,
+    user_can_use_card,
 )
 
 logger = logging.getLogger(__name__)
@@ -627,6 +628,37 @@ def get_invoice(invoice_id):
     return jsonify(result)
 
 
+# Типы заявки. Значение хранится в invoices.kind; CHECK в схему не ставим —
+# добавить ограничение к существующей таблице SQLite умеет только пересозданием
+# (см. _ensure_card_invoice_columns), поэтому единственная проверка — здесь.
+INVOICE_KINDS = ("invoice", "card_expense", "card_topup")
+CARD_KINDS = ("card_expense", "card_topup")
+
+
+def _card_stores_error(card_id, line_items):
+    """
+    Салоны в распределении траты должны принадлежать карте.
+
+    Карта привязана к городу, и без этой проверки управляющий из Барнаула
+    отправил бы расход в проект Челябинска — в ПланФакте это выглядело бы как
+    трата чужого салона, а разбираться пришлось бы уже по итогам месяца.
+    """
+    card = get_card_by_id(card_id)
+    if not card:
+        return "Карта не найдена"
+    allowed = set(card["store_ids"])
+    if not allowed:
+        return (f"У карты «{card['title']}» не отмечены салоны — "
+                "заполните их в справочнике рабочих карт")
+
+    for item in line_items:
+        if item.get("store_id") not in allowed:
+            store = get_store_by_id(item.get("store_id"))
+            return (f"Салон «{store['name'] if store else item.get('store_id')}» "
+                    f"не обслуживается картой «{card['title']}»")
+    return None
+
+
 def _validate_line_items(line_items):
     """
     Проверить строки распределения. Возвращает текст ошибки или None.
@@ -684,10 +716,26 @@ def edit_invoice(invoice_id):
             return jsonify({"error": "Некорректный вариант НДС"}), 400
         changes["vat_id"] = data["vat_id"]
 
-    if "due_date" in data:
+    if "due_date" in data and invoice.get("kind") != "card_expense":
         if not (data["due_date"] or "").strip():
             return jsonify({"error": "Планируемая дата оплаты обязательна"}), 400
         changes["due_date"] = data["due_date"].strip()
+
+    # У траты с карты вместо срока оплаты — дата, когда деньги реально
+    # потратили: именно ею операция ляжет в ПланФакт, поэтому её правят руками
+    # (занесли 30-го трату от 25-го — отчёт за месяц не должен поехать).
+    if "spent_at" in data and invoice.get("kind") == "card_expense":
+        if not (data["spent_at"] or "").strip():
+            return jsonify({"error": "Дата траты обязательна"}), 400
+        changes["spent_at"] = data["spent_at"].strip()
+
+    if "card_id" in data and invoice.get("kind") in CARD_KINDS:
+        card_id = data["card_id"]
+        if not isinstance(card_id, int) or not get_card_by_id(card_id):
+            return jsonify({"error": "Выберите рабочую карту"}), 400
+        if not user_can_use_card(card_id, current_user.username, current_user.role):
+            return jsonify({"error": "Нет доступа к этой карте"}), 403
+        changes["card_id"] = card_id
 
     if "amount" in data:
         if not isinstance(data["amount"], (int, float)) or data["amount"] <= 0:
@@ -722,6 +770,16 @@ def edit_invoice(invoice_id):
         if invoice["is_archived"]:
             return jsonify({"error": "Счёт в архиве — распределение изменить нельзя"}), 409
 
+        if invoice.get("kind") == "card_expense":
+            error = _card_stores_error(changes.get("card_id", invoice["card_id"]), line_items)
+            if error:
+                return jsonify({"error": error}), 400
+        elif invoice.get("kind") == "card_topup" and line_items:
+            return jsonify({
+                "error": "У пополнения карты нет распределения по статьям — "
+                         "расход появится, когда деньги потратят"
+            }), 400
+
     if not changes and line_items is None:
         return jsonify({"error": "Нет полей для изменения"}), 400
 
@@ -729,7 +787,10 @@ def edit_invoice(invoice_id):
     # деньги: меняется сумма или сами строки. Иначе перенос срока оплаты
     # (борд шлёт один due_date) упирался бы в старый счёт без распределения,
     # а таких в базе хватает — задним числом их никто не дозаполнял (§3.3).
-    if "amount" in changes or line_items is not None:
+    # Пополнение карты — исключение: распределения у него нет по определению,
+    # и требовать его при правке суммы значило бы запретить правку вовсе.
+    if (invoice.get("kind") != "card_topup"
+            and ("amount" in changes or line_items is not None)):
         final_amount = changes.get("amount", invoice["amount"])
         final_items = line_items if line_items is not None else get_invoice_line_items(invoice_id)
         if not final_items:
@@ -816,27 +877,61 @@ def edit_invoice_status(invoice_id):
 @section_required(*INVOICE_SECTIONS)
 def add_invoice():
     """
-    Создать счёт на оплату. Сразу уходит на согласование (status=on_approval).
+    Создать заявку. Сразу уходит на согласование (status=on_approval).
 
-    Обязательные поля: city_id, payer_id, due_date, amount, payment_purpose.
-    Остальное — опционально, включая line_items (распределение по проекту/статье).
+    Тип задаётся полем `kind` (по умолчанию 'invoice' — старое поведение):
+      * invoice      — счёт на оплату: город, плательщик, срок оплаты,
+                       распределение по салонам и статьям;
+      * card_expense — трата с рабочей карты: карта, дата траты (spent_at),
+                       распределение; ни контрагента, ни срока оплаты;
+      * card_topup   — пополнение карты: карта, срок перевода; распределения
+                       нет вовсе, это перемещение денег, а не расход.
     """
     data = request.get_json(silent=True) or {}
+
+    kind = (data.get("kind") or "invoice").strip()
+    if kind not in INVOICE_KINDS:
+        return jsonify({"error": f"Неизвестный тип заявки: {kind}"}), 400
+    is_card = kind in CARD_KINDS
 
     city_id = data.get("city_id")
     payer_id = data.get("payer_id")
     due_date = (data.get("due_date") or "").strip()
     amount = data.get("amount")
     payment_purpose = (data.get("payment_purpose") or "").strip()
+    spent_at = (data.get("spent_at") or "").strip()
 
-    if not isinstance(city_id, int) or not get_city_by_id(city_id):
-        return jsonify({"error": "Некорректный город"}), 400
+    # Город и плательщик — свойства счёта поставщику: у карточной заявки нет
+    # ни того, ни другого (деньги свои, а не по документу от контрагента).
+    if not is_card:
+        if not isinstance(city_id, int) or not get_city_by_id(city_id):
+            return jsonify({"error": "Некорректный город"}), 400
+        if not isinstance(payer_id, int) or not get_payer_by_id(payer_id):
+            return jsonify({"error": "Некорректный плательщик"}), 400
+    else:
+        city_id = None
+        payer_id = None
 
-    if not isinstance(payer_id, int) or not get_payer_by_id(payer_id):
-        return jsonify({"error": "Некорректный плательщик"}), 400
+    card_id = data.get("card_id")
+    if is_card:
+        if not isinstance(card_id, int) or not get_card_by_id(card_id):
+            return jsonify({"error": "Выберите рабочую карту"}), 400
+        # Проверка на сервере, а не только фильтр в интерфейсе: иначе
+        # управляющий, подменив card_id в запросе, спишет с чужой карты.
+        if not user_can_use_card(card_id, current_user.username, current_user.role):
+            return jsonify({"error": "Нет доступа к этой карте"}), 403
+    else:
+        card_id = None
 
-    if not due_date:
-        return jsonify({"error": "Планируемая дата оплаты обязательна"}), 400
+    if kind == "card_expense":
+        # Деньги уже потрачены — платить нечего, срока оплаты не бывает.
+        if not spent_at:
+            return jsonify({"error": "Укажите дату траты"}), 400
+        due_date = None
+    else:
+        if not due_date:
+            return jsonify({"error": "Планируемая дата оплаты обязательна"}), 400
+        spent_at = None
 
     if not isinstance(amount, (int, float)) or amount <= 0:
         return jsonify({"error": "Сумма должна быть положительным числом"}), 400
@@ -845,13 +940,31 @@ def add_invoice():
         return jsonify({"error": "Назначение платежа обязательно"}), 400
 
     vat_id = data.get("vat_id")
-    if vat_id is not None and not get_vat_option_by_id(vat_id):
+    if is_card:
+        vat_id = None
+    elif vat_id is not None and not get_vat_option_by_id(vat_id):
         return jsonify({"error": "Некорректный вариант НДС"}), 400
 
     line_items = data.get("line_items") or []
     error = _validate_line_items(line_items)
     if error:
         return jsonify({"error": error}), 400
+
+    if kind == "card_topup":
+        # Перемещение денег между своими счетами статей расхода не имеет:
+        # расход появится позже, когда управляющий потратит эти деньги.
+        if line_items:
+            return jsonify({
+                "error": "У пополнения карты нет распределения по статьям — "
+                         "расход появится, когда деньги потратят"
+            }), 400
+        return _finish_add_invoice(data, kind, amount, payment_purpose, city_id, payer_id,
+                                   vat_id, due_date, card_id, spent_at, [])
+
+    if kind == "card_expense":
+        error = _card_stores_error(card_id, line_items)
+        if error:
+            return jsonify({"error": error}), 400
 
     # Распределение обязательно (решение №15 плана, включено владельцем
     # 2026-08-25). Проверка стоит на сервере, а не только в форме нового
@@ -875,6 +988,18 @@ def add_invoice():
                      f"в точности складываться в сумму счёта"
         }), 400
 
+    return _finish_add_invoice(data, kind, amount, payment_purpose, city_id, payer_id,
+                               vat_id, due_date, card_id, spent_at, line_items)
+
+
+def _finish_add_invoice(data, kind, amount, payment_purpose, city_id, payer_id,
+                        vat_id, due_date, card_id, spent_at, line_items):
+    """
+    Общий хвост создания для всех трёх типов: сама вставка, справочник
+    контрагентов и аудит. Вынесен из add_invoice, потому что пополнение карты
+    уходит сюда раньше — у него нет ни распределения, ни сверки сумм по нему.
+    """
+    is_card = kind in CARD_KINDS
     try:
         invoice = create_invoice(
             amount=amount,
@@ -883,25 +1008,32 @@ def add_invoice():
             city_id=city_id,
             payer_id=payer_id,
             vat_id=vat_id,
-            counterparty_name=data.get("counterparty_name"),
-            counterparty_inn=data.get("counterparty_inn"),
-            counterparty_kpp=data.get("counterparty_kpp"),
-            counterparty_bank_name=data.get("counterparty_bank_name"),
-            counterparty_bank_bik=data.get("counterparty_bank_bik"),
-            counterparty_bank_account=data.get("counterparty_bank_account"),
-            counterparty_bank_corr_account=data.get("counterparty_bank_corr_account"),
+            # Реквизиты контрагента у карточной заявки не спрашиваются и не
+            # сохраняются, даже если пришли в запросе: платим своими деньгами,
+            # платёжка в банк не формируется.
+            counterparty_name=None if is_card else data.get("counterparty_name"),
+            counterparty_inn=None if is_card else data.get("counterparty_inn"),
+            counterparty_kpp=None if is_card else data.get("counterparty_kpp"),
+            counterparty_bank_name=None if is_card else data.get("counterparty_bank_name"),
+            counterparty_bank_bik=None if is_card else data.get("counterparty_bank_bik"),
+            counterparty_bank_account=None if is_card else data.get("counterparty_bank_account"),
+            counterparty_bank_corr_account=None if is_card else data.get("counterparty_bank_corr_account"),
             due_date=due_date,
             comment=(data.get("comment") or "").strip() or None,
             line_items=line_items,
+            kind=kind,
+            card_id=card_id,
+            spent_at=spent_at,
         )
     except sqlite3.IntegrityError:
         logger.exception("create_invoice упал с IntegrityError")
-        return jsonify({"error": "Не удалось создать счёт, попробуйте ещё раз"}), 409
+        return jsonify({"error": "Не удалось создать заявку, попробуйте ещё раз"}), 409
 
     # Запоминаем контрагента уже после того, как счёт создан и его соединение
     # закрыто: справочник — приятное дополнение, ронять из-за него создание
     # счёта нельзя (внутри всё обёрнуто в try).
-    remember_counterparty_from_invoice(invoice)
+    if not is_card:
+        remember_counterparty_from_invoice(invoice)
 
     log_action(current_user.username, "create_invoice", f"{invoice['invoice_number']}: {amount}")
     return jsonify({"ok": True, "invoice": invoice}), 201
@@ -1013,6 +1145,14 @@ def mark_paid(invoice_id):
     if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
 
+    # У траты с карты «оплачен» смысла не имеет: деньги ушли ещё до создания
+    # заявки. Её терминальное состояние — «Согласован» плюс признак разноски
+    # в ПланФакт, и статус paid сбил бы и отчёты, и синк.
+    if invoice.get("kind") == "card_expense":
+        return jsonify({
+            "error": "Трата с рабочей карты уже совершена — отмечать её оплаченной нечем"
+        }), 409
+
     if not mark_invoice_paid(invoice_id, current_user.username):
         return jsonify({"error": f"Счёт в статусе '{invoice['status']}', отметить оплаченным нельзя"}), 409
 
@@ -1078,6 +1218,15 @@ def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict
     Возвращает {"ok": bool, "http_status": int, "body": dict} — body уже в
     форме, готовой под jsonify(), http_status — какой код вернуть вьюхе.
     """
+    # Карточные заявки в банк не уходят: трата уже совершена своими деньгами,
+    # а пополнение владелец переводит руками. Отсечка стоит здесь, а не только
+    # во вьюхе, чтобы её проходило и массовое действие bulk-send-to-bank.
+    if invoice.get("kind") in CARD_KINDS:
+        return {"ok": False, "http_status": 409, "body": {
+            "error": "Заявка по рабочей карте в банк не отправляется — "
+                     "платёжка для неё не формируется"
+        }}
+
     if not sandbox and invoice["status"] != "approved":
         return {"ok": False, "http_status": 409,
                 "body": {"error": f"Счёт в статусе '{invoice['status']}', отправить в банк нельзя"}}
@@ -1879,6 +2028,14 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
     # в ПланФакте оставалась нераспределённой, и в «Требует внимания» она тоже
     # не попадала, потому что этот выход стоит до записи туда.
     if invoice.get("planfact_synced_at"):
+        return {"status": "skip"}
+
+    # Заявки по рабочим картам этот синк не касается: он дообогащает операции,
+    # которые ПланФакт получил автоимпортом из банка, а операции по картам
+    # создаёт целиком другой синк (план 2026-08-29, Фаза 3). Разнести их здесь
+    # значило бы записать пополнение карты расходом — тот же рубль лёг бы в
+    # расход дважды: при пополнении и при трате.
+    if invoice.get("kind") in CARD_KINDS:
         return {"status": "skip"}
 
     # Оплаченный, но не разнесённый счёт — нормальный кандидат на разноску
