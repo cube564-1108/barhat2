@@ -16,6 +16,7 @@ planfact-api-php-example (curl/put.php — единственный найден
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 import requests
@@ -202,6 +203,128 @@ class PlanFactClient:
         if data is None:
             return None
         return data.get("items", []) if isinstance(data, dict) else data
+
+    def get_accounts(self, active_only: bool = True) -> Optional[List[Dict[str, Any]]]:
+        """
+        Справочник счетов (GET /accounts) — отсюда accountId рабочих карт и
+        счетов, с которых они пополняются.
+
+        Ответ в той же обёртке, что projects: {"items": [...], "total",
+        "deletedItems", "totalDeleted"}. Поле "remainder" у счёта — НЕ остаток,
+        оно всегда 0.0 (проверено на боевом кабинете 2026-08-29); остаток даёт
+        get_account_balances(). Признак живого счёта — "active".
+        """
+        data = self.request("GET", "accounts", timeout=8, max_retries_429=0)
+        if data is None:
+            return None
+        items = data.get("items", []) if isinstance(data, dict) else data
+        if active_only:
+            items = [item for item in items if item.get("active")]
+        return items
+
+    def get_account_balances(
+        self,
+        account_ids: List[int],
+        on_date: Optional[str] = None,
+        period_start: Optional[str] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Остатки на счетах (POST /dashboards/accountbalance).
+
+        Единственный найденный способ узнать остаток: GET /accounts его не
+        отдаёт (см. get_accounts). Тело обязано содержать currentDate,
+        periodStartDate и periodEndDate, иначе запрос отвергается; accountIds
+        сужает выборку до нужных счетов.
+
+        Возвращает items[]: {"accountId", "total" (остаток), "account" {...},
+        "totalValuesByDays": [...]} — по дням готовая история, своё накопление
+        остатков заводить не нужно.
+        """
+        today = on_date or datetime.now().strftime("%Y-%m-%d")
+        body = {
+            "currentDate": today,
+            "periodStartDate": period_start or today,
+            "periodEndDate": today,
+            "accountIds": [int(account_id) for account_id in account_ids],
+        }
+        data = self.request("POST", "dashboards/accountbalance", json_data=body,
+                            timeout=15, max_retries_429=0)
+        if data is None:
+            return None
+        return data.get("items", []) if isinstance(data, dict) else data
+
+    def create_outcome_operation(
+        self,
+        account_id: Any,
+        operation_date: str,
+        items: List[Dict[str, Any]],
+        comment: str = "",
+        is_committed: bool = True,
+        external_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Создать расходную операцию (POST /operations/outcome) — трата с рабочей
+        карты. Обязательны accountId и operationDate; сумма идёт ТОЛЬКО через
+        items[] (верхнеуровневые value/valueByProjects помечены deprecated).
+
+        items: [{"value", "calculationDate", "isCalculationCommitted",
+                 "operationCategoryId", "projectId", "contrAgentId"}, ...]
+
+        comment обязан содержать маркер вида [cardexp:123]: искать свою операцию
+        по externalId нечем — searchString в operations/list ищет по тексту.
+        Без маркера падение процесса между записью в ПланФакт и записью признака
+        в нашу базу приведёт к дублю на следующем прогоне.
+
+        Возвращает созданную операцию (в ней operationId) или None.
+        """
+        body: Dict[str, Any] = {
+            "accountId": int(account_id),
+            "operationDate": operation_date,
+            "comment": comment or "",
+            "isCommitted": is_committed,
+            "items": items,
+        }
+        if external_id:
+            body["externalId"] = external_id
+        return self.request("POST", "operations/outcome", json_data=body)
+
+    def create_move_operation(
+        self,
+        debiting_account_id: Any,
+        admission_account_id: Any,
+        operation_date: str,
+        debiting_items: List[Dict[str, Any]],
+        admission_items: Optional[List[Dict[str, Any]]] = None,
+        comment: str = "",
+        is_committed: bool = True,
+        external_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Создать перемещение (POST /operations/move) — пополнение рабочей карты
+        с расчётного счёта.
+
+        Даты списания и зачисления раздельные, но у нас перевод мгновенный,
+        поэтому обе равны operation_date. Суммы — через debitingItems/
+        admissionItems (верхнеуровневые debitingValue/admissionValue deprecated).
+
+        ПланФакт создаёт на одно перемещение ДВЕ операции с общим
+        boundMoveOperationId (списание и зачисление), и в списке пара даёт 0 —
+        это нормально, а не потерянная сумма.
+        """
+        body: Dict[str, Any] = {
+            "debitingAccountId": int(debiting_account_id),
+            "admissionAccountId": int(admission_account_id),
+            "debitingDate": operation_date,
+            "admissionDate": operation_date,
+            "comment": comment or "",
+            "isCommitted": is_committed,
+            "debitingItems": debiting_items,
+            "admissionItems": admission_items if admission_items is not None else debiting_items,
+        }
+        if external_id:
+            body["debitingExternalId"] = external_id
+            body["admissionExternalId"] = external_id
+        return self.request("POST", "operations/move", json_data=body)
 
     def get_operation_categories(self, operation_category_type: str = "Outcome") -> Optional[List[Dict[str, Any]]]:
         """Справочник статей операций указанного типа (по умолчанию — расходы). См. get_projects — та же обёртка {"items": [...]}."""

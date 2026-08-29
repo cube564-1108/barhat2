@@ -433,6 +433,13 @@ def init_invoices_tables():
 
     conn.close()
 
+    # Справочник рабочих карт (план 2026-08-29). Импорт локальный: cards.py
+    # берёт get_db отсюда, и импорт на уровне модуля был бы циклическим.
+    # Вызов после close() — у карт своё соединение, а сид привязок читает
+    # stores, которую создаёт модуль кассовых смен (он стартует раньше).
+    from .cards import init_cards_tables
+    init_cards_tables()
+
 
 def _ensure_invoices_migrated(conn: sqlite3.Connection):
     """

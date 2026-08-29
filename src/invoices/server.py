@@ -119,6 +119,15 @@ from .storage import (
     resolve_planfact_unmatched,
     get_invoice_by_match_code,
 )
+from .cards import (
+    list_cards,
+    get_card_by_id,
+    get_cards_for_user,
+    create_card,
+    update_card,
+    deactivate_card,
+    is_valid_account_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +252,145 @@ def set_payer_bank_requisites(payer_id):
     )
     log_action(current_user.username, "set_payer_bank_requisites", str(payer_id))
     return jsonify({"ok": True, "payer": get_payer_by_id(payer_id)})
+
+
+# =============================================================================
+# РАБОЧИЕ КАРТЫ (план 2026-08-29, Фаза 0)
+# =============================================================================
+#
+# Карта — подотчётный счёт в ПланФакте, привязанный к городу (а не к
+# сотруднику): управляющие меняются, карта остаётся. Справочник правит только
+# админ; управляющий видит карты своих салонов, чтобы выбрать её в заявке.
+
+
+@invoices_bp.route("/work-cards", methods=["GET"])
+@section_required(*INVOICE_SECTIONS)
+def get_work_cards():
+    """
+    Карты, доступные текущему пользователю. Админу — все активные, остальным —
+    те, чьи салоны пересекаются с его салонами. `?all=true` (только админ) —
+    вместе с деактивированными, для экрана справочника.
+    """
+    if request.args.get("all", "").lower() == "true" and current_user.role == "admin":
+        return jsonify({"work_cards": list_cards(active_only=False)})
+    return jsonify({"work_cards": get_cards_for_user(current_user.username, current_user.role)})
+
+
+def _card_payload_error(data, *, require_all: bool):
+    """
+    Общая проверка тела для создания и правки: два набора правил на одни данные
+    неизбежно разъезжаются.
+
+    accountId проверяем на сервере, а не только фильтром на вводе: нечисловое
+    значение уже роняло прогон разноски внутри цикла по операциям и обрывало
+    обработку всех остальных записей.
+    """
+    if require_all or "title" in data:
+        if not (data.get("title") or "").strip():
+            return "Название карты обязательно"
+
+    for field, label in (("planfact_account_id", "Счёт карты в ПланФакте"),
+                         ("source_planfact_account_id", "Счёт, с которого пополняется карта")):
+        if require_all or field in data:
+            if not is_valid_account_id(data.get(field)):
+                return f"{label}: нужен числовой идентификатор счёта"
+
+    if "store_ids" in data:
+        if not isinstance(data["store_ids"], list):
+            return "Салоны должны приходить списком"
+        for store_id in data["store_ids"]:
+            if not get_store_by_id(store_id):
+                return f"Некорректный салон в списке: {store_id}"
+    return None
+
+
+@invoices_bp.route("/work-cards", methods=["POST"])
+@role_required("admin")
+def add_work_card():
+    data = request.get_json(silent=True) or {}
+    error = _card_payload_error(data, require_all=True)
+    if error:
+        return jsonify({"error": error}), 400
+
+    card_id = create_card(
+        title=data["title"].strip(),
+        planfact_account_id=str(data["planfact_account_id"]).strip(),
+        source_planfact_account_id=str(data["source_planfact_account_id"]).strip(),
+        store_ids=data.get("store_ids") or [],
+        planfact_account_title=(data.get("planfact_account_title") or "").strip() or None,
+        source_planfact_account_title=(data.get("source_planfact_account_title") or "").strip() or None,
+    )
+    log_action(current_user.username, "create_work_card", f"{card_id}: {data['title'].strip()}")
+    return jsonify({"ok": True, "work_card": get_card_by_id(card_id)}), 201
+
+
+@invoices_bp.route("/work-cards/<int:card_id>", methods=["PUT"])
+@role_required("admin")
+def edit_work_card(card_id):
+    if not get_card_by_id(card_id):
+        return jsonify({"error": "Карта не найдена"}), 404
+
+    data = request.get_json(silent=True) or {}
+    error = _card_payload_error(data, require_all=False)
+    if error:
+        return jsonify({"error": error}), 400
+
+    values = {}
+    for field in ("title", "planfact_account_id", "planfact_account_title",
+                  "source_planfact_account_id", "source_planfact_account_title"):
+        if field in data:
+            values[field] = (str(data[field] or "").strip() or None)
+    if "is_active" in data:
+        values["is_active"] = 1 if data["is_active"] else 0
+
+    update_card(card_id, values, store_ids=data.get("store_ids"))
+    log_action(current_user.username, "update_work_card", str(card_id))
+    return jsonify({"ok": True, "work_card": get_card_by_id(card_id)})
+
+
+@invoices_bp.route("/work-cards/<int:card_id>", methods=["DELETE"])
+@role_required("admin")
+def remove_work_card(card_id):
+    """Мягкое удаление: заявки прошлых месяцев ссылаются на карту по id."""
+    if not get_card_by_id(card_id):
+        return jsonify({"error": "Карта не найдена"}), 404
+    deactivate_card(card_id)
+    log_action(current_user.username, "delete_work_card", str(card_id))
+    return jsonify({"ok": True})
+
+
+@invoices_bp.route("/planfact/accounts", methods=["GET"])
+@role_required("admin")
+def get_planfact_accounts():
+    """
+    Счета ПланФакта для выпадающих списков в справочнике карт.
+
+    Живой вызов без кэша, поэтому — короткий таймаут и без ретраев (см.
+    request() в planfact/client.py, инцидент 2026-08-17: справочные вызовы
+    из UI заняли обоих воркеров и подвесили сайт). Ошибка ПланФакта здесь не
+    фатальна: id счёта можно вписать руками.
+    """
+    from planfact.client import get_client
+
+    try:
+        accounts = get_client().get_accounts(active_only=True)
+    except Exception:
+        logger.exception("get_planfact_accounts упал")
+        accounts = None
+
+    if accounts is None:
+        return jsonify({"accounts": [], "error": "ПланФакт не ответил — впишите id счёта вручную"})
+
+    return jsonify({"accounts": [
+        {
+            "account_id": account.get("accountId"),
+            # Названия счетов в ПФ грязные (двойные и хвостовые пробелы),
+            # схлопываем для показа; id при этом остаётся ключом
+            "title": " ".join((account.get("title") or "").split()),
+            "company": (account.get("company") or {}).get("title"),
+        }
+        for account in accounts
+    ]})
 
 
 # =============================================================================
