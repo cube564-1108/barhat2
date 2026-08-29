@@ -295,6 +295,51 @@ def _replace_card_stores(conn: sqlite3.Connection, card_id: int, store_ids: List
         )
 
 
+def get_cards_balances() -> Dict[int, Dict[str, float]]:
+    """
+    Подотчёт по каждой карте одним запросом: сколько выдано, сколько отчитано,
+    сколько ждёт подтверждения и что в остатке.
+
+    Считается по нашим заявкам, а не по ПланФакту: остаток из ПФ — внешний
+    вызов, ему не место в форме, которую управляющий открывает по десять раз
+    на дню. Сверка с ПФ идёт отдельно (Фаза 4).
+
+    Выдано — только пополнения в статусе `paid`: согласованное, но ещё не
+    переведённое на карту не лежит. Потрачено считаем в двух корзинах:
+    подтверждённое владельцем и ждущее подтверждения. В остаток входят обе —
+    деньги ушли с карты независимо от того, посмотрел ли на трату владелец.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT card_id, kind, status, COALESCE(SUM(amount), 0) AS total
+            FROM invoices
+            WHERE card_id IS NOT NULL AND status != 'rejected'
+            GROUP BY card_id, kind, status
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    balances: Dict[int, Dict[str, float]] = {}
+    for row in rows:
+        card = balances.setdefault(
+            row["card_id"], {"issued": 0.0, "spent_confirmed": 0.0, "spent_pending": 0.0, "balance": 0.0}
+        )
+        if row["kind"] == "card_topup" and row["status"] == "paid":
+            card["issued"] += row["total"]
+        elif row["kind"] == "card_expense":
+            key = "spent_pending" if row["status"] == "on_approval" else "spent_confirmed"
+            card[key] += row["total"]
+
+    for card in balances.values():
+        card["balance"] = round(card["issued"] - card["spent_confirmed"] - card["spent_pending"], 2)
+        for key in ("issued", "spent_confirmed", "spent_pending"):
+            card[key] = round(card[key], 2)
+    return balances
+
+
 def get_cards_for_user(username: str, role: str) -> List[Dict[str, Any]]:
     """
     Карты, доступные пользователю: админу — все, остальным — те, чьи салоны

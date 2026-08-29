@@ -1,5 +1,5 @@
 """
-Прогон Фазы 1 плана plans/2026-08-29-рабочие-карты.md — три типа заявки.
+Прогон Фаз 1-2 плана plans/2026-08-29-рабочие-карты.md — три типа заявки.
 
 Проверяет на РЕАЛЬНОМ бэкенде (настоящие auth_bp и invoices_bp в минимальном
 Flask-приложении на временной базе), что:
@@ -8,7 +8,9 @@ Flask-приложении на временной базе), что:
   * карточные заявки не уходят в банк и не попадают в старый REF-синк
     (иначе пополнение легло бы расходом и рубль учёлся бы дважды),
   * управляющий не может списать с чужой карты и отправить расход в чужой салон,
-  * платёжные KPI-плитки не засоряются тратами с карты.
+  * платёжные KPI-плитки не засоряются тратами с карты,
+  * остаток подотчёта считается верно, а фильтры по типу и карте работают,
+  * пополнение без распределения видно в списке всем управляющим своего города.
 
 Запуск: python scripts/test_card_invoices.py
 """
@@ -51,9 +53,10 @@ from cashshifts.storage import init_cashshifts_tables, get_all_stores  # noqa: E
 from invoices.storage import (  # noqa: E402
     init_invoices_tables, get_all_expense_categories, create_city, create_payer,
     get_invoice_by_id, get_invoices_summary, approve_invoice, user_can_access_invoice,
+    mark_invoice_paid,
 )
 from invoices.server import invoices_bp, _send_invoice_to_bank, _match_planfact_operation  # noqa: E402
-from invoices.cards import list_cards  # noqa: E402
+from invoices.cards import list_cards, get_cards_balances  # noqa: E402
 
 failures = []
 
@@ -256,6 +259,52 @@ def main():
         response = client.put(f"/api/invoices/{topup['id']}", json={'amount': 60000})
         check(response.status_code == 200,
               "сумму пополнения можно поправить, распределение с него не требуют")
+
+    print("\n10. Остаток подотчёта по карте")
+    # Пополнение 60 000 переведено, трата 1 250 ждёт подтверждения
+    mark_invoice_paid(topup['id'], 'admin_test')
+    balances = get_cards_balances()
+    nsk = balances.get(nsk_card['id'], {})
+    check(nsk.get('issued') == 60000, f"выдано 60000 (получено {nsk.get('issued')})")
+    check(nsk.get('spent_pending') == 1250, f"ждёт подтверждения 1250 (получено {nsk.get('spent_pending')})")
+    check(nsk.get('balance') == 58750, f"остаток 58750 (получено {nsk.get('balance')})")
+
+    with app.test_client() as client:
+        login(client, 'nsk_manager')
+        response = client.get('/api/invoices/work-cards?with_balance=true')
+        card = response.get_json()['work_cards'][0]
+        check(card.get('balance', {}).get('balance') == 58750,
+              "остаток приходит в списке карт для формы")
+
+    print("\n11. Фильтры списка по типу и карте")
+    with app.test_client() as client:
+        login(client, 'admin_test')
+        response = client.get('/api/invoices?kind=card_expense')
+        rows = response.get_json()['invoices']
+        check(len(rows) == 1 and rows[0]['kind'] == 'card_expense',
+              f"фильтр по типу отдаёт только траты (получено {len(rows)})")
+
+        response = client.get(f"/api/invoices?card_id={nsk_card['id']}")
+        rows = response.get_json()['invoices']
+        check(len(rows) == 2, f"фильтр по карте отдаёт обе её заявки (получено {len(rows)})")
+
+        response = client.get('/api/invoices?kind=invoice')
+        rows = response.get_json()['invoices']
+        check(len(rows) == 1 and rows[0]['kind'] == 'invoice',
+              "обычные счета отбираются отдельно от карточных")
+
+    print("\n12. Пополнение видно в СПИСКЕ второму управляющему города")
+    with app.test_client() as client:
+        login(client, 'nsk_manager2')
+        rows = client.get('/api/invoices').get_json()['invoices']
+        check(any(row['id'] == topup['id'] for row in rows),
+              "заявку без распределения находит видимость по карте, а не по строкам")
+
+    with app.test_client() as client:
+        login(client, 'chlb_manager')
+        rows = client.get('/api/invoices').get_json()['invoices']
+        check(not any(row['id'] == topup['id'] for row in rows),
+              "управляющему другого города чужое пополнение в списке не показывается")
 
     print("\n" + "=" * 60)
     if failures:

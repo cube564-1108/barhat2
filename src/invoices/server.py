@@ -128,6 +128,7 @@ from .cards import (
     deactivate_card,
     is_valid_account_id,
     user_can_use_card,
+    get_cards_balances,
 )
 
 logger = logging.getLogger(__name__)
@@ -273,8 +274,21 @@ def get_work_cards():
     вместе с деактивированными, для экрана справочника.
     """
     if request.args.get("all", "").lower() == "true" and current_user.role == "admin":
-        return jsonify({"work_cards": list_cards(active_only=False)})
-    return jsonify({"work_cards": get_cards_for_user(current_user.username, current_user.role)})
+        cards = list_cards(active_only=False)
+    else:
+        cards = get_cards_for_user(current_user.username, current_user.role)
+
+    # Остаток подотчёта считается только по запросу: форма траты его показывает,
+    # а справочнику и выпадающим спискам он не нужен — лишний GROUP BY по
+    # счетам на каждое открытие раздела ни к чему на медленном /data.
+    if request.args.get("with_balance", "").lower() == "true":
+        balances = get_cards_balances()
+        for card in cards:
+            card["balance"] = balances.get(card["id"], {
+                "issued": 0.0, "spent_confirmed": 0.0, "spent_pending": 0.0, "balance": 0.0,
+            })
+
+    return jsonify({"work_cards": cards})
 
 
 def _card_payload_error(data, *, require_all: bool):
@@ -478,6 +492,9 @@ def get_invoices():
 
     filters = {
         "status": statuses,
+        # Тип заявки и карта: счёт на оплату / трата с карты / пополнение
+        "kind": [value for value in _arg_list("kind") if value in INVOICE_KINDS],
+        "card_id": _arg_int_list("card_id"),
         "store_id": _arg_int_list("store_id"),
         "city_id": _arg_int_list("city_id"),
         "payer_id": _arg_int_list("payer_id"),

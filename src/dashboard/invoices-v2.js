@@ -41,6 +41,7 @@
      */
     const COLS = [
         { key: 'number',       label: 'Номер',             sort: 'id' },
+        { key: 'kind',         label: 'Тип' },
         { key: 'city',         label: 'Город',             sort: 'city' },
         { key: 'counterparty', label: 'Контрагент',        sort: 'counterparty_name' },
         { key: 'payer',        label: 'На кого выставлен', sort: 'payer' },
@@ -96,6 +97,8 @@
     const FILTERS = [
         { key: 'counterparty',        label: 'Контрагент',          type: 'text',   placeholder: 'название или ИНН' },
         { key: 'payment_purpose',     label: 'Назначение платежа',  type: 'text',   placeholder: 'текст в назначении' },
+        { key: 'kind',                label: 'Тип заявки',          type: 'select', ref: 'kinds',      any: 'Все типы' },
+        { key: 'card_id',             label: 'Рабочая карта',       type: 'select', ref: 'cardOptions', any: 'Все карты' },
         { key: 'city_id',             label: 'Город',               type: 'select', ref: 'cities',     any: 'Все города' },
         { key: 'store_id',            label: 'Салон / проект',      type: 'select', ref: 'stores',     any: 'Все салоны' },
         { key: 'payer_id',            label: 'На кого выставлен',   type: 'select', ref: 'payers',     any: 'Все' },
@@ -180,7 +183,7 @@
     const state = {
         user: null,
         view: 'queue',
-        refs: { cities: [], payers: [], categories: [], stores: [], authors: [], statuses: [], vatOptions: [] },
+        refs: { cities: [], payers: [], categories: [], stores: [], authors: [], statuses: [], vatOptions: [], workCards: [], cardOptions: [], kinds: [] },
         refsLoaded: false,
         filters: emptyFilters(),
         showArchived: false,
@@ -504,14 +507,23 @@
 
     async function loadReferences() {
         if (state.refsLoaded) return;
-        const [cities, payers, categories, stores, authors, vat] = await Promise.all([
+        const [cities, payers, categories, stores, authors, vat, cards] = await Promise.all([
             apiGet('/api/invoices/cities').catch(() => ({ cities: [] })),
             apiGet('/api/invoices/payers').catch(() => ({ payers: [] })),
             apiGet('/api/invoices/categories').catch(() => ({ categories: [] })),
             apiGet('/api/invoices/stores').catch(() => ({ stores: [] })),
             apiGet('/api/invoices/authors').catch(() => ({ authors: [] })),
             apiGet('/api/invoices/vat-options').catch(() => ({ 'vat-options': [] })),
+            // Остаток подотчёта нужен форме траты, поэтому берём его сразу
+            // здесь: отдельный запрос при каждом открытии формы упирался бы в
+            // медленный /data на проде
+            apiGet('/api/invoices/work-cards?with_balance=true').catch(() => ({ work_cards: [] })),
         ]);
+        state.refs.workCards = cards.work_cards || [];
+        // Фильтры и выпадающие списки ждут пары {id, name}: у карты поле
+        // называется title, поэтому держим отдельный, уже приведённый список
+        state.refs.cardOptions = state.refs.workCards.map(card => ({ id: card.id, name: card.title }));
+        state.refs.kinds = Object.keys(KIND_META).map(kind => ({ id: kind, name: KIND_META[kind].label }));
         state.refs.cities = cities.cities || [];
         state.refs.payers = payers.payers || [];
         state.refs.categories = categories.categories || [];
@@ -636,15 +648,51 @@
                 ${escapeHtml(tool.label)}
             </button>`).join('') : '';
 
+        // Тип заявки выбирается ДО формы: у счёта, траты с карты и пополнения
+        // разные обязательные поля, и переключатель внутри формы означал бы
+        // поля, которые то появляются, то исчезают под руками.
         host.innerHTML = toolButtons + `
-            <button class="bx-btn bx-btn--light" type="button" id="iv2NewInvoice">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="1.75" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-                Новый счёт
-            </button>`;
+            <div class="iv2-newmenu">
+                <button class="bx-btn bx-btn--light" type="button" id="iv2NewInvoice" aria-haspopup="true" aria-expanded="false">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.75" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                    Создать
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.75" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="iv2-newmenu__list" id="iv2NewMenu" hidden>
+                    ${Object.keys(KIND_META).map(kind => `
+                        <button class="iv2-newmenu__item" type="button" data-new-kind="${kind}">
+                            ${escapeHtml(KIND_META[kind].label)}
+                        </button>`).join('')}
+                </div>
+            </div>`;
 
         const button = $('iv2NewInvoice');
-        if (button) button.addEventListener('click', () => openForm('create'));
+        const menu = $('iv2NewMenu');
+        if (button && menu) {
+            const closeMenu = () => {
+                menu.hidden = true;
+                button.setAttribute('aria-expanded', 'false');
+            };
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                menu.hidden = !menu.hidden;
+                button.setAttribute('aria-expanded', String(!menu.hidden));
+            });
+            menu.querySelectorAll('[data-new-kind]').forEach(item => {
+                item.addEventListener('click', () => {
+                    closeMenu();
+                    openForm('create', null, item.getAttribute('data-new-kind'));
+                });
+            });
+            // Клик мимо и Esc закрывают меню: в iframe Пульса «залипшее»
+            // выпадающее меню перекрывает таблицу и выглядит поломкой
+            document.addEventListener('click', closeMenu);
+            document.addEventListener('keydown', event => {
+                if (event.key === 'Escape') closeMenu();
+            });
+        }
         host.querySelectorAll('[data-tool]').forEach(element => {
             element.addEventListener('click', () => openTool(element.getAttribute('data-tool')));
         });
@@ -1551,6 +1599,21 @@
      * Ячейка распределения. При одной строке показываем и салон, и статью:
      * без статьи колонка отвечает лишь на половину вопроса «куда ушли деньги».
      */
+    /**
+     * Тип заявки в таблице. У карточных рядом с типом видно карту: без неё в
+     * общем списке не понять, чей это подотчёт, а фильтр по карте есть не
+     * всегда под рукой.
+     */
+    function kindCell(invoice) {
+        const kind = invoice.kind || 'invoice';
+        const meta = KIND_META[kind];
+        if (!meta || kind === 'invoice') return '<span class="iv2-hint">Счёт</span>';
+
+        const card = (state.refs.workCards || []).find(item => String(item.id) === String(invoice.card_id));
+        return `<span class="bx-badge b-card">${escapeHtml(meta.label)}</span>`
+            + (card ? `<div class="iv2-hint">${escapeHtml(card.title)}</div>` : '');
+    }
+
     function allocCell(invoice) {
         const items = invoice.line_items || [];
         if (!items.length) return '<span class="iv2-hint">не распределён</span>';
@@ -1589,6 +1652,7 @@
     function cellContent(col, invoice) {
         switch (col.key) {
             case 'number': return `<button class="iv2-linkish iv2-linkish--num" type="button" data-open="${invoice.id}">${escapeHtml(invoice.invoice_number || ('#' + invoice.id))}</button>`;
+            case 'kind': return kindCell(invoice);
             case 'city': return escapeHtml(invoice.city_name || '—');
             case 'counterparty': return escapeHtml(invoice.counterparty_name || '—');
             case 'payer': return escapeHtml(invoice.payer_name || '—');
@@ -3370,15 +3434,81 @@
         edit: 'Редактирование счёта',
     };
 
+    /**
+     * Три типа заявки (план 2026-08-29). Тип выбирается один раз при создании и
+     * определяет и форму, и маршрут согласования, и то, какая операция уедет в
+     * ПланФакт, — поэтому в режиме правки он только читается.
+     *
+     * card_expense — трата уже совершена: вместо срока оплаты дата траты, вместо
+     * скана счёта фото чека, контрагента и НДС нет.
+     * card_topup — перемещение денег между своими счетами: распределения по
+     * статьям нет вовсе, расход появится, когда деньги потратят.
+     */
+    const KIND_META = {
+        invoice: {
+            label: 'Счёт на оплату',
+            createTitle: 'Новый счёт',
+            submitText: 'Создать счёт',
+            createdToast: 'Счёт создан и отправлен на согласование',
+            documentsTitle: 'Документ (скан счёта)',
+            dateLabel: 'Дата оплаты (план)',
+            dateField: 'due_date',
+            purposeLabel: 'Назначение платежа',
+            amountLabel: 'Сумма счёта, ₽',
+            hasCounterparty: true,
+            hasAllocation: true,
+        },
+        card_expense: {
+            label: 'Расход с карты',
+            createTitle: 'Расход с рабочей карты',
+            submitText: 'Отправить на согласование',
+            createdToast: 'Трата записана и отправлена на согласование',
+            documentsTitle: 'Чек',
+            dateLabel: 'Дата траты',
+            dateField: 'spent_at',
+            purposeLabel: 'На что потрачено',
+            amountLabel: 'Сумма траты, ₽',
+            hasCounterparty: false,
+            hasAllocation: true,
+        },
+        card_topup: {
+            label: 'Пополнение карты',
+            createTitle: 'Пополнение рабочей карты',
+            submitText: 'Отправить на согласование',
+            createdToast: 'Заявка на пополнение отправлена на согласование',
+            documentsTitle: 'Документы',
+            dateLabel: 'Когда нужны деньги',
+            dateField: 'due_date',
+            purposeLabel: 'Комментарий для согласующего',
+            amountLabel: 'Сумма пополнения, ₽',
+            hasCounterparty: false,
+            hasAllocation: false,
+        },
+    };
+
+    function formKind() {
+        return KIND_META[state.form.kind] ? state.form.kind : 'invoice';
+    }
+
+    function formMeta() {
+        return KIND_META[formKind()];
+    }
+
+    function isCardForm() {
+        return formKind() !== 'invoice';
+    }
+
     function emptyForm() {
         const values = {
             city_id: '', payer_id: '', vat_id: '', due_date: '',
             amount: '', payment_purpose: '', comment: '',
+            card_id: '', spent_at: '',
         };
         COUNTERPARTY_FIELDS.forEach(f => { values[f.key] = ''; });
         return {
             open: false,
             mode: 'create',
+            kind: 'invoice',
             invoiceId: null,
             values,
             items: [],
@@ -3426,14 +3556,25 @@
         return host;
     }
 
-    function openForm(mode, invoiceId) {
+    function openForm(mode, invoiceId, kind) {
         const form = emptyForm();
         form.open = true;
         form.mode = mode;
+        form.kind = KIND_META[kind] ? kind : 'invoice';
 
         if (mode === 'create') {
             form.values.due_date = today();
             form.items = [{ store_id: '', expense_category_id: '', amount: '' }];
+
+            if (form.kind !== 'invoice') {
+                // Дата траты по умолчанию сегодняшняя, но её видно и можно
+                // поменять: занесли 30-го трату от 25-го — отчёт за месяц
+                // поедет, если дату молча подставить и спрятать.
+                form.values.spent_at = today();
+                const cards = state.refs.workCards || [];
+                if (cards.length === 1) form.values.card_id = String(cards[0].id);
+                form.openSections = { main: true, documents: true, requisites: false, allocation: true };
+            }
         } else {
             const details = state.details[invoiceId];
             if (!details) {
@@ -3442,6 +3583,11 @@
             }
             const invoice = details.invoice;
             form.invoiceId = mode === 'edit' ? invoiceId : null;
+            // Тип берём у самой заявки: сменить его правкой нельзя, он задаёт
+            // и маршрут согласования, и то, что уедет в ПланФакт
+            form.kind = KIND_META[invoice.kind] ? invoice.kind : 'invoice';
+            form.values.card_id = invoice.card_id || '';
+            form.values.spent_at = invoice.spent_at || (form.kind === 'card_expense' ? today() : '');
             form.values.city_id = invoice.city_id || '';
             form.values.payer_id = invoice.payer_id || '';
             form.values.vat_id = invoice.vat_id || '';
@@ -3512,11 +3658,27 @@
         ).join('');
     }
 
+    /**
+     * Салоны, доступные в распределении. У траты с карты — только салоны этой
+     * карты: карта привязана к городу, и без сужения управляющий из Барнаула
+     * отправил бы расход в проект Челябинска. Сервер это тоже проверяет, но
+     * ошибку лучше не показывать вовсе, чем показывать после нажатия кнопки.
+     */
+    function allocationStores() {
+        if (formKind() !== 'card_expense') return state.refs.stores;
+        const card = selectedFormCard();
+        if (!card) return [];
+        const allowed = new Set((card.store_ids || []).map(String));
+        return (state.refs.stores || []).filter(store => allowed.has(String(store.id)));
+    }
+
     function allocationRowsHtml() {
+        const stores = allocationStores();
         return state.form.items.map((item, index) => `
             <div class="iv2-arow">
                 <select class="iv2-select" data-item="${index}" data-item-field="store_id">
-                    ${selectOptions(state.refs.stores, item.store_id, 'Салон / проект')}
+                    ${selectOptions(stores, item.store_id,
+                        stores.length ? 'Салон / проект' : 'Сначала выберите карту')}
                 </select>
                 <select class="iv2-select" data-item="${index}" data-item-field="expense_category_id">
                     ${selectOptions(state.refs.categories, item.expense_category_id, 'Статья расхода')}
@@ -3577,12 +3739,16 @@
             ? (state.details[state.form.invoiceId].attachments || []).length
             : 0;
 
+        // У траты с карты документ — чек: он и есть основание расхода, поэтому
+        // на телефоне кнопка камеры для неё важнее выбора файла с диска
+        const isReceipt = formKind() === 'card_expense';
         return `
             <div class="iv2-drop" data-drop="form">
-                <div class="iv2-drop__title">Приложите счёт</div>
+                <div class="iv2-drop__title">${isReceipt ? 'Приложите чек' : 'Приложите счёт'}</div>
                 <div class="iv2-drop__hint">Вставьте скрин из буфера (Ctrl+V), перетащите файл сюда
                     или выберите на диске.
-                    <span class="iv2-only-touch">Можно сфотографировать счёт камерой.</span></div>
+                    <span class="iv2-only-touch">Можно сфотографировать
+                        ${isReceipt ? 'чек' : 'счёт'} камерой.</span></div>
                 <div class="iv2-drop__btns">
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-form-act="pick-file">Выбрать файл</button>
                     <button class="bx-btn bx-btn--ghost bx-btn--sm iv2-only-touch" type="button" data-form-act="take-photo">Сфотографировать</button>
@@ -3696,9 +3862,22 @@
             : (requisitesFilled() ? '<span class="bx-badge b-appr">полные</span>'
                                   : '<span class="bx-badge b-rej">неполные</span>');
 
-        const mainBody = `
-            <div class="iv2-grid2">
-                <div class="iv2-field">
+        const meta = formMeta();
+        const dateField = meta.dateField;
+
+        // У карточной заявки ни города, ни плательщика, ни НДС: платим своими
+        // деньгами, платёжка в банк не формируется, счёт от контрагента не
+        // приходит. Вместо них — карта и её остаток.
+        const headFields = isCardForm()
+            ? `<div class="iv2-field">
+                    <label class="iv2-field__label" for="iv2form-card_id">Рабочая карта <span class="iv2-req">*</span></label>
+                    <select class="iv2-select" id="iv2form-card_id" data-form-field="card_id">
+                        ${selectOptions((state.refs.workCards || []).map(card => ({ id: card.id, name: card.title })),
+                                        values.card_id, 'Выберите карту')}
+                    </select>
+                    ${cardBalanceHintHtml(values.card_id)}
+                </div>`
+            : `<div class="iv2-field">
                     <label class="iv2-field__label" for="iv2form-city_id">Город <span class="iv2-req">*</span></label>
                     <select class="iv2-select" id="iv2form-city_id" data-form-field="city_id">
                         ${selectOptions(state.refs.cities, values.city_id, 'Выберите город')}
@@ -3709,26 +3888,31 @@
                     <select class="iv2-select" id="iv2form-payer_id" data-form-field="payer_id">
                         ${selectOptions(state.refs.payers, values.payer_id, 'Выберите плательщика')}
                     </select>
+                </div>`;
+
+        const mainBody = `
+            <div class="iv2-grid2">
+                ${headFields}
+                <div class="iv2-field">
+                    <label class="iv2-field__label" for="iv2form-${dateField}">${escapeHtml(meta.dateLabel)} <span class="iv2-req">*</span></label>
+                    <input class="iv2-input" type="date" id="iv2form-${dateField}" data-form-field="${dateField}"
+                           value="${escapeHtml(values[dateField] || '')}">
                 </div>
                 <div class="iv2-field">
-                    <label class="iv2-field__label" for="iv2form-due_date">Дата оплаты (план) <span class="iv2-req">*</span></label>
-                    <input class="iv2-input" type="date" id="iv2form-due_date" data-form-field="due_date"
-                           value="${escapeHtml(values.due_date)}">
-                </div>
-                <div class="iv2-field">
-                    <label class="iv2-field__label" for="iv2form-amount">Сумма счёта, ₽ <span class="iv2-req">*</span></label>
+                    <label class="iv2-field__label" for="iv2form-amount">${escapeHtml(meta.amountLabel)} <span class="iv2-req">*</span></label>
                     <input class="iv2-input" type="number" step="0.01" min="0" id="iv2form-amount"
                            data-form-field="amount" value="${escapeHtml(values.amount)}">
                 </div>
+                ${isCardForm() ? '' : `
                 <div class="iv2-field">
                     <label class="iv2-field__label" for="iv2form-vat_id">НДС</label>
                     <select class="iv2-select" id="iv2form-vat_id" data-form-field="vat_id">
                         ${selectOptions(state.refs.vatOptions, values.vat_id, 'Не указан')}
                     </select>
-                </div>
+                </div>`}
             </div>
             <div class="iv2-field">
-                <label class="iv2-field__label" for="iv2form-payment_purpose">Назначение платежа <span class="iv2-req">*</span></label>
+                <label class="iv2-field__label" for="iv2form-payment_purpose">${escapeHtml(meta.purposeLabel)} <span class="iv2-req">*</span></label>
                 <textarea class="iv2-textarea" id="iv2form-payment_purpose" rows="2"
                           data-form-field="payment_purpose">${escapeHtml(values.payment_purpose)}</textarea>
             </div>
@@ -3784,7 +3968,9 @@
             <div class="iv2-modal iv2-modal--form">
                 <div class="iv2-modal__box">
                     <div class="iv2-modal__head">
-                        <h3 class="bx-card__title">${escapeHtml(FORM_TITLES[state.form.mode])}</h3>
+                        <h3 class="bx-card__title">${escapeHtml(
+                            state.form.mode === 'create' ? meta.createTitle : FORM_TITLES[state.form.mode]
+                            + (isCardForm() ? ` · ${meta.label}` : ''))}</h3>
                         <button class="iv2-x" type="button" id="iv2FormClose" aria-label="Закрыть">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                  stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -3792,21 +3978,27 @@
                     </div>
                     <div class="iv2-modal__body">
                         ${sectionHtml('main', 'Основное', '', mainBody)}
-                        ${sectionHtml('documents', 'Документ (скан счёта)', documentsBadge, documentsBody)}
-                        ${sectionHtml('requisites', 'Контрагент и реквизиты', requisitesBadge, requisitesBody)}
-                        ${sectionHtml('allocation', 'Распределение по салонам и статьям', allocationBadge, allocationBody)}
+                        ${sectionHtml('documents', meta.documentsTitle, documentsBadge, documentsBody)}
+                        ${meta.hasCounterparty
+                            ? sectionHtml('requisites', 'Контрагент и реквизиты', requisitesBadge, requisitesBody)
+                            : ''}
+                        ${meta.hasAllocation
+                            ? sectionHtml('allocation', 'Распределение по салонам и статьям', allocationBadge, allocationBody)
+                            : `<p class="iv2-hint">Пополнение переносит деньги между своими счетами —
+                                   распределять по статьям нечего. Расход появится, когда деньги потратят
+                                   и заведут трату с карты.</p>`}
                         ${state.form.error ? `<div class="iv2-form-error">${escapeHtml(state.form.error)}</div>` : ''}
                     </div>
                     <div class="iv2-modal__foot">
-                        ${state.form.mode === 'create'
+                        ${state.form.mode === 'create' && !isCardForm()
                             ? `<button class="bx-btn bx-btn--ghost" type="button" id="iv2FormFromTemplate">Из шаблона</button>`
                             : ''}
-                        ${isAdmin()
+                        ${isAdmin() && !isCardForm()
                             ? `<button class="bx-btn bx-btn--ghost" type="button" id="iv2FormSaveTemplate">Сохранить как шаблон</button>`
                             : ''}
                         <button class="bx-btn bx-btn--ghost" type="button" id="iv2FormCancel">Отмена</button>
                         <button class="bx-btn" type="button" id="iv2FormSave"${state.form.saving ? ' disabled' : ''}>
-                            ${state.form.mode === 'edit' ? 'Сохранить изменения' : 'Создать счёт'}
+                            ${state.form.mode === 'edit' ? 'Сохранить изменения' : escapeHtml(meta.submitText)}
                         </button>
                     </div>
                 </div>
@@ -3826,7 +4018,18 @@
                 if (COUNTERPARTY_FIELDS.some(f => f.key === field)) updateRequisiteHints(host, input, field);
             });
             if (input.tagName === 'SELECT') {
-                input.addEventListener('change', () => { state.form.values[field] = input.value; });
+                input.addEventListener('change', () => {
+                    state.form.values[field] = input.value;
+                    // Смена карты меняет и остаток над суммой, и набор салонов
+                    // в распределении — тут перерисовка нужна целиком
+                    if (field === 'card_id') {
+                        const allowed = new Set(allocationStores().map(store => String(store.id)));
+                        state.form.items.forEach(item => {
+                            if (item.store_id && !allowed.has(String(item.store_id))) item.store_id = '';
+                        });
+                        renderForm();
+                    }
+                });
             }
         });
 
@@ -4064,13 +4267,48 @@
         renderForm();
     }
 
+    /** Карта, выбранная в форме (или null). */
+    function selectedFormCard() {
+        const id = state.form.values.card_id;
+        if (!id) return null;
+        return (state.refs.workCards || []).find(card => String(card.id) === String(id)) || null;
+    }
+
+    /**
+     * Остаток подотчёта под выбором карты: управляющий должен видеть, сколько
+     * за ним ещё числится, до того как заведёт трату, а не после.
+     */
+    function cardBalanceHintHtml(cardId) {
+        const card = (state.refs.workCards || []).find(item => String(item.id) === String(cardId));
+        if (!card || !card.balance) return '';
+        const balance = card.balance;
+        const pending = balance.spent_pending > 0
+            ? ` · ждёт подтверждения ${money(balance.spent_pending)}` : '';
+        const negative = balance.balance < 0 ? ' iv2-hint--warn' : '';
+        return `<div class="iv2-hint${negative}">На карте по нашим данным ${money(balance.balance)}
+                    (выдано ${money(balance.issued)}, отчитано ${money(balance.spent_confirmed)}${pending})</div>`;
+    }
+
     function formValidationError() {
         const values = state.form.values;
-        if (!values.city_id) return 'Выберите город';
-        if (!values.payer_id) return 'Выберите, на кого выставлен счёт';
-        if (!values.due_date) return 'Укажите планируемую дату оплаты';
-        if (!(Number(values.amount) > 0)) return 'Сумма счёта должна быть больше нуля';
-        if (!String(values.payment_purpose).trim()) return 'Заполните назначение платежа';
+        const meta = formMeta();
+
+        if (isCardForm()) {
+            if (!values.card_id) return 'Выберите рабочую карту';
+            if (!values[meta.dateField]) return `Укажите: ${meta.dateLabel.toLowerCase()}`;
+        } else {
+            if (!values.city_id) return 'Выберите город';
+            if (!values.payer_id) return 'Выберите, на кого выставлен счёт';
+            if (!values.due_date) return 'Укажите планируемую дату оплаты';
+        }
+        if (!(Number(values.amount) > 0)) return 'Сумма должна быть больше нуля';
+        if (!String(values.payment_purpose).trim()) {
+            return formKind() === 'card_expense' ? 'Напишите, на что потрачено' : 'Заполните назначение платежа';
+        }
+
+        // У пополнения распределения нет по определению — деньги только
+        // переезжают между своими счетами
+        if (!meta.hasAllocation) return '';
 
         // Распределение обязательно (решение №15): нераспределённый счёт не
         // попадает ни в один разрез по салонам — теряется ровно та аналитика,
@@ -4102,7 +4340,32 @@
 
     function formPayload() {
         const values = state.form.values;
+        const meta = formMeta();
+        const lineItems = state.form.items
+            .filter(item => item.store_id && item.expense_category_id && Number(item.amount) > 0)
+            .map(item => ({
+                store_id: Number(item.store_id),
+                expense_category_id: Number(item.expense_category_id),
+                amount: Number(item.amount),
+            }));
+
+        if (isCardForm()) {
+            // Ничего лишнего: сервер всё равно обнулит город, плательщика, НДС
+            // и реквизиты у карточной заявки, но и слать их незачем
+            const payload = {
+                kind: formKind(),
+                card_id: Number(values.card_id),
+                amount: Number(values.amount),
+                payment_purpose: String(values.payment_purpose).trim(),
+                comment: String(values.comment || '').trim(),
+                line_items: meta.hasAllocation ? lineItems : [],
+            };
+            payload[meta.dateField] = values[meta.dateField];
+            return payload;
+        }
+
         const payload = {
+            kind: 'invoice',
             city_id: Number(values.city_id),
             payer_id: Number(values.payer_id),
             vat_id: values.vat_id ? Number(values.vat_id) : null,
@@ -4110,13 +4373,7 @@
             amount: Number(values.amount),
             payment_purpose: String(values.payment_purpose).trim(),
             comment: String(values.comment || '').trim(),
-            line_items: state.form.items
-                .filter(item => item.store_id && item.expense_category_id && Number(item.amount) > 0)
-                .map(item => ({
-                    store_id: Number(item.store_id),
-                    expense_category_id: Number(item.expense_category_id),
-                    amount: Number(item.amount),
-                })),
+            line_items: lineItems,
         };
         COUNTERPARTY_FIELDS.forEach(f => {
             payload[f.key] = String(values[f.key] || '').trim() || null;
@@ -4151,13 +4408,14 @@
                 if (files.length) await uploadAttachments(invoiceId, files);
                 else await refreshDetails(invoiceId);
             } else {
+                const createdToast = formMeta().createdToast;
                 const data = await apiPost('/api/invoices', payload);
                 const newId = data.invoice && data.invoice.id;
                 const files = state.form.files.map(item => item.file);
                 releaseFormFiles();
                 state.form = emptyForm();
                 renderForm();
-                toast('Счёт создан и отправлен на согласование', 'success');
+                toast(createdToast, 'success');
                 if (newId) {
                     // Счёт уже создан, поэтому неудача с файлом не должна
                     // выглядеть как неудача создания: uploadAttachments скажет,

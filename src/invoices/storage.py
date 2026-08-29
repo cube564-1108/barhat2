@@ -1860,8 +1860,55 @@ def _in_clause(column: str, values: Sequence[Any]) -> str:
     return f" {column} IN ({placeholders})"
 
 
+_HAS_CARD_COLUMNS: Optional[bool] = None
+
+
+def _has_card_columns() -> bool:
+    """
+    Появились ли колонки заявок по картам (kind/card_id). Проверяем один раз за
+    жизнь процесса: до миграции фильтры по типу и видимость по карте молча не
+    применяются, а не роняют выборку 500-й — тем же приёмом, что и
+    _clarification_column_exists.
+    """
+    global _HAS_CARD_COLUMNS
+    if _HAS_CARD_COLUMNS is None:
+        conn = get_db()
+        try:
+            _HAS_CARD_COLUMNS = (_column_exists(conn, "invoices", "kind")
+                                 and _column_exists(conn, "invoices", "card_id")
+                                 and _table_exists(conn, "work_card_stores"))
+        finally:
+            conn.close()
+    return _HAS_CARD_COLUMNS
+
+
+def _visibility_clause(store_ids: List[int]) -> str:
+    """
+    Что не-админ имеет право видеть: свои заявки, заявки со своим салоном в
+    распределении и заявки по карте своего салона.
+
+    Третья ветка нужна из-за пополнения карты: распределения у него нет вовсе,
+    по строкам его не найти, и без неё заявку видел бы только автор — хотя
+    карта в НСК, Барнауле и Челябинске одна на несколько салонов. То же правило
+    в user_can_access_invoice; здесь оно повторено на SQL, потому что список
+    фильтруется запросом, а не в Python.
+
+    Порядок плейсхолдеров: username, затем store_ids, затем ещё раз store_ids
+    (если колонки карт уже есть).
+    """
+    placeholders = ",".join("?" * len(store_ids))
+    clause = (f"i.created_by = ? OR i.id IN ("
+              f"SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders}))")
+    if _has_card_columns():
+        clause += (f" OR i.card_id IN ("
+                   f"SELECT card_id FROM work_card_stores WHERE store_id IN ({placeholders}))")
+    return clause
+
+
 def _build_invoice_filters(
     status: Optional[Union[str, Sequence[str]]] = None,
+    kind: Optional[Union[str, Sequence[str]]] = None,
+    card_id: Optional[Union[int, Sequence[int]]] = None,
     store_id: Optional[Union[int, Sequence[int]]] = None,
     city_id: Optional[Union[int, Sequence[int]]] = None,
     payer_id: Optional[Union[int, Sequence[int]]] = None,
@@ -1904,17 +1951,24 @@ def _build_invoice_filters(
 
     if restrict_username is not None:
         if restrict_store_ids:
-            placeholders = ",".join("?" * len(restrict_store_ids))
-            where += f"""
-                AND (i.created_by = ? OR i.id IN (
-                    SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders})
-                ))
-            """
+            where += " AND (" + _visibility_clause(restrict_store_ids) + ")"
             params.append(restrict_username)
             params.extend(restrict_store_ids)
+            if _has_card_columns():
+                params.extend(restrict_store_ids)
         else:
             where += " AND i.created_by = ?"
             params.append(restrict_username)
+
+    kinds = _filter_values(kind)
+    if kinds and _has_card_columns():
+        where += " AND" + _in_clause("i.kind", kinds)
+        params.extend(kinds)
+
+    card_ids = _filter_values(card_id)
+    if card_ids and _has_card_columns():
+        where += " AND" + _in_clause("i.card_id", card_ids)
+        params.extend(card_ids)
 
     statuses = _filter_values(status)
     if statuses:
@@ -2030,6 +2084,8 @@ def _build_invoice_order_by(sort: Optional[str], order: Optional[str]) -> str:
 
 def list_invoices(
     status: Optional[Union[str, Sequence[str]]] = None,
+    kind: Optional[Union[str, Sequence[str]]] = None,
+    card_id: Optional[Union[int, Sequence[int]]] = None,
     store_id: Optional[Union[int, Sequence[int]]] = None,
     city_id: Optional[Union[int, Sequence[int]]] = None,
     payer_id: Optional[Union[int, Sequence[int]]] = None,
@@ -2063,7 +2119,8 @@ def list_invoices(
     (см. _build_invoice_filters).
     """
     where, params = _build_invoice_filters(
-        status=status, store_id=store_id, city_id=city_id, payer_id=payer_id,
+        status=status, kind=kind, card_id=card_id,
+        store_id=store_id, city_id=city_id, payer_id=payer_id,
         expense_category_id=expense_category_id, created_by=created_by,
         counterparty=counterparty, payment_purpose=payment_purpose,
         created_from=created_from, created_to=created_to,
@@ -2165,14 +2222,11 @@ def get_invoices_summary(
         params: List[Any] = []
         if restrict_username is not None:
             if restrict_store_ids:
-                placeholders = ",".join("?" * len(restrict_store_ids))
-                where += f"""
-                    AND (i.created_by = ? OR i.id IN (
-                        SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders})
-                    ))
-                """
+                where += " AND (" + _visibility_clause(restrict_store_ids) + ")"
                 params.append(restrict_username)
                 params.extend(restrict_store_ids)
+                if _has_card_columns():
+                    params.extend(restrict_store_ids)
             else:
                 where += " AND i.created_by = ?"
                 params.append(restrict_username)
@@ -2230,14 +2284,11 @@ def list_invoice_authors(
     params: List[Any] = []
     if restrict_username is not None:
         if restrict_store_ids:
-            placeholders = ",".join("?" * len(restrict_store_ids))
-            where += f"""
-                AND (i.created_by = ? OR i.id IN (
-                    SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders})
-                ))
-            """
+            where += " AND (" + _visibility_clause(restrict_store_ids) + ")"
             params.append(restrict_username)
             params.extend(restrict_store_ids)
+            if _has_card_columns():
+                params.extend(restrict_store_ids)
         else:
             where += " AND i.created_by = ?"
             params.append(restrict_username)

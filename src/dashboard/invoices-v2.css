@@ -215,6 +215,9 @@
 .iv2 .b-paid   { background: var(--bx-wine); color: #fff; }
 .iv2 .b-rej    { background: rgba(0, 0, 0, 0.05); color: var(--bx-text-2); }
 .iv2 .b-arch   { background: rgba(0, 0, 0, 0.05); color: var(--bx-text-2); border: 1px dashed #cfc4cb; }
+/* Заявка по рабочей карте — розовая подложка бренда, чтобы карточные строки
+   читались в общем списке счетов с одного взгляда */
+.iv2 .b-card   { background: var(--bx-pink-wash); color: var(--bx-wine); border: 1px solid var(--bx-pink-light); }
 .iv2 .b-over   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
 .iv2 .b-today  { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
 
@@ -1644,6 +1647,42 @@
 }
 
 .iv2 .iv2-tools-bank__btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Меню «Создать»: тип заявки выбирается до формы, потому что у счёта, траты и
+   пополнения разные обязательные поля. */
+.iv2 .iv2-newmenu { position: relative; display: inline-block; }
+
+.iv2 .iv2-newmenu__list {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    z-index: 30;
+    min-width: 240px;
+    padding: 6px;
+    background: var(--bx-white);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    box-shadow: 0 12px 32px rgba(65, 19, 48, 0.16);
+}
+
+.iv2 .iv2-newmenu__item {
+    display: block;
+    width: 100%;
+    padding: 9px 12px;
+    border: 0;
+    border-radius: var(--bx-r-lg);
+    background: transparent;
+    color: var(--bx-text);
+    font-family: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.iv2 .iv2-newmenu__item:hover { background: var(--bx-bg-2); color: var(--bx-wine); }
+
+/* Остаток подотчёта ушёл в минус — управляющий должен это заметить сразу */
+.iv2 .iv2-hint--warn { color: var(--bx-down); }
 
 /* Салоны рабочей карты: чекбоксов немного (9 салонов), поэтому плоский список
    без поиска — он читается быстрее мультиселекта и виден целиком. */
