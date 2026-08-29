@@ -13,6 +13,7 @@
 
 import logging
 import sqlite3
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from .storage import get_db, _table_exists, get_user_stores
@@ -109,6 +110,17 @@ def init_cards_tables():
             CREATE INDEX IF NOT EXISTS idx_work_card_stores_store
             ON work_card_stores(store_id)
         """)
+        # Талон на тик расписания и лок прогона (см. try_claim_scheduled_run).
+        # Своя таблица, а не общий sync_state: в barhat.db его нет, а заводить
+        # общий на весь файл — значит связать модули, которые синхронизируются
+        # независимо.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS invoice_sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         conn.commit()
 
         _seed_cards_if_empty(conn)
@@ -169,6 +181,101 @@ def _seed_cards_if_empty(conn: sqlite3.Connection):
     except Exception:
         conn.rollback()
         raise
+
+
+def _now_text() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _future_text(seconds: int) -> str:
+    return (datetime.utcnow() + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def try_claim_scheduled_run(name: str, interval_seconds: int) -> bool:
+    """
+    Занять талон на очередной тик расписания. False — тик уже отработал сосед.
+
+    Лока для этого мало, и в этом проекте это уже стоило дорого: лок отвечает
+    на вопрос «идёт ли прогон прямо сейчас» и освобождается сразу по
+    завершении, а планировщик крутится в КАЖДОМ из двух gunicorn-воркеров.
+    Их тики разъезжаются на десятки секунд — первый отработал и отпустил лок,
+    через полминуты просыпается второй и делает ту же работу заново.
+
+    В value лежит время, раньше которого следующий тик не разрешён; талон не
+    освобождается по завершении, а истекает сам. Захват атомарен — один
+    UPDATE ... WHERE. Формат времени фиксированной ширины, поэтому строковое
+    сравнение совпадает с хронологическим.
+    """
+    key = f"schedule:{name}"
+    conn = get_db()
+    try:
+        conn.execute("INSERT OR IGNORE INTO invoice_sync_state (key, value) VALUES (?, '')", (key,))
+        cursor = conn.execute(
+            "UPDATE invoice_sync_state SET value = ?, updated_at = datetime('now') "
+            "WHERE key = ? AND (value = '' OR value < ?)",
+            (_future_text(interval_seconds), key, _now_text()),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception:
+        logger.exception("Не удалось занять талон расписания %s", name)
+        return False
+    finally:
+        conn.close()
+
+
+def try_acquire_sync_lock(name: str, ttl_seconds: int) -> bool:
+    """
+    Захватить лок прогона. False — держит кто-то другой.
+
+    В value — срок истечения: держатель мог умереть вместе с воркером (деплой,
+    OOM) и не позвать release, по TTL лок освободится сам.
+    """
+    key = f"lock:{name}"
+    conn = get_db()
+    try:
+        conn.execute("INSERT OR IGNORE INTO invoice_sync_state (key, value) VALUES (?, '')", (key,))
+        cursor = conn.execute(
+            "UPDATE invoice_sync_state SET value = ?, updated_at = datetime('now') "
+            "WHERE key = ? AND (value = '' OR value < ?)",
+            (_future_text(ttl_seconds), key, _now_text()),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception:
+        logger.exception("Не удалось захватить лок %s", name)
+        return False
+    finally:
+        conn.close()
+
+
+def renew_sync_lock(name: str, ttl_seconds: int) -> None:
+    """Продлить свой лок. Долгий прогон обязан это делать — иначе TTL отдаст лок соседу."""
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE invoice_sync_state SET value = ?, updated_at = datetime('now') WHERE key = ?",
+            (_future_text(ttl_seconds), f"lock:{name}"),
+        )
+        conn.commit()
+    except Exception:
+        logger.exception("Не удалось продлить лок %s", name)
+    finally:
+        conn.close()
+
+
+def release_sync_lock(name: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE invoice_sync_state SET value = '', updated_at = datetime('now') WHERE key = ?",
+            (f"lock:{name}",),
+        )
+        conn.commit()
+    except Exception:
+        logger.exception("Не удалось отпустить лок %s", name)
+    finally:
+        conn.close()
 
 
 def is_valid_account_id(value: Any) -> bool:

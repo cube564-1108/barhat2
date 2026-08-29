@@ -338,6 +338,14 @@ with app.app_context():
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц счетов на оплату: {e}")
 
+    # Фоновая разноска заявок по рабочим картам в ПланФакт. Запускается после
+    # инициализации таблиц: планировщик первым делом читает базу.
+    try:
+        from invoices.cards_sync import start_card_sync_scheduler
+        start_card_sync_scheduler()
+    except Exception as e:
+        logger.error(f"Не удалось запустить планировщик разноски карт: {e}")
+
     # Инициализация таблиц задач дашборда
     try:
         from tasks.storage import init_tasks_tables

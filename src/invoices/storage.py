@@ -1988,7 +1988,15 @@ def _build_invoice_filters(
     # Оплачен, но в ПланФакт не уехал. Раньше такие счета были неотличимы от
     # разнесённых — из-за этого сбой разноски был полностью беззвучным.
     if planfact == "unsynced" and _planfact_sync_columns_exist():
-        where += " AND i.status = 'paid' AND i.planfact_synced_at IS NULL"
+        # У траты с карты статуса «оплачен» не бывает — она ждёт разноски с
+        # момента подтверждения. Без второй ветки срез «не разнесены» показывал
+        # бы только счета, а карточные ошибки оставались бы невидимыми.
+        if _has_card_columns():
+            where += (" AND i.planfact_synced_at IS NULL AND ("
+                      "(i.kind = 'card_expense' AND i.status = 'approved')"
+                      " OR (i.kind != 'card_expense' AND i.status = 'paid'))")
+        else:
+            where += " AND i.status = 'paid' AND i.planfact_synced_at IS NULL"
 
     if clarification in ("only", "exclude") and _clarification_column_exists():
         where += (" AND i.clarification_at IS NOT NULL" if clarification == "only"

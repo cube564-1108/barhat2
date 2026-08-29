@@ -374,6 +374,38 @@ def remove_work_card(card_id):
     return jsonify({"ok": True})
 
 
+@invoices_bp.route("/work-cards/sync", methods=["POST"])
+@role_required("admin")
+def trigger_card_sync():
+    """
+    Разнести заявки по картам в ПланФакт, не дожидаясь очередного тика.
+
+    Кнопка НЕ ходит в ПланФакт сама: запускает фоновый поток и сразу отвечает.
+    Живой внешний вызов из обработчика уже дважды забирал оба воркера и клал
+    сайт целиком. `?dry_run=true` — превью без записи, выполняется синхронно:
+    оно ничего не меняет, а результат нужен здесь и сейчас.
+    """
+    from .cards_sync import run_card_sync, run_card_sync_locked
+
+    if request.args.get("dry_run", "").lower() == "true":
+        try:
+            result = run_card_sync(dry_run=True)
+        except Exception as error:
+            logger.exception("Превью разноски карт упало")
+            return jsonify({"error": f"Не удалось получить превью: {error}"}), 502
+        return jsonify({"ok": True, "dry_run": True, "result": result})
+
+    def worker():
+        try:
+            run_card_sync_locked()
+        except Exception:
+            logger.exception("Ручной прогон разноски карт упал")
+
+    threading.Thread(target=worker, daemon=True, name="card-sync-manual").start()
+    log_action(current_user.username, "trigger_card_sync", "")
+    return jsonify({"ok": True, "started": True})
+
+
 @invoices_bp.route("/planfact/accounts", methods=["GET"])
 @role_required("admin")
 def get_planfact_accounts():

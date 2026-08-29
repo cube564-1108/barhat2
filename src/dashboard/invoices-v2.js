@@ -1577,10 +1577,17 @@
         const clarification = invoice.clarification_at
             ? ' <span class="bx-badge b-warn">На уточнении</span>'
             : '';
-        // Оплачен, но операция в ПланФакт не разнесена. Раньше это было
-        // неотличимо от разнесённого счёта, и сбой не видел никто.
-        const unsynced = invoice.status === 'paid' && !invoice.planfact_synced_at
-            ? ' <span class="bx-badge b-warn" title="Операция в ПланФакт не разнесена">Не разнесён</span>'
+        // Ждёт разноски в ПланФакт. У счёта это оплаченный, у траты с карты —
+        // подтверждённый (статуса «оплачен» у неё не бывает), у пополнения —
+        // переведённый. Раньше сбой разноски не видел никто.
+        const kind = invoice.kind || 'invoice';
+        const waitsSync = kind === 'card_expense'
+            ? invoice.status === 'approved'
+            : invoice.status === 'paid';
+        const unsynced = waitsSync && !invoice.planfact_synced_at
+            ? ` <span class="bx-badge b-warn" title="${escapeHtml(invoice.planfact_error
+                    || 'Операция в ПланФакт ещё не разнесена')}">${
+                invoice.planfact_error ? 'Ошибка разноски' : 'Не разнесён'}</span>`
             : '';
         return `<span class="bx-badge ${meta.cls}">${escapeHtml(meta.label)}</span>${clarification}${unsynced}${archived}`;
     }
@@ -5133,8 +5140,46 @@
                     Одна карта обслуживает все салоны своего города.</p>
                 <div class="iv2-tools-add">
                     <button class="bx-btn bx-btn--sm" type="button" id="iv2CardAdd">Добавить карту</button>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2CardSyncPreview">Что уедет в ПланФакт</button>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2CardSync">Разнести сейчас</button>
                 </div>
+                <div id="iv2CardSyncResult"></div>
                 <div id="iv2CardList">${cardsListHtml()}</div>`;
+    }
+
+    /**
+     * Разноска идёт фоновым потоком раз в 15 минут — кнопка только просит не
+     * ждать очередного тика. Живой вызов ПланФакта прямо из обработчика уже
+     * дважды забирал оба воркера и клал сайт, поэтому сервер отвечает сразу,
+     * а результат виден по бейджам в списке.
+     */
+    async function runCardSync(preview) {
+        const host = $('iv2CardSyncResult');
+        if (host) host.innerHTML = '<p class="iv2-tools-note">Проверяем…</p>';
+        try {
+            const data = await apiPost('/api/invoices/work-cards/sync' + (preview ? '?dry_run=true' : ''), {});
+            if (!preview) {
+                if (host) {
+                    host.innerHTML = `<p class="iv2-tools-note">Разноска запущена. Заявки,
+                        которые не уехали, останутся с бейджем «Ошибка разноски» — причина в подсказке
+                        к бейджу.</p>`;
+                }
+                toast('Разноска запущена', 'success');
+                return;
+            }
+            const result = data.result || {};
+            const failed = (result.failed || []).map(item =>
+                `<li>#${escapeHtml(item.invoice_id)} — ${escapeHtml(item.error || '')}</li>`).join('');
+            if (host) {
+                host.innerHTML = `
+                    <p class="iv2-tools-note">Готовы к разноске: <b>${(result.created || []).length}</b>,
+                        уже в ПланФакте: <b>${(result.exists || []).length}</b>,
+                        с ошибкой: <b>${(result.failed || []).length}</b>.</p>
+                    ${failed ? `<ul class="iv2-tools-note">${failed}</ul>` : ''}`;
+            }
+        } catch (error) {
+            if (host) host.innerHTML = `<p class="iv2-tools-note">Не получилось: ${escapeHtml(error.message)}</p>`;
+        }
     }
 
     function cardsListHtml() {
@@ -5255,6 +5300,10 @@
                 renderCardList();
             });
         }
+        const previewButton = $('iv2CardSyncPreview');
+        if (previewButton) previewButton.addEventListener('click', () => runCardSync(true));
+        const syncButton = $('iv2CardSync');
+        if (syncButton) syncButton.addEventListener('click', () => runCardSync(false));
         bindCardListActions();
     }
 
