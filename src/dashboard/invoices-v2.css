@@ -510,6 +510,47 @@
 
 .iv2 .iv2-ms--open .iv2-ms__chev { transform: rotate(180deg); }
 
+/* Выбранные значения тегами под полем: на кнопке при трёх и более значениях
+   остаётся «Выбрано N», и что именно выбрано — иначе не видно */
+
+.iv2 .iv2-ms__tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.iv2 .iv2-ms__tags:not(:empty) { margin-top: 6px; }
+
+.iv2 .iv2-ms__tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    background: rgba(228, 194, 221, 0.4);
+    color: var(--bx-wine);
+    border: 1px solid var(--bx-pink-light);
+    border-radius: 9999px;
+    padding: 2px 5px 2px 9px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.iv2 .iv2-ms__tag button {
+    flex: none;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--bx-wine);
+    line-height: 0;
+    padding: 2px;
+    border-radius: 50%;
+}
+
+.iv2 .iv2-ms__tag button:hover { background: rgba(65, 19, 48, 0.10); }
+
 .iv2 .iv2-ms__panel {
     position: absolute;
     z-index: 40;

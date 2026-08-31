@@ -925,6 +925,7 @@
                          stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
                          stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
                 </button>
+                <div class="iv2-ms__tags" data-ms-tags></div>
                 <div class="iv2-ms__panel" data-ms-panel hidden>
                     <input type="text" class="iv2-ms__search" data-ms-search
                            placeholder="Поиск" aria-label="Поиск по списку">
@@ -959,8 +960,30 @@
         return items.filter(item => String(item.name).toLowerCase().includes(needle));
     }
 
+    /**
+     * Выбранное — тегами под полем. Без них при трёх и более значениях на
+     * кнопке остаётся «Выбрано 5», и что именно выбрано, видно только если
+     * снова открыть список и прокрутить его до галочек.
+     */
+    function multiSelectTagsHtml(f) {
+        return filterValues(f.key).map(value => `
+            <span class="iv2-ms__tag">${escapeHtml(refName(f, value))}
+                <button type="button" data-ms-untag="${escapeHtml(value)}"
+                        aria-label="Убрать ${escapeHtml(refName(f, value))}">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </span>`).join('');
+    }
+
     function renderMultiOptions(f, query) {
-        const items = multiSelectItems(f, query);
+        // Выбранные — наверх: в справочнике салонов их иначе надо искать
+        // прокруткой. Порядок пересобирается только при открытии списка и
+        // поиске, поэтому пункты не прыгают под курсором на каждой галочке.
+        const chosenOrder = new Set(filterValues(f.key).map(String));
+        const items = multiSelectItems(f, query)
+            .slice()
+            .sort((a, b) => (chosenOrder.has(String(b.id)) ? 1 : 0) - (chosenOrder.has(String(a.id)) ? 1 : 0));
         if (!items.length) return '<div class="iv2-ms__empty">Ничего не найдено</div>';
         const chosen = new Set(filterValues(f.key).map(String));
         return items.map(item => `
@@ -978,6 +1001,8 @@
         const chosen = filterValues(f.key);
         const label = root.querySelector('[data-ms-label]');
         if (label) label.textContent = multiSelectLabel(f);
+        const tags = root.querySelector('[data-ms-tags]');
+        if (tags) tags.innerHTML = multiSelectTagsHtml(f);
         root.classList.toggle('iv2-ms--active', chosen.length > 0);
         const chosenSet = new Set(chosen.map(String));
         root.querySelectorAll('[data-ms-value]').forEach(box => {
@@ -1084,6 +1109,18 @@
 
         const clear = root.querySelector('[data-ms-clear]');
         if (clear) clear.addEventListener('click', () => setFilterValues(f, []));
+
+        // Крестик на теге. Обработчик один на контейнер: сами теги
+        // пересобираются при каждом изменении выбора.
+        const tags = root.querySelector('[data-ms-tags]');
+        if (tags) {
+            tags.addEventListener('click', event => {
+                const button = event.target.closest('[data-ms-untag]');
+                if (!button) return;
+                const value = button.getAttribute('data-ms-untag');
+                setFilterValues(f, filterValues(f.key).map(String).filter(v => v !== value));
+            });
+        }
     }
 
     /**
