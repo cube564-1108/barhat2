@@ -72,8 +72,15 @@ from .storage import (
     update_invoice_with_line_items,
     update_invoice_status,
     get_invoice_history,
+    add_invoice_history,
     add_invoice_comment,
     get_invoice_comments,
+    # Персональный доступ к счёту (доработка 2026-08-31)
+    can_grant_invoice_access,
+    list_invoice_access,
+    grant_invoice_access,
+    revoke_invoice_access,
+    list_access_candidates,
     get_user_stores,
     get_users_full_names,
     list_invoices,
@@ -761,6 +768,10 @@ def get_invoice(invoice_id):
         "can_edit_fields": can_edit_invoice_fields(invoice, current_user.username, current_user.role),
         "can_edit_status": can_edit_invoice_status(invoice, current_user.role),
         "can_delete": can_delete_invoice(invoice, current_user.role),
+        # Кнопка «Доступ» в карточке показывается по ответу сервера, а не по
+        # своей копии правил: считает её та же функция, что потом и разрешит
+        # выдачу
+        "can_grant_access": can_grant_invoice_access(invoice, current_user.username, current_user.role),
     }
 
     if "history" in include:
@@ -2131,6 +2142,103 @@ def add_comment(invoice_id):
 
     comment = add_invoice_comment(invoice_id, current_user.username, message)
     return jsonify({"ok": True, "comment": comment}), 201
+
+
+# =============================================================================
+# ПЕРСОНАЛЬНЫЙ ДОСТУП К СЧЁТУ (доработка 2026-08-31)
+# =============================================================================
+#
+# Раздать салон целиком ради одного чужого счёта — слишком широко: вместе с
+# нужным счётом человек получает все остальные счета этого салона, включая
+# будущие. Здесь доступ выдаётся точечно, отзывается в один клик и виден в
+# истории счёта.
+
+
+def _load_invoice_for_access(invoice_id):
+    """Счёт и право им делиться: (invoice, error_response). Одна проверка на все три ручки."""
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return None, (jsonify({"error": "Счёт не найден"}), 404)
+    if not can_grant_invoice_access(invoice, current_user.username, current_user.role):
+        return None, (jsonify({
+            "error": "Открывать доступ к счёту может администратор или его автор"
+        }), 403)
+    return invoice, None
+
+
+def _access_rows_with_names(invoice_id):
+    """Выданные доступы с человеческими именами вместо логинов."""
+    grants = list_invoice_access(invoice_id)
+    names = get_users_full_names(
+        list({g["username"] for g in grants} | {g["granted_by"] for g in grants})
+    )
+    for grant in grants:
+        grant["full_name"] = names.get(grant["username"])
+        grant["granted_by_full_name"] = names.get(grant["granted_by"])
+    return grants
+
+
+@invoices_bp.route("/<int:invoice_id>/access", methods=["GET"])
+@section_required(*INVOICE_SECTIONS)
+def get_invoice_access(invoice_id):
+    """Кому открыт счёт и кому его можно открыть."""
+    invoice, error = _load_invoice_for_access(invoice_id)
+    if error:
+        return error
+
+    return jsonify({
+        "access": _access_rows_with_names(invoice_id),
+        # Автор и так видит свой счёт всегда — предлагать открыть его самому
+        # себе незачем
+        "candidates": [user for user in list_access_candidates()
+                       if user["username"] != invoice["created_by"]],
+    })
+
+
+@invoices_bp.route("/<int:invoice_id>/access", methods=["POST"])
+@section_required(*INVOICE_SECTIONS)
+def add_invoice_access(invoice_id):
+    """Открыть счёт сотруднику. Body: {"username": str}."""
+    invoice, error = _load_invoice_for_access(invoice_id)
+    if error:
+        return error
+
+    username = (request.get_json(silent=True) or {}).get("username")
+    username = (username or "").strip()
+    if not username:
+        return jsonify({"error": "Не выбран сотрудник"}), 400
+
+    known = {user["username"] for user in list_access_candidates()}
+    if username not in known:
+        return jsonify({"error": "Такого сотрудника нет или он отключён"}), 400
+
+    granted = grant_invoice_access(invoice_id, username, current_user.username)
+
+    # В историю счёта — чтобы через месяц было видно, кто и кому его открыл.
+    # Повторную выдачу не пишем: события не было.
+    if granted:
+        add_invoice_history(invoice_id, current_user.username, "access", None, username)
+        log_action(current_user.username, "grant_invoice_access",
+                   f"{invoice['invoice_number']} → {username}")
+
+    return jsonify({"ok": True, "granted": granted, "access": _access_rows_with_names(invoice_id)})
+
+
+@invoices_bp.route("/<int:invoice_id>/access/<username>", methods=["DELETE"])
+@section_required(*INVOICE_SECTIONS)
+def remove_invoice_access(invoice_id, username):
+    """Закрыть счёт сотруднику."""
+    invoice, error = _load_invoice_for_access(invoice_id)
+    if error:
+        return error
+
+    revoked = revoke_invoice_access(invoice_id, username)
+    if revoked:
+        add_invoice_history(invoice_id, current_user.username, "access", username, None)
+        log_action(current_user.username, "revoke_invoice_access",
+                   f"{invoice['invoice_number']} → {username}")
+
+    return jsonify({"ok": True, "revoked": revoked, "access": _access_rows_with_names(invoice_id)})
 
 
 # =============================================================================

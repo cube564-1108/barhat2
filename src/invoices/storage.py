@@ -417,6 +417,33 @@ def init_invoices_tables():
         ON invoice_template_items(template_id)
     """)
 
+    # ========================================================================
+    # 12. Персональный доступ к счёту (доработка 2026-08-31)
+    #
+    # Видимость счёта обычно определяется салонами сотрудника, но регулярно
+    # нужен ровно один чужой счёт: бухгалтеру — чтобы свести оплату, коллеге
+    # из другого города — чтобы подтвердить поставку. Раньше выход был один:
+    # выдать человеку целый салон.
+    #
+    # Строка здесь = «этому человеку открыт этот счёт». UNIQUE(invoice_id,
+    # username) держит идемпотентность: повторная выдача не плодит дубли.
+    # Индекс по username — под проверку видимости, она идёт на каждый список.
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_access (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+            username TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(invoice_id, username)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_invoice_access_username
+        ON invoice_access(username)
+    """)
+
     conn.commit()
 
     # ========================================================================
@@ -1469,35 +1496,143 @@ def get_invoice_by_id(invoice_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+# =============================================================================
+# ПЕРСОНАЛЬНЫЙ ДОСТУП К СЧЁТУ (доработка 2026-08-31)
+#
+# Видимость счёта задаётся салонами сотрудника, но регулярно нужен ровно один
+# чужой счёт. Раньше единственным выходом было выдать человеку целый салон —
+# то есть заодно и все остальные его счета.
+# =============================================================================
+
+
+def has_invoice_access_grant(invoice_id: int, username: str) -> bool:
+    """Выдан ли этому человеку персональный доступ к этому счёту."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM invoice_access WHERE invoice_id = ? AND username = ?",
+            (invoice_id, username)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
+def list_invoice_access(invoice_id: int) -> List[Dict[str, Any]]:
+    """Кому открыт этот счёт: список выдач, свежие сверху."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT username, granted_by, granted_at FROM invoice_access "
+            "WHERE invoice_id = ? ORDER BY granted_at DESC, id DESC",
+            (invoice_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+def grant_invoice_access(invoice_id: int, username: str, granted_by: str) -> bool:
+    """
+    Открыть счёт сотруднику. True — доступ появился, False — уже был.
+
+    Идемпотентно за счёт UNIQUE(invoice_id, username): повторное нажатие не
+    плодит дубли и не считается ошибкой — открыто и открыто.
+    """
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO invoice_access (invoice_id, username, granted_by) "
+            "VALUES (?, ?, ?)",
+            (invoice_id, username, granted_by)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def revoke_invoice_access(invoice_id: int, username: str) -> bool:
+    """Закрыть счёт сотруднику. True — доступ был и снят."""
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM invoice_access WHERE invoice_id = ? AND username = ?",
+            (invoice_id, username)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def can_grant_invoice_access(invoice: Dict[str, Any], username: str, role: str) -> bool:
+    """
+    Может ли пользователь раздавать доступ к этому счёту.
+
+    Админ и автор счёта (решение владельца 2026-08-31). Менеджера здесь нет
+    намеренно: он правит чужие счета до согласования, но раздача видимости —
+    решение владельца счёта, а не любого, кто может его редактировать.
+    """
+    return role == "admin" or invoice["created_by"] == username
+
+
+def list_access_candidates() -> List[Dict[str, Any]]:
+    """
+    Кому можно открыть счёт: активные учётные записи дашборда.
+
+    Свой лёгкий запрос вместо /api/auth/users: та ручка доступна только
+    админу (а доступ раздаёт и автор счёта) и на каждого пользователя тянет
+    права и салоны отдельными запросами — здесь нужны только имена.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT username, full_name, role FROM users WHERE is_active = 1 "
+            "ORDER BY py_lower(COALESCE(full_name, username))"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
 def user_can_access_invoice(invoice: Dict[str, Any], username: str, role: str) -> bool:
     """
     Может ли пользователь видеть/трогать этот счёт.
 
     Админ — всегда. Автор счёта — всегда (иначе только что созданный счёт
     без распределения тут же исчезает из своего же списка). Остальные —
-    только если распределение счёта задевает хотя бы один из салонов,
-    к которым у пользователя есть доступ (user_stores, тот же справочник,
-    что и в cashshifts).
+    если распределение счёта задевает хотя бы один из салонов, к которым у
+    пользователя есть доступ (user_stores, тот же справочник, что и в
+    cashshifts), либо если этот счёт открыли ему персонально.
+
+    Те же четыре ветки собраны на SQL в _visibility_clause — список
+    фильтруется запросом. Меняются они только вместе.
     """
     if role == "admin" or invoice["created_by"] == username:
         return True
 
     allowed_store_ids = set(get_user_stores(username))
-    if not allowed_store_ids:
-        return False
 
     # Пополнение карты распределения не имеет вовсе (это перемещение денег, а
     # не расход), поэтому по строкам его не найти. Доступ к нему даёт сама
     # карта: в НСК, Барнауле и Челябинске она одна на несколько салонов, то
     # есть заявку вполне создаёт один управляющий, а искать её будет другой.
-    if invoice.get("card_id"):
+    if allowed_store_ids and invoice.get("card_id"):
         from .cards import get_card_by_id
         card = get_card_by_id(invoice["card_id"])
         if card and allowed_store_ids.intersection(card["store_ids"]):
             return True
 
-    line_items = get_invoice_line_items(invoice["id"])
-    return any(item["store_id"] in allowed_store_ids for item in line_items)
+    if allowed_store_ids:
+        line_items = get_invoice_line_items(invoice["id"])
+        if any(item["store_id"] in allowed_store_ids for item in line_items):
+            return True
+
+    # Персональный доступ спрашиваем последним: это лишнее обращение к базе, а
+    # диск /data на проде отвечает 90–700 мс. Обычный случай (счёт своего
+    # салона) до него не доходит, платит только тот, кому счёт открыли руками.
+    return has_invoice_access_grant(invoice["id"], username)
 
 
 # Статусы, после которых деньги уже в движении/ушли — правки полей закрыты
@@ -1882,27 +2017,43 @@ def _has_card_columns() -> bool:
     return _HAS_CARD_COLUMNS
 
 
-def _visibility_clause(store_ids: List[int]) -> str:
+def _visibility_clause(username: str, store_ids: List[int]) -> Tuple[str, List[Any]]:
     """
     Что не-админ имеет право видеть: свои заявки, заявки со своим салоном в
-    распределении и заявки по карте своего салона.
+    распределении, заявки по карте своего салона и счета, к которым ему выдали
+    персональный доступ.
 
-    Третья ветка нужна из-за пополнения карты: распределения у него нет вовсе,
-    по строкам его не найти, и без неё заявку видел бы только автор — хотя
-    карта в НСК, Барнауле и Челябинске одна на несколько салонов. То же правило
-    в user_can_access_invoice; здесь оно повторено на SQL, потому что список
-    фильтруется запросом, а не в Python.
+    Ветка карты нужна из-за пополнения: распределения у него нет вовсе, по
+    строкам его не найти, и без неё заявку видел бы только автор — хотя карта
+    в НСК, Барнауле и Челябинске одна на несколько салонов. Ветка
+    invoice_access — доработка 2026-08-31: доступ к одному чужому счёту без
+    выдачи целого салона.
 
-    Порядок плейсхолдеров: username, затем store_ids, затем ещё раз store_ids
-    (если колонки карт уже есть).
+    То же правило живёт в user_can_access_invoice; здесь оно повторено на SQL,
+    потому что список фильтруется запросом, а не в Python. Правила обязаны
+    меняться вместе: разъехавшись, они дают «в списке вижу, открыть не могу».
+
+    Возвращает (условие, параметры) вместе — раскладывать плейсхолдеры руками
+    на каждом месте вызова слишком легко перепутать, а порядок здесь зависит
+    от наличия колонок карт.
     """
-    placeholders = ",".join("?" * len(store_ids))
-    clause = (f"i.created_by = ? OR i.id IN ("
-              f"SELECT invoice_id FROM invoice_line_items WHERE store_id IN ({placeholders}))")
-    if _has_card_columns():
-        clause += (f" OR i.card_id IN ("
-                   f"SELECT card_id FROM work_card_stores WHERE store_id IN ({placeholders}))")
-    return clause
+    parts = ["i.created_by = ?"]
+    params: List[Any] = [username]
+
+    if store_ids:
+        placeholders = ",".join("?" * len(store_ids))
+        parts.append(f"i.id IN (SELECT invoice_id FROM invoice_line_items "
+                     f"WHERE store_id IN ({placeholders}))")
+        params.extend(store_ids)
+        if _has_card_columns():
+            parts.append(f"i.card_id IN (SELECT card_id FROM work_card_stores "
+                         f"WHERE store_id IN ({placeholders}))")
+            params.extend(store_ids)
+
+    parts.append("i.id IN (SELECT invoice_id FROM invoice_access WHERE username = ?)")
+    params.append(username)
+
+    return " OR ".join(parts), params
 
 
 def _build_invoice_filters(
@@ -1952,15 +2103,9 @@ def _build_invoice_filters(
     params: List[Any] = [1 if is_archived else 0]
 
     if restrict_username is not None:
-        if restrict_store_ids:
-            where += " AND (" + _visibility_clause(restrict_store_ids) + ")"
-            params.append(restrict_username)
-            params.extend(restrict_store_ids)
-            if _has_card_columns():
-                params.extend(restrict_store_ids)
-        else:
-            where += " AND i.created_by = ?"
-            params.append(restrict_username)
+        clause, clause_params = _visibility_clause(restrict_username, restrict_store_ids or [])
+        where += " AND (" + clause + ")"
+        params.extend(clause_params)
 
     kinds = _filter_values(kind)
     if kinds and _has_card_columns():
@@ -2284,15 +2429,9 @@ def get_invoices_summary(
         where = "WHERE i.is_archived = 0"
         params: List[Any] = []
         if restrict_username is not None:
-            if restrict_store_ids:
-                where += " AND (" + _visibility_clause(restrict_store_ids) + ")"
-                params.append(restrict_username)
-                params.extend(restrict_store_ids)
-                if _has_card_columns():
-                    params.extend(restrict_store_ids)
-            else:
-                where += " AND i.created_by = ?"
-                params.append(restrict_username)
+            clause, clause_params = _visibility_clause(restrict_username, restrict_store_ids or [])
+            where += " AND (" + clause + ")"
+            params.extend(clause_params)
 
         row = conn.execute(
             f"""
@@ -2610,6 +2749,7 @@ def delete_invoice(invoice_id: int, deleted_by: str) -> Optional[Dict[str, Any]]
     conn.execute("DELETE FROM invoice_attachments WHERE invoice_id = ?", (invoice_id,))
     conn.execute("DELETE FROM invoice_comments WHERE invoice_id = ?", (invoice_id,))
     conn.execute("DELETE FROM invoice_history WHERE invoice_id = ?", (invoice_id,))
+    conn.execute("DELETE FROM invoice_access WHERE invoice_id = ?", (invoice_id,))
     # Операцию ПланФакта не трогаем — она существует в ПланФакте независимо от
     # нашего счёта. Обнуляем только ссылку, иначе в списке «не разнесено»
     # останется строка, ведущая в никуда.

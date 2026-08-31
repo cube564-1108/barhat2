@@ -1619,6 +1619,24 @@
 .iv2 .iv2-modal--tools { z-index: 2007; }
 .iv2 .iv2-modal__box--tools { max-width: 820px; }
 
+/* Доступ к счёту */
+
+.iv2 .iv2-access__title {
+    font-family: var(--bx-font-head);
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--bx-wine);
+    margin: 16px 0 8px;
+}
+
+.iv2 .iv2-access__title:first-of-type { margin-top: 8px; }
+
+.iv2 .iv2-access__list {
+    margin-top: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
 .iv2 .iv2-tabs--tools { margin-bottom: 14px; }
 
 .iv2 .iv2-tools-note {

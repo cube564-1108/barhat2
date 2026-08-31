@@ -170,6 +170,7 @@
         line_items: 'Распределение',
         attachments: 'Вложения',
         is_archived: 'Архив',
+        access: 'Доступ',
     };
 
     // Показываем вложение прямо в интерфейсе только то, что браузер умеет
@@ -243,7 +244,22 @@
         // Инструменты раздела (справочники, контрагенты, ПланФакт) — одна
         // модалка за раз, поэтому одно поле `open` на все три.
         tools: emptyTools(),
+
+        // Кому открыт этот счёт (доработка 2026-08-31)
+        access: emptyAccess(),
     };
+
+    function emptyAccess() {
+        return {
+            invoiceId: null,
+            list: [],
+            candidates: [],
+            loading: false,
+            error: '',
+            search: '',
+            busy: '',
+        };
+    }
 
     function emptyTools() {
         return {
@@ -2577,6 +2593,13 @@
                 default: return String(value);
             }
         };
+        // Выдача доступа читается как действие, а не как «поле было → стало»:
+        // «Доступ: — → ivanov» пришлось бы расшифровывать
+        if (entry.field_name === 'access') {
+            return entry.new_value
+                ? `открыл доступ к счёту: ${entry.new_value}`
+                : `закрыл доступ к счёту: ${entry.old_value}`;
+        }
         if (entry.old_value === null || entry.old_value === undefined || entry.old_value === '') {
             return `${field}: ${asLabel(entry.new_value)}`;
         }
@@ -2668,6 +2691,11 @@
             buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="edit">Редактировать</button>`);
         }
         buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="copy">Копировать счёт</button>`);
+        // Открыть счёт коллеге, у которого нет нужного салона. Право считает
+        // сервер (can_grant_access) — админ или автор счёта
+        if (details.can_grant_access) {
+            buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="access">Доступ к счёту</button>`);
+        }
         if (admin) {
             buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="save-template">Сохранить как шаблон</button>`);
         }
@@ -2938,6 +2966,11 @@
 
         if (action === 'edit' || action === 'copy') {
             openForm(action === 'edit' ? 'edit' : 'copy', invoiceId);
+            return;
+        }
+
+        if (action === 'access') {
+            openAccess(invoiceId);
             return;
         }
 
@@ -3840,6 +3873,7 @@
         bulk: 'iv2BulkHost',
         report: 'iv2ReportHost',
         tools: 'iv2ToolsHost',
+        access: 'iv2AccessHost',
     };
 
     function modalHost(name) {
@@ -4990,6 +5024,189 @@
         else if (open === 'planfact') bindPlanfact();
     }
 
+
+    // =========================================================================
+    // Доступ к счёту (доработка 2026-08-31)
+    //
+    // Видимость счёта задаётся салонами сотрудника, но регулярно нужен ровно
+    // один чужой счёт. Выдавать ради него целый салон — значит отдать заодно
+    // все остальные счета этого салона, включая будущие.
+    // =========================================================================
+
+    function openAccess(invoiceId) {
+        state.access = emptyAccess();
+        state.access.invoiceId = invoiceId;
+        state.access.loading = true;
+        renderAccess();
+        loadAccess(invoiceId);
+    }
+
+    function closeAccess() {
+        state.access = emptyAccess();
+        renderAccess();
+    }
+
+    async function loadAccess(invoiceId) {
+        try {
+            const data = await apiGet(`/api/invoices/${invoiceId}/access`);
+            if (state.access.invoiceId !== invoiceId) return;
+            state.access.list = data.access || [];
+            state.access.candidates = data.candidates || [];
+        } catch (error) {
+            if (state.access.invoiceId !== invoiceId) return;
+            state.access.error = error.message;
+        } finally {
+            if (state.access.invoiceId === invoiceId) {
+                state.access.loading = false;
+                renderAccess();
+            }
+        }
+    }
+
+    /** Сотрудники, которым счёт ещё не открыт и которые подходят под поиск. */
+    function accessCandidates() {
+        const granted = new Set(state.access.list.map(item => item.username));
+        const needle = state.access.search.trim().toLowerCase();
+        return state.access.candidates
+            .filter(user => !granted.has(user.username))
+            .filter(user => !needle
+                || String(user.full_name || '').toLowerCase().includes(needle)
+                || String(user.username).toLowerCase().includes(needle));
+    }
+
+    function accessBodyHtml() {
+        const access = state.access;
+        if (access.loading) return '<p class="iv2-tools-empty">Загрузка…</p>';
+        if (access.error) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(access.error)}</p>`;
+
+        const granted = access.list.length
+            ? access.list.map(item => `
+                <div class="iv2-tools-row">
+                    <div class="iv2-tools-row__main">
+                        <div class="iv2-tools-row__name">${escapeHtml(item.full_name || item.username)}</div>
+                        <div class="iv2-hint">Открыл ${escapeHtml(item.granted_by_full_name || item.granted_by)}
+                            · ${escapeHtml(fmtCreated(item.granted_at))}</div>
+                    </div>
+                    <div class="iv2-tools-row__btns">
+                        <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                                data-access-revoke="${escapeHtml(item.username)}"
+                                ${access.busy === item.username ? 'disabled' : ''}>Закрыть доступ</button>
+                    </div>
+                </div>`).join('')
+            : '<p class="iv2-hint">Персонально счёт пока никому не открыт.</p>';
+
+        const candidates = accessCandidates();
+        const list = candidates.length
+            ? candidates.slice(0, 30).map(user => `
+                <div class="iv2-tools-row">
+                    <div class="iv2-tools-row__main">
+                        <div class="iv2-tools-row__name">${escapeHtml(user.full_name || user.username)}</div>
+                        <div class="iv2-hint">${escapeHtml(user.username)} · ${escapeHtml(user.role || '')}</div>
+                    </div>
+                    <div class="iv2-tools-row__btns">
+                        <button class="bx-btn bx-btn--sm" type="button"
+                                data-access-grant="${escapeHtml(user.username)}"
+                                ${access.busy === user.username ? 'disabled' : ''}>Открыть доступ</button>
+                    </div>
+                </div>`).join('')
+            : '<p class="iv2-tools-empty">Никого не нашлось</p>';
+
+        return `
+            <p class="iv2-tools-note">Доступ открывает только этот счёт — остальные счета салона
+                сотруднику по-прежнему не видны. Закрыть можно в любой момент.</p>
+            <h4 class="iv2-access__title">Счёт открыт</h4>
+            ${granted}
+            <h4 class="iv2-access__title">Кому открыть</h4>
+            <input class="iv2-input" id="iv2AccessSearch" placeholder="Поиск по имени или логину"
+                   value="${escapeHtml(access.search)}">
+            <div class="iv2-access__list">${list}</div>
+            ${candidates.length > 30
+                ? `<p class="iv2-hint">Показаны первые 30 из ${candidates.length} — уточните поиск.</p>`
+                : ''}`;
+    }
+
+    function renderAccess() {
+        const host = modalHost('access');
+        if (!host) return;
+
+        if (!state.access.invoiceId) {
+            host.innerHTML = '';
+            return;
+        }
+
+        const restoreScroll = keepModalScroll(host);
+        host.innerHTML = `
+            <div class="iv2-ovl iv2-ovl--tools" id="iv2AccessOverlay"></div>
+            <div class="iv2-modal iv2-modal--tools">
+                <div class="iv2-modal__box iv2-modal__box--narrow">
+                    <div class="iv2-modal__head">
+                        <h3 class="bx-card__title">Доступ к счёту</h3>
+                        <button class="iv2-x" type="button" id="iv2AccessClose" aria-label="Закрыть">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                 stroke-width="1.75" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                        </button>
+                    </div>
+                    <div class="iv2-modal__body">${accessBodyHtml()}</div>
+                    <div class="iv2-modal__foot">
+                        <button class="bx-btn bx-btn--ghost" type="button" id="iv2AccessDone">Закрыть</button>
+                    </div>
+                </div>
+            </div>`;
+
+        [$('iv2AccessClose'), $('iv2AccessDone'), $('iv2AccessOverlay')].forEach(element => {
+            if (element) element.addEventListener('click', closeAccess);
+        });
+
+        const search = $('iv2AccessSearch');
+        if (search) {
+            search.addEventListener('input', () => {
+                state.access.search = search.value;
+                renderAccess();
+                // Перерисовка забирает фокус — возвращаем вместе с кареткой,
+                // иначе набор обрывается на первом символе
+                const fresh = $('iv2AccessSearch');
+                if (fresh) {
+                    fresh.focus();
+                    fresh.setSelectionRange(fresh.value.length, fresh.value.length);
+                }
+            });
+        }
+
+        host.querySelectorAll('[data-access-grant]').forEach(button => {
+            button.addEventListener('click', () => changeAccess('grant', button.getAttribute('data-access-grant')));
+        });
+        host.querySelectorAll('[data-access-revoke]').forEach(button => {
+            button.addEventListener('click', () => changeAccess('revoke', button.getAttribute('data-access-revoke')));
+        });
+
+        restoreScroll();
+    }
+
+    async function changeAccess(action, username) {
+        const invoiceId = state.access.invoiceId;
+        if (!invoiceId || state.access.busy) return;
+
+        state.access.busy = username;
+        renderAccess();
+
+        try {
+            const data = action === 'grant'
+                ? await apiPost(`/api/invoices/${invoiceId}/access`, { username })
+                : await apiDelete(`/api/invoices/${invoiceId}/access/${encodeURIComponent(username)}`);
+            if (state.access.invoiceId !== invoiceId) return;
+            state.access.list = data.access || [];
+            toast(action === 'grant' ? 'Доступ открыт' : 'Доступ закрыт');
+            // Выдача доступа — событие счёта, оно видно в его истории
+            refreshDetails(invoiceId);
+        } catch (error) {
+            toast('Не получилось: ' + error.message, 'error');
+        } finally {
+            if (state.access.invoiceId === invoiceId) {
+                state.access.busy = '';
+                renderAccess();
+            }
+        }
+    }
 
     // ------------------------------------------------------------------ Шаблоны
 
