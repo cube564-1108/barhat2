@@ -592,11 +592,6 @@
     }
 
     /**
-     * Перечитать список.
-     * append=true — «Показать ещё»: дозагружаем следующую страницу и НЕ просим
-     * пересчитать итог, он уже посчитан на первой странице тем же фильтром.
-     */
-    /**
      * Взаимоисключающие границы суммы. Сервер такой запрос тоже отклоняет, но
      * набор идёт по цифре: пока в «до» допечатывают 50000, оно успевает побыть
      * пятёркой, и каждое такое состояние прилетало бы красным тостом.
@@ -609,25 +604,35 @@
         return from > to ? 'Сумма «от» больше суммы «до» — под такой фильтр не попадёт ничего' : '';
     }
 
+    /**
+     * Перечитать список.
+     * append=true — «Показать ещё»: дозагружаем следующую страницу и НЕ просим
+     * пересчитать итог, он уже посчитан на первой странице тем же фильтром.
+     */
     async function loadList(append) {
         const token = ++listToken;
         state.loading = true;
-        state.filterError = amountRangeError();
-
-        if (state.filterError) {
-            state.loading = false;
-            state.rows = [];
-            state.total = 0;
-            state.totalAmount = 0;
-            render();
-            return;
-        }
 
         // Любая перезагрузка списка отменяет отложенную: иначе снятие чипа или
         // сброс фильтров даёт второй запрос с тем же результатом.
         if (!append) {
             clearTimeout(selectFilterTimer);
             selectFilterTimer = null;
+        }
+
+        // Заведомо пустой фильтр не отправляем вовсе, но состояние прибираем
+        // так же, как при обычной загрузке: борд живёт на своём запросе и
+        // иначе остался бы с прошлым, уже неверным срезом.
+        state.filterError = amountRangeError();
+        if (state.filterError) {
+            state.loading = false;
+            state.rows = [];
+            state.total = 0;
+            state.totalAmount = 0;
+            clearSelection();
+            state.board.loaded = false;
+            render();
+            return;
         }
 
         const params = buildListParams();
@@ -3456,10 +3461,11 @@
         // Пока идут пачки, кнопки убираем: второе действие поверх первого
         // перемешало бы отчёты и обработало часть счетов дважды
         if (state.bulkProgress) {
+            const { from, to, total } = state.bulkProgress;
             host.innerHTML = `
                 <div class="iv2-bulkbar">
                     <span class="iv2-bulkbar__txt">Обрабатываем
-                        <b>${state.bulkProgress.done}</b> из <b>${state.bulkProgress.total}</b>…</span>
+                        <b>${from}–${to}</b> из <b>${total}</b>…</span>
                     <span class="iv2-bulkbar__txt">Не закрывайте вкладку</span>
                 </div>`;
             return;
@@ -3578,7 +3584,11 @@
         let merged = null;
         for (let start = 0; start < ids.length; start += BULK_CHUNK) {
             const part = ids.slice(start, start + BULK_CHUNK);
-            state.bulkProgress = { done: start, total: ids.length };
+            state.bulkProgress = {
+                from: start + 1,
+                to: Math.min(start + BULK_CHUNK, ids.length),
+                total: ids.length,
+            };
             renderBulkBar();
             try {
                 merged = mergeBulkReports(merged, await apiPost(paths[actionKey], { ids: part }));
@@ -3668,11 +3678,15 @@
         const { actionKey, data } = state.report;
         let body;
 
-        if (data.error) {
-            body = `<div class="iv2-form-error">${escapeHtml(data.error)}</div>`
-                + reportSection('Не отправлены', data.skipped)
-                + bankDocumentHtml(data.result);
-        } else if (actionKey === 'bank-test') {
+        // Ошибка не заменяет отчёт, а надписывается над ним: длинный выбор
+        // уходит пачками по BULK_CHUNK, и падение третьей пачки не отменяет
+        // двух прошедших. Показать одну ошибку значило бы соврать, что не
+        // изменилось ничего, — а 200 счетов уже сменили статус.
+        const errorHtml = data.error
+            ? `<div class="iv2-form-error">${escapeHtml(data.error)}</div>`
+            : '';
+
+        if (actionKey === 'bank-test') {
             // Проверка сборки: главное здесь — сам документ, а не статус.
             // Банк на тестовом контуре может и отклонить — это тоже результат.
             body = `<div class="iv2-report__head">${data.ok
@@ -3719,8 +3733,13 @@
                 + reportSection('Ушли в банк', data.sent, true)
                 + reportSection('Банк отклонил', data.failed)
                 + reportSection('Пропущены до отправки', data.skipped)
-                + reportSection('Не успели за отведённое время', data.postponed);
+                + reportSection('Не успели за отведённое время', data.postponed)
+                // Собранный документ под спойлером: при отказе банка это
+                // первое, куда смотрят
+                + bankDocumentHtml(data.result);
         }
+
+        body = errorHtml + body;
 
         host.innerHTML = `
             <div class="iv2-ovl iv2-ovl--report" id="iv2ReportOverlay"></div>

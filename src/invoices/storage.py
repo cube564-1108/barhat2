@@ -1507,6 +1507,8 @@ def get_invoice_by_id(invoice_id: int) -> Optional[Dict[str, Any]]:
 
 def has_invoice_access_grant(invoice_id: int, username: str) -> bool:
     """Выдан ли этому человеку персональный доступ к этому счёту."""
+    if not _has_access_table():
+        return False
     conn = get_db()
     try:
         row = conn.execute(
@@ -1996,6 +1998,24 @@ def _in_clause(column: str, values: Sequence[Any]) -> str:
 
 
 _HAS_CARD_COLUMNS: Optional[bool] = None
+_HAS_ACCESS_TABLE: Optional[bool] = None
+
+
+def _has_access_table() -> bool:
+    """
+    Появилась ли таблица персональных доступов. Тем же приёмом, что и
+    _has_card_columns: пока её нет, ветка доступа молча не применяется, а не
+    роняет 500-й список у всех не-админов сразу. Спрашиваем один раз за жизнь
+    процесса — иначе это лишнее соединение на каждый запрос списка.
+    """
+    global _HAS_ACCESS_TABLE
+    if _HAS_ACCESS_TABLE is None:
+        conn = get_db()
+        try:
+            _HAS_ACCESS_TABLE = _table_exists(conn, "invoice_access")
+        finally:
+            conn.close()
+    return _HAS_ACCESS_TABLE
 
 
 def _has_card_columns() -> bool:
@@ -2050,8 +2070,9 @@ def _visibility_clause(username: str, store_ids: List[int]) -> Tuple[str, List[A
                          f"WHERE store_id IN ({placeholders}))")
             params.extend(store_ids)
 
-    parts.append("i.id IN (SELECT invoice_id FROM invoice_access WHERE username = ?)")
-    params.append(username)
+    if _has_access_table():
+        parts.append("i.id IN (SELECT invoice_id FROM invoice_access WHERE username = ?)")
+        params.append(username)
 
     return " OR ".join(parts), params
 
