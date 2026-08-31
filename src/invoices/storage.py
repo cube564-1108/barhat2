@@ -1920,6 +1920,8 @@ def _build_invoice_filters(
     created_to: Optional[str] = None,
     due_from: Optional[str] = None,
     due_to: Optional[str] = None,
+    amount_from: Optional[float] = None,
+    amount_to: Optional[float] = None,
     is_archived: bool = False,
     hide_paid: bool = False,
     clarification: Optional[str] = None,
@@ -2073,6 +2075,17 @@ def _build_invoice_filters(
         where += " AND i.due_date <= ?"
         params.append(due_to)
 
+    # Сумма счёта диапазоном. Границы включительные: «от 10000 до 10000» —
+    # это способ найти счёт на ровно 10 000, а не пустой ответ.
+    # Проверка на None, а не на истинность: 0 — валидная нижняя граница.
+    if amount_from is not None:
+        where += " AND i.amount >= ?"
+        params.append(amount_from)
+
+    if amount_to is not None:
+        where += " AND i.amount <= ?"
+        params.append(amount_to)
+
     return where, params
 
 
@@ -2105,6 +2118,8 @@ def list_invoices(
     created_to: Optional[str] = None,
     due_from: Optional[str] = None,
     due_to: Optional[str] = None,
+    amount_from: Optional[float] = None,
+    amount_to: Optional[float] = None,
     is_archived: bool = False,
     hide_paid: bool = False,
     clarification: Optional[str] = None,
@@ -2132,7 +2147,8 @@ def list_invoices(
         expense_category_id=expense_category_id, created_by=created_by,
         counterparty=counterparty, payment_purpose=payment_purpose,
         created_from=created_from, created_to=created_to,
-        due_from=due_from, due_to=due_to, is_archived=is_archived,
+        due_from=due_from, due_to=due_to,
+        amount_from=amount_from, amount_to=amount_to, is_archived=is_archived,
         hide_paid=hide_paid, clarification=clarification, planfact=planfact,
         restrict_username=restrict_username,
         restrict_store_ids=restrict_store_ids,

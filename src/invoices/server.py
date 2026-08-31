@@ -478,19 +478,34 @@ def _arg_int_list(name: str) -> List[int]:
     return result
 
 
-@invoices_bp.route("", methods=["GET"])
-@section_required(*INVOICE_SECTIONS)
-def get_invoices():
+def _arg_amount(name: str):
     """
-    Список счетов с фильтрами.
+    Граница фильтра по сумме: (value, error). Пустой параметр — (None, None).
 
-    Query params: status, store_id, city_id, payer_id, expense_category_id,
-    created_by, counterparty, payment_purpose, created_from, created_to,
-    due_from, due_to, archived, hide_paid, sort, order, with_total, limit, offset
+    Нечисловое значение — это 400, а не молчаливое «фильтр не применился»:
+    иначе опечатка в поле суммы выглядит как «счетов на такую сумму нет».
+    Запятую принимаем: на цифровой клавиатуре телефона точки может не быть.
+    """
+    raw = (request.args.get(name) or "").strip().replace(" ", "").replace(",", ".")
+    if not raw:
+        return None, None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None, f"«{name}»: сумма должна быть числом"
+    if value < 0:
+        return None, f"«{name}»: сумма не может быть отрицательной"
+    return value, None
 
-    Параметры expense_category_id, hide_paid, sort, order и with_total добавлены
-    для раздела «Согласование счетов v2» и все необязательны: старый раздел их
-    не передаёт и получает ровно прежний ответ.
+
+def _read_invoice_filters():
+    """
+    Разобрать фильтры списка счетов из query-параметров: (filters, error).
+
+    Одна функция на все три ручки, которым нужен один и тот же срез: список
+    (`GET /`), его итоги (`count_invoices`) и выбор «все по фильтру»
+    (`GET /selection`). Держать разбор отдельно у каждой — верный способ
+    получить список из 340 счетов и «выбрать все», которое выберет не те 340.
 
     Справочные фильтры (status, store_id, city_id, payer_id,
     expense_category_id, created_by) можно повторять — `?city_id=1&city_id=2`
@@ -499,20 +514,16 @@ def get_invoices():
     statuses = _arg_list("status")
     unknown = [s for s in statuses if s not in STATUSES]
     if unknown:
-        return jsonify({"error": f"Неизвестный статус. Доступны: {list(STATUSES)}"}), 400
+        return None, f"Неизвестный статус. Доступны: {list(STATUSES)}"
 
-    sort = request.args.get("sort")
-    if sort and sort not in INVOICE_SORT_FIELDS:
-        return jsonify({"error": f"Сортировка недоступна. Доступны: {sorted(INVOICE_SORT_FIELDS)}"}), 400
-
-    order = (request.args.get("order") or "desc").lower()
-    if order not in ("asc", "desc"):
-        return jsonify({"error": "order должен быть asc или desc"}), 400
-
-    # Верхняя граница страницы. Без неё limit=100000 разом вытянул бы всю базу
-    # вместе со строками распределения — на двух воркерах это заметно.
-    limit = max(1, min(request.args.get("limit", 100, type=int) or 100, 200))
-    offset = max(0, request.args.get("offset", 0, type=int) or 0)
+    amount_from, error = _arg_amount("amount_from")
+    if error:
+        return None, error
+    amount_to, error = _arg_amount("amount_to")
+    if error:
+        return None, error
+    if amount_from is not None and amount_to is not None and amount_from > amount_to:
+        return None, "Сумма «от» больше суммы «до» — под такой фильтр не попадёт ничего"
 
     # Не-админ видит только счета своих салонов (или созданные им самим) —
     # см. user_can_access_invoice в storage.py
@@ -522,7 +533,7 @@ def get_invoices():
         restrict_username = current_user.username
         restrict_store_ids = get_user_stores(current_user.username)
 
-    filters = {
+    return {
         "status": statuses,
         # Тип заявки и карта: счёт на оплату / трата с карты / пополнение
         "kind": [value for value in _arg_list("kind") if value in INVOICE_KINDS],
@@ -538,6 +549,8 @@ def get_invoices():
         "created_to": request.args.get("created_to"),
         "due_from": request.args.get("due_from"),
         "due_to": request.args.get("due_to"),
+        "amount_from": amount_from,
+        "amount_to": amount_to,
         "is_archived": request.args.get("archived", "false").lower() == "true",
         "hide_paid": request.args.get("hide_paid", "false").lower() == "true",
         # Фаза 7: 'only' — счета, которые сейчас у автора на уточнении,
@@ -547,7 +560,48 @@ def get_invoices():
         "planfact": request.args.get("planfact"),
         "restrict_username": restrict_username,
         "restrict_store_ids": restrict_store_ids,
-    }
+    }, None
+
+
+def _read_invoice_sort():
+    """Сортировка списка из query-параметров: (sort, order, error)."""
+    sort = request.args.get("sort")
+    if sort and sort not in INVOICE_SORT_FIELDS:
+        return None, None, f"Сортировка недоступна. Доступны: {sorted(INVOICE_SORT_FIELDS)}"
+
+    order = (request.args.get("order") or "desc").lower()
+    if order not in ("asc", "desc"):
+        return None, None, "order должен быть asc или desc"
+    return sort, order, None
+
+
+@invoices_bp.route("", methods=["GET"])
+@section_required(*INVOICE_SECTIONS)
+def get_invoices():
+    """
+    Список счетов с фильтрами.
+
+    Query params: status, store_id, city_id, payer_id, expense_category_id,
+    created_by, counterparty, payment_purpose, created_from, created_to,
+    due_from, due_to, amount_from, amount_to, archived, hide_paid, sort, order,
+    with_total, limit, offset
+
+    Параметры expense_category_id, hide_paid, sort, order и with_total добавлены
+    для раздела «Согласование счетов v2» и все необязательны: старый раздел их
+    не передаёт и получает ровно прежний ответ.
+    """
+    sort, order, error = _read_invoice_sort()
+    if error:
+        return jsonify({"error": error}), 400
+
+    # Верхняя граница страницы. Без неё limit=100000 разом вытянул бы всю базу
+    # вместе со строками распределения — на двух воркерах это заметно.
+    limit = max(1, min(request.args.get("limit", 100, type=int) or 100, 200))
+    offset = max(0, request.args.get("offset", 0, type=int) or 0)
+
+    filters, error = _read_invoice_filters()
+    if error:
+        return jsonify({"error": error}), 400
 
     invoices = list_invoices(sort=sort, order=order, limit=limit, offset=offset, **filters)
 

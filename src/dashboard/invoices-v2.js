@@ -105,11 +105,18 @@
         { key: 'expense_category_id', label: 'Статья расхода',      type: 'select', ref: 'categories', any: 'Все статьи' },
         { key: 'status',              label: 'Статус',              type: 'select', ref: 'statuses',   any: 'Любой' },
         { key: 'created_by',          label: 'Автор',               type: 'select', ref: 'authors',    any: 'Все' },
+        // Сумма диапазоном: заполнено одно поле — граница односторонняя,
+        // заполнены оба одинаково — поиск счёта на ровно эту сумму
+        { key: 'amount_from',         label: 'Сумма от',            type: 'number', placeholder: '₽, например 10000' },
+        { key: 'amount_to',           label: 'Сумма до',            type: 'number', placeholder: '₽, например 50000' },
         { key: 'created_from',        label: 'Заведён с',           type: 'date' },
         { key: 'created_to',          label: 'Заведён по',          type: 'date' },
         { key: 'due_from',            label: 'Оплата (план) с',     type: 'date' },
         { key: 'due_to',              label: 'Оплата (план) по',    type: 'date' },
     ];
+
+    // Какой type= ставить полю фильтра. Всё, чего здесь нет, — обычный текст.
+    const FILTER_INPUT_TYPES = { date: 'date', number: 'number' };
 
     // KPI-плитки. Клик по плитке = фильтр списка, повторный клик снимает.
     const KPI_TILES = [
@@ -191,6 +198,9 @@
         // Только оплаченные, не уехавшие в ПланФакт
         onlyUnsynced: false,
         kpiFilter: null,
+        // Фильтр, который заведомо ничего не найдёт (сумма «от» больше «до»):
+        // показываем причину вместо «счетов нет»
+        filterError: '',
         sort: { key: 'created_at', dir: 'desc' },
         rows: [],
         total: 0,
@@ -557,9 +567,32 @@
      * append=true — «Показать ещё»: дозагружаем следующую страницу и НЕ просим
      * пересчитать итог, он уже посчитан на первой странице тем же фильтром.
      */
+    /**
+     * Взаимоисключающие границы суммы. Сервер такой запрос тоже отклоняет, но
+     * набор идёт по цифре: пока в «до» допечатывают 50000, оно успевает побыть
+     * пятёркой, и каждое такое состояние прилетало бы красным тостом.
+     */
+    function amountRangeError() {
+        const from = Number(state.filters.amount_from);
+        const to = Number(state.filters.amount_to);
+        if (!state.filters.amount_from || !state.filters.amount_to) return '';
+        if (!Number.isFinite(from) || !Number.isFinite(to)) return '';
+        return from > to ? 'Сумма «от» больше суммы «до» — под такой фильтр не попадёт ничего' : '';
+    }
+
     async function loadList(append) {
         const token = ++listToken;
         state.loading = true;
+        state.filterError = amountRangeError();
+
+        if (state.filterError) {
+            state.loading = false;
+            state.rows = [];
+            state.total = 0;
+            state.totalAmount = 0;
+            render();
+            return;
+        }
 
         // Любая перезагрузка списка отменяет отложенную: иначе снятие чипа или
         // сброс фильтров даёт второй запрос с тем же результатом.
@@ -831,7 +864,8 @@
                 ${f.type === 'select'
                     ? multiSelectHtml(f)
                     : `<input class="iv2-input" id="iv2f-${f.key}"
-                              type="${f.type === 'date' ? 'date' : 'text'}"
+                              type="${FILTER_INPUT_TYPES[f.type] || 'text'}"
+                              ${f.type === 'number' ? 'inputmode="decimal" step="0.01" min="0"' : ''}
                               ${f.placeholder ? `placeholder="${escapeHtml(f.placeholder)}"` : ''}>`}
             </div>`).join('');
 
@@ -1103,7 +1137,9 @@
             }
             const el = $('iv2f-' + f.key);
             if (!el) return;
-            if (f.type === 'text') {
+            // Сумма набирается по цифре, как и текст, — ей та же пауза перед
+            // запросом. Даты ставятся одним осознанным действием.
+            if (f.type === 'text' || f.type === 'number') {
                 el.addEventListener('input', () => {
                     state.filters[f.key] = el.value;
                     clearTimeout(textFilterTimer);
@@ -1207,6 +1243,9 @@
         const value = state.filters[f.key];
         if (!value) return '';
         if (f.type === 'date') return fmtDue(value);
+        // Сумма в чипе — деньгами: «Сумма от, ₽: 10 000 ₽» читается быстрее,
+        // чем голое число, среди прочих чипов
+        if (f.type === 'number') return Number.isFinite(Number(value)) ? money(value) : value;
         return value;
     }
 
@@ -1726,7 +1765,8 @@
         if (state.loading && !state.rows.length) {
             body = `<tr><td colspan="${tableSpan()}" class="iv2-tbl-empty">Загрузка…</td></tr>`;
         } else if (!state.rows.length) {
-            body = `<tr><td colspan="${tableSpan()}" class="iv2-tbl-empty">Под текущие фильтры счетов нет</td></tr>`;
+            body = `<tr><td colspan="${tableSpan()}" class="iv2-tbl-empty">${
+                escapeHtml(state.filterError || 'Под текущие фильтры счетов нет')}</td></tr>`;
         } else {
             body = state.rows.map(invoice => `
                 <tr class="${invoice.is_archived ? 'iv2-arch' : ''}">
@@ -1803,7 +1843,8 @@
 
         const count = $('iv2FiltersCount');
         if (count) {
-            count.textContent = state.loading && !state.rows.length
+            if (state.filterError) count.textContent = state.filterError;
+            else count.textContent = state.loading && !state.rows.length
                 ? 'Считаем…'
                 : `Найдено ${withCount(state.total, 'счёт', 'счёта', 'счетов')} на ${money(state.totalAmount)}`;
         }
