@@ -2161,13 +2161,52 @@ def list_invoices(
     )
     params = params + [limit, offset]
 
+    # try/finally обязателен: без него исключение в _attach_line_items уносит
+    # соединение с собой, а незакрытое соединение держит лок общей базы —
+    # так уже вставал вход в дашборд (см. CLAUDE.md).
     conn = get_db()
-    rows = conn.execute(query, params).fetchall()
-    invoices = [dict(row) for row in rows]
-    _attach_line_items(conn, invoices)
-    conn.close()
+    try:
+        rows = conn.execute(query, params).fetchall()
+        invoices = [dict(row) for row in rows]
+        _attach_line_items(conn, invoices)
+    finally:
+        conn.close()
 
     return invoices
+
+
+def list_invoice_selection(
+    sort: Optional[str] = None,
+    order: Optional[str] = None,
+    limit: int = 1000,
+    **filters,
+) -> List[Dict[str, Any]]:
+    """
+    Счета выборки в минимальном виде — для действия «выбрать все по фильтру».
+
+    Отдаём ровно то, чем панель массовых действий считает сумму и решает, к
+    каким счетам действие применимо (см. bulkActionFits на клиенте): id, номер,
+    сумму, статус и признак архива. Полные счета со строками распределения
+    тянуть ради галочки незачем — под фильтр может попасть вся база.
+
+    Фильтры те же, что у list_invoices: срез обязан совпадать с тем, что
+    человек видит в таблице, иначе «выбрать все 340» выберет не те 340.
+    """
+    where, params = _build_invoice_filters(**filters)
+
+    query = (
+        f"SELECT i.id, i.invoice_number, i.amount, i.status, i.is_archived"
+        f"{_INVOICE_LIST_FROM} {where}"
+        f" ORDER BY {_build_invoice_order_by(sort, order)} LIMIT ?"
+    )
+
+    conn = get_db()
+    try:
+        rows = conn.execute(query, params + [limit]).fetchall()
+    finally:
+        conn.close()
+
+    return [dict(row) for row in rows]
 
 
 def count_invoices(**filters) -> Dict[str, Any]:

@@ -77,6 +77,7 @@ from .storage import (
     get_user_stores,
     get_users_full_names,
     list_invoices,
+    list_invoice_selection,
     approve_invoice,
     reject_invoice,
     mark_invoice_paid,
@@ -631,6 +632,49 @@ def get_invoices():
         result["total_amount"] = totals["amount"]
 
     return jsonify(result)
+
+
+# Потолок выбора «все по фильтру». Он не про интерфейс, а про здравый смысл:
+# выбранное живёт в памяти вкладки и уходит в массовое действие пачками по
+# BULK_MAX_IDS, то есть 1000 счетов — это уже 10 последовательных запросов.
+# Упёрлись в потолок — говорим об этом прямо, а не выбираем молча часть.
+SELECTION_MAX = 1000
+
+
+@invoices_bp.route("/selection", methods=["GET"])
+@section_required(*INVOICE_SECTIONS)
+def get_invoices_selection():
+    """
+    Все счета текущей выборки в минимальном виде — для «выбрать все по фильтру».
+
+    Query params — те же, что у списка (см. get_invoices). Отдаём только id,
+    номер, сумму, статус и признак архива: панели массовых действий этого
+    хватает, а тянуть полные счета со строками распределения ради галочки
+    незачем.
+
+    truncated=true — под фильтр попало больше SELECTION_MAX; клиент обязан
+    сказать об этом человеку, иначе «выбрать все 3000» тихо возьмёт первую
+    тысячу.
+    """
+    sort, order, error = _read_invoice_sort()
+    if error:
+        return jsonify({"error": error}), 400
+
+    filters, error = _read_invoice_filters()
+    if error:
+        return jsonify({"error": error}), 400
+
+    # Берём на один больше потолка: так отличаем «ровно тысяча» от «больше»
+    # без второго запроса с COUNT(*)
+    invoices = list_invoice_selection(sort=sort, order=order, limit=SELECTION_MAX + 1, **filters)
+    truncated = len(invoices) > SELECTION_MAX
+
+    return jsonify({
+        "invoices": invoices[:SELECTION_MAX],
+        "count": min(len(invoices), SELECTION_MAX),
+        "truncated": truncated,
+        "limit": SELECTION_MAX,
+    })
 
 
 @invoices_bp.route("/summary", methods=["GET"])

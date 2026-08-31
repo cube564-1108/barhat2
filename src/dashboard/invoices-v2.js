@@ -135,6 +135,11 @@
     ];
 
     const PAGE_SIZE = 25;
+
+    // Сколько счетов уходит в массовое действие одним запросом. Должно
+    // совпадать с BULK_MAX_IDS в src/invoices/server.py: больше сервер не
+    // возьмёт, меньше — лишние запросы на медленном диске.
+    const BULK_CHUNK = 100;
     const TEXT_FILTER_DELAY_MS = 350;
 
     // Мультивыбор: галочки ставятся пачкой, и каждая не должна уходить своим
@@ -207,6 +212,14 @@
         totalAmount: 0,
         expandedAlloc: new Set(),
         selected: new Set(),
+        // Что известно о выбранных счетах: id → {id, invoice_number, amount,
+        // status, is_archived}. Отдельно от state.rows, потому что «выбрать
+        // все по фильтру» отмечает и те счета, которых на странице ещё нет.
+        selectedMeta: new Map(),
+        // Выбор сделан по всей выборке, а не галочками — влияет на подпись
+        selectedFromFilter: false,
+        // Ход массового действия: {done, total} пока идут пачки
+        bulkProgress: null,
         report: null,
         summary: null,
         // Счета, уехавшие в архив при отменённой автоархивации (см. loadAutoArchived)
@@ -628,7 +641,16 @@
                 state.total = data.total ?? state.rows.length;
                 state.totalAmount = data.total_amount ?? 0;
                 state.expandedAlloc.clear();
+                // Выборка сменилась — выбор к ней больше не относится. Иначе
+                // «выбрать все по фильтру», смена фильтра и массовое действие
+                // подряд обработали бы счета из прошлого среза.
+                clearSelection();
             }
+            // Статус выбранного счёта мог уехать вперёд (согласовали в другой
+            // вкладке) — держим наше знание о нём в актуальном виде
+            state.rows.forEach(invoice => {
+                if (state.selected.has(invoice.id)) addToSelection(invoice);
+            });
         } catch (error) {
             if (token !== listToken) return;
             console.error('invoices-v2: не удалось загрузить список:', error);
@@ -1794,7 +1816,20 @@
         if (!host) return;
 
         const bulk = canBulk();
-        const head = (bulk ? '<th class="iv2-cbx-col"></th>' : '') + COLS.map(col => `
+        // Галочка в шапке выбирает страницу целиком. Выборка целиком — это
+        // отдельная кнопка ниже: одна галочка не должна незаметно захватывать
+        // счета, которых человек на экране не видел.
+        const pageRows = state.rows.filter(isSelectable);
+        const pageAllSelected = pageRows.length > 0
+            && pageRows.every(invoice => state.selected.has(invoice.id));
+        const head = (bulk
+            ? `<th class="iv2-cbx-col">
+                   <input type="checkbox" class="iv2-cbx" data-select-page
+                          ${pageAllSelected ? 'checked' : ''}
+                          ${pageRows.length ? '' : 'disabled'}
+                          aria-label="Выбрать счета на странице">
+               </th>`
+            : '') + COLS.map(col => `
             <th class="${col.sort ? 'iv2-sortable' : ''}${col.sort === state.sort.key ? ' iv2-sorted' : ''}${col.right ? ' iv2-right' : ''}"
                 ${col.sort ? `data-sort="${col.sort}"` : ''}>${escapeHtml(col.label)}${sortArrow(col)}</th>`).join('');
 
@@ -1819,12 +1854,28 @@
         const shownAmount = state.rows.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
         const rest = Math.max(0, state.total - state.rows.length);
 
+        // Выбор всей выборки предлагаем только когда в ней есть чего выбирать
+        // сверх страницы: на 20 счетах кнопка была бы шумом
+        const selectAllHtml = bulk && state.total > 0
+            ? `<span class="iv2-tbl-sum__pick">
+                   ${state.selected.size
+                       ? `<span>Выбрано <b>${state.selected.size}</b>${
+                              state.selectedFromFilter ? ' — вся выборка' : ''}</span>
+                          <button class="iv2-linkish" type="button" id="iv2SelectNone">Снять выбор</button>`
+                       : ''}
+                   ${state.selected.size < state.total
+                       ? `<button class="iv2-linkish" type="button" id="iv2SelectAll">Выбрать все ${state.total} по фильтру</button>`
+                       : ''}
+               </span>`
+            : '';
+
         host.innerHTML = `
             <div class="iv2-tbl-wrap">
                 <div class="iv2-tbl-sum">
                     <span>Найдено: <b>${state.total}</b> на <b>${escapeHtml(money(state.totalAmount))}</b></span>
                     <span>Показано: <b>${state.rows.length}</b> на <b>${escapeHtml(money(shownAmount))}</b></span>
                     <span class="iv2-hint">Сортировка: ${escapeHtml(currentSortLabel())}</span>
+                    ${selectAllHtml}
                 </div>
                 <table class="iv2-tbl">
                     <thead><tr>${head}</tr></thead>
@@ -1869,11 +1920,45 @@
         host.querySelectorAll('[data-select]').forEach(box => {
             box.addEventListener('change', () => {
                 const id = Number(box.getAttribute('data-select'));
-                if (box.checked) state.selected.add(id);
-                else state.selected.delete(id);
+                const invoice = state.rows.find(row => row.id === id);
+                if (box.checked && invoice) {
+                    addToSelection(invoice);
+                } else {
+                    state.selected.delete(id);
+                    state.selectedMeta.delete(id);
+                }
+                // Ручная галочка означает, что выбор больше не «вся выборка»
+                state.selectedFromFilter = false;
+                renderTable();
                 renderBulkBar();
             });
         });
+
+        const selectPage = host.querySelector('[data-select-page]');
+        if (selectPage) {
+            selectPage.addEventListener('change', () => {
+                if (selectPage.checked) pageRows.forEach(addToSelection);
+                else pageRows.forEach(invoice => {
+                    state.selected.delete(invoice.id);
+                    state.selectedMeta.delete(invoice.id);
+                });
+                state.selectedFromFilter = false;
+                renderTable();
+                renderBulkBar();
+            });
+        }
+
+        const selectAll = $('iv2SelectAll');
+        if (selectAll) selectAll.addEventListener('click', () => selectAllFiltered(selectAll));
+
+        const selectNone = $('iv2SelectNone');
+        if (selectNone) {
+            selectNone.addEventListener('click', () => {
+                clearSelection();
+                renderTable();
+                renderBulkBar();
+            });
+        }
 
         const more = $('iv2MoreBtn');
         if (more) more.addEventListener('click', () => loadList(true));
@@ -3259,16 +3344,68 @@
     // Массовые действия
     // =========================================================================
 
-    /** Выбранные счета из текущей страницы: со снятых фильтром отметку снимаем. */
+    /**
+     * Выбранные счета.
+     *
+     * Источник истины — selectedMeta, а не текущая страница: выбор «все по
+     * фильтру» отмечает и те счета, которые ещё не подгружены, и сверка со
+     * state.rows молча выбрасывала бы их из массового действия. Выбор
+     * сбрасывается при смене фильтров (см. loadList), поэтому «выбрано» здесь
+     * всегда принадлежит той же выборке, что на экране.
+     */
     function selectedInvoices() {
-        const byId = {};
-        state.rows.forEach(invoice => { byId[invoice.id] = invoice; });
-        const alive = [];
-        state.selected.forEach(id => { if (byId[id]) alive.push(byId[id]); });
-        if (alive.length !== state.selected.size) {
-            state.selected = new Set(alive.map(invoice => invoice.id));
+        const list = [];
+        state.selected.forEach(id => {
+            const invoice = state.selectedMeta.get(id);
+            if (invoice) list.push(invoice);
+        });
+        return list;
+    }
+
+    function clearSelection() {
+        state.selected.clear();
+        state.selectedMeta.clear();
+        state.selectedFromFilter = false;
+    }
+
+    /** Запомнить счёт как выбранный (из строки таблицы или из ответа /selection). */
+    function addToSelection(invoice) {
+        state.selected.add(invoice.id);
+        state.selectedMeta.set(invoice.id, {
+            id: invoice.id,
+            invoice_number: invoice.invoice_number,
+            amount: invoice.amount,
+            status: invoice.status,
+            is_archived: invoice.is_archived,
+        });
+    }
+
+    /**
+     * Выбрать все счета, попавшие под текущий фильтр, — включая незагруженные.
+     * Сервер отдаёт их в минимальном виде одной ручкой (GET /selection).
+     */
+    async function selectAllFiltered(button) {
+        if (!canBulk()) return;
+        const params = buildListParams();
+        if (button) button.disabled = true;
+        try {
+            const data = await apiGet('/api/invoices/selection?' + params.toString());
+            clearSelection();
+            (data.invoices || []).forEach(invoice => {
+                if (isSelectable(invoice)) addToSelection(invoice);
+            });
+            state.selectedFromFilter = true;
+            if (data.truncated) {
+                toast(`Под фильтр попало больше ${data.limit} счетов — выбраны первые ${data.limit}. `
+                      + 'Сузьте фильтр, чтобы обработать остальные', 'error');
+            }
+        } catch (error) {
+            toast('Не удалось выбрать всю выборку: ' + error.message, 'error');
+        } finally {
+            if (button) button.disabled = false;
+            renderTable();
+            renderBulkBar();
         }
-        return alive;
     }
 
     function renderBulkBar() {
@@ -3283,6 +3420,18 @@
 
         const total = chosen.reduce((sum, invoice) => sum + (Number(invoice.amount) || 0), 0);
 
+        // Пока идут пачки, кнопки убираем: второе действие поверх первого
+        // перемешало бы отчёты и обработало часть счетов дважды
+        if (state.bulkProgress) {
+            host.innerHTML = `
+                <div class="iv2-bulkbar">
+                    <span class="iv2-bulkbar__txt">Обрабатываем
+                        <b>${state.bulkProgress.done}</b> из <b>${state.bulkProgress.total}</b>…</span>
+                    <span class="iv2-bulkbar__txt">Не закрывайте вкладку</span>
+                </div>`;
+            return;
+        }
+
         // Кнопка появляется, если под неё подходит хотя бы один выбранный счёт,
         // и показывает, скольких именно касается: при смешанном выборе иначе
         // непонятно, что произойдёт.
@@ -3295,7 +3444,8 @@
 
         host.innerHTML = `
             <div class="iv2-bulkbar">
-                <span class="iv2-bulkbar__txt">Выбрано <b>${chosen.length}</b> ·
+                <span class="iv2-bulkbar__txt">Выбрано <b>${chosen.length}</b>${
+                    state.selectedFromFilter ? ' (вся выборка)' : ''} ·
                     <span class="iv2-bulkbar__sum">${escapeHtml(money(total))}</span></span>
                 <span class="iv2-bulkbar__actions">${buttons || '<span class="iv2-bulkbar__txt">Для выбранных статусов массовых действий нет</span>'}</span>
                 <button class="bx-btn bx-btn--sm iv2-bulkbar__clear" type="button" id="iv2BulkClear">Снять выбор</button>
@@ -3307,7 +3457,7 @@
         const clear = $('iv2BulkClear');
         if (clear) {
             clear.addEventListener('click', () => {
-                state.selected.clear();
+                clearSelection();
                 renderTable();
                 renderBulkBar();
             });
@@ -3367,7 +3517,13 @@
             },
         };
         const text = texts[actionKey];
-        const ok = await window.BarhatUI.confirm(text.body, {
+        // Длинный выбор уходит пачками и идёт заметное время — предупреждаем
+        // до нажатия, а не показываем молчащий экран после
+        const batchNote = ids.length > BULK_CHUNK
+            ? `\n\nСчета уйдут пачками по ${BULK_CHUNK} — это ${Math.ceil(ids.length / BULK_CHUNK)} `
+              + 'запросов подряд. Вкладку закрывать нельзя, отчёт придёт один на всё.'
+            : '';
+        const ok = await window.BarhatUI.confirm(text.body + batchNote, {
             title: text.title,
             confirmText: text.confirm,
             danger: actionKey === 'bank',
@@ -3382,18 +3538,58 @@
             unarchive: '/api/invoices/bulk-unarchive',
         };
 
-        try {
-            const data = await apiPost(paths[actionKey], { ids });
-            state.selected.clear();
-            showBulkReport(actionKey, data);
-        } catch (error) {
-            // Пакет мог быть отклонён целиком (например, в банк отправлять
-            // нечего) — сервер в этом случае называет причины поимённо
-            showBulkReport(actionKey, { error: error.message });
+        // Сервер берёт не больше BULK_MAX_IDS за запрос, и поднимать этот
+        // лимит нельзя: каждый счёт — своя транзакция на медленном /data, а
+        // воркеров на проде два. Поэтому длинный выбор режем сами и шлём
+        // пачки последовательно — между запросами воркер свободен.
+        let merged = null;
+        for (let start = 0; start < ids.length; start += BULK_CHUNK) {
+            const part = ids.slice(start, start + BULK_CHUNK);
+            state.bulkProgress = { done: start, total: ids.length };
+            renderBulkBar();
+            try {
+                merged = mergeBulkReports(merged, await apiPost(paths[actionKey], { ids: part }));
+            } catch (error) {
+                // Пачка могла быть отклонена целиком (например, в банк
+                // отправлять нечего) — сервер называет причины поимённо.
+                // Дальше не идём: если упала одна пачка, следующие, скорее
+                // всего, упадут так же, а человек уже ждёт ответа.
+                merged = mergeBulkReports(merged, { error: error.message });
+                break;
+            }
         }
+
+        state.bulkProgress = null;
+        clearSelection();
+        showBulkReport(actionKey, merged || {});
 
         loadSummary();
         loadList(false);
+    }
+
+    /**
+     * Склеить отчёты пачек в один: списки складываем, суммы (*_amount)
+     * суммируем, флаги — по «хотя бы в одной». Человек отправлял одно
+     * действие и ждёт один отчёт, а не десять окон подряд.
+     */
+    function mergeBulkReports(target, part) {
+        if (!target) return Object.assign({}, part);
+        Object.keys(part).forEach(key => {
+            const value = part[key];
+            const current = target[key];
+            if (Array.isArray(value)) {
+                target[key] = (Array.isArray(current) ? current : []).concat(value);
+            } else if (typeof value === 'number') {
+                target[key] = (typeof current === 'number' ? current : 0) + value;
+            } else if (typeof value === 'boolean') {
+                target[key] = Boolean(current) || value;
+            } else if (current === undefined || current === null || current === '') {
+                // Строки и объекты (текст ошибки, собранный документ банка)
+                // берём от первой пачки, где они появились
+                target[key] = value;
+            }
+        });
+        return target;
     }
 
     function reportSection(title, items, withAmount) {

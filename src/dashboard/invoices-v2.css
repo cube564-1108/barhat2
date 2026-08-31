@@ -693,6 +693,15 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* Выбор всей выборки — прижат вправо, чтобы не путался со счётчиками слева */
+.iv2 .iv2-tbl-sum__pick {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
 .iv2 table.iv2-tbl {
     width: 100%;
     border-collapse: collapse;
