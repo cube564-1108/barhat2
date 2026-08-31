@@ -62,6 +62,50 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dd
         raise
 
 
+ONE_OPEN_SHIFT_INDEX = "idx_shifts_one_open_per_store"
+
+
+def ensure_one_open_shift_index(conn: sqlite3.Connection) -> bool:
+    """
+    Создать частичный уникальный индекс «одна открытая смена на точку».
+
+    29.08.26 на Свердловском, 23 открылись три дневные смены в одну минуту:
+    проверка «нет ли открытой смены» и INSERT шли отдельными соединениями, а
+    воркеров на проде 2 по 8 потоков — все три запроса прочитали «открытых нет»
+    раньше, чем первый успел записаться. Проверку в коде теперь держит
+    open_cash_shift() под BEGIN IMMEDIATE, а этот индекс — последняя преграда:
+    он не даёт продублировать смену, даже если появится ещё один путь вставки.
+
+    Возвращает True, если индекс на месте. Два штатных исхода без индекса, и
+    ни один не должен ронять старт воркера:
+
+      IntegrityError   — в базе уже лежат дубли, индекс не построить. Их
+                         разбирает POST /api/cash-shifts/admin/duplicate-open-shifts/resolve,
+                         который в конце зовёт эту же функцию ещё раз — без деплоя.
+      database is locked — индекс строит параллельный воркер gunicorn.
+    """
+    try:
+        conn.execute(f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS {ONE_OPEN_SHIFT_INDEX}
+            ON cash_shifts(store_id) WHERE status = 'open'
+        """)
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        print(
+            f"[CashShifts] Индекс {ONE_OPEN_SHIFT_INDEX} не создан — в базе есть "
+            f"дубли открытых смен: {e}. Разобрать: "
+            f"GET /api/cash-shifts/admin/duplicate-open-shifts"
+        )
+        return False
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            print(f"[CashShifts] Индекс {ONE_OPEN_SHIFT_INDEX} строит параллельный воркер: {e}")
+            return False
+        raise
+
+
 def init_cashshifts_tables():
     """Инициализация таблиц кассовых смен (вызывается при старте приложения).
 
@@ -171,6 +215,9 @@ def _init_cashshifts_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_shifts_store_datetime
         ON cash_shifts(store_id, datetime_start DESC)
     """)
+
+    # Одна открытая смена на точку — гарантия уровня БД
+    ensure_one_open_shift_index(conn)
 
     # ========================================================================
     # 4. Инкассации (cash_collections)
@@ -303,22 +350,26 @@ def _seed_categories_if_empty(conn: sqlite3.Connection):
 def get_all_stores() -> List[Dict[str, Any]]:
     """Получить список всех активных точек продаж."""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM stores WHERE is_active = 1 ORDER BY name"
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        rows = conn.execute(
+            "SELECT * FROM stores WHERE is_active = 1 ORDER BY name"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_store_by_id(store_id: int) -> Optional[Dict[str, Any]]:
     """Получить точку по ID."""
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM stores WHERE id = ? AND is_active = 1",
-        (store_id,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        row = conn.execute(
+            "SELECT * FROM stores WHERE id = ? AND is_active = 1",
+            (store_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def create_store(name: str) -> int:
@@ -383,11 +434,13 @@ def delete_store(store_id: int) -> bool:
 def get_all_categories() -> List[Dict[str, Any]]:
     """Получить список всех активных категорий расходов."""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM expense_categories WHERE is_active = 1 ORDER BY name"
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        rows = conn.execute(
+            "SELECT * FROM expense_categories WHERE is_active = 1 ORDER BY name"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_categories_with_usage() -> List[Dict[str, Any]]:
@@ -416,23 +469,27 @@ def get_categories_with_usage() -> List[Dict[str, Any]]:
 def get_category_by_id(category_id: int) -> Optional[Dict[str, Any]]:
     """Получить категорию по ID."""
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM expense_categories WHERE id = ? AND is_active = 1",
-        (category_id,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        row = conn.execute(
+            "SELECT * FROM expense_categories WHERE id = ? AND is_active = 1",
+            (category_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def get_user_stores(username: str) -> List[int]:
     """Получить список ID точек пользователя."""
     conn = get_db()
-    rows = conn.execute(
-        "SELECT store_id FROM user_stores WHERE username = ?",
-        (username,)
-    ).fetchall()
-    conn.close()
-    return [row["store_id"] for row in rows]
+    try:
+        rows = conn.execute(
+            "SELECT store_id FROM user_stores WHERE username = ?",
+            (username,)
+        ).fetchall()
+        return [row["store_id"] for row in rows]
+    finally:
+        conn.close()
 
 
 def check_store_access(username: str, store_id: int, user_role: str) -> bool:
@@ -484,6 +541,102 @@ def get_users_full_names(usernames: List[str]) -> Dict[str, str]:
 # ОРМ-ПОДОБНЫЕ ФУНКЦИИ ДЛЯ КАССОВЫХ СМЕН
 # =============================================================================
 
+class OpenShiftExistsError(Exception):
+    """На точке уже есть открытая смена — вторую открывать нельзя."""
+
+    def __init__(self, shift_id: int):
+        super().__init__(f"На этой точке уже есть открытая смена (ID={shift_id})")
+        self.shift_id = shift_id
+
+
+def open_cash_shift(
+    store_id: int,
+    shift_type: str,
+    datetime_start: str,
+    florist_username: Optional[str] = None
+) -> tuple:
+    """
+    Открыть смену на точке. Возвращает (shift_id, opening_balance).
+
+    Проверка «нет открытой смены», расчёт начального остатка и INSERT — одна
+    транзакция на одном соединении. Раньше это были три независимых соединения
+    в server.open_shift(), и между проверкой и вставкой лежало окно в сотни
+    миллисекунд (медленный /data: 90-700 мс на запрос). 29.08.26 в это окно
+    прошли три запроса подряд и открыли три смены на одной точке.
+
+    BEGIN IMMEDIATE берёт write-лок ДО чтения, поэтому второй запрос не читает
+    устаревшую картину, а ждёт своей очереди по busy_timeout (20 с) и потом
+    честно видит уже открытую смену. Обычный BEGIN (deferred) так не умеет:
+    он берёт read-лок, и обе транзакции спокойно доходят до INSERT.
+
+    Raises:
+        OpenShiftExistsError: смена на точке уже открыта
+    """
+    conn = get_db()
+    # Управляем транзакцией руками: с дефолтным isolation_level драйвер сам
+    # ставит BEGIN перед INSERT, и наш BEGIN IMMEDIATE оказался бы вложенным
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        existing = conn.execute(
+            """
+            SELECT id FROM cash_shifts
+            WHERE store_id = ? AND status = 'open'
+            ORDER BY datetime_start DESC
+            LIMIT 1
+            """,
+            (store_id,)
+        ).fetchone()
+
+        if existing:
+            conn.execute("ROLLBACK")
+            raise OpenShiftExistsError(existing["id"])
+
+        # Начальный остаток — фактический остаток последней закрытой смены точки.
+        # NULL здесь реален (смену закрыли без пересчёта кассы), а колонка
+        # opening_balance объявлена NOT NULL — без подмены на 0 INSERT падал бы
+        last_closed = conn.execute(
+            """
+            SELECT actual_balance FROM cash_shifts
+            WHERE store_id = ? AND status = 'closed'
+            ORDER BY datetime_end DESC
+            LIMIT 1
+            """,
+            (store_id,)
+        ).fetchone()
+
+        opening_balance = 0.0
+        if last_closed and last_closed["actual_balance"] is not None:
+            opening_balance = float(last_closed["actual_balance"])
+
+        cursor = conn.execute(
+            """
+            INSERT INTO cash_shifts (
+                store_id, shift_type, datetime_start,
+                opening_balance, florist_username, status
+            ) VALUES (?, ?, ?, ?, ?, 'open')
+            """,
+            (store_id, shift_type, datetime_start, opening_balance, florist_username)
+        )
+        shift_id = cursor.lastrowid
+        conn.execute("COMMIT")
+
+        return shift_id, opening_balance
+
+    except sqlite3.IntegrityError as e:
+        # Сработал idx_shifts_one_open_per_store: гонку выиграл кто-то другой.
+        # Отвечаем тем же, что и при обычной проверке, — «смена уже открыта»
+        conn.execute("ROLLBACK")
+        row = conn.execute(
+            "SELECT id FROM cash_shifts WHERE store_id = ? AND status = 'open' LIMIT 1",
+            (store_id,)
+        ).fetchone()
+        raise OpenShiftExistsError(row["id"] if row else 0) from e
+    finally:
+        conn.close()
+
+
 def create_cash_shift(
     store_id: int,
     shift_type: str,
@@ -491,40 +644,46 @@ def create_cash_shift(
     opening_balance: float,
     florist_username: Optional[str] = None
 ) -> int:
-    """Создать новую кассовую смену. Возвращает ID созданной смены."""
+    """
+    Низкоуровневая вставка смены без проверок. Только для тестовых сценариев.
+
+    Боевое открытие смены идёт через open_cash_shift(): здесь нет ни проверки
+    «одна открытая смена на точку», ни расчёта начального остатка.
+    """
     conn = get_db()
-
-    cursor = conn.execute(
-        """
-        INSERT INTO cash_shifts (
-            store_id, shift_type, datetime_start,
-            opening_balance, florist_username, status
-        ) VALUES (?, ?, ?, ?, ?, 'open')
-        """,
-        (store_id, shift_type, datetime_start, opening_balance, florist_username)
-    )
-
-    shift_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-
-    return shift_id
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO cash_shifts (
+                store_id, shift_type, datetime_start,
+                opening_balance, florist_username, status
+            ) VALUES (?, ?, ?, ?, ?, 'open')
+            """,
+            (store_id, shift_type, datetime_start, opening_balance, florist_username)
+        )
+        shift_id = cursor.lastrowid
+        conn.commit()
+        return shift_id
+    finally:
+        conn.close()
 
 
 def get_open_shift(store_id: int) -> Optional[Dict[str, Any]]:
     """Получить открытую смену для точки."""
     conn = get_db()
-    row = conn.execute(
-        """
-        SELECT * FROM cash_shifts
-        WHERE store_id = ? AND status = 'open'
-        ORDER BY datetime_start DESC
-        LIMIT 1
-        """,
-        (store_id,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM cash_shifts
+            WHERE store_id = ? AND status = 'open'
+            ORDER BY datetime_start DESC
+            LIMIT 1
+            """,
+            (store_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def get_open_shifts(store_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:
@@ -534,8 +693,6 @@ def get_open_shifts(store_ids: Optional[List[int]] = None) -> List[Dict[str, Any
     Args:
         store_ids: если задан — только по этим точкам (для manager); None — по всем (admin)
     """
-    conn = get_db()
-
     query = """
         SELECT cs.*, s.name as store_name
         FROM cash_shifts cs
@@ -546,7 +703,6 @@ def get_open_shifts(store_ids: Optional[List[int]] = None) -> List[Dict[str, Any
 
     if store_ids is not None:
         if not store_ids:
-            conn.close()
             return []
         placeholders = ", ".join("?" for _ in store_ids)
         query += f" AND cs.store_id IN ({placeholders})"
@@ -554,37 +710,43 @@ def get_open_shifts(store_ids: Optional[List[int]] = None) -> List[Dict[str, Any
 
     query += " ORDER BY cs.datetime_start ASC"
 
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+    conn = get_db()
+    try:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_last_closed_shift(store_id: int) -> Optional[Dict[str, Any]]:
     """Получить последнюю закрытую смену для точки (для opening_balance)."""
     conn = get_db()
-    row = conn.execute(
-        """
-        SELECT * FROM cash_shifts
-        WHERE store_id = ? AND status = 'closed'
-        ORDER BY datetime_end DESC
-        LIMIT 1
-        """,
-        (store_id,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM cash_shifts
+            WHERE store_id = ? AND status = 'closed'
+            ORDER BY datetime_end DESC
+            LIMIT 1
+            """,
+            (store_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def get_cash_shift_by_id(shift_id: int) -> Optional[Dict[str, Any]]:
     """Получить смену по ID."""
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM cash_shifts WHERE id = ?",
-        (shift_id,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        row = conn.execute(
+            "SELECT * FROM cash_shifts WHERE id = ?",
+            (shift_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_cash_shifts(
@@ -620,10 +782,11 @@ def list_cash_shifts(
     params.extend([limit, offset])
 
     conn = get_db()
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+    try:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def delete_cash_shift(shift_id: int) -> bool:
@@ -645,6 +808,120 @@ def delete_cash_shift(shift_id: int) -> bool:
         return cursor.rowcount > 0
     finally:
         conn.close()
+
+
+def find_duplicate_open_shifts() -> List[Dict[str, Any]]:
+    """
+    Найти точки, на которых открыто больше одной смены.
+
+    Наследие гонки в open_shift(): пока не создан idx_shifts_one_open_per_store,
+    в базе могут лежать дубли, и построить индекс поверх них нельзя. Отдаём по
+    каждой смене признаки «есть ли в ней данные» — инкассации и кэш заказов из
+    CRM: удалять можно только пустые, иначе потеряем внесённые расходы.
+
+    Возвращает список групп: [{store_id, store_name, shifts: [...]}, ...]
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT
+                cs.id, cs.store_id, cs.shift_type, cs.datetime_start,
+                cs.opening_balance, cs.florist_username,
+                s.name AS store_name,
+                (SELECT COUNT(*) FROM cash_collections cc WHERE cc.shift_id = cs.id)
+                    AS collections_count,
+                (SELECT COUNT(*) FROM cash_orders_cache oc WHERE oc.shift_id = cs.id)
+                    AS cash_orders_count
+            FROM cash_shifts cs
+            LEFT JOIN stores s ON s.id = cs.store_id
+            WHERE cs.status = 'open'
+              AND cs.store_id IN (
+                  SELECT store_id FROM cash_shifts
+                  WHERE status = 'open'
+                  GROUP BY store_id
+                  HAVING COUNT(*) > 1
+              )
+            ORDER BY cs.store_id, cs.datetime_start, cs.id
+        """).fetchall()
+    finally:
+        conn.close()
+
+    groups: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        shift = dict(row)
+        group = groups.setdefault(shift["store_id"], {
+            "store_id": shift["store_id"],
+            "store_name": shift["store_name"],
+            "shifts": [],
+        })
+        shift["has_data"] = bool(shift["collections_count"] or shift["cash_orders_count"])
+        group["shifts"].append(shift)
+
+    return list(groups.values())
+
+
+def resolve_duplicate_open_shifts() -> Dict[str, Any]:
+    """
+    Разобрать дубли открытых смен: оставить одну на точку, пустые удалить.
+
+    Какую смену оставляем:
+      — единственную, в которой есть данные (инкассации или заказы из CRM);
+      — если данных нет ни в одной — самую раннюю по datetime_start.
+
+    Если данные есть больше чем в одной смене, группу НЕ трогаем: слить кассу
+    двух смен автоматически нельзя, это решение человека. Такие точки уезжают
+    в skipped, и по ним индекс не построится, пока их не разведут руками.
+
+    В конце пробуем создать idx_shifts_one_open_per_store — чтобы после чистки
+    защита включилась без передеплоя.
+    """
+    deleted: List[Dict[str, Any]] = []
+    kept: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    for group in find_duplicate_open_shifts():
+        with_data = [s for s in group["shifts"] if s["has_data"]]
+
+        if len(with_data) > 1:
+            skipped.append({
+                "store_id": group["store_id"],
+                "store_name": group["store_name"],
+                "reason": "данные внесены больше чем в одну смену — нужен ручной разбор",
+                "shift_ids": [s["id"] for s in group["shifts"]],
+            })
+            continue
+
+        keep = with_data[0] if with_data else group["shifts"][0]
+        kept.append({
+            "store_id": group["store_id"],
+            "store_name": group["store_name"],
+            "shift_id": keep["id"],
+            "datetime_start": keep["datetime_start"],
+        })
+
+        for shift in group["shifts"]:
+            if shift["id"] == keep["id"]:
+                continue
+            delete_cash_shift(shift["id"])
+            deleted.append({
+                "store_id": group["store_id"],
+                "store_name": group["store_name"],
+                "shift_id": shift["id"],
+                "datetime_start": shift["datetime_start"],
+            })
+
+    conn = get_db()
+    try:
+        index_created = ensure_one_open_shift_index(conn)
+    finally:
+        conn.close()
+
+    return {
+        "kept": kept,
+        "deleted": deleted,
+        "skipped": skipped,
+        "index_created": index_created,
+    }
 
 
 def update_cash_shift(
@@ -716,14 +993,15 @@ def update_cash_shift(
     params.append(shift_id)
 
     conn = get_db()
-    conn.execute(
-        f"UPDATE cash_shifts SET {', '.join(updates)} WHERE id = ?",
-        params
-    )
-    conn.commit()
-    conn.close()
-
-    return True
+    try:
+        conn.execute(
+            f"UPDATE cash_shifts SET {', '.join(updates)} WHERE id = ?",
+            params
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 # =============================================================================
@@ -740,52 +1018,53 @@ def create_collection(
 ) -> int:
     """Создать инкассацию. Возвращает ID."""
     conn = get_db()
-
-    cursor = conn.execute(
-        """
-        INSERT INTO cash_collections (
-            shift_id, amount, expense_category_id, date,
-            custom_comment, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (shift_id, amount, expense_category_id, date, custom_comment, created_by)
-    )
-
-    collection_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-
-    return collection_id
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO cash_collections (
+                shift_id, amount, expense_category_id, date,
+                custom_comment, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (shift_id, amount, expense_category_id, date, custom_comment, created_by)
+        )
+        collection_id = cursor.lastrowid
+        conn.commit()
+        return collection_id
+    finally:
+        conn.close()
 
 
 def get_shift_collections(shift_id: int) -> List[Dict[str, Any]]:
     """Получить все инкассации смены."""
     conn = get_db()
-    rows = conn.execute(
-        """
-        SELECT cc.*, ec.name as category_name
-        FROM cash_collections cc
-        LEFT JOIN expense_categories ec ON cc.expense_category_id = ec.id
-        WHERE cc.shift_id = ?
-        ORDER BY cc.date
-        """,
-        (shift_id,)
-    ).fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+    try:
+        rows = conn.execute(
+            """
+            SELECT cc.*, ec.name as category_name
+            FROM cash_collections cc
+            LEFT JOIN expense_categories ec ON cc.expense_category_id = ec.id
+            WHERE cc.shift_id = ?
+            ORDER BY cc.date
+            """,
+            (shift_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def get_collections_total(shift_id: int) -> float:
     """Получить сумму инкассаций смены."""
     conn = get_db()
-    result = conn.execute(
-        "SELECT COALESCE(SUM(amount), 0) as total FROM cash_collections WHERE shift_id = ?",
-        (shift_id,)
-    ).fetchone()
-    conn.close()
-
-    return result["total"] if result else 0.0
+    try:
+        result = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM cash_collections WHERE shift_id = ?",
+            (shift_id,)
+        ).fetchone()
+        return result["total"] if result else 0.0
+    finally:
+        conn.close()
 
 
 def _build_collections_filter(
@@ -913,14 +1192,15 @@ def get_collections_by_store(
 def update_collection(collection_id: int, amount: float) -> bool:
     """Обновить сумму инкассации."""
     conn = get_db()
-    conn.execute(
-        "UPDATE cash_collections SET amount = ? WHERE id = ?",
-        (amount, collection_id)
-    )
-    conn.commit()
-    conn.close()
-
-    return True
+    try:
+        conn.execute(
+            "UPDATE cash_collections SET amount = ? WHERE id = ?",
+            (amount, collection_id)
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 # =============================================================================
@@ -939,52 +1219,55 @@ def cache_cash_orders(
         orders: Список словарей {retailcrm_order_id, amount, paid_at, order_data?}
     """
     conn = get_db()
-
-    for order in orders:
-        conn.execute(
-            """
-            INSERT INTO cash_orders_cache (
-                shift_id, retailcrm_order_id, amount, paid_at, order_data
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                shift_id,
-                order["retailcrm_order_id"],
-                order["amount"],
-                order["paid_at"],
-                order.get("order_data")
+    try:
+        for order in orders:
+            conn.execute(
+                """
+                INSERT INTO cash_orders_cache (
+                    shift_id, retailcrm_order_id, amount, paid_at, order_data
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    shift_id,
+                    order["retailcrm_order_id"],
+                    order["amount"],
+                    order["paid_at"],
+                    order.get("order_data")
+                )
             )
-        )
-
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_shift_cash_orders(shift_id: int) -> List[Dict[str, Any]]:
     """Получить кэшированные наличные заказы смены."""
     conn = get_db()
-    rows = conn.execute(
-        """
-        SELECT * FROM cash_orders_cache
-        WHERE shift_id = ?
-        ORDER BY paid_at
-        """,
-        (shift_id,)
-    ).fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cash_orders_cache
+            WHERE shift_id = ?
+            ORDER BY paid_at
+            """,
+            (shift_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def clear_shift_cache(shift_id: int) -> None:
     """Очистить кэш заказов смены."""
     conn = get_db()
-    conn.execute(
-        "DELETE FROM cash_orders_cache WHERE shift_id = ?",
-        (shift_id,)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "DELETE FROM cash_orders_cache WHERE shift_id = ?",
+            (shift_id,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # =============================================================================
@@ -998,22 +1281,23 @@ def set_user_stores(username: str, store_ids: List[int]) -> None:
     Заменяет существующие связи на новые.
     """
     conn = get_db()
-
-    # Удаляем старые связи
-    conn.execute(
-        "DELETE FROM user_stores WHERE username = ?",
-        (username,)
-    )
-
-    # Добавляем новые
-    for store_id in store_ids:
+    try:
+        # Удаляем старые связи
         conn.execute(
-            "INSERT INTO user_stores (username, store_id) VALUES (?, ?)",
-            (username, store_id)
+            "DELETE FROM user_stores WHERE username = ?",
+            (username,)
         )
 
-    conn.commit()
-    conn.close()
+        # Добавляем новые
+        for store_id in store_ids:
+            conn.execute(
+                "INSERT INTO user_stores (username, store_id) VALUES (?, ?)",
+                (username, store_id)
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_user_stores_with_details(username: str) -> List[Dict[str, Any]]:
@@ -1021,31 +1305,33 @@ def get_user_stores_with_details(username: str) -> List[Dict[str, Any]]:
     Получить точки пользователя с деталями (названия и т.д.).
     """
     conn = get_db()
-    rows = conn.execute(
-        """
-        SELECT s.* FROM stores s
-        JOIN user_stores us ON s.id = us.store_id
-        WHERE us.username = ? AND s.is_active = 1
-        ORDER BY s.name
-        """,
-        (username,)
-    ).fetchall()
-    conn.close()
-
-    return [dict(row) for row in rows]
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.* FROM stores s
+            JOIN user_stores us ON s.id = us.store_id
+            WHERE us.username = ? AND s.is_active = 1
+            ORDER BY s.name
+            """,
+            (username,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def delete_user_store(username: str, store_id: int) -> bool:
     """Удалить привязку пользователя к точке."""
     conn = get_db()
-    conn.execute(
-        "DELETE FROM user_stores WHERE username = ? AND store_id = ?",
-        (username, store_id)
-    )
-    conn.commit()
-    conn.close()
-
-    return True
+    try:
+        conn.execute(
+            "DELETE FROM user_stores WHERE username = ? AND store_id = ?",
+            (username, store_id)
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 # =============================================================================

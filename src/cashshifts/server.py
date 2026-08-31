@@ -36,7 +36,10 @@ from .storage import (
     check_store_access,
     get_users_full_names,
     # Смены
-    create_cash_shift,
+    open_cash_shift,
+    OpenShiftExistsError,
+    find_duplicate_open_shifts,
+    resolve_duplicate_open_shifts,
     get_open_shift,
     get_open_shifts,
     get_last_closed_shift,
@@ -413,31 +416,22 @@ def open_shift():
         # Проверка доступа к точке
         require_store_access(store_id)
 
-        # Проверка: нет ли открытой смены
-        existing = get_open_shift(store_id)
-        if existing:
-            return error_response(f"На этой точке уже есть открытая смена (ID={existing['id']})", 409)
-
-        # Вычисляем opening_balance
-        last_closed = get_last_closed_shift(store_id)
-        if last_closed:
-            # Берём actual_balance последней закрытой смены
-            opening_balance = last_closed.get("actual_balance", 0.0)
-        else:
-            # Первая смена на точке
-            opening_balance = 0.0
-
-        # Создаём смену
+        # Проверка «нет открытой смены», расчёт начального остатка и вставка —
+        # одной транзакцией внутри open_cash_shift(). Разносить их по разным
+        # соединениям нельзя: между ними успевали проскочить параллельные
+        # запросы и открыть на точке вторую и третью смену (29.08.26)
         datetime_start = utc_now().strftime("%Y-%m-%d %H:%M:%S")
         florist_username = get_current_username()
 
-        shift_id = create_cash_shift(
-            store_id=store_id,
-            shift_type=shift_type,
-            datetime_start=datetime_start,
-            opening_balance=opening_balance,
-            florist_username=florist_username
-        )
+        try:
+            shift_id, opening_balance = open_cash_shift(
+                store_id=store_id,
+                shift_type=shift_type,
+                datetime_start=datetime_start,
+                florist_username=florist_username
+            )
+        except OpenShiftExistsError as e:
+            return error_response(str(e), 409)
 
         # Получаем созданную смену
         shift = get_cash_shift_by_id(shift_id)
@@ -461,6 +455,50 @@ def open_shift():
         import traceback
         traceback.print_exc()
         return error_response(str(e), 500)
+
+
+# =============================================================================
+# ЭНДПОИНТЫ: РАЗБОР ДУБЛЕЙ ОТКРЫТЫХ СМЕН (АДМИН)
+# =============================================================================
+
+@cashshifts_bp.route("/admin/duplicate-open-shifts", methods=["GET"])
+@role_required("admin")
+def list_duplicate_open_shifts():
+    """
+    Точки, на которых висит больше одной открытой смены.
+
+    Сначала показываем, что нашли, и только отдельным запросом удаляем: разовые
+    операции с боевой базой на этом тарифе Amvera делаются HTTP-ручками,
+    консоли контейнера нет. Плюс речь о деньгах — удаление вслепую недопустимо.
+    """
+    groups = find_duplicate_open_shifts()
+    return jsonify(success_response({
+        "count": len(groups),
+        "groups": groups,
+    }))
+
+
+@cashshifts_bp.route("/admin/duplicate-open-shifts/resolve", methods=["POST"])
+@role_required("admin")
+def resolve_duplicates():
+    """
+    Оставить по одной открытой смене на точку, пустые дубли удалить.
+
+    Смены с внесёнными данными не удаляются никогда. Если данные есть больше
+    чем в одной смене на точке — группа уходит в skipped и разбирается руками.
+    """
+    result = resolve_duplicate_open_shifts()
+
+    if result["deleted"]:
+        log_action(
+            current_user.username,
+            "resolve_duplicate_open_shifts",
+            f"удалено {len(result['deleted'])} дублей: "
+            f"{', '.join(str(d['shift_id']) for d in result['deleted'])}"
+        )
+        logger.info(f"Разобраны дубли открытых смен: {result}")
+
+    return jsonify(success_response(result))
 
 
 # =============================================================================

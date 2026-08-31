@@ -18,6 +18,7 @@
     let editingShiftId = null;  // Смена, открытая в модалке исправления
     let editingShiftStatus = null;  // 'open' | 'closed' — от него зависит, что правим
     let openShifts = [];  // Открытые смены по всем доступным точкам
+    let duplicateShiftGroups = [];  // Точки, где открыто больше одной смены (админ)
 
     // Сколько строк инкассаций тянем за раз. Итоги по салонам лимит не трогает —
     // их считает бэкенд отдельным запросом по всему периоду
@@ -35,6 +36,7 @@
         openShiftsTbody: null,
         openShiftsSyncedAt: null,
         refreshOpenShiftsBtn: null,
+        duplicateShiftsNotice: null,
         shiftDateFilter: null,
         applyDateFilterBtn: null,
         collectionsStoreFilter: null,
@@ -117,6 +119,7 @@
         elements.openShiftsTbody = document.getElementById('open-shifts-tbody');
         elements.openShiftsSyncedAt = document.getElementById('open-shifts-synced-at');
         elements.refreshOpenShiftsBtn = document.getElementById('refresh-open-shifts');
+        elements.duplicateShiftsNotice = document.getElementById('duplicate-shifts-notice');
         elements.shiftDateFilter = document.getElementById('shift-date-filter');
         elements.applyDateFilterBtn = document.getElementById('apply-date-filter');
 
@@ -209,7 +212,9 @@
             elements.cancelOpenShiftBtn.addEventListener('click', closeOpenShiftModal);
         }
         if (elements.confirmOpenShiftBtn) {
-            elements.confirmOpenShiftBtn.addEventListener('click', onOpenShift);
+            elements.confirmOpenShiftBtn.addEventListener(
+                'click', guardClicks(elements.confirmOpenShiftBtn, onOpenShift)
+            );
         }
         if (elements.openShiftOverlay) {
             elements.openShiftOverlay.addEventListener('click', closeOpenShiftModal);
@@ -223,7 +228,9 @@
             elements.cancelCloseShiftBtn.addEventListener('click', closeCloseShiftModal);
         }
         if (elements.confirmCloseShiftBtn) {
-            elements.confirmCloseShiftBtn.addEventListener('click', onCloseShift);
+            elements.confirmCloseShiftBtn.addEventListener(
+                'click', guardClicks(elements.confirmCloseShiftBtn, onCloseShift)
+            );
         }
         if (elements.closeShiftOverlay) {
             elements.closeShiftOverlay.addEventListener('click', closeCloseShiftModal);
@@ -240,7 +247,9 @@
             elements.cancelAddCollectionBtn.addEventListener('click', closeAddCollectionModal);
         }
         if (elements.confirmAddCollectionBtn) {
-            elements.confirmAddCollectionBtn.addEventListener('click', onAddCollection);
+            elements.confirmAddCollectionBtn.addEventListener(
+                'click', guardClicks(elements.confirmAddCollectionBtn, onAddCollection)
+            );
         }
         if (elements.addCollectionOverlay) {
             elements.addCollectionOverlay.addEventListener('click', closeAddCollectionModal);
@@ -280,13 +289,17 @@
             elements.cancelEditShiftBtn.addEventListener('click', closeEditShiftModal);
         }
         if (elements.confirmEditShiftBtn) {
-            elements.confirmEditShiftBtn.addEventListener('click', onSaveEditShift);
+            elements.confirmEditShiftBtn.addEventListener(
+                'click', guardClicks(elements.confirmEditShiftBtn, onSaveEditShift)
+            );
         }
         if (elements.editShiftOverlay) {
             elements.editShiftOverlay.addEventListener('click', closeEditShiftModal);
         }
         if (elements.addEditShiftCollectionBtn) {
-            elements.addEditShiftCollectionBtn.addEventListener('click', onAddEditShiftCollection);
+            elements.addEditShiftCollectionBtn.addEventListener(
+                'click', guardClicks(elements.addEditShiftCollectionBtn, onAddEditShiftCollection)
+            );
         }
 
         // Справочник категорий инкассации
@@ -302,15 +315,18 @@
         if (elements.categoriesOverlay) {
             elements.categoriesOverlay.addEventListener('click', closeCategoriesModal);
         }
+        // Обёртка одна на оба входа (кнопка и Enter) — иначе клик и Enter имели
+        // бы каждый свой замок и могли бы отправить два запроса одновременно
+        const guardedAddCategory = guardClicks(elements.categoryAddBtn, onAddCategory);
         if (elements.categoryAddBtn) {
-            elements.categoryAddBtn.addEventListener('click', onAddCategory);
+            elements.categoryAddBtn.addEventListener('click', guardedAddCategory);
         }
         if (elements.categoryNewName) {
             // Enter в поле названия = «Добавить»: поле вне <form>, само не сабмитит
             elements.categoryNewName.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
                     e.preventDefault();
-                    onAddCategory();
+                    guardedAddCategory();
                 }
             });
         }
@@ -395,6 +411,7 @@
         if (canSeeOpenShifts()) {
             loadOpenShifts();
         }
+        loadDuplicateShifts();
 
         const role = userData && userData.role;
 
@@ -418,6 +435,36 @@
     function canSeeOpenShifts() {
         const role = currentUserData && currentUserData.role;
         return role === 'admin' || role === 'manager' || role === 'florist';
+    }
+
+    // === Защита кнопки от повторного клика ===
+    // Пока запрос в полёте, кнопка не принимает второй клик. На проде запрос к
+    // базе стоит 90-700 мс (сетевой диск /data), кнопка при этом выглядит
+    // живой — и её дожимают ещё раз. Так 29.08.26 на Свердловском, 23
+    // открылись три дневные смены подряд. Бэкенд теперь такое отбивает, но
+    // отбитый запрос — это лишняя ошибка в лицо сотруднику вместо тишины.
+    function guardClicks(btn, handler) {
+        let busy = false;
+        return async function guarded(...args) {
+            if (busy) return;
+            busy = true;
+            // Текст читаем при клике, а не при привязке: у «Сохранить и
+            // пересчитать» он меняется в зависимости от статуса смены
+            const originalText = btn ? btn.textContent : null;
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Подождите...';
+            }
+            try {
+                return await handler.apply(this, args);
+            } finally {
+                busy = false;
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                }
+            }
+        };
     }
 
     // === API запросы ===
@@ -791,6 +838,106 @@
             if (elements.refreshOpenShiftsBtn) {
                 elements.refreshOpenShiftsBtn.disabled = false;
             }
+        }
+    }
+
+    // === Дубли открытых смен (только админ) ===
+    // Наследие гонки: до фикса на точке могло открыться несколько смен разом.
+    // Показываем плашку и разбираем из интерфейса — консоли на этом тарифе
+    // Amvera нет, разовые операции с боевой базой делаются HTTP-ручками
+    async function loadDuplicateShifts() {
+        const host = elements.duplicateShiftsNotice;
+        if (!host) return;
+        if (!currentUserData || currentUserData.role !== 'admin') {
+            host.innerHTML = '';
+            return;
+        }
+
+        try {
+            // silent: плашка — фоновая проверка, ошибка по ней не должна
+            // выскакивать тостом поверх рабочего экрана
+            const result = await apiRequest(
+                '/api/cash-shifts/admin/duplicate-open-shifts', { silent: true }
+            );
+            duplicateShiftGroups = result.groups || [];
+        } catch (error) {
+            console.error('[CashShifts] Не удалось проверить дубли смен:', error);
+            duplicateShiftGroups = [];
+        }
+        renderDuplicateShifts();
+    }
+
+    function renderDuplicateShifts() {
+        const host = elements.duplicateShiftsNotice;
+        if (!host) return;
+
+        if (!duplicateShiftGroups.length) {
+            host.innerHTML = '';
+            return;
+        }
+
+        const lines = duplicateShiftGroups.map(group => {
+            const withData = group.shifts.filter(s => s.has_data).length;
+            const note = withData > 1
+                ? ' — данные внесены в несколько смен, разберите вручную'
+                : '';
+            return `<li>${escapeHtml(group.store_name || `точка ${group.store_id}`)}: `
+                + `${group.shifts.length} открытых смены${escapeHtml(note)}</li>`;
+        }).join('');
+
+        host.innerHTML = `
+            <div class="card calculator-card" style="border-left: 4px solid var(--barkhat-burgundy);">
+                <div class="card-header">
+                    <h3 class="card-title">Дубли открытых смен</h3>
+                </div>
+                <p style="margin: 0 0 8px;">
+                    На этих точках открыто больше одной смены одновременно:
+                </p>
+                <ul style="margin: 0 0 12px 18px;">${lines}</ul>
+                <p style="margin: 0 0 12px; color: var(--barkhat-gray); font-size: 13px;">
+                    Разбор оставит по одной смене на точку и удалит только пустые дубли —
+                    смены с инкассациями и продажами не трогаются.
+                </p>
+                <button id="resolve-duplicate-shifts" class="btn btn-primary btn-sm">
+                    Разобрать дубли
+                </button>
+            </div>`;
+
+        const button = document.getElementById('resolve-duplicate-shifts');
+        if (button) {
+            button.addEventListener('click', guardClicks(button, onResolveDuplicateShifts));
+        }
+    }
+
+    async function onResolveDuplicateShifts() {
+        const ok = await window.BarhatUI.confirm(
+            'На каждой точке останется одна смена — та, в которую уже вносили данные, '
+            + 'иначе самая ранняя. Пустые дубли будут удалены безвозвратно.',
+            { title: 'Разобрать дубли смен?', confirmText: 'Разобрать' }
+        );
+        if (!ok) return;
+
+        try {
+            const result = await apiRequest(
+                '/api/cash-shifts/admin/duplicate-open-shifts/resolve', { method: 'POST' }
+            );
+            const deleted = (result.deleted || []).length;
+            const skipped = (result.skipped || []).length;
+
+            showNotification(
+                skipped
+                    ? `Удалено дублей: ${deleted}. Точек на ручной разбор: ${skipped}`
+                    : `Удалено дублей: ${deleted}`,
+                skipped ? 'info' : 'success'
+            );
+
+            loadDuplicateShifts();
+            loadCurrentShift();
+            if (canSeeOpenShifts()) {
+                loadOpenShifts();
+            }
+        } catch (error) {
+            console.error('[CashShifts] Ошибка разбора дублей смен:', error);
         }
     }
 
@@ -1605,9 +1752,15 @@
     }
 
     function showNotification(message, type = 'info') {
-        // TODO: реализовать уведомления
         console.log(`[CashShifts] Notification (${type}):`, message);
-        alert(message);  // Временно
+        // Тип передаём явно: через window.alert (его ui-dialog.js подменяет на
+        // тост) он теряется, и «смена уже открыта» выглядела как обычная
+        // информация, а не как отказ
+        if (window.BarhatUI && window.BarhatUI.toast) {
+            window.BarhatUI.toast(message, type);
+            return;
+        }
+        alert(message);
     }
 
     // === Экспорт публичных методов ===
