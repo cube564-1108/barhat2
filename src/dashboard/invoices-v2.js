@@ -1623,6 +1623,10 @@
 
     function allocCell(invoice) {
         const items = invoice.line_items || [];
+        // У пополнения карты распределения нет по определению — это перенос
+        // денег между своими счетами. «Не распределён» читалось бы как
+        // недоделка, за которой надо идти в счёт.
+        if (invoice.kind === 'card_topup') return '<span class="iv2-hint">—</span>';
         if (!items.length) return '<span class="iv2-hint">не распределён</span>';
         if (items.length === 1) {
             return `${escapeHtml(items[0].store_name || '—')}
@@ -2561,6 +2565,9 @@
         const warnings = requisiteWarnings(invoice);
         const items = details.line_items || [];
 
+        // Пополнение карты распределения не имеет вовсе, поэтому блока у него
+        // нет — ни строк, ни заголовка, ни «не распределён»
+        const hasAllocation = invoice.kind !== 'card_topup';
         const allocRows = items.length
             ? items.map(item => `
                 <div class="iv2-alloc__row">
@@ -2627,10 +2634,11 @@
                     </div>
                 </div>
 
+                ${hasAllocation ? `
                 <div class="iv2-alloc">
                     <div class="iv2-alloc__row"><span>Салон · статья</span><span>Сумма</span></div>
                     ${allocRows}
-                </div>
+                </div>` : ''}
 
                 <div class="iv2-feed">${feedHtml(details)}</div>
 
@@ -3064,8 +3072,17 @@
 
         if (!state.card.id) {
             host.innerHTML = '';
+            host.dataset.cardId = '';
             return;
         }
+
+        // Карточку перерисовывает каждое действие по счёту (сообщение,
+        // согласование, вложение), и без этого человек после каждого
+        // оказывался в её начале. Прокрутку возвращаем только если на экране
+        // тот же счёт: при переходе к соседнему она не его.
+        const sameCard = host.dataset.cardId === String(state.card.id);
+        const restoreScroll = keepModalScroll(host);
+        host.dataset.cardId = String(state.card.id);
 
         let body;
         if (state.card.error) {
@@ -3105,6 +3122,7 @@
         if (overlay) overlay.addEventListener('click', closeCard);
 
         if (state.card.data) bindPane(host, state.card.data);
+        if (sameCard) restoreScroll();
     }
 
     /** Адрес карточки в браузере: «Назад» закрывает её, обновление — возвращает. */
@@ -3852,6 +3870,37 @@
         state.form.files = [];
     }
 
+    /**
+     * Запомнить прокрутку модалки и вернуть функцию, которая её восстановит.
+     *
+     * Перерисовка модалки переписывает innerHTML целиком — вместе с ним
+     * пропадает позиция прокрутки, и человек оказывается в начале формы.
+     * Ловилось это на кнопке «Добавить строку» в распределении: заполнил
+     * строку внизу длинной формы, добавил следующую — и ты снова наверху.
+     * Кнопка тут ни при чём: так же вело себя удаление строки, «остаток в
+     * последнюю строку», «разделить поровну», подстановка контрагента и
+     * смена карты. Поэтому лечим не кнопку, а саму перерисовку.
+     *
+     * Прокручиваться может и тело модалки (`max-height: 78vh` на десктопе), и
+     * её внешний слой (на узком экране), поэтому запоминаем оба.
+     */
+    function keepModalScroll(host) {
+        const body = host.querySelector('.iv2-modal__body');
+        const outer = host.querySelector('.iv2-modal');
+        const bodyTop = body ? body.scrollTop : 0;
+        const outerTop = outer ? outer.scrollTop : 0;
+        return () => {
+            if (bodyTop) {
+                const freshBody = host.querySelector('.iv2-modal__body');
+                if (freshBody) freshBody.scrollTop = bodyTop;
+            }
+            if (outerTop) {
+                const freshOuter = host.querySelector('.iv2-modal');
+                if (freshOuter) freshOuter.scrollTop = outerTop;
+            }
+        };
+    }
+
     function renderForm() {
         const host = modalHost('form');
         if (!host) return;
@@ -3859,6 +3908,8 @@
             host.innerHTML = '';
             return;
         }
+
+        const restoreScroll = keepModalScroll(host);
 
         const values = state.form.values;
         const issues = formRequisiteIssues();
@@ -3991,9 +4042,7 @@
                             : ''}
                         ${meta.hasAllocation
                             ? sectionHtml('allocation', 'Распределение по салонам и статьям', allocationBadge, allocationBody)
-                            : `<p class="iv2-hint">Пополнение переносит деньги между своими счетами —
-                                   распределять по статьям нечего. Расход появится, когда деньги потратят
-                                   и заведут трату с карты.</p>`}
+                            : ''}
                         ${state.form.error ? `<div class="iv2-form-error">${escapeHtml(state.form.error)}</div>` : ''}
                     </div>
                     <div class="iv2-modal__foot">
@@ -4012,6 +4061,7 @@
             </div>`;
 
         bindForm(host);
+        restoreScroll();
     }
 
     function bindForm(host) {
@@ -4111,6 +4161,14 @@
         }
     }
 
+    /** Курсор в первое поле строки распределения с указанным номером. */
+    function focusAllocationRow(index) {
+        const host = modalHost('form');
+        if (!host) return;
+        const field = host.querySelector(`[data-item="${index}"][data-item-field="store_id"]`);
+        if (field) field.focus();
+    }
+
     /** Точечное обновление итога — чтобы не перерисовывать форму на каждый символ. */
     function updateAllocationSummary(host) {
         const box = host.querySelector('.iv2-alloc-total');
@@ -4176,6 +4234,10 @@
         if (action === 'alloc-add') {
             state.form.items.push({ store_id: '', expense_category_id: '', amount: '' });
             renderForm();
+            // Прокрутка после перерисовки на месте (см. keepModalScroll), но
+            // курсор всё равно надо перенести: иначе человек добавил строку и
+            // ищет глазами, куда теперь печатать.
+            focusAllocationRow(state.form.items.length - 1);
             return;
         }
         if (action === 'alloc-rest') {
