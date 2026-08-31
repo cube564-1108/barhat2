@@ -501,6 +501,16 @@ def health_check():
             'files': len(os.listdir(full)) if os.path.isdir(full) else 0,
         }
 
+    # Инварианты, которые держит не код, а схема БД. Индекс мог не построиться
+    # (например, поверх уже накопленных дублей), и снаружи это ничем не видно:
+    # запись продолжает работать, просто последней преграды нет.
+    guarantees = {}
+    try:
+        from cashshifts.storage import one_open_shift_guarantee_status
+        guarantees['one_open_shift_per_store'] = one_open_shift_guarantee_status()
+    except Exception as e:
+        guarantees['one_open_shift_per_store'] = {'error': f'{type(e).__name__}: {e}'}
+
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
@@ -508,6 +518,7 @@ def health_check():
         'databases': databases,
         'attachments': attachments,
         'disk': _disk_free_info(),
+        'guarantees': guarantees,
         'write_test': _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
     })
 

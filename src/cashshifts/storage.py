@@ -106,6 +106,39 @@ def ensure_one_open_shift_index(conn: sqlite3.Connection) -> bool:
         raise
 
 
+def one_open_shift_guarantee_status() -> Dict[str, Any]:
+    """
+    Стоит ли на проде защита «одна открытая смена на точку». Для /health.
+
+    Отсутствие плашки о дублях в интерфейсе неоднозначно: она не появляется и
+    когда дублей нет, и когда что-то сломалось. Консоли на этом тарифе Amvera
+    нет, поэтому единственный способ убедиться, что индекс реально построен на
+    боевой базе, — посмотреть отсюда. `index: false` при `duplicates: 0` значит,
+    что индекс не создался по какой-то другой причине и это надо разобрать.
+    """
+    conn = get_db()
+    try:
+        index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (ONE_OPEN_SHIFT_INDEX,)
+        ).fetchone() is not None
+
+        duplicates = conn.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT store_id FROM cash_shifts
+                WHERE status = 'open'
+                GROUP BY store_id
+                HAVING COUNT(*) > 1
+            )
+        """).fetchone()[0]
+
+        return {"index": index, "duplicate_stores": duplicates}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        conn.close()
+
+
 def init_cashshifts_tables():
     """Инициализация таблиц кассовых смен (вызывается при старте приложения).
 
