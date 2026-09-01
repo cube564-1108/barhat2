@@ -55,6 +55,7 @@ from .storage import (
     update_payer_bank_requisites,
     get_payer_bank_requisites,
     payer_has_bank_requisites,
+    payer_requires_bank_details,
     set_invoice_bank_send_error,
     get_all_vat_options,
     get_vat_option_by_id,
@@ -838,6 +839,46 @@ def _validate_line_items(line_items):
     return None
 
 
+# Реквизиты, без которых платёжку в банк не собрать (см. send_invoice_to_bank).
+# Порядок здесь — порядок в тексте ошибки, поэтому он совпадает с порядком
+# полей в форме. КПП сознательно не в списке: у контрагента-ИП его нет.
+_BANK_REQUISITE_LABELS = (
+    ("counterparty_name", "Контрагент"),
+    ("counterparty_inn", "ИНН"),
+    ("counterparty_bank_name", "Банк"),
+    ("counterparty_bank_bik", "БИК"),
+    ("counterparty_bank_account", "Расчётный счёт"),
+    ("counterparty_bank_corr_account", "Корр. счёт"),
+)
+
+_INVOICE_REQUIRED_BANK_FIELDS = tuple(field for field, _ in _BANK_REQUISITE_LABELS)
+
+
+def _bank_transfer_error(payer_id, values):
+    """
+    Проверка реквизитов для счетов, которые оплачиваются с расчётного счёта
+    (ИП Кваша, ИП Насуленко, ООО Кофферс — см. BANK_TRANSFER_PAYER_KEYS).
+    Возвращает текст ошибки или None.
+
+    Раньше пустые реквизиты всплывали только при отправке в банк — то есть
+    через несколько дней и уже не у того человека, который счёт заводил.
+    Требование стоит на сервере, а не только в форме: у ручек два потребителя
+    (старый раздел «Счета» и новый «Согласование»), и проверка в одной форме
+    обходится другой.
+    """
+    if not payer_requires_bank_details(payer_id):
+        return None
+    missing = []
+    if not values.get("vat_id"):
+        missing.append("НДС")
+    missing += [label for field, label in _BANK_REQUISITE_LABELS
+                if not str(values.get(field) or "").strip()]
+    if not missing:
+        return None
+    return ("Счёт оплачивается с расчётного счёта — заполните: "
+            + ", ".join(missing))
+
+
 @invoices_bp.route("/<int:invoice_id>", methods=["PUT"])
 @section_required(*INVOICE_SECTIONS)
 def edit_invoice(invoice_id):
@@ -912,6 +953,20 @@ def edit_invoice(invoice_id):
 
     if "comment" in data:
         changes["comment"] = (data["comment"] or "").strip() or None
+
+    # Реквизиты для оплаты с расчётного счёта проверяем по ИТОГОВОМУ счёту, но
+    # только когда правка их и трогает (плательщик, НДС, любое поле реквизитов).
+    # Та же логика, что у распределения ниже: в базе полно старых счетов без
+    # реквизитов, и требовать их при переносе срока оплаты значило бы запретить
+    # правку таких счетов вовсе.
+    if invoice.get("kind") not in CARD_KINDS and (
+            {"payer_id", "vat_id"} & changes.keys()
+            or set(_INVOICE_REQUIRED_BANK_FIELDS) & changes.keys()):
+        final_values = dict(invoice)
+        final_values.update(changes)
+        error = _bank_transfer_error(final_values.get("payer_id"), final_values)
+        if error:
+            return jsonify({"error": error}), 400
 
     # Распределение можно править тем же запросом, что и поля. Без этого правка
     # «сумма + распределение» рвётся на два запроса, и при обрыве второго счёт
@@ -1102,6 +1157,11 @@ def add_invoice():
         vat_id = None
     elif vat_id is not None and not get_vat_option_by_id(vat_id):
         return jsonify({"error": "Некорректный вариант НДС"}), 400
+
+    if not is_card:
+        error = _bank_transfer_error(payer_id, dict(data, vat_id=vat_id))
+        if error:
+            return jsonify({"error": error}), 400
 
     line_items = data.get("line_items") or []
     error = _validate_line_items(line_items)
@@ -1317,11 +1377,6 @@ def mark_paid(invoice_id):
     log_action(current_user.username, "mark_invoice_paid", invoice["invoice_number"])
     return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
 
-
-_INVOICE_REQUIRED_BANK_FIELDS = (
-    "counterparty_name", "counterparty_inn", "counterparty_bank_name",
-    "counterparty_bank_bik", "counterparty_bank_account", "counterparty_bank_corr_account",
-)
 
 _VAT_NO_TAX_RE = re.compile(r"без\s*нал|без\s*нд[сc]|не облага", re.IGNORECASE)
 _VAT_RATE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")

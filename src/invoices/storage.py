@@ -978,12 +978,45 @@ def delete_city(city_id: int) -> bool:
     return _ref_deactivate("invoice_cities", city_id)
 
 
+# Плательщики, счета которых оплачиваются с расчётного счёта: платёжка уходит
+# в банк, поэтому у таких счетов реквизиты контрагента и НДС обязательны ещё
+# на вводе (решение владельца 01.09.2026). Сверяем по названию, а не по id:
+# справочник заполняется руками на проде и в локальной базе, id одной и той же
+# компании там разные. Ключи — фрагменты названия, чтобы «ИП Кваша Р. Е.» и
+# «ИП Кваша» считались одним плательщиком.
+BANK_TRANSFER_PAYER_KEYS = ("кваша", "насуленко", "кофферс")
+
+
+def payer_name_requires_bank_details(name: Optional[str]) -> bool:
+    """Оплачивается ли счёт этого плательщика с расчётного счёта."""
+    low = (name or "").lower()
+    return any(key in low for key in BANK_TRANSFER_PAYER_KEYS)
+
+
+def payer_requires_bank_details(payer_id: Optional[int]) -> bool:
+    if not payer_id:
+        return False
+    payer = get_payer_by_id(payer_id)
+    return bool(payer) and payer_name_requires_bank_details(payer.get("name"))
+
+
 def get_all_payers() -> List[Dict[str, Any]]:
-    return _ref_list_active("invoice_payers")
+    """
+    Список плательщиков. Признак `requires_bank_details` считается здесь, а не
+    на фронте: правило одно на все разделы и на серверную валидацию, второй
+    список названий в JS разъехался бы с этим при первом же новом юрлице.
+    """
+    payers = _ref_list_active("invoice_payers")
+    for payer in payers:
+        payer["requires_bank_details"] = payer_name_requires_bank_details(payer.get("name"))
+    return payers
 
 
 def get_payer_by_id(payer_id: int) -> Optional[Dict[str, Any]]:
-    return _ref_get_by_id("invoice_payers", payer_id)
+    payer = _ref_get_by_id("invoice_payers", payer_id)
+    if payer:
+        payer["requires_bank_details"] = payer_name_requires_bank_details(payer.get("name"))
+    return payer
 
 
 def create_payer(name: str) -> int:

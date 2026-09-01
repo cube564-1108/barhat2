@@ -110,7 +110,10 @@ def main():
     category_id = get_all_expense_categories()[0]['id']
     # Города и плательщики seed-данными не заполняются — заводим сами
     city_id = create_city('Новосибирск')
-    payer_id = create_payer('ИП Кваша')
+    # Плательщик здесь намеренно НЕ из тех, кто платит с расчётного счёта
+    # (ИП Кваша и т.п.): у тех обязательны реквизиты и НДС, а этот тест про
+    # карты — см. scripts/test_bank_transfer_requisites.py.
+    payer_id = create_payer('ИП Тестовый')
 
     cards = {card['title']: card for card in list_cards()}
     nsk_card = cards['Рабочая карта НСК']

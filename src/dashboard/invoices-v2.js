@@ -4004,6 +4004,30 @@
         return BANK_FIELDS.every(field => String(state.form.values[field] || '').trim());
     }
 
+    /**
+     * Счёт оплачивается с расчётного счёта — значит по нему уйдёт платёжка в
+     * банк, и реквизиты контрагента с НДС нужны сразу, а не в день оплаты.
+     *
+     * Признак приходит с сервера (`requires_bank_details` в /api/invoices/payers):
+     * список юрлиц живёт в storage.py одним местом на форму и на серверную
+     * проверку — свой список названий в JS разъехался бы с ним при первом же
+     * новом юрлице.
+     */
+    function payerRequiresBankDetails(payerId) {
+        if (isCardForm() || !payerId) return false;
+        const payer = (state.refs.payers || []).find(item => String(item.id) === String(payerId));
+        return !!(payer && payer.requires_bank_details);
+    }
+
+    function formNeedsBankDetails() {
+        return payerRequiresBankDetails(state.form.values.payer_id);
+    }
+
+    /** Метка обязательного поля — только когда поле действительно обязательно. */
+    function reqMark(required) {
+        return required ? ' <span class="iv2-req">*</span>' : '';
+    }
+
     function selectOptions(items, current, anyLabel) {
         return `<option value="">${escapeHtml(anyLabel)}</option>` + (items || []).map(item =>
             `<option value="${escapeHtml(item.id)}"${String(item.id) === String(current) ? ' selected' : ''}>${escapeHtml(item.name)}</option>`
@@ -4241,6 +4265,7 @@
         const values = state.form.values;
         const issues = formRequisiteIssues();
         const issueCount = Object.keys(issues).length;
+        const needsBank = formNeedsBankDetails();
 
         const requisitesBadge = issueCount
             ? `<span class="bx-badge b-warn">${withCount(issueCount, 'замечание', 'замечания', 'замечаний')}</span>`
@@ -4290,7 +4315,7 @@
                 </div>
                 ${isCardForm() ? '' : `
                 <div class="iv2-field">
-                    <label class="iv2-field__label" for="iv2form-vat_id">НДС</label>
+                    <label class="iv2-field__label" for="iv2form-vat_id">НДС${reqMark(needsBank)}</label>
                     <select class="iv2-select" id="iv2form-vat_id" data-form-field="vat_id">
                         ${selectOptions(state.refs.vatOptions, values.vat_id, 'Не указан')}
                     </select>
@@ -4318,6 +4343,8 @@
 
         const requisitesBody = `
             ${mismatchHtml(state.form.templateMismatch, 'iv2-form-mismatch')}
+            ${needsBank ? `<div class="iv2-hint">Счёт оплачивается с расчётного счёта:
+                реквизиты и НДС обязательны — по ним уйдёт платёжка в банк</div>` : ''}
             <div class="iv2-field">
                 <label class="iv2-field__label" for="iv2form-cp-search">Найти в справочнике</label>
                 <input class="iv2-input" id="iv2form-cp-search" placeholder="название, ИНН или расчётный счёт">
@@ -4327,7 +4354,8 @@
             <div class="iv2-grid2">
                 ${COUNTERPARTY_FIELDS.map(f => `
                     <div class="iv2-field">
-                        <label class="iv2-field__label" for="iv2form-${f.key}">${escapeHtml(f.label)}</label>
+                        <label class="iv2-field__label" for="iv2form-${f.key}">${escapeHtml(f.label)}${
+                            reqMark(needsBank && BANK_FIELDS.indexOf(f.key) !== -1)}</label>
                         <input class="iv2-input${issues[f.key] ? ' iv2-input--bad' : ''}" id="iv2form-${f.key}"
                                data-form-field="${f.key}" value="${escapeHtml(values[f.key])}">
                         ${issues[f.key] ? `<div class="iv2-field__err">${escapeHtml(issues[f.key])}</div>` : ''}
@@ -4412,6 +4440,16 @@
                             if (item.store_id && !allowed.has(String(item.store_id))) item.store_id = '';
                         });
                         renderForm();
+                    }
+                    // От плательщика зависит, обязательны ли реквизиты и НДС:
+                    // звёздочки и подсказка появляются только перерисовкой.
+                    // Раскрываем реквизиты сразу, иначе человек упрётся в
+                    // ошибку сохранения, не увидев ни одного из полей.
+                    if (field === 'payer_id') {
+                        if (payerRequiresBankDetails(input.value)) state.form.openSections.requisites = true;
+                        renderForm();
+                        const fresh = $('iv2form-payer_id');
+                        if (fresh) fresh.focus();
                     }
                 });
             }
@@ -4700,6 +4738,23 @@
         if (!(Number(values.amount) > 0)) return 'Сумма должна быть больше нуля';
         if (!String(values.payment_purpose).trim()) {
             return formKind() === 'card_expense' ? 'Напишите, на что потрачено' : 'Заполните назначение платежа';
+        }
+
+        // Счёт с расчётного счёта уходит в банк платёжкой — без реквизитов и
+        // НДС он там встанет, причём выяснится это уже не у того человека,
+        // который счёт заводил. Те же поля проверяет сервер.
+        if (formNeedsBankDetails()) {
+            const missing = [];
+            if (!values.vat_id) missing.push('НДС');
+            BANK_FIELDS.forEach(key => {
+                if (String(values[key] || '').trim()) return;
+                const field = COUNTERPARTY_FIELDS.find(f => f.key === key);
+                missing.push(field ? field.label : key);
+            });
+            if (missing.length) {
+                state.form.openSections.requisites = true;
+                return 'Счёт оплачивается с расчётного счёта — заполните: ' + missing.join(', ');
+            }
         }
 
         // У пополнения распределения нет по определению — деньги только
