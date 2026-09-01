@@ -144,6 +144,15 @@ def main():
     check(payer_name_requires_bank_details('ООО «Кофферс»') is True, "название в кавычках распознаётся")
     check(payer_name_requires_bank_details('ИП НАСУЛЕНКО') is True, "регистр названия роли не играет")
     check(payer_requires_bank_details(None) is False, "пустой плательщик реквизитов не требует")
+    # Баг 01.09.2026: в справочнике есть плательщики-карты, и юрлицо у них
+    # указано в скобках. Поиск фрагмента где угодно в строке требовал с них
+    # реквизиты и НДС, хотя платят по ним картой.
+    check(payer_name_requires_bank_details('Карта Насти Н. (Кофферс)') is False,
+          "плательщик-карта с юрлицом в скобках реквизитов не требует")
+    check(payer_name_requires_bank_details('Карта НСК (ИП Кваша)') is False,
+          "и карта, у которой юрлицо названо полностью, — тоже")
+    check(payer_name_requires_bank_details('Кваша Р.Е.') is True,
+          "юрлицо без формы «ИП» в начале названия правило всё равно узнаёт")
 
     with app.test_client() as client:
         login(client, 'admin_test')

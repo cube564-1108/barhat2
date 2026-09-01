@@ -14,6 +14,7 @@
 
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -982,15 +983,25 @@ def delete_city(city_id: int) -> bool:
 # в банк, поэтому у таких счетов реквизиты контрагента и НДС обязательны ещё
 # на вводе (решение владельца 01.09.2026). Сверяем по названию, а не по id:
 # справочник заполняется руками на проде и в локальной базе, id одной и той же
-# компании там разные. Ключи — фрагменты названия, чтобы «ИП Кваша Р. Е.» и
-# «ИП Кваша» считались одним плательщиком.
-BANK_TRANSFER_PAYER_KEYS = ("кваша", "насуленко", "кофферс")
+# компании там разные.
+#
+# Имя юрлица обязано стоять В НАЧАЛЕ названия (форма «ИП»/«ООО» перед ним
+# необязательна): в справочнике есть и плательщики-карты вида
+# «Карта Насти Н. (Кофферс)» — по ним платят картой, реквизиты и НДС не нужны,
+# а поиск фрагмента «кофферс» где угодно в строке требовал их и с карты
+# (баг 01.09.2026). Хвост после имени свободный: «ИП Кваша Р. Е.»,
+# «ООО «Кофферс»» и «Кваша Р.Е.» — те же юрлица.
+BANK_TRANSFER_PAYER_NAMES = ("кваша", "насуленко", "кофферс")
+
+_BANK_TRANSFER_PAYER_RE = re.compile(
+    r"^[\s«\"']*(?:(?:ип|ооо)[\s«\"'.]+)?(?:"
+    + "|".join(BANK_TRANSFER_PAYER_NAMES) + r")\b"
+)
 
 
 def payer_name_requires_bank_details(name: Optional[str]) -> bool:
     """Оплачивается ли счёт этого плательщика с расчётного счёта."""
-    low = (name or "").lower()
-    return any(key in low for key in BANK_TRANSFER_PAYER_KEYS)
+    return bool(_BANK_TRANSFER_PAYER_RE.match((name or "").lower()))
 
 
 def payer_requires_bank_details(payer_id: Optional[int]) -> bool:
