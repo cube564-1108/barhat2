@@ -5542,7 +5542,13 @@
         return refs.list.map(item => `
             <div class="iv2-tools-row">
                 <div class="iv2-tools-row__main">
-                    <div class="iv2-tools-row__name">${escapeHtml(item.name)}</div>
+                    <div class="iv2-tools-row__name">${escapeHtml(item.name)}${
+                        // Пометка показывает, по каким плательщикам требуются реквизиты
+                        // контрагента и НДС. Правило узнаёт юрлицо по точному названию,
+                        // поэтому переименование его отключает — без этой пометки такое
+                        // прошло бы незамеченным до первого счёта без реквизитов.
+                        isPayers && item.requires_bank_details
+                            ? ' <span class="bx-badge b-appr">оплата с расчётного счёта</span>' : ''}</div>
                     ${isPayers ? `<div class="iv2-hint">${item.bank_account
                         ? 'реквизиты банка заполнены' : 'реквизиты банка не заполнены'}</div>` : ''}
                 </div>

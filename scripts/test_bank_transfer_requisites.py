@@ -2,7 +2,7 @@
 Сторож правила «оплата с расчётного счёта» (решение владельца 01.09.2026).
 
 Если счёт выставлен на юрлицо, которое платит с расчётного счёта (ИП Кваша,
-ИП Насуленко, ООО Кофферс — BANK_TRANSFER_PAYER_KEYS в invoices/storage.py),
+ИП Насуленко, ООО Кофферс — BANK_TRANSFER_PAYER_NAMES в invoices/storage.py),
 то по нему уйдёт платёжка в банк. Значит НДС и реквизиты контрагента должны
 быть заполнены на вводе, а не всплывать через несколько дней у того, кто
 отправляет счета в банк.
@@ -121,7 +121,7 @@ def main():
     category_id = get_all_expense_categories()[0]['id']
     city_id = create_city('Новосибирск')
     vat_id = create_vat_option('НДС 20%')
-    bank_payer = create_payer('ИП Кваша Р. Е.')
+    bank_payer = create_payer('ИП Кваша')
     cash_payer = create_payer('ИП Тестовый')
 
     make_user('admin_test', 'admin', ['invoices_v2'])
@@ -139,20 +139,34 @@ def main():
         return data
 
     print("1. Правило считается по названию плательщика, а не по id")
-    check(payer_requires_bank_details(bank_payer) is True, "ИП Кваша Р. Е. платит с расчётного счёта")
+    check(payer_requires_bank_details(bank_payer) is True, "ИП Кваша платит с расчётного счёта")
     check(payer_requires_bank_details(cash_payer) is False, "прочий плательщик под правило не подпадает")
-    check(payer_name_requires_bank_details('ООО «Кофферс»') is True, "название в кавычках распознаётся")
-    check(payer_name_requires_bank_details('ИП НАСУЛЕНКО') is True, "регистр названия роли не играет")
     check(payer_requires_bank_details(None) is False, "пустой плательщик реквизитов не требует")
-    # Баг 01.09.2026: в справочнике есть плательщики-карты, и юрлицо у них
-    # указано в скобках. Поиск фрагмента где угодно в строке требовал с них
-    # реквизиты и НДС, хотя платят по ним картой.
-    check(payer_name_requires_bank_details('Карта Насти Н. (Кофферс)') is False,
-          "плательщик-карта с юрлицом в скобках реквизитов не требует")
-    check(payer_name_requires_bank_details('Карта НСК (ИП Кваша)') is False,
-          "и карта, у которой юрлицо названо полностью, — тоже")
-    check(payer_name_requires_bank_details('Кваша Р.Е.') is True,
-          "юрлицо без формы «ИП» в начале названия правило всё равно узнаёт")
+    check(payer_name_requires_bank_details('  ООО  Кофферс ') is True,
+          "лишние пробелы в названии не мешают")
+    check(payer_name_requires_bank_details('ИП НАСУЛЕНКО') is True, "регистр названия роли не играет")
+
+    # Боевой справочник целиком (скрин владельца от 01.09.2026). Рядом с
+    # юрлицами в нём живут способы оплаты, названные теми же фамилиями, —
+    # именно на них правило срабатывало по ошибке (баг 01.09.2026).
+    reference_payers = {
+        'ИП Кваша': True,
+        'ИП Насуленко': True,
+        'ООО Кофферс': True,
+        'Карта Насти Н. (Кофферс)': False,
+        'Карта Насти С.': False,
+        'Карта Стас (Кофферс)': False,
+        'Наличка': False,
+        'Перевод': False,
+        'Перевод Кваша': False,
+        'Перевод Насуленко': False,
+        'Рабочая карта Кваша': False,
+        'Рабочая карта Насуленко': False,
+    }
+    wrong = [name for name, expected in reference_payers.items()
+             if payer_name_requires_bank_details(name) is not expected]
+    check(not wrong, "весь боевой справочник плательщиков разобран верно"
+          + (f" (расходятся: {', '.join(wrong)})" if wrong else ""))
 
     with app.test_client() as client:
         login(client, 'admin_test')
@@ -219,7 +233,7 @@ def main():
         print("\n5. Признак для формы")
         response = client.get('/api/invoices/payers')
         payers = {item['name']: item for item in (response.get_json() or {}).get('payers', [])}
-        check(payers.get('ИП Кваша Р. Е.', {}).get('requires_bank_details') is True,
+        check(payers.get('ИП Кваша', {}).get('requires_bank_details') is True,
               "справочник отдаёт requires_bank_details=true для плательщика с расчётным счётом")
         check(payers.get('ИП Тестовый', {}).get('requires_bank_details') is False,
               "и false для прочих")
