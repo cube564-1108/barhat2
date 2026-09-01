@@ -554,6 +554,8 @@ def _read_invoice_filters():
         "created_by": _arg_list("created_by"),
         "counterparty": request.args.get("counterparty"),
         "payment_purpose": request.args.get("payment_purpose"),
+        # Номер счёта: принимает и «123», и «СЧ-000123» (см. _build_invoice_filters)
+        "invoice_number": request.args.get("invoice_number"),
         "created_from": request.args.get("created_from"),
         "created_to": request.args.get("created_to"),
         "due_from": request.args.get("due_from"),
@@ -980,7 +982,10 @@ def edit_invoice(invoice_id):
         error = _validate_line_items(line_items)
         if error:
             return jsonify({"error": error}), 400
-        if invoice["is_archived"]:
+        # Архив закрыт для правки распределения всем, кроме админа: у него с
+        # 01.09.2026 нет статусных ограничений вовсе (см. can_edit_invoice_fields),
+        # и разбирать ошибку в статьях расхода чаще приходится как раз в архиве.
+        if invoice["is_archived"] and current_user.role != "admin":
             return jsonify({"error": "Счёт в архиве — распределение изменить нельзя"}), 409
 
         if invoice.get("kind") == "card_expense":
@@ -1032,12 +1037,13 @@ def edit_invoice(invoice_id):
 @role_required("admin")
 def remove_invoice(invoice_id):
     """
-    Удалить счёт насовсем — админ, до оплаты.
+    Удалить счёт насовсем — админ, в любом статусе.
 
     Нужно для ошибочно заведённых и дублирующих счетов: до 2026-08-28 их
     можно было только отклонить или убрать в архив, и мусор оставался в
-    выборках и суммах навсегда. Оплаченный счёт не удаляется ни в каком
-    случае — для него есть архив (см. can_delete_invoice).
+    выборках и суммах навсегда. С 01.09.2026 удаляется и оплаченный счёт
+    (решение владельца): дубли чаще всего вскрываются уже после оплаты.
+    Операцию в ПланФакте это не трогает — предупреждение стоит в интерфейсе.
 
     След остаётся в общем аудите (log_action): собственная история счёта
     удаляется вместе с ним.
@@ -1046,13 +1052,11 @@ def remove_invoice(invoice_id):
     if not invoice:
         return jsonify({"error": "Счёт не найден"}), 404
     if not can_delete_invoice(invoice, current_user.role):
-        return jsonify({
-            "error": "Оплаченный счёт удалить нельзя — уберите его в архив"
-        }), 409
+        return jsonify({"error": "Удалять счета может только админ"}), 403
 
     deleted = delete_invoice(invoice_id, current_user.username)
     if not deleted:
-        return jsonify({"error": "Счёт уже удалён или оплачен"}), 409
+        return jsonify({"error": "Счёт уже удалён"}), 409
 
     log_action(current_user.username, "delete_invoice",
                f"{deleted['invoice_number']} · {deleted.get('counterparty_name') or 'без контрагента'} · "

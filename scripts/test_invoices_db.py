@@ -576,13 +576,19 @@ def test_editing_history_comments():
     if updated["status"] != "sent_to_bank":
         print(f"   ✗ Ошибка: статус не изменился, получено {updated['status']}")
         return False
-    if s.can_edit_invoice_fields(updated, "admin_user", "admin"):
-        print("   ✗ Ошибка: после sent_to_bank поля должны быть закрыты даже для админа")
+    # С 01.09.2026 у админа статусных ограничений на правку нет (решение
+    # владельца): ошибку в счёте чаще замечают уже после отправки в банк.
+    # Остальным роля́м sent_to_bank по-прежнему закрыт.
+    if not s.can_edit_invoice_fields(updated, "admin_user", "admin"):
+        print("   ✗ Ошибка: админ должен править счёт и после отправки в банк")
+        return False
+    if s.can_edit_invoice_fields(updated, "creator_x", "manager"):
+        print("   ✗ Ошибка: после sent_to_bank поля закрыты для всех, кроме админа")
         return False
     if not s.can_edit_invoice_status(updated, "admin"):
         print("   ✗ Ошибка: статус должен оставаться редактируемым (не все счета идут через банк)")
         return False
-    print("   ✓ Поля закрыты, статус всё ещё редактируем\n")
+    print("   ✓ Поля правит только админ, статус всё ещё редактируем\n")
 
     print("5. Дальнейшая смена статуса sent_to_bank -> paid и авто-архив:")
     updated = s.update_invoice_status(inv_id, "paid", "admin_user")

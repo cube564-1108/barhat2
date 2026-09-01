@@ -1707,8 +1707,17 @@ def can_edit_invoice_fields(invoice: Dict[str, Any], username: str, role: str) -
     Может ли пользователь редактировать обычные поля счёта (не статус).
 
     До согласования — автор счёта, менеджер или админ. После согласования —
-    только админ. После отправки в банк/оплаты (или архивации) — никто.
+    только админ. После отправки в банк/оплаты (или архивации) — тоже админ,
+    но больше никто.
+
+    Админ без статусных ограничений — решение владельца 01.09.2026: ошибку в
+    сумме или статье расхода чаще замечают уже после оплаты, а починить её
+    было нечем — оставалось завести счёт заново и развести отчётность руками.
+    Правка оплаченного счёта в ПланФакт не уезжает (операция там уже создана),
+    поэтому интерфейс о таком предупреждает отдельно.
     """
+    if role == "admin":
+        return True
     if invoice["is_archived"] or invoice["status"] in _CLOSED_FOR_EDIT_STATUSES:
         return False
     if invoice["status"] == "on_approval":
@@ -2139,6 +2148,7 @@ def _build_invoice_filters(
     created_by: Optional[Union[str, Sequence[str]]] = None,
     counterparty: Optional[str] = None,
     payment_purpose: Optional[str] = None,
+    invoice_number: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
     due_from: Optional[str] = None,
@@ -2268,6 +2278,20 @@ def _build_invoice_filters(
         where += " AND py_lower(i.payment_purpose) LIKE ?"
         params.append(f"%{payment_purpose.lower()}%")
 
+    # Номер счёта. Ищем по цифрам, а не по строке целиком: номер выглядит как
+    # «СЧ-000123», а по памяти и в переписке его называют «123» — требовать
+    # ведущие нули и префикс значило бы сделать поиск, которым не пользуются.
+    # Если цифр не ввели вовсе — ищем как обычный текст (через py_lower:
+    # префикс кириллический, а SQLite сам регистр кириллицы не приводит).
+    if invoice_number:
+        digits = re.sub(r"\D", "", invoice_number)
+        if digits:
+            where += " AND i.invoice_number LIKE ?"
+            params.append(f"%{digits}%")
+        else:
+            where += " AND py_lower(i.invoice_number) LIKE ?"
+            params.append(f"%{invoice_number.strip().lower()}%")
+
     if created_from:
         where += " AND i.created_at >= ?"
         params.append(created_from)
@@ -2331,6 +2355,7 @@ def list_invoices(
     created_by: Optional[Union[str, Sequence[str]]] = None,
     counterparty: Optional[str] = None,
     payment_purpose: Optional[str] = None,
+    invoice_number: Optional[str] = None,
     created_from: Optional[str] = None,
     created_to: Optional[str] = None,
     due_from: Optional[str] = None,
@@ -2363,6 +2388,7 @@ def list_invoices(
         store_id=store_id, city_id=city_id, payer_id=payer_id,
         expense_category_id=expense_category_id, created_by=created_by,
         counterparty=counterparty, payment_purpose=payment_purpose,
+        invoice_number=invoice_number,
         created_from=created_from, created_to=created_to,
         due_from=due_from, due_to=due_to,
         amount_from=amount_from, amount_to=amount_to, is_archived=is_archived,
@@ -2769,20 +2795,20 @@ def set_invoice_archived(invoice_id: int, archived: bool, changed_by: str = "sys
     return True
 
 
-# Статус, из которого счёт уже не удалить (решение владельца 2026-08-28).
-# Оплаченный счёт — свершившийся факт движения денег: он попадает в разноску
-# ПланФакта и в отчёты, поэтому убирается только в архив.
-_UNDELETABLE_STATUSES = ("paid",)
-
-
 def can_delete_invoice(invoice: Dict[str, Any], role: str) -> bool:
     """
     Может ли пользователь удалить счёт насовсем.
 
-    Только админ и только до оплаты. Архивный счёт удалить можно: архив — это
-    «работа закончена», а не «трогать нельзя».
+    Только админ — и любой счёт, включая оплаченный и архивный (решение
+    владельца 01.09.2026; до этого оплаченный счёт удалить было нельзя вовсе).
+    Дублирующие и ошибочно заведённые счета всплывают чаще всего после того,
+    как их уже отметили оплаченными, и архив от такого мусора не спасает: он
+    остаётся в суммах и выборках архива.
+
+    Операцию в ПланФакте удаление счёта не трогает — об этом предупреждает
+    диалог подтверждения.
     """
-    return role == "admin" and invoice["status"] not in _UNDELETABLE_STATUSES
+    return role == "admin"
 
 
 def delete_invoice(invoice_id: int, deleted_by: str) -> Optional[Dict[str, Any]]:
@@ -2795,15 +2821,15 @@ def delete_invoice(invoice_id: int, deleted_by: str) -> Optional[Dict[str, Any]]
     уже занята архивом — см. set_invoice_archived.
 
     Возвращает данные удалённого счёта (для записи в аудит) или None, если
-    счёт не найден либо уже оплачен. Проверку статуса дублируем здесь, а не
-    только в ручке: удаление необратимо, и второй рубеж дешевле разбора.
+    счёт не найден. Ограничений по статусу нет: право удалять решает
+    can_delete_invoice, и оно есть только у админа.
     """
     conn = get_db()
     row = conn.execute(
         "SELECT id, invoice_number, amount, status, counterparty_name FROM invoices WHERE id = ?",
         (invoice_id,)
     ).fetchone()
-    if not row or row["status"] in _UNDELETABLE_STATUSES:
+    if not row:
         conn.close()
         return None
 
