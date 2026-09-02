@@ -274,6 +274,10 @@
         return {
             open: null,           // 'refs' | 'counterparties' | 'planfact' | 'cards'
             refs: { type: 'categories', list: [], loading: false, error: '', bankEditId: null, newName: '' },
+            // Состояние справочника банков ЦБ. Нужно именно здесь: поломку
+            // синка (ЦБ сменил адрес или формат) иначе нечем заметить —
+            // подстановка просто продолжит отдавать данные годичной давности
+            banks: { count: 0, updated_at: null, stale: false, empty: true, loading: false, busy: false },
             cards: {
                 list: [], loading: false, error: '',
                 // Счета ПланФакта для выпадающих списков. accountsError не
@@ -4610,6 +4614,17 @@
                 // поле теряет фокус на каждом набранном символе
                 if (field === 'amount') updateAllocationSummary(host);
                 if (COUNTERPARTY_FIELDS.some(f => f.key === field)) updateRequisiteHints(host, input, field);
+                if (field === 'counterparty_bank_bik') {
+                    scheduleBankAutofill(() => bankAutofill(
+                        input,
+                        host.querySelector('[data-form-field="counterparty_bank_name"]'),
+                        host.querySelector('[data-form-field="counterparty_bank_corr_account"]'),
+                        (which, value) => {
+                            state.form.values[which === 'name'
+                                ? 'counterparty_bank_name'
+                                : 'counterparty_bank_corr_account'] = value;
+                        }));
+                }
             });
             if (input.tagName === 'SELECT') {
                 input.addEventListener('change', () => {
@@ -4737,6 +4752,121 @@
     }
 
     /** Подсветка поля реквизита прямо на вводе, без перерисовки всей формы. */
+    // =========================================================================
+    // Справочник банков: подстановка по БИК (план 2026-09-02)
+    // =========================================================================
+    //
+    // Название банка и корр. счёт однозначно выводятся из БИК, поэтому руками
+    // их вбивать не нужно. Ручка не ходит наружу — она читает локальный
+    // справочник ЦБ, который наполняет фоновый синк раз в сутки.
+
+    const bankCache = new Map();
+    let bankLookupSeq = 0;
+    let bankLookupTimer = null;
+
+    async function fetchBank(bic) {
+        if (bankCache.has(bic)) return bankCache.get(bic);
+        let result;
+        try {
+            const data = await apiGet('/api/invoices/banks/' + encodeURIComponent(bic));
+            result = { bank: data.bank || null, error: '' };
+            bankCache.set(bic, result);
+        } catch (error) {
+            // Сетевую ошибку не кэшируем: она проходит, а «банка нет» —
+            // приговор на всю сессию, и закэшировать одно вместо другого
+            // значит навсегда сломать подстановку по этому БИК
+            result = { bank: null, error: error.message || 'не удалось проверить БИК' };
+        }
+        return result;
+    }
+
+    /** Строка под полем БИК. Создаём один раз и переиспользуем: перерисовка
+     *  формы её сносит, и без маркера мы плодили бы по строке на нажатие. */
+    function bankHintHost(bikInput) {
+        const field = bikInput.parentElement;
+        let hint = field.querySelector('[data-bank-hint]');
+        if (!hint) {
+            hint = document.createElement('div');
+            hint.setAttribute('data-bank-hint', '');
+            field.appendChild(hint);
+        }
+        return hint;
+    }
+
+    /**
+     * Подставить банк и корр. счёт по БИК.
+     *
+     * Заполняем ТОЛЬКО пустые поля. Человек мог вписать название банка руками
+     * или поправить подставленное — затирать это автоподстановкой нельзя,
+     * иначе исправление откатывается само и выглядит как поломка.
+     *
+     * onFilled нужен форме счёта: у неё значения живут в state.form.values, и
+     * без него подставленное потерялось бы при следующей перерисовке. В форме
+     * плательщика значения читаются прямо из DOM при сохранении.
+     */
+    async function bankAutofill(bikInput, nameInput, corrInput, onFilled) {
+        const bic = digits(bikInput.value);
+        const hint = bankHintHost(bikInput);
+        const seq = ++bankLookupSeq;
+
+        // О неверной длине говорит собственная проверка реквизитов — незачем
+        // дублировать её ещё и здесь
+        if (bic.length !== 9) {
+            hint.textContent = '';
+            hint.className = '';
+            return;
+        }
+
+        hint.className = 'iv2-hint';
+        hint.textContent = 'Ищем банк…';
+
+        const result = await fetchBank(bic);
+
+        // Пока запрос летел, человек мог допечатать или стереть цифры: ответ
+        // на прошлый БИК не должен перебить подсказку по текущему
+        if (seq !== bankLookupSeq || digits(bikInput.value) !== bic) return;
+
+        if (!result.bank) {
+            hint.className = 'iv2-hint iv2-hint--warn';
+            hint.textContent = result.error || 'Банк с таким БИК не найден в справочнике ЦБ';
+            return;
+        }
+
+        const bank = result.bank;
+        const filled = [];
+        if (nameInput && !nameInput.value.trim() && bank.name) {
+            nameInput.value = bank.name;
+            if (onFilled) onFilled('name', bank.name);
+            filled.push('банк');
+        }
+        if (corrInput && !corrInput.value.trim() && bank.corr_account) {
+            corrInput.value = bank.corr_account;
+            if (onFilled) onFilled('corr', bank.corr_account);
+            filled.push('корр. счёт');
+        }
+
+        const where = bank.city ? `${bank.name}, ${bank.city}` : bank.name;
+        if (!bank.is_active) {
+            hint.className = 'iv2-hint iv2-hint--warn';
+            hint.textContent = `${where} — банк ликвидируется или лицензия отозвана, платёж не пройдёт`;
+        } else if (!bank.corr_account) {
+            // У РКЦ, УФК и подразделений корсчёта (CRSA) в справочнике ЦБ нет
+            // вовсе. Подставить вместо него счёт другого типа нельзя — это
+            // разные счета, платёжка уйдёт не туда
+            hint.className = 'iv2-hint iv2-hint--warn';
+            hint.textContent = `${where}. Корр. счёт у этого БИК в справочнике ЦБ не указан — впишите вручную`;
+        } else {
+            hint.className = 'iv2-hint';
+            hint.textContent = filled.length ? `${where} · подставлено: ${filled.join(', ')}` : where;
+        }
+    }
+
+    /** Задержка, чтобы не дёргать ручку на каждую цифру при вставке из буфера. */
+    function scheduleBankAutofill(run) {
+        clearTimeout(bankLookupTimer);
+        bankLookupTimer = setTimeout(run, 250);
+    }
+
     function updateRequisiteHints(host, input, field) {
         const issues = formRequisiteIssues();
         input.classList.toggle('iv2-input--bad', Boolean(issues[field]));
@@ -5220,7 +5350,7 @@
         state.tools = emptyTools();
         state.tools.open = key;
         renderTools();
-        if (key === 'refs') loadRefList();
+        if (key === 'refs') { loadRefList(); loadBanksStatus(); }
         if (key === 'cards') loadCards();
         if (key === 'counterparties') loadCounterparties();
         if (key === 'templates') loadTemplates();
@@ -5715,7 +5845,92 @@
                           autocomplete="off" value="${escapeHtml(refs.newName || '')}">
                    <button class="bx-btn bx-btn--sm" type="button" id="iv2RefAdd">Добавить</button>
                </div>
-               <div id="iv2RefList">${refsListHtml()}</div>`;
+               <div id="iv2RefList">${refsListHtml()}</div>
+               <div id="iv2BanksStatus">${banksStatusHtml()}</div>`;
+    }
+
+    /**
+     * Состояние справочника банков ЦБ внизу «Справочников».
+     *
+     * Справочник обновляется сам раз в сутки, кнопка — на случай «нужен новый
+     * банк прямо сейчас». Дата обновления показана намеренно: без неё поломка
+     * синка выглядит как исправная работа, только с устаревшими данными.
+     */
+    function banksStatusHtml() {
+        const banks = state.tools.banks;
+        if (banks.loading) return '<p class="iv2-tools-note">Справочник банков: загрузка…</p>';
+
+        const state_ = banks.empty
+            ? '<span class="bx-badge b-rej">не загружен</span>'
+            : (banks.stale ? '<span class="bx-badge b-warn">данные устарели</span>' : '');
+        // updated_at пишется в UTC (datetime('now')), показываем по поясу
+        // устройства тем же помощником, что и остальные даты раздела
+        const when = banks.updated_at ? ` · обновлён ${escapeHtml(fmtCreated(banks.updated_at))}` : '';
+
+        return `<div class="iv2-tools-row">
+                    <div class="iv2-tools-row__main">
+                        <div class="iv2-tools-row__name">Справочник банков ЦБ ${state_}</div>
+                        <div class="iv2-hint">${banks.empty
+                            ? 'Подстановка банка и корр. счёта по БИК не работает, пока справочник пуст'
+                            : `${escapeHtml(withCount(banks.count, 'банк', 'банка', 'банков'))}${when}`}</div>
+                        <div class="iv2-hint">Обновляется сам раз в сутки из открытых данных ЦБ</div>
+                    </div>
+                    <div class="iv2-tools-row__btns">
+                        <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2BanksRefresh"
+                                ${banks.busy ? 'disabled' : ''}>Обновить</button>
+                    </div>
+                </div>`;
+    }
+
+    function renderBanksStatus() {
+        const host = $('iv2BanksStatus');
+        if (!host) return;
+        host.innerHTML = banksStatusHtml();
+        bindBanksStatus();
+    }
+
+    function bindBanksStatus() {
+        const button = $('iv2BanksRefresh');
+        if (button) button.addEventListener('click', refreshBanksDirectory);
+    }
+
+    async function loadBanksStatus() {
+        const banks = state.tools.banks;
+        banks.loading = true;
+        renderBanksStatus();
+        try {
+            const data = await apiGet('/api/invoices/banks/status');
+            Object.assign(banks, data);
+        } catch (error) {
+            // Справочник — не главное содержимое модалки: его недоступность не
+            // должна выглядеть как поломка всех справочников
+            banks.empty = true;
+        } finally {
+            banks.loading = false;
+            renderBanksStatus();
+        }
+    }
+
+    async function refreshBanksDirectory() {
+        const banks = state.tools.banks;
+        banks.busy = true;
+        renderBanksStatus();
+        try {
+            await apiPost('/api/invoices/banks/refresh', {});
+            toast('Обновление запущено — займёт несколько секунд', 'success');
+            // Загрузка идёт фоновым потоком, поэтому статус перечитываем не
+            // сразу: мгновенный ответ показал бы прежнюю дату и выглядел бы
+            // как «кнопка не сработала»
+            setTimeout(async () => {
+                banks.busy = false;
+                bankCache.clear();
+                await loadBanksStatus();
+            }, 6000);
+        } catch (error) {
+            banks.busy = false;
+            toast('Не удалось обновить справочник: ' + error.message, 'error');
+            renderBanksStatus();
+        }
     }
 
     function refsListHtml() {
@@ -5800,6 +6015,7 @@
         const addButton = $('iv2RefAdd');
         if (addButton) addButton.addEventListener('click', addRefItem);
 
+        bindBanksStatus();
         bindRefListActions();
     }
 
@@ -5809,6 +6025,22 @@
         host.querySelectorAll('[data-ref-act]').forEach(button => {
             button.addEventListener('click', () => {
                 refAction(button.getAttribute('data-ref-act'), button.getAttribute('data-ref-id'));
+            });
+        });
+
+        // Реквизиты плательщика вбиваются так же руками, как и реквизиты
+        // контрагента, и ошибиться в корсчёте здесь дороже: с этого счёта
+        // уходит платёжка. Значения формы читаются из DOM при сохранении,
+        // поэтому достаточно проставить их в сами поля.
+        host.querySelectorAll('[data-payer-field="bank_bik"]').forEach(input => {
+            input.addEventListener('input', () => {
+                const form = input.closest('[data-payer-form]');
+                if (!form) return;
+                scheduleBankAutofill(() => bankAutofill(
+                    input,
+                    form.querySelector('[data-payer-field="bank_name"]'),
+                    form.querySelector('[data-payer-field="bank_corr_account"]'),
+                    null));
             });
         });
     }

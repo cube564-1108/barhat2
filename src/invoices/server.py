@@ -141,6 +141,12 @@ from .cards import (
     get_planfact_balances,
     empty_accountable,
 )
+from .banks import (
+    is_valid_bic,
+    lookup_bank,
+    get_banks_status,
+    refresh_banks_locked,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -485,6 +491,66 @@ def trigger_card_sync():
 
     threading.Thread(target=worker, daemon=True, name="card-sync-manual").start()
     log_action(current_user.username, "trigger_card_sync", "")
+    return jsonify({"ok": True, "started": True})
+
+
+@invoices_bp.route("/banks/<bic>", methods=["GET"])
+@section_required(*INVOICE_SECTIONS)
+def get_bank_by_bic(bic):
+    """
+    Банк по БИК для автоподстановки названия и корр. счёта.
+
+    Ручку зовут на каждое изменение поля БИК, поэтому наружу она не ходит
+    ВООБЩЕ — только SELECT по первичному ключу локального справочника (его
+    наполняет фоновый синк, см. banks.py). Живой внешний вызов в таком месте
+    забрал бы оба воркера на первом же быстро печатающем человеке.
+
+    404 здесь — обычный ответ «такого БИК нет», а не поломка: форма показывает
+    подсказку и оставляет поля человеку.
+    """
+    if not is_valid_bic(bic):
+        return jsonify({"error": "БИК — это девять цифр"}), 400
+
+    bank = lookup_bank(bic)
+    if not bank:
+        # Пустой справочник и неизвестный БИК — разные истории, и человеку
+        # нужно понимать, какая из них: во втором случае он ошибся в цифрах,
+        # в первом — ещё не прошёл первый синк.
+        status = get_banks_status()
+        return jsonify({
+            "error": ("Справочник банков ещё не загружен" if status["empty"]
+                      else "Банк с таким БИК не найден в справочнике ЦБ"),
+            "directory_empty": status["empty"],
+        }), 404
+
+    return jsonify({"bank": bank})
+
+
+@invoices_bp.route("/banks/status", methods=["GET"])
+@role_required("admin")
+def banks_status():
+    """Состояние справочника: сколько банков и когда обновляли."""
+    return jsonify(get_banks_status())
+
+
+@invoices_bp.route("/banks/refresh", methods=["POST"])
+@role_required("admin")
+def refresh_banks_view():
+    """
+    Обновить справочник банков из ЦБ, не дожидаясь суточного тика.
+
+    Кнопка не ходит в ЦБ сама: запускает фоновый поток и сразу отвечает — по
+    той же причине, что и разноска карт. Результат виден по дате обновления в
+    статусе справочника.
+    """
+    def worker():
+        try:
+            refresh_banks_locked()
+        except Exception:
+            logger.exception("Ручное обновление справочника банков упало")
+
+    threading.Thread(target=worker, daemon=True, name="banks-refresh").start()
+    log_action(current_user.username, "refresh_banks_directory", "")
     return jsonify({"ok": True, "started": True})
 
 

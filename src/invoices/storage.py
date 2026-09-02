@@ -468,6 +468,11 @@ def init_invoices_tables():
     from .cards import init_cards_tables
     init_cards_tables()
 
+    # Справочник банков по БИК (план 2026-09-02). Импорт локальный по той же
+    # причине, что и у карт: banks.py берёт get_db отсюда.
+    from .banks import init_banks_table
+    init_banks_table()
+
     # Колонки трёх типов заявки — после таблиц карт: card_id ссылается на
     # work_cards, и хотя SQLite внешние ключи не проверяет, порядок оставляем
     # честным, чтобы схема читалась сверху вниз.

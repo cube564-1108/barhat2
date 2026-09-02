@@ -356,6 +356,14 @@ with app.app_context():
     except Exception as e:
         logger.error(f"Не удалось запустить планировщик разноски карт: {e}")
 
+    # Справочник банков ЦБ: обновление раз в сутки, своя стартовая задержка,
+    # чтобы не совпасть волной с остальными синками на общем диске /data.
+    try:
+        from invoices.banks import start_banks_scheduler
+        start_banks_scheduler()
+    except Exception as e:
+        logger.error(f"Не удалось запустить планировщик справочника банков: {e}")
+
     # Инициализация таблиц задач дашборда
     try:
         from tasks.storage import init_tasks_tables
