@@ -213,10 +213,66 @@ def save_banks(banks: List[Dict[str, Any]]) -> int:
     return len(banks)
 
 
+# Исход последнего прогона. Без него поломка синка не видна ниоткуда: работа
+# идёт в фоновом потоке, его исключение уходит только в лог, а консоли
+# контейнера на этом тарифе Amvera нет. Интерфейс в итоге показывал «не
+# загружен» и на «ещё качается», и на «упало» — то есть не показывал ничего.
+_LAST_RUN_KEY = "banks:last_run"
+
+
+def _set_last_run(status: str, detail: str = "") -> None:
+    """Записать исход прогона: running / ok / error. Молча глотаем свои же
+    ошибки — сорванная запись статуса не должна ронять сам прогон."""
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO invoice_sync_state (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (_LAST_RUN_KEY, f"{status}|{detail}"[:500]),
+        )
+        conn.commit()
+    except Exception:
+        logger.exception("Не удалось записать исход обновления справочника банков")
+    finally:
+        conn.close()
+
+
+def get_last_run() -> Dict[str, Any]:
+    """Исход последнего прогона для интерфейса."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT value, updated_at FROM invoice_sync_state WHERE key = ?", (_LAST_RUN_KEY,)
+        ).fetchone()
+    except Exception:
+        # Таблицы может не быть на совсем старой базе — это не повод ронять
+        # весь статус справочника
+        return {"status": "", "detail": "", "at": None}
+    finally:
+        conn.close()
+
+    if not row:
+        return {"status": "", "detail": "", "at": None}
+    value = row["value"] or ""
+    status, _, detail = value.partition("|")
+    return {"status": status, "detail": detail, "at": row["updated_at"]}
+
+
 def refresh_banks() -> Dict[str, Any]:
     """Один прогон обновления. Возвращает сводку для интерфейса и логов."""
-    data = fetch_cbr_directory()
-    saved = save_banks(data["banks"])
+    _set_last_run("running")
+    try:
+        data = fetch_cbr_directory()
+        saved = save_banks(data["banks"])
+    except Exception as error:
+        # Текст ошибки нужен человеку в интерфейсе, а не только в логах:
+        # прочитать логи Amvera на этом тарифе нельзя
+        _set_last_run("error", f"{type(error).__name__}: {error}")
+        raise
+
+    _set_last_run("ok", f"{saved} записей, выгрузка от {data['business_day']}")
     logger.info("[Banks] Справочник ЦБ обновлён: %d записей, выгрузка от %s",
                 saved, data["business_day"])
     return {"saved": saved, "business_day": data["business_day"],
@@ -266,16 +322,21 @@ def get_banks_status() -> Dict[str, Any]:
     проявляется — подстановка просто продолжает отдавать данные годичной
     давности, и заметить это нечем.
     """
+    count, updated_at, read_error = 0, None, ""
     conn = get_db()
     try:
         row = conn.execute(
             "SELECT COUNT(*) AS count, MAX(updated_at) AS updated_at FROM banks"
         ).fetchone()
+        count = row["count"] if row else 0
+        updated_at = row["updated_at"] if row else None
+    except Exception as error:
+        # Отсутствующая таблица и пустая таблица — разные беды, и лечатся они
+        # по-разному. Раньше интерфейс показывал на обе одно и то же слово
+        logger.exception("Не удалось прочитать справочник банков")
+        read_error = f"{type(error).__name__}: {error}"
     finally:
         conn.close()
-
-    count = row["count"] if row else 0
-    updated_at = row["updated_at"] if row else None
 
     stale = True
     if updated_at:
@@ -286,7 +347,8 @@ def get_banks_status() -> Dict[str, Any]:
             logger.warning("Непонятная дата обновления справочника банков: %r", updated_at)
 
     return {"count": count, "updated_at": updated_at, "stale": stale,
-            "empty": count == 0, "source": CBR_BIK_URL}
+            "empty": count == 0, "source": CBR_BIK_URL,
+            "read_error": read_error, "last_run": get_last_run()}
 
 
 # =============================================================================

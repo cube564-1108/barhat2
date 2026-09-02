@@ -277,7 +277,8 @@
             // Состояние справочника банков ЦБ. Нужно именно здесь: поломку
             // синка (ЦБ сменил адрес или формат) иначе нечем заметить —
             // подстановка просто продолжит отдавать данные годичной давности
-            banks: { count: 0, updated_at: null, stale: false, empty: true, loading: false, busy: false },
+            banks: { count: 0, updated_at: null, stale: false, empty: true, loading: false,
+                     busy: false, error: '', read_error: '', last_run: {} },
             cards: {
                 list: [], loading: false, error: '',
                 // Счета ПланФакта для выпадающих списков. accountsError не
@@ -5860,19 +5861,30 @@
         const banks = state.tools.banks;
         if (banks.loading) return '<p class="iv2-tools-note">Справочник банков: загрузка…</p>';
 
-        const state_ = banks.empty
-            ? '<span class="bx-badge b-rej">не загружен</span>'
-            : (banks.stale ? '<span class="bx-badge b-warn">данные устарели</span>' : '');
+        const run = banks.last_run || {};
+        const badge = banks.busy || run.status === 'running'
+            ? '<span class="bx-badge b-warn">обновляется…</span>'
+            : (banks.empty
+                ? '<span class="bx-badge b-rej">не загружен</span>'
+                : (banks.stale ? '<span class="bx-badge b-warn">данные устарели</span>' : ''));
+
         // updated_at пишется в UTC (datetime('now')), показываем по поясу
         // устройства тем же помощником, что и остальные даты раздела
         const when = banks.updated_at ? ` · обновлён ${escapeHtml(fmtCreated(banks.updated_at))}` : '';
+        const main = banks.empty
+            ? 'Подстановка банка и корр. счёта по БИК не работает, пока справочник пуст'
+            : `${withCount(banks.count, 'банк', 'банка', 'банков')}${when}`;
+
+        // Причина, по которой справочник пуст. Раньше её не показывал никто:
+        // и «ещё качается», и «упало с ошибкой» выглядели одним словом
+        const reason = banks.error || banks.read_error
+            || (run.status === 'error' ? `Прошлое обновление не удалось: ${run.detail || ''}` : '');
 
         return `<div class="iv2-tools-row">
                     <div class="iv2-tools-row__main">
-                        <div class="iv2-tools-row__name">Справочник банков ЦБ ${state_}</div>
-                        <div class="iv2-hint">${banks.empty
-                            ? 'Подстановка банка и корр. счёта по БИК не работает, пока справочник пуст'
-                            : `${escapeHtml(withCount(banks.count, 'банк', 'банка', 'банков'))}${when}`}</div>
+                        <div class="iv2-tools-row__name">Справочник банков ЦБ ${badge}</div>
+                        <div class="iv2-hint">${escapeHtml(main)}</div>
+                        ${reason ? `<div class="iv2-hint iv2-hint--warn">${escapeHtml(reason)}</div>` : ''}
                         <div class="iv2-hint">Обновляется сам раз в сутки из открытых данных ЦБ</div>
                     </div>
                     <div class="iv2-tools-row__btns">
@@ -5900,11 +5912,17 @@
         renderBanksStatus();
         try {
             const data = await apiGet('/api/invoices/banks/status');
+            // Ответ сервера не содержит error, поэтому Object.assign его не
+            // затирает — снимаем руками, иначе прошлая неудача висит на
+            // экране поверх уже исправного справочника
+            banks.error = '';
             Object.assign(banks, data);
         } catch (error) {
             // Справочник — не главное содержимое модалки: его недоступность не
-            // должна выглядеть как поломка всех справочников
+            // должна выглядеть как поломка всех справочников. Но и молчать
+            // нельзя: раньше ошибка ручки была неотличима от пустой таблицы
             banks.empty = true;
+            banks.error = 'Не удалось прочитать состояние справочника: ' + error.message;
         } finally {
             banks.loading = false;
             renderBanksStatus();
@@ -5914,23 +5932,46 @@
     async function refreshBanksDirectory() {
         const banks = state.tools.banks;
         banks.busy = true;
+        banks.error = '';
         renderBanksStatus();
         try {
             await apiPost('/api/invoices/banks/refresh', {});
-            toast('Обновление запущено — займёт несколько секунд', 'success');
-            // Загрузка идёт фоновым потоком, поэтому статус перечитываем не
-            // сразу: мгновенный ответ показал бы прежнюю дату и выглядел бы
-            // как «кнопка не сработала»
-            setTimeout(async () => {
-                banks.busy = false;
-                bankCache.clear();
-                await loadBanksStatus();
-            }, 6000);
         } catch (error) {
             banks.busy = false;
-            toast('Не удалось обновить справочник: ' + error.message, 'error');
+            banks.error = error.message;
             renderBanksStatus();
+            return;
         }
+
+        // Работа идёт фоновым потоком, и сколько она займёт — неизвестно:
+        // диск /data медленный, ответ ЦБ тоже не мгновенный. Одна проверка
+        // через фиксированную паузу (так было до 02.09) читала статус раньше,
+        // чем прогон успевал записать результат, показывала «не загружен» и
+        // больше не возвращалась — поломка и успех выглядели одинаково.
+        for (let attempt = 0; attempt < 20; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            let data;
+            try {
+                data = await apiGet('/api/invoices/banks/status');
+            } catch (error) {
+                continue;   // воркер мог перезапуститься — пробуем дальше
+            }
+            Object.assign(banks, data);
+            const run = data.last_run || {};
+            if (run.status === 'running') { renderBanksStatus(); continue; }
+
+            banks.busy = false;
+            bankCache.clear();   // подстановка не должна отдавать доисторический ответ
+            renderBanksStatus();
+            if (run.status === 'error') toast('Обновление не удалось: ' + (run.detail || ''), 'error');
+            else if (!data.empty) toast(`Справочник обновлён: ${data.count} банков`, 'success');
+            return;
+        }
+
+        // Минута ожидания без исхода — это тоже ответ, и молчать о нём нельзя
+        banks.busy = false;
+        banks.error = 'Обновление идёт дольше обычного. Закройте окно и загляните позже';
+        renderBanksStatus();
     }
 
     function refsListHtml() {

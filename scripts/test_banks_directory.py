@@ -172,6 +172,34 @@ check("справочник не считается пустым", status["empty
 check("свежая загрузка не помечена устаревшей", status["stale"] is False)
 check("дата обновления записана", bool(status["updated_at"]))
 
+print("\n=== Исход прогона виден снаружи ===")
+# Прогон работает в фоновом потоке, его исключение уходит только в лог, а
+# консоли контейнера на этом тарифе Amvera нет. Без записанного исхода
+# интерфейс показывал «не загружен» и на «ещё качается», и на «упало».
+from invoices import banks as banks_module                       # noqa: E402
+
+banks_module._set_last_run("running")
+check("прогон помечается идущим", banks_module.get_last_run()["status"] == "running")
+
+banks_module._set_last_run("error", "SSLError: сертификат не проверен")
+run = banks_module.get_last_run()
+check("ошибка сохраняется", run["status"] == "error", run["status"])
+check("текст ошибки доезжает до человека", "SSLError" in run["detail"], run["detail"])
+check("исход попадает в статус", get_banks_status()["last_run"]["status"] == "error")
+
+banks_module._set_last_run("ok", "1416 записей, выгрузка от 2026-09-02")
+check("успех перекрывает прошлую ошибку", get_banks_status()["last_run"]["status"] == "ok")
+
+# Сеть выключена, значит настоящий прогон обязан упасть — и обязан рассказать
+# об этом, а не молча оставить справочник пустым
+try:
+    banks_module.refresh_banks()
+    check("падение прогона записывается", False, "исключения не было")
+except Exception:
+    check("падение прогона записывается", banks_module.get_last_run()["status"] == "error")
+    check("причина падения читаема", bool(banks_module.get_last_run()["detail"]))
+check("данные при этом не потерялись", get_banks_status()["count"] == 6)
+
 print("\n=== HTTP-ручка (без сети) ===")
 from flask import Flask                                          # noqa: E402
 from flask_login import LoginManager, AnonymousUserMixin         # noqa: E402
