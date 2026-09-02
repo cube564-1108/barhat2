@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Согласование документов — прототип</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Vollkorn:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bx-darkest:#130810; --bx-dark:#1e0d1b; --bx-wine:#411330; --bx-primary:#4a1942;
+  --bx-medium:#6b2660; --bx-accent:#8b3a7d;
+  --bx-pink-deep:#B26FA1; --bx-pink:#D19CC2; --bx-pink-bright:#E1A4C9;
+  --bx-pink-light:#E4C2DD; --bx-pink-wash:#F3E3EE;
+  --bx-bg:#faf4f9; --bx-bg-2:#f5e8f3; --bx-white:#fff;
+  --bx-text:#3C3C3C; --bx-text-2:#6F6F6F; --bx-muted:#9b8f97;
+  --bx-border:#eee2ea; --bx-scroll:#d1b8ce;
+  --bx-up:#0a7d3f; --bx-down:#c0322f;
+  --bx-grad-header:linear-gradient(135deg,#411330 0%,#B26FA1 100%);
+  --bx-grad-accent:linear-gradient(135deg,#E1A4C9 0%,#B26FA1 100%);
+  --bx-r-sm:4px; --bx-r-md:6px; --bx-r-lg:8px; --bx-r-xl:12px; --bx-r-2xl:16px;
+  --bx-font-head:'Vollkorn',Georgia,serif;
+  --bx-font-body:'Inter','PT Sans',system-ui,-apple-system,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bx-bg);color:var(--bx-text);font-family:var(--bx-font-body);
+  -webkit-font-smoothing:antialiased;font-size:14px}
+h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700;margin:0}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bx-scroll);border-radius:4px}
+
+.bx-page{width:100%;max-width:1400px;margin:0 auto;padding:32px}
+@media(max-width:768px){.bx-page{padding:16px}}
+
+/* ---------- Плашка прототипа ---------- */
+.proto-note{background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:var(--bx-r-xl);
+  padding:10px 14px;font-size:12.5px;margin-bottom:16px;line-height:1.5}
+
+/* ---------- Шапка ---------- */
+.bx-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
+  background:var(--bx-grad-header);color:#fff;border-radius:var(--bx-r-2xl);padding:28px 32px;margin-bottom:20px}
+.bx-header__left{display:flex;align-items:center;gap:16px;min-width:0}
+.bx-header__icon{flex:0 0 auto;width:44px;height:44px;display:flex;align-items:center;justify-content:center;
+  border-radius:var(--bx-r-xl);background:rgba(255,255,255,.15)}
+.bx-header__title{font-size:30px;line-height:1.1;letter-spacing:-.01em;color:#fff}
+.bx-header__subtitle{color:rgba(255,255,255,.7);font-size:14px;margin:4px 0 0}
+.bx-header__actions{flex:0 0 auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bx-header .bx-btn--light{background:rgba(255,255,255,.16);color:#fff}
+.bx-header .bx-btn--light:hover{background:rgba(255,255,255,.24)}
+@media(max-width:768px){.bx-header{flex-direction:column;padding:20px}.bx-header__title{font-size:22px}}
+
+/* ---------- Карточки и KPI ---------- */
+.bx-card{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:18px}
+.bx-card__title{font-family:var(--bx-font-head);font-weight:600;font-size:15.5px;color:var(--bx-wine);margin:0}
+.bx-card__caption{color:var(--bx-muted);font-size:12px;margin:2px 0 12px}
+.kpis{display:grid;gap:12px;grid-template-columns:repeat(4,1fr);margin-bottom:16px}
+@media(max-width:1000px){.kpis{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.kpis{grid-template-columns:1fr}}
+.kpi{padding:16px;cursor:pointer;text-align:left;font:inherit;border:1px solid var(--bx-border);
+  background:#fff;border-radius:var(--bx-r-2xl);transition:border-color .15s,box-shadow .15s}
+.kpi:hover{border-color:var(--bx-pink);box-shadow:0 2px 10px rgba(65,19,48,.06)}
+.kpi--active{border-color:var(--bx-wine);box-shadow:0 0 0 2px rgba(65,19,48,.08)}
+.kpi__label{font-size:11.5px;color:var(--bx-muted);text-transform:uppercase;letter-spacing:.03em;line-height:1.2}
+.kpi__value{font-weight:700;font-size:28px;color:var(--bx-wine);margin:6px 0 4px;line-height:1;
+  font-variant-numeric:tabular-nums lining-nums;letter-spacing:-.01em}
+.kpi__hint{font-size:12px;color:var(--bx-text-2)}
+.kpi__hint--warn{color:var(--bx-down);font-weight:600}
+
+/* ---------- Табы ---------- */
+.bx-tabs{display:inline-flex;flex-wrap:wrap;gap:4px;padding:4px;border-radius:var(--bx-r-xl);
+  background:rgba(228,194,221,.15);margin-bottom:16px}
+.bx-tab{padding:8px 16px;font-size:14px;border-radius:var(--bx-r-lg);color:var(--bx-wine);
+  background:none;border:none;cursor:pointer;font-family:inherit;white-space:nowrap}
+.bx-tab:hover{background:rgba(228,194,221,.25)}
+.bx-tab--active{background:var(--bx-wine);color:#fff;font-weight:500}
+
+/* ---------- Кнопки, поля, бейджи ---------- */
+.bx-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 16px;
+  border-radius:var(--bx-r-xl);border:none;cursor:pointer;font-size:14px;font-weight:600;
+  font-family:inherit;background:var(--bx-wine);color:#fff;transition:opacity .15s}
+.bx-btn:disabled{opacity:.5;cursor:default}
+.bx-btn:hover:not(:disabled){opacity:.92}
+.bx-btn--ghost{background:transparent;color:var(--bx-wine);border:1px solid var(--bx-border)}
+.bx-btn--ghost:hover{background:var(--bx-bg-2)}
+.bx-btn--danger{background:#fff;color:var(--bx-down);border:1px solid #f3c9c8}
+.bx-btn--sm{padding:7px 12px;font-size:13px}
+.bx-input,select.bx-input,textarea.bx-input{width:100%;padding:10px 12px;border-radius:var(--bx-r-xl);
+  border:1px solid #e5e7eb;font-size:14px;color:#1f2937;outline:none;font-family:inherit;background:#fff;
+  transition:box-shadow .15s,border-color .15s}
+.bx-input:focus{border-color:var(--bx-pink-deep);box-shadow:0 0 0 3px rgba(178,111,161,.15)}
+.bx-input::placeholder{color:#cbd5e1}
+textarea.bx-input{resize:vertical;min-height:72px}
+.bx-badge{display:inline-block;border-radius:9999px;padding:2px 10px;font-size:11px;font-weight:500;white-space:nowrap}
+.b-neutral{background:rgba(0,0,0,.05);color:#6F6F6F}
+.b-ok{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0}
+.b-warn{background:#fffbeb;color:#b45309;border:1px solid #fde68a}
+.b-bad{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}
+.b-brand{background:rgba(228,194,221,.4);color:#411330}
+.b-pink{background:#B26FA1;color:#fff}
+.field{margin-bottom:12px}
+.field__label{display:block;font-size:12px;color:var(--bx-text-2);margin-bottom:5px;font-weight:500}
+.field__hint{font-size:11.5px;color:var(--bx-muted);margin-top:4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.grid2{grid-template-columns:1fr}}
+
+/* ---------- Фильтры ---------- */
+.filters{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);padding:14px 16px;margin-bottom:12px}
+.filters__row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+@media(max-width:1000px){.filters__row{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.filters__row{grid-template-columns:1fr}}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--bx-pink-wash);color:var(--bx-wine);
+  border-radius:9999px;padding:4px 8px 4px 12px;font-size:12px}
+.chip button{border:none;background:none;cursor:pointer;color:var(--bx-wine);font-size:14px;line-height:1;padding:0 2px}
+.result-line{font-size:12.5px;color:var(--bx-text-2);margin:10px 2px}
+
+/* ---------- Таблица ---------- */
+.table-wrap{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);overflow:hidden}
+table.reg{width:100%;border-collapse:collapse;font-size:13.5px}
+table.reg th{background:#faf5f9;color:var(--bx-wine);font-weight:600;text-align:left;padding:11px 14px;
+  border-bottom:1px solid var(--bx-border);font-size:12px;white-space:nowrap;cursor:pointer;user-select:none}
+table.reg th:hover{background:var(--bx-bg-2)}
+table.reg td{padding:11px 14px;border-bottom:1px solid #f6eef4;vertical-align:top}
+table.reg tr:last-child td{border-bottom:none}
+table.reg tbody tr:hover{background:#fdf9fc}
+.doc-link{background:none;border:none;padding:0;font:inherit;font-weight:600;color:var(--bx-wine);
+  cursor:pointer;text-align:left;text-decoration:underline;text-decoration-color:var(--bx-pink)}
+.muted{color:var(--bx-muted);font-size:12px}
+.row-cancelled{opacity:.55}
+.empty{padding:36px;text-align:center;color:var(--bx-muted)}
+
+/* ---------- Очередь ---------- */
+.queue{display:grid;grid-template-columns:300px 1fr;gap:12px}
+@media(max-width:900px){.queue{grid-template-columns:1fr}}
+.queue__list{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);overflow:hidden;
+  max-height:640px;overflow-y:auto}
+.qitem{padding:12px 14px;border-bottom:1px solid #f6eef4;cursor:pointer;background:none;border-left:none;
+  border-right:none;border-top:none;width:100%;text-align:left;font:inherit}
+.qitem:hover{background:#fdf9fc}
+.qitem--active{background:var(--bx-pink-wash)}
+.qitem__title{font-weight:600;color:var(--bx-wine);font-size:13.5px;margin-bottom:3px}
+.doc-preview{background:#f7f2f6;border:1px dashed var(--bx-border);border-radius:var(--bx-r-xl);
+  min-height:260px;display:flex;align-items:center;justify-content:center;color:var(--bx-muted);
+  text-align:center;padding:20px;font-size:13px}
+.split{display:grid;grid-template-columns:1fr 340px;gap:14px}
+@media(max-width:900px){.split{grid-template-columns:1fr}}
+
+/* ---------- Модалка ---------- */
+.overlay{position:fixed;inset:0;background:rgba(19,8,16,.45);display:none;align-items:flex-start;
+  justify-content:center;padding:24px;z-index:2000;overflow-y:auto}
+.overlay--open{display:flex}
+.modal{background:#fff;border-radius:var(--bx-r-2xl);width:100%;max-width:1040px;margin:auto;
+  box-shadow:0 20px 60px rgba(19,8,16,.25)}
+.modal--narrow{max-width:620px}
+.modal__head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
+  padding:18px 22px;border-bottom:1px solid var(--bx-border)}
+.modal__body{padding:20px 22px;max-height:calc(100vh - 200px);overflow-y:auto}
+.modal__foot{padding:14px 22px;border-top:1px solid var(--bx-border);display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.icon-btn{background:none;border:none;cursor:pointer;color:var(--bx-muted);font-size:22px;line-height:1;padding:2px 6px}
+.icon-btn:hover{color:var(--bx-wine)}
+
+/* ---------- Лента и лист согласования ---------- */
+.feed{border-top:1px solid var(--bx-border);margin-top:14px;padding-top:12px}
+.feed__item{display:flex;gap:10px;padding:8px 0;font-size:13px;border-bottom:1px solid #f6eef4}
+.feed__item:last-child{border-bottom:none}
+.feed__dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--bx-pink);margin-top:6px}
+.feed__msg{background:var(--bx-pink-wash);border-radius:var(--bx-r-lg);padding:8px 10px}
+.approval{border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);padding:10px 12px;margin-bottom:8px}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:6px 10px;font-size:13px}
+.kv dt{color:var(--bx-text-2)}
+.kv dd{margin:0;color:var(--bx-text);font-weight:500}
+
+/* ---------- Файлы и импорт ---------- */
+.dropzone{border:2px dashed var(--bx-pink);border-radius:var(--bx-r-xl);padding:24px;text-align:center;
+  color:var(--bx-text-2);background:#fdf9fc;font-size:13px}
+.dropzone--hot{background:var(--bx-pink-wash);border-color:var(--bx-pink-deep)}
+.files{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.file-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--bx-border);
+  border-radius:var(--bx-r-lg);padding:6px 10px;font-size:12.5px;background:#fff}
+.import-row{display:grid;grid-template-columns:1.4fr 1fr 1fr .8fr auto;gap:8px;align-items:center;
+  padding:10px 0;border-bottom:1px solid #f6eef4}
+@media(max-width:900px){.import-row{grid-template-columns:1fr 1fr}}
+.report{background:var(--bx-pink-wash);border-radius:var(--bx-r-xl);padding:12px 14px;font-size:13px;margin-top:12px}
+
+/* ---------- Печатная форма ---------- */
+.sheet{background:#fff;color:#111;padding:40px;font-size:14px;line-height:1.6;max-width:800px;margin:0 auto}
+.sheet h2{font-family:var(--bx-font-head);text-align:center;margin-bottom:20px}
+.sheet__sign{margin-top:48px;display:flex;justify-content:space-between;gap:24px}
+@media print{
+  body *{visibility:hidden}
+  .sheet,.sheet *{visibility:visible}
+  .sheet{position:absolute;left:0;top:0;width:100%;padding:0}
+}
+
+/* ---------- Тост ---------- */
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--bx-wine);color:#fff;
+  padding:11px 18px;border-radius:var(--bx-r-xl);font-size:13.5px;z-index:5000;opacity:0;pointer-events:none;
+  transition:opacity .2s}
+.toast--show{opacity:1}
+.warn-box{background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:var(--bx-r-lg);
+  padding:9px 12px;font-size:12.5px;margin-bottom:12px}
+.sec-title{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:600;font-size:14.5px;margin:18px 0 8px}
+.sec-title:first-child{margin-top:0}
+</style>
+</head>
+<body>
+<div class="bx-page">
+
+  <div class="proto-note">
+    <strong>Прототип.</strong> Данные вымышленные, ничего не сохраняется — обновление страницы возвращает
+    исходное состояние. Проверяем состав экранов, поля форм, порядок действий и формулировки.
+    План: <code>plans/2026-09-02-согласование-документов.md</code>
+  </div>
+
+  <header class="bx-header">
+    <div class="bx-header__left">
+      <span class="bx-header__icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.75"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <path d="M14 2v6h6"/><path d="M9 15l2 2 4-4"/>
+        </svg>
+      </span>
+      <div>
+        <h1 class="bx-header__title">Согласование документов</h1>
+        <p class="bx-header__subtitle" id="headerSub">Доверенности, договоры, УПД — заведение, согласование, сроки</p>
+      </div>
+    </div>
+    <div class="bx-header__actions">
+      <button class="bx-btn bx-btn--light" id="btnNew">Завести документ</button>
+    </div>
+  </header>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="bx-tabs" role="tablist">
+    <button class="bx-tab bx-tab--active" data-view="registry">Реестр</button>
+    <button class="bx-tab" data-view="queue">Очередь согласования</button>
+    <button class="bx-tab" data-view="import">Импорт архива</button>
+    <button class="bx-tab" data-view="types">Типы документов</button>
+  </div>
+
+  <div id="viewRegistry">
+    <div class="filters">
+      <div class="filters__row">
+        <input class="bx-input" id="fSearch" placeholder="Поиск: название, номер, контрагент">
+        <select class="bx-input" id="fType"></select>
+        <select class="bx-input" id="fStatus"></select>
+        <select class="bx-input" id="fStore"></select>
+        <select class="bx-input" id="fDeadline">
+          <option value="">Срок — любой</option>
+          <option value="30">Истекает в 30 дней</option>
+          <option value="notice">Скоро дедлайн отказа</option>
+          <option value="none">Без срока</option>
+          <option value="expired">Просрочен</option>
+        </select>
+      </div>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="result-line" id="resultLine"></div>
+    <div class="table-wrap">
+      <table class="reg">
+        <thead>
+          <tr>
+            <th data-sort="type">Тип</th>
+            <th data-sort="title">Документ</th>
+            <th data-sort="counterparty">Контрагент</th>
+            <th data-sort="store">Салон</th>
+            <th data-sort="valid_until">Срок действия</th>
+            <th data-sort="status">Статус</th>
+            <th data-sort="created_by">Автор</th>
+          </tr>
+        </thead>
+        <tbody id="regBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="viewQueue" style="display:none">
+    <div class="queue">
+      <div class="queue__list" id="queueList"></div>
+      <div class="bx-card" id="queuePanel"></div>
+    </div>
+  </div>
+
+  <div id="viewImport" style="display:none">
+    <div class="bx-card">
+      <h3 class="bx-card__title">Импорт архива договоров</h3>
+      <p class="bx-card__caption">Заливаем папку целиком, потом разбираем карточки. Повторная заливка того же
+        файла дубль не создаёт — сверка идёт по содержимому файла.</p>
+      <div class="dropzone" id="importZone">
+        Перетащите файлы сюда или
+        <button class="bx-btn bx-btn--ghost bx-btn--sm" id="btnFakeUpload" style="margin-left:6px">выбрать файлы</button>
+        <div class="muted" style="margin-top:8px">PDF, JPG, PNG. В прототипе кнопка добавляет шесть тестовых файлов.</div>
+      </div>
+      <div id="importReport"></div>
+      <div id="importList"></div>
+    </div>
+  </div>
+
+  <div id="viewTypes" style="display:none">
+    <div class="bx-card">
+      <h3 class="bx-card__title">Типы документов</h3>
+      <p class="bx-card__caption">Тип определяет, какие поля обязательны, за сколько дней напоминать,
+        кому документ виден и можно ли отправлять его скан на распознавание.</p>
+      <div class="table-wrap" style="border-radius:var(--bx-r-xl)">
+        <table class="reg">
+          <thead><tr>
+            <th style="cursor:default">Тип</th><th style="cursor:default">Обязательные поля</th>
+            <th style="cursor:default">Напомнить</th><th style="cursor:default">Срок согласования</th>
+            <th style="cursor:default">Персональные данные</th><th style="cursor:default">Распознавание</th>
+            <th style="cursor:default">Видят управляющие</th>
+          </tr></thead>
+          <tbody id="typesBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ===================== Данные ===================== */
+const TYPES = [
+  {code:'poa', name:'Доверенность', amount:false, validity:true, counterparty:false, subject:true,
+   sensitive:true, ai:false, managers:true, remind:14, sla:8, print:true},
+  {code:'rent', name:'Договор аренды', amount:true, validity:true, counterparty:true, subject:false,
+   sensitive:false, ai:true, managers:true, remind:30, sla:48, print:false},
+  {code:'supply', name:'Договор поставки', amount:true, validity:true, counterparty:true, subject:false,
+   sensitive:false, ai:true, managers:false, remind:30, sla:48, print:false},
+  {code:'upd', name:'УПД / акт', amount:true, validity:false, counterparty:true, subject:false,
+   sensitive:false, ai:true, managers:false, remind:null, sla:24, print:false}
+];
+const STORES = ['Центральный','Северный','Южный','Онлайн'];
+const PAYERS = ['ООО «Бархат»','ИП Иванова С. В.'];
+const PEOPLE = ['Стас (владелец)','Ирина, Центральный','Марина, Северный','Ольга, Южный'];
+const STATUS = {
+  draft:{label:'Черновик',cls:'b-neutral'},
+  on_approval:{label:'На согласовании',cls:'b-warn'},
+  rework:{label:'На доработке',cls:'b-warn'},
+  approved:{label:'Согласован',cls:'b-ok'},
+  approved_cond:{label:'Согласован с условием',cls:'b-ok'},
+  rejected:{label:'Отклонён',cls:'b-bad'},
+  signing:{label:'На подписании',cls:'b-pink'},
+  signed:{label:'Подписан',cls:'b-ok'},
+  cancelled:{label:'Отменён',cls:'b-neutral'}
+};
+const today = new Date('2026-09-02T09:00:00');
+function d(offset){const x=new Date(today);x.setDate(x.getDate()+offset);return x.toISOString().slice(0,10);}
+
+let SEQ = 100;
+let DOCS = [
+  {id:++SEQ,type:'rent',title:'Аренда помещения, ул. Ленина 14',number:'АР-2024/11',date:d(-300),
+   counterparty:'ООО «Строймир»',inn:'6671234567',store:'Центральный',payer:PAYERS[0],amount:145000,
+   valid_until:d(24),notice:60,auto_renew:true,status:'signed',created_by:PEOPLE[1],signed_method:'paper',
+   files:[{kind:'signed',name:'аренда-ленина-14.pdf'}],
+   history:[{t:d(-300),who:PEOPLE[1],what:'Документ заведён'},{t:d(-298),who:PEOPLE[0],what:'Согласован'},
+            {t:d(-296),who:PEOPLE[0],what:'Отмечен подписанным (бумага)'}],
+   comments:[]},
+  {id:++SEQ,type:'rent',title:'Аренда, ТЦ «Гринвич», павильон 2-14',number:'АР-2025/4',date:d(-210),
+   counterparty:'АО «Гринвич»',inn:'6659876543',store:'Южный',payer:PAYERS[0],amount:210000,
+   valid_until:d(96),notice:90,auto_renew:true,status:'signed',created_by:PEOPLE[3],signed_method:'edo',
+   files:[{kind:'signed',name:'грин-павильон.pdf'}],
+   history:[{t:d(-210),who:PEOPLE[3],what:'Документ заведён'},{t:d(-207),who:PEOPLE[0],what:'Согласован'}],
+   comments:[]},
+  {id:++SEQ,type:'supply',title:'Поставка срезки, еженедельно',number:'ПС-77',date:d(-120),
+   counterparty:'ООО «ФлораОпт»',inn:'7701234512',store:null,payer:PAYERS[0],amount:0,
+   valid_until:d(230),notice:30,auto_renew:false,status:'signed',created_by:PEOPLE[0],signed_method:'edo',
+   files:[{kind:'signed',name:'floraopt-dogovor.pdf'}],
+   history:[{t:d(-120),who:PEOPLE[0],what:'Документ заведён'}],comments:[]},
+  {id:++SEQ,type:'poa',title:'Доверенность на получение ТМЦ — Ирина',number:'Д-31',date:d(-40),
+   counterparty:null,inn:null,store:'Центральный',payer:PAYERS[0],amount:null,subject:PEOPLE[1],
+   valid_until:d(-3),notice:null,auto_renew:false,status:'signed',created_by:PEOPLE[1],signed_method:'paper',
+   files:[{kind:'signed',name:'doverennost-31.pdf'}],
+   history:[{t:d(-40),who:PEOPLE[1],what:'Документ заведён'},{t:d(-39),who:PEOPLE[0],what:'Согласован'}],
+   comments:[]},
+  {id:++SEQ,type:'poa',title:'Доверенность на получение ТМЦ — Марина',number:'Д-34',date:d(-2),
+   counterparty:null,inn:null,store:'Северный',payer:PAYERS[0],amount:null,subject:PEOPLE[2],
+   valid_until:d(88),notice:null,auto_renew:false,status:'on_approval',created_by:PEOPLE[2],
+   files:[],history:[{t:d(-2),who:PEOPLE[2],what:'Отправлен на согласование'}],
+   comments:[{t:d(-2),who:PEOPLE[2],msg:'Нужна к четвергу — забираем горшки на складе.'}]},
+  {id:++SEQ,type:'supply',title:'Поставка упаковки и лент',number:'ПУ-2026/9',date:d(-1),
+   counterparty:'ООО «ПакСервис»',inn:'6685554433',store:null,payer:PAYERS[0],amount:0,
+   valid_until:d(365),notice:30,auto_renew:true,status:'on_approval',created_by:PEOPLE[1],
+   files:[{kind:'draft',name:'pak-service-v2.pdf'}],
+   history:[{t:d(-1),who:PEOPLE[1],what:'Отправлен на согласование'}],
+   comments:[{t:d(-1),who:PEOPLE[1],msg:'Цены выросли на 8%, но отсрочка стала 21 день.'}]},
+  {id:++SEQ,type:'upd',title:'УПД по поставке срезки от 28.08',number:'УПД-4412',date:d(-5),
+   counterparty:'ООО «ФлораОпт»',inn:'7701234512',store:'Центральный',payer:PAYERS[0],amount:86400,
+   valid_until:null,notice:null,auto_renew:false,status:'on_approval',created_by:PEOPLE[1],
+   files:[{kind:'draft',name:'upd-4412.pdf'}],
+   history:[{t:d(-5),who:PEOPLE[1],what:'Отправлен на согласование'}],comments:[]},
+  {id:++SEQ,type:'upd',title:'Акт на клининг, август',number:'А-119',date:d(-8),
+   counterparty:'ИП Сафин Р. Р.',inn:'661234567890',store:'Северный',payer:PAYERS[1],amount:24000,
+   valid_until:null,notice:null,auto_renew:false,status:'rework',created_by:PEOPLE[2],
+   files:[{kind:'draft',name:'akt-119.jpg'}],
+   history:[{t:d(-8),who:PEOPLE[2],what:'Отправлен на согласование'},
+            {t:d(-7),who:PEOPLE[0],what:'Возвращён на доработку: сумма не сходится с договором'}],
+   comments:[{t:d(-7),who:PEOPLE[0],msg:'В договоре 22 000. Уточни, откуда 24 000.'}]},
+  {id:++SEQ,type:'rent',title:'Аренда склада на Титова',number:'АР-2026/2',date:d(-15),
+   counterparty:'ИП Кузнецов А. А.',inn:'665012345678',store:null,payer:PAYERS[0],amount:38000,
+   valid_until:d(140),notice:30,auto_renew:false,status:'approved_cond',created_by:PEOPLE[0],
+   files:[{kind:'draft',name:'sklad-titova.pdf'}],
+   history:[{t:d(-15),who:PEOPLE[0],what:'Документ заведён'},
+            {t:d(-13),who:PEOPLE[0],what:'Согласован с условием: убрать п. 5.4 про индексацию'}],
+   comments:[],condition:'Убрать пункт 5.4 про ежегодную индексацию 12%'},
+  {id:++SEQ,type:'supply',title:'Поставка горшков и кашпо',number:'ПГ-15',date:d(-22),
+   counterparty:'ООО «КерамикаУрал»',inn:'6678889911',store:null,payer:PAYERS[0],amount:0,
+   valid_until:null,notice:null,auto_renew:false,status:'draft',created_by:PEOPLE[3],
+   files:[],history:[{t:d(-22),who:PEOPLE[3],what:'Черновик создан'}],comments:[]},
+  {id:++SEQ,type:'upd',title:'УПД по упаковке от 15.08',number:'УПД-2201',date:d(-18),
+   counterparty:'ООО «ПакСервис»',inn:'6685554433',store:'Южный',payer:PAYERS[0],amount:31200,
+   valid_until:null,notice:null,auto_renew:false,status:'signed',created_by:PEOPLE[3],signed_method:'edo',
+   files:[{kind:'signed',name:'upd-2201.pdf'}],
+   history:[{t:d(-18),who:PEOPLE[3],what:'Документ заведён'},{t:d(-17),who:PEOPLE[0],what:'Согласован'}],
+   comments:[]},
+  {id:++SEQ,type:'rent',title:'Аренда, пр. Космонавтов 41',number:'АР-2025/9',date:d(-95),
+   counterparty:'ООО «Инвест-Недвижимость»',inn:'6674443322',store:'Северный',payer:PAYERS[0],amount:98000,
+   valid_until:d(11),notice:30,auto_renew:true,status:'signed',created_by:PEOPLE[2],signed_method:'paper',
+   files:[{kind:'signed',name:'kosmonavtov-41.pdf'}],
+   history:[{t:d(-95),who:PEOPLE[2],what:'Документ заведён'}],comments:[]},
+  {id:++SEQ,type:'poa',title:'Доверенность на подачу отчётности',number:'Д-28',date:d(-150),
+   counterparty:null,inn:null,store:null,payer:PAYERS[0],amount:null,subject:PEOPLE[0],
+   valid_until:d(-20),notice:null,auto_renew:false,status:'signed',created_by:PEOPLE[0],signed_method:'kep',
+   files:[{kind:'signed',name:'d-28.pdf'}],history:[{t:d(-150),who:PEOPLE[0],what:'Документ заведён'}],
+   comments:[]},
+  {id:++SEQ,type:'supply',title:'Поставка кофе и сиропов',number:'ПК-3',date:d(-60),
+   counterparty:'ООО «Бариста Плюс»',inn:'6671112233',store:null,payer:PAYERS[1],amount:0,
+   valid_until:null,notice:null,auto_renew:false,status:'rejected',created_by:PEOPLE[1],
+   files:[],history:[{t:d(-60),who:PEOPLE[1],what:'Отправлен на согласование'},
+                     {t:d(-58),who:PEOPLE[0],what:'Отклонён: не наш профиль'}],comments:[]}
+];
+
+/* ===================== Утилиты ===================== */
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function typeOf(code){return TYPES.find(t=>t.code===code)||TYPES[0];}
+function fmtDate(iso){if(!iso)return '—';const[y,m,dd]=iso.split('-');return `${dd}.${m}.${y}`;}
+function fmtMoney(v){if(v==null||v===0)return '—';return v.toLocaleString('ru-RU')+' ₽';}
+function daysLeft(iso){if(!iso)return null;return Math.round((new Date(iso)-today)/86400000);}
+function noticeDate(doc){
+  if(!doc.valid_until||!doc.notice)return null;
+  const x=new Date(doc.valid_until);x.setDate(x.getDate()-doc.notice);return x.toISOString().slice(0,10);
+}
+/* Дедлайн, о котором надо помнить: у автопролонгации это срок отказа, а не дата окончания */
+function deadlineInfo(doc){
+  const nd=noticeDate(doc), dl=daysLeft(doc.valid_until);
+  if(!doc.valid_until)return{text:'без срока',cls:'b-neutral',days:null,kind:'none'};
+  if(doc.auto_renew&&nd){
+    const nl=daysLeft(nd);
+    if(nl<0)return{text:`срок отказа прошёл · продлится ${fmtDate(doc.valid_until)}`,cls:'b-bad',
+      days:nl,kind:'notice_passed'};
+    if(nl<=45)return{text:`отказ до ${fmtDate(nd)} · ${nl} дн.`,cls:'b-warn',days:nl,kind:'notice'};
+    return{text:`до ${fmtDate(doc.valid_until)}`,cls:'b-neutral',days:dl,kind:'ok'};
+  }
+  if(dl<0)return{text:`истёк ${fmtDate(doc.valid_until)}`,cls:'b-bad',days:dl,kind:'expired'};
+  if(dl<=30)return{text:`истекает через ${dl} дн.`,cls:'b-warn',days:dl,kind:'soon'};
+  return{text:`до ${fmtDate(doc.valid_until)}`,cls:'b-neutral',days:dl,kind:'ok'};
+}
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('toast--show');
+  clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('toast--show'),2600);}
+function $(id){return document.getElementById(id);}
+
+/* ===================== Состояние ===================== */
+let state={view:'registry',search:'',type:'',status:'',store:'',deadline:'',
+  sort:'valid_until',dir:'asc',kpi:'',queueId:null,imported:[]};
+
+/* ===================== KPI ===================== */
+function kpiSets(){
+  const alive=DOCS.filter(x=>x.status!=='cancelled');
+  return {
+    notice:alive.filter(x=>{const i=deadlineInfo(x);return i.kind==='notice'||i.kind==='notice_passed';}),
+    soon:alive.filter(x=>{const i=deadlineInfo(x);return i.kind==='soon'||i.kind==='expired';}),
+    wait:alive.filter(x=>x.status==='on_approval'),
+    noorig:alive.filter(x=>(x.status==='approved'||x.status==='approved_cond'||x.status==='signing')
+      &&!x.files.some(f=>f.kind==='signed'))
+  };
+}
+function renderKpis(){
+  const s=kpiSets();
+  const cards=[
+    {key:'notice',label:'Дедлайн отказа от пролонгации',val:s.notice.length,
+     hint:s.notice.length?'Молчание = договор продлён':'Ближайших нет',warn:!!s.notice.length},
+    {key:'soon',label:'Истекают в 30 дней',val:s.soon.length,hint:'Вместе с уже истёкшими'},
+    {key:'wait',label:'Ждут вашего решения',val:s.wait.length,hint:'Очередь согласования'},
+    {key:'noorig',label:'Согласованы без оригинала',val:s.noorig.length,hint:'Подписали, но файл не приложен'}
+  ];
+  $('kpis').innerHTML=cards.map(c=>`
+    <button class="kpi${state.kpi===c.key?' kpi--active':''}" data-kpi="${c.key}">
+      <div class="kpi__label">${esc(c.label)}</div>
+      <div class="kpi__value">${c.val}</div>
+      <div class="kpi__hint${c.warn?' kpi__hint--warn':''}">${esc(c.hint)}</div>
+    </button>`).join('');
+  $('kpis').querySelectorAll('[data-kpi]').forEach(b=>b.onclick=()=>{
+    state.kpi=state.kpi===b.dataset.kpi?'':b.dataset.kpi;
+    if(state.kpi==='wait'){state.status='on_approval';state.deadline='';}
+    else if(state.kpi==='notice'){state.deadline='notice';state.status='';}
+    else if(state.kpi==='soon'){state.deadline='30';state.status='';}
+    else if(state.kpi==='noorig'){state.status='';state.deadline='';}
+    else {state.status='';state.deadline='';}
+    switchView('registry');syncFilterInputs();renderAll();
+  });
+}
+
+/* ===================== Реестр ===================== */
+function visibleDocs(){
+  let list=DOCS.slice();
+  if(state.kpi==='noorig')list=kpiSets().noorig.slice();
+  const q=state.search.trim().toLowerCase();
+  if(q)list=list.filter(x=>[x.title,x.number,x.counterparty,x.inn].filter(Boolean)
+    .some(v=>String(v).toLowerCase().includes(q)));
+  if(state.type)list=list.filter(x=>x.type===state.type);
+  if(state.status)list=list.filter(x=>x.status===state.status);
+  if(state.store)list=list.filter(x=>x.store===state.store);
+  if(state.deadline){
+    list=list.filter(x=>{
+      const i=deadlineInfo(x);
+      if(state.deadline==='30')return i.kind==='soon'||i.kind==='expired';
+      if(state.deadline==='notice')return i.kind==='notice'||i.kind==='notice_passed';
+      if(state.deadline==='none')return i.kind==='none';
+      if(state.deadline==='expired')return i.kind==='expired'||i.kind==='notice_passed';
+      return true;
+    });
+  }
+  const dir=state.dir==='asc'?1:-1;
+  list.sort((a,b)=>{
+    const get=x=>({type:typeOf(x.type).name,title:x.title,counterparty:x.counterparty||'',
+      store:x.store||'',valid_until:x.valid_until||'9999-12-31',status:STATUS[x.status].label,
+      created_by:x.created_by}[state.sort]);
+    return String(get(a)).localeCompare(String(get(b)),'ru')*dir;
+  });
+  return list;
+}
+function renderChips(){
+  const items=[];
+  if(state.search)items.push(['search',`Поиск: ${state.search}`]);
+  if(state.type)items.push(['type',typeOf(state.type).name]);
+  if(state.status)items.push(['status',STATUS[state.status].label]);
+  if(state.store)items.push(['store',state.store]);
+  if(state.deadline)items.push(['deadline',{'30':'Истекает в 30 дней',notice:'Скоро дедлайн отказа',
+    none:'Без срока',expired:'Просрочен'}[state.deadline]]);
+  if(state.kpi==='noorig')items.push(['kpi','Согласованы без оригинала']);
+  $('chips').innerHTML=items.length
+    ? items.map(([k,v])=>`<span class="chip">${esc(v)}<button data-chip="${k}" title="Убрать">&times;</button></span>`).join('')
+      +`<button class="bx-btn bx-btn--ghost bx-btn--sm" id="resetAll">Сбросить всё</button>`
+    : '<span class="muted">Фильтры не заданы</span>';
+  $('chips').querySelectorAll('[data-chip]').forEach(b=>b.onclick=()=>{
+    state[b.dataset.chip]='';if(b.dataset.chip==='kpi')state.kpi='';syncFilterInputs();renderAll();});
+  const r=$('resetAll');
+  if(r)r.onclick=()=>{state.search='';state.type='';state.status='';state.store='';state.deadline='';
+    state.kpi='';syncFilterInputs();renderAll();};
+}
+function renderRegistry(){
+  const list=visibleDocs();
+  $('resultLine').textContent=`Найдено ${list.length} из ${DOCS.length}`;
+  $('regBody').innerHTML=list.length?list.map(x=>{
+    const dl=deadlineInfo(x),st=STATUS[x.status];
+    return `<tr class="${x.status==='cancelled'?'row-cancelled':''}">
+      <td><span class="bx-badge b-brand">${esc(typeOf(x.type).name)}</span></td>
+      <td><button class="doc-link" data-open="${x.id}">${esc(x.title)}</button>
+          <div class="muted">${esc(x.number)} от ${fmtDate(x.date)}</div></td>
+      <td>${esc(x.counterparty||'—')}${x.inn?`<div class="muted">ИНН ${esc(x.inn)}</div>`:''}</td>
+      <td>${x.store?esc(x.store):'<span class="muted">вся сеть</span>'}</td>
+      <td><span class="bx-badge ${dl.cls}">${esc(dl.text)}</span></td>
+      <td><span class="bx-badge ${st.cls}">${esc(st.label)}</span>
+          ${x.condition?`<div class="muted">условие есть</div>`:''}</td>
+      <td class="muted">${esc(x.created_by)}</td></tr>`;
+  }).join(''):'<tr><td colspan="7" class="empty">Ничего не найдено. Снимите часть фильтров.</td></tr>';
+  $('regBody').querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openCard(+b.dataset.open));
+}
+
+/* ===================== Очередь ===================== */
+function renderQueue(){
+  const list=DOCS.filter(x=>x.status==='on_approval');
+  if(!list.length){
+    $('queueList').innerHTML='<div class="empty">Очередь пуста</div>';
+    $('queuePanel').innerHTML='<div class="empty">Нечего согласовывать</div>';return;
+  }
+  if(!list.some(x=>x.id===state.queueId))state.queueId=list[0].id;
+  $('queueList').innerHTML=list.map(x=>{
+    const t=typeOf(x.type);
+    return `<button class="qitem${x.id===state.queueId?' qitem--active':''}" data-q="${x.id}">
+      <div class="qitem__title">${esc(x.title)}</div>
+      <div class="muted">${esc(t.name)} · ${esc(x.created_by)}</div>
+      <div class="muted">ждёт с ${fmtDate(x.date)}</div></button>`;}).join('');
+  $('queueList').querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>{state.queueId=+b.dataset.q;renderQueue();});
+  const doc=list.find(x=>x.id===state.queueId);
+  $('queuePanel').innerHTML=`
+    <div class="split">
+      <div>
+        <h3 class="bx-card__title">${esc(doc.title)}</h3>
+        <p class="bx-card__caption">${esc(typeOf(doc.type).name)} · ${esc(doc.number)} от ${fmtDate(doc.date)}</p>
+        <div class="doc-preview">${doc.files.length
+          ? 'Превью документа: '+esc(doc.files[0].name)+'<br><span class="muted">в рабочем модуле здесь скан или PDF</span>'
+          : 'Файл не приложен'}</div>
+      </div>
+      <div>${cardFields(doc)}
+        <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+          ${actionButtons(doc)}
+        </div>
+        <div class="muted" style="margin-top:10px">Горячие клавиши в рабочем модуле: A — согласовать,
+          D — на доработку, R — отклонить</div>
+      </div>
+    </div>`;
+  bindActions($('queuePanel'),doc);
+}
+
+/* ===================== Карточка ===================== */
+function cardFields(doc){
+  const t=typeOf(doc.type),dl=deadlineInfo(doc);
+  const rows=[['Тип',t.name],['Номер и дата',`${doc.number} от ${fmtDate(doc.date)}`]];
+  if(t.counterparty)rows.push(['Контрагент',(doc.counterparty||'—')+(doc.inn?` · ИНН ${doc.inn}`:'')]);
+  if(t.subject)rows.push(['Выписана на',doc.subject||'—']);
+  rows.push(['Наше юрлицо',doc.payer]);
+  rows.push(['Салон',doc.store||'вся сеть']);
+  if(t.amount)rows.push(['Сумма',fmtMoney(doc.amount)]);
+  if(t.validity){
+    rows.push(['Срок действия',doc.valid_until?fmtDate(doc.valid_until):'—']);
+    if(doc.auto_renew)rows.push(['Пролонгация',`автоматическая, отказ за ${doc.notice||'—'} дн.`
+      +(noticeDate(doc)?` (до ${fmtDate(noticeDate(doc))})`:'')]);
+  }
+  rows.push(['Статус',STATUS[doc.status].label]);
+  if(doc.condition)rows.push(['Условие согласования',doc.condition]);
+  if(doc.status==='signed')rows.push(['Подписан',{paper:'на бумаге',edo:'в ЭДО',kep:'КЭП'}[doc.signed_method]||'—']);
+  return `<dl class="kv">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    ${t.validity&&dl.kind!=='ok'&&dl.kind!=='none'?`<div class="warn-box" style="margin-top:10px">${esc(dl.text)}</div>`:''}`;
+}
+function actionButtons(doc){
+  const t=typeOf(doc.type),b=[];
+  if(doc.status==='draft')b.push(`<button class="bx-btn" data-act="submit">Отправить на согласование</button>`);
+  if(doc.status==='on_approval'||doc.status==='rework'){
+    b.push(`<button class="bx-btn" data-act="approve">Согласовать</button>`);
+    b.push(`<button class="bx-btn bx-btn--ghost" data-act="condition">Согласовать с условием</button>`);
+    b.push(`<button class="bx-btn bx-btn--ghost" data-act="rework">Вернуть на доработку</button>`);
+    b.push(`<button class="bx-btn bx-btn--danger" data-act="reject">Отклонить</button>`);
+  }
+  if(doc.status==='approved'||doc.status==='approved_cond'||doc.status==='signing')
+    b.push(`<button class="bx-btn" data-act="sign">Отметить подписанным</button>`);
+  if(t.print)b.push(`<button class="bx-btn bx-btn--ghost" data-act="print">Печатная форма</button>`);
+  if(doc.status!=='cancelled'&&doc.status!=='signed')
+    b.push(`<button class="bx-btn bx-btn--ghost" data-act="cancel">Отменить документ</button>`);
+  return b.join('');
+}
+function feedHtml(doc){
+  const items=[...doc.history.map(h=>({t:h.t,who:h.who,text:h.what,msg:false})),
+               ...doc.comments.map(c=>({t:c.t,who:c.who,text:c.msg,msg:true}))]
+    .sort((a,b)=>a.t<b.t?-1:1);
+  return `<div class="feed">${items.map(i=>`
+    <div class="feed__item"><span class="feed__dot"></span>
+      <div><div class="muted">${fmtDate(i.t)} · ${esc(i.who)}</div>
+      <div class="${i.msg?'feed__msg':''}">${esc(i.text)}</div></div></div>`).join('')}</div>`;
+}
+function openCard(id){
+  const doc=DOCS.find(x=>x.id===id);if(!doc)return;
+  const t=typeOf(doc.type);
+  showModal(`
+    <div class="modal__head">
+      <div><h3 class="bx-card__title">${esc(doc.title)}</h3>
+        <p class="bx-card__caption">${esc(t.name)} · ${esc(doc.number)}
+        ${t.sensitive?'<span class="bx-badge b-warn" style="margin-left:6px">персональные данные</span>':''}</p></div>
+      <button class="icon-btn" data-close>&times;</button>
+    </div>
+    <div class="modal__body">
+      <div class="split">
+        <div>
+          <div class="doc-preview">${doc.files.length
+            ? 'Превью: '+esc(doc.files[0].name)
+            : 'Файл не приложен'}</div>
+          ${doc.files.length>1?`<div class="files">${doc.files.map(f=>
+            `<span class="file-chip">${esc(f.name)} <span class="muted">${f.kind==='signed'?'подписанный':'черновик'}</span></span>`).join('')}</div>`:''}
+          <div class="sec-title">Лист согласования</div>
+          ${doc.history.some(h=>/Согласован|Отклонён|доработку/.test(h.what))
+            ? doc.history.filter(h=>/Согласован|Отклонён|доработку/.test(h.what)).map(h=>
+              `<div class="approval"><div class="muted">${fmtDate(h.t)} · ${esc(h.who)}</div>${esc(h.what)}</div>`).join('')
+            : '<div class="muted">Решения ещё не было</div>'}
+          <div class="sec-title">История и обсуждение</div>
+          ${feedHtml(doc)}
+          <div style="margin-top:10px">
+            <textarea class="bx-input" id="msgBox" placeholder="Написать сотруднику по документу…"></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <span class="muted">Ctrl+Enter — отправить. Доступно на любом статусе, включая архив</span>
+              <button class="bx-btn bx-btn--sm" data-act="msg">Отправить</button>
+            </div>
+          </div>
+        </div>
+        <div>${cardFields(doc)}
+          <div style="margin-top:14px;display:flex;flex-direction:column;gap:8px">${actionButtons(doc)}</div>
+        </div>
+      </div>
+    </div>`);
+  bindActions($('modal'),doc);
+  const box=$('msgBox');
+  if(box)box.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='Enter')
+    $('modal').querySelector('[data-act="msg"]').click();});
+}
+
+/* ===================== Действия ===================== */
+function bindActions(root,doc){
+  root.querySelectorAll('[data-act]').forEach(btn=>btn.onclick=()=>{
+    const a=btn.dataset.act;
+    if(a==='submit'){doc.status='on_approval';log(doc,'Отправлен на согласование');done('Документ в очереди');}
+    else if(a==='approve'){doc.status='approved';log(doc,'Согласован');done('Согласовано');}
+    else if(a==='condition')askText('Согласовать с условием','Что нужно изменить в документе',v=>{
+      doc.status='approved_cond';doc.condition=v;log(doc,'Согласован с условием: '+v);done('Согласовано с условием');});
+    else if(a==='rework')askText('Вернуть на доработку','Причина обязательна — иначе автор не знает, что править',v=>{
+      doc.status='rework';log(doc,'Возвращён на доработку: '+v);
+      doc.comments.push({t:d(0),who:PEOPLE[0],msg:v});done('Возвращено автору');});
+    else if(a==='reject')askText('Отклонить документ','Причина (необязательно)',v=>{
+      doc.status='rejected';log(doc,'Отклонён'+(v?': '+v:''));done('Отклонено');},true);
+    else if(a==='sign')signDialog(doc);
+    else if(a==='cancel')askText('Отменить документ','Причина обязательна. Документ уйдёт из очереди и KPI, но останется в истории',v=>{
+      doc.status='cancelled';log(doc,'Отменён: '+v);done('Документ отменён');});
+    else if(a==='print')printForm(doc);
+    else if(a==='msg'){
+      const box=$('msgBox');const v=(box.value||'').trim();
+      if(!v){toast('Пустое сообщение не отправляется');return;}
+      doc.comments.push({t:d(0),who:PEOPLE[0],msg:v});openCard(doc.id);renderAll();toast('Сообщение отправлено');
+    }
+  });
+}
+function log(doc,what){doc.history.push({t:d(0),who:PEOPLE[0],what});}
+function done(msg){closeModal();renderAll();toast(msg);}
+
+function askText(title,hint,cb,optional){
+  showModal(`<div class="modal__head"><h3 class="bx-card__title">${esc(title)}</h3>
+      <button class="icon-btn" data-close>&times;</button></div>
+    <div class="modal__body"><div class="field">
+      <label class="field__label" for="askBox">${esc(hint)}</label>
+      <textarea class="bx-input" id="askBox" autofocus></textarea></div></div>
+    <div class="modal__foot"><button class="bx-btn bx-btn--ghost" data-close>Отмена</button>
+      <button class="bx-btn" id="askOk">Подтвердить</button></div>`,'modal--narrow');
+  $('askOk').onclick=()=>{const v=($('askBox').value||'').trim();
+    if(!v&&!optional){toast('Без причины нельзя — это правило модуля');return;}cb(v);};
+}
+function signDialog(doc){
+  showModal(`<div class="modal__head"><div><h3 class="bx-card__title">Отметить подписанным</h3>
+      <p class="bx-card__caption">Модуль не подписывает документы — он фиксирует, что подпись уже поставлена</p></div>
+      <button class="icon-btn" data-close>&times;</button></div>
+    <div class="modal__body">
+      <div class="grid2">
+        <div class="field"><label class="field__label">Дата подписания</label>
+          <input type="date" class="bx-input" id="sgDate" value="${d(0)}"></div>
+        <div class="field"><label class="field__label">Чем подписан</label>
+          <select class="bx-input" id="sgMethod">
+            <option value="paper">На бумаге</option><option value="edo">В ЭДО</option>
+            <option value="kep">КЭП вне модуля</option></select></div>
+      </div>
+      <div class="field"><label class="field__label">Подписанный оригинал</label>
+        <div class="dropzone" id="sgZone">Перетащите файл или
+          <button class="bx-btn bx-btn--ghost bx-btn--sm" id="sgPick" style="margin-left:6px">выбрать</button>
+          <div class="muted" style="margin-top:6px">Без файла отметку поставить нельзя</div></div>
+        <div class="files" id="sgFiles"></div></div>
+    </div>
+    <div class="modal__foot"><button class="bx-btn bx-btn--ghost" data-close>Отмена</button>
+      <button class="bx-btn" id="sgOk">Отметить подписанным</button></div>`,'modal--narrow');
+  let file=null;
+  $('sgPick').onclick=()=>{file={kind:'signed',name:`подписан-${doc.number}.pdf`};
+    $('sgFiles').innerHTML=`<span class="file-chip">${esc(file.name)}</span>`;};
+  $('sgOk').onclick=()=>{
+    if(!file){toast('Приложите подписанный оригинал');return;}
+    doc.files.push(file);doc.status='signed';doc.signed_method=$('sgMethod').value;
+    log(doc,'Отмечен подписанным ('+{paper:'бумага',edo:'ЭДО',kep:'КЭП'}[doc.signed_method]+')');
+    done('Оригинал приложен');
+  };
+}
+function printForm(doc){
+  showModal(`<div class="modal__head"><div><h3 class="bx-card__title">Печатная форма</h3>
+      <p class="bx-card__caption">Поля подставлены из карточки; печать — средствами браузера</p></div>
+      <button class="icon-btn" data-close>&times;</button></div>
+    <div class="modal__body"><div class="sheet">
+      <h2>ДОВЕРЕННОСТЬ № ${esc(doc.number)}</h2>
+      <p>г. Екатеринбург, ${fmtDate(doc.date)}</p>
+      <p>${esc(doc.payer)} в лице директора, действующего на основании Устава, настоящей доверенностью
+      уполномочивает <strong>${esc(doc.subject||'—')}</strong> получать товарно-материальные ценности
+      от поставщиков, подписывать накладные и акты приёма-передачи${doc.store?`, салон «${esc(doc.store)}»`:''}.</p>
+      <p>Доверенность действительна по <strong>${fmtDate(doc.valid_until)}</strong> без права передоверия.</p>
+      <div class="sheet__sign"><div>Директор ______________</div>
+        <div>Подпись доверенного лица ______________</div></div>
+    </div></div>
+    <div class="modal__foot"><button class="bx-btn bx-btn--ghost" data-close>Закрыть</button>
+      <button class="bx-btn" onclick="window.print()">Печать</button></div>`);
+}
+
+/* ===================== Форма заведения ===================== */
+function openForm(){
+  showModal(`<div class="modal__head"><div><h3 class="bx-card__title">Новый документ</h3>
+      <p class="bx-card__caption">Набор полей зависит от типа</p></div>
+      <button class="icon-btn" data-close>&times;</button></div>
+    <div class="modal__body">
+      <div class="field"><label class="field__label">Тип документа</label>
+        <select class="bx-input" id="nType">${TYPES.map(t=>`<option value="${t.code}">${esc(t.name)}</option>`).join('')}</select></div>
+      <div id="nFields"></div>
+      <div class="sec-title">Файл документа</div>
+      <div class="dropzone" id="nZone">Перетащите файл, вставьте скрин через Ctrl+V или
+        <button class="bx-btn bx-btn--ghost bx-btn--sm" id="nPick" style="margin-left:6px">выберите</button>
+        <div class="muted" style="margin-top:6px">На телефоне здесь же появляется кнопка «Сфотографировать»</div></div>
+      <div class="files" id="nFiles"></div>
+    </div>
+    <div class="modal__foot"><button class="bx-btn bx-btn--ghost" data-close>Отмена</button>
+      <button class="bx-btn bx-btn--ghost" id="nDraft">Сохранить черновиком</button>
+      <button class="bx-btn" id="nSubmit">Отправить на согласование</button></div>`);
+  const files=[];
+  $('nPick').onclick=()=>{files.push({kind:'draft',name:`скан-${files.length+1}.pdf`});
+    $('nFiles').innerHTML=files.map(f=>`<span class="file-chip">${esc(f.name)}</span>`).join('');};
+  const zone=$('nZone');
+  zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dropzone--hot');});
+  zone.addEventListener('dragleave',()=>zone.classList.remove('dropzone--hot'));
+  zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('dropzone--hot');
+    $('nPick').click();});
+  $('nType').onchange=()=>renderFormFields();
+  renderFormFields();
+  function renderFormFields(){
+    const t=typeOf($('nType').value);
+    $('nFields').innerHTML=`
+      <div class="grid2">
+        <div class="field"><label class="field__label">Название</label>
+          <input class="bx-input" id="nTitle" placeholder="Коротко: что это за документ"></div>
+        <div class="field"><label class="field__label">Номер и дата</label>
+          <div class="grid2"><input class="bx-input" id="nNum" placeholder="№">
+          <input type="date" class="bx-input" id="nDate" value="${d(0)}"></div></div>
+      </div>
+      ${t.counterparty?`<div class="grid2">
+        <div class="field"><label class="field__label">Контрагент</label>
+          <input class="bx-input" id="nCp" placeholder="Название организации"></div>
+        <div class="field"><label class="field__label">ИНН</label>
+          <input class="bx-input" id="nInn" placeholder="10 или 12 цифр">
+          <div class="field__hint">Реквизиты подтянутся из общего справочника контрагентов</div></div>
+      </div>`:''}
+      ${t.subject?`<div class="field"><label class="field__label">На кого выписана</label>
+        <select class="bx-input" id="nSubject">${PEOPLE.map(p=>`<option>${esc(p)}</option>`).join('')}</select>
+        <div class="field__hint">Этот человек будет видеть документ у себя</div></div>`:''}
+      <div class="grid2">
+        <div class="field"><label class="field__label">Наше юрлицо</label>
+          <select class="bx-input" id="nPayer">${PAYERS.map(p=>`<option>${esc(p)}</option>`).join('')}</select></div>
+        <div class="field"><label class="field__label">Салон</label>
+          <select class="bx-input" id="nStore"><option value="">Вся сеть</option>
+            ${STORES.map(s=>`<option>${esc(s)}</option>`).join('')}</select>
+          ${!t.managers?'<div class="field__hint">Документ без салона управляющие не видят</div>':''}</div>
+      </div>
+      ${t.amount?`<div class="field"><label class="field__label">Сумма, ₽</label>
+        <input class="bx-input" id="nAmount" inputmode="numeric" placeholder="0"></div>`:''}
+      ${t.validity?`<div class="grid2">
+        <div class="field"><label class="field__label">Действует по</label>
+          <input type="date" class="bx-input" id="nUntil"></div>
+        <div class="field"><label class="field__label">Автопролонгация</label>
+          <select class="bx-input" id="nRenew"><option value="0">Нет</option><option value="1">Да</option></select></div>
+      </div>
+      <div class="field" id="nNoticeWrap" style="display:none">
+        <label class="field__label">Отказ от пролонгации — за сколько дней</label>
+        <input class="bx-input" id="nNotice" inputmode="numeric" placeholder="например, 60">
+        <div class="field__hint">Напоминание придёт к этой дате, а не к дате окончания — иначе договор
+          продлится сам</div></div>`:''}
+      <div class="field"><label class="field__label">Предмет / суть</label>
+        <textarea class="bx-input" id="nSubj" placeholder="Одна-две строки, чтобы потом найти документ"></textarea></div>
+      ${t.sensitive?`<div class="warn-box">Тип содержит персональные данные: документ виден только автору,
+        тому, на кого он выписан, и администратору. На распознавание такие сканы не отправляются.</div>`:''}
+      <div id="dupWarn"></div>`;
+    const renew=$('nRenew');
+    if(renew)renew.onchange=()=>{$('nNoticeWrap').style.display=renew.value==='1'?'block':'none';};
+    const num=$('nNum'),cp=$('nCp');
+    [num,cp].forEach(el=>{if(el)el.addEventListener('input',checkDup);});
+  }
+  function checkDup(){
+    const num=($('nNum')?.value||'').trim().toLowerCase();
+    const cp=($('nCp')?.value||'').trim().toLowerCase();
+    if(!num)  {$('dupWarn').innerHTML='';return;}
+    const hit=DOCS.find(x=>String(x.number).toLowerCase()===num&&
+      (!cp||String(x.counterparty||'').toLowerCase()===cp));
+    $('dupWarn').innerHTML=hit
+      ? `<div class="warn-box">Похоже, такой документ уже есть: «${esc(hit.title)}»
+         (${esc(hit.number)} от ${fmtDate(hit.date)}). Сохранить всё равно можно — это подсказка, не запрет.</div>`
+      : '';
+  }
+  function collect(status){
+    const t=typeOf($('nType').value);
+    const title=($('nTitle').value||'').trim();
+    if(!title){toast('Название обязательно');return null;}
+    if(t.counterparty&&!($('nCp').value||'').trim()){toast('Для этого типа нужен контрагент');return null;}
+    if(t.validity&&!$('nUntil').value){toast('Для этого типа нужен срок действия');return null;}
+    const renew=$('nRenew')&&$('nRenew').value==='1';
+    return {id:++SEQ,type:t.code,title,number:($('nNum').value||'б/н').trim(),date:$('nDate').value,
+      counterparty:t.counterparty?($('nCp').value||'').trim():null,
+      inn:t.counterparty?($('nInn').value||'').trim():null,
+      subject:t.subject?$('nSubject').value:null,
+      store:$('nStore').value||null,payer:$('nPayer').value,
+      amount:t.amount?Number(($('nAmount').value||'0').replace(/\s/g,''))||0:null,
+      valid_until:t.validity?$('nUntil').value:null,
+      notice:renew?Number($('nNotice').value||0)||null:null,auto_renew:renew,
+      status,created_by:PEOPLE[1],files:files.slice(),
+      history:[{t:d(0),who:PEOPLE[1],what:status==='draft'?'Черновик создан':'Отправлен на согласование'}],
+      comments:[]};
+  }
+  $('nDraft').onclick=()=>{const doc=collect('draft');if(!doc)return;DOCS.unshift(doc);done('Черновик сохранён');};
+  $('nSubmit').onclick=()=>{const doc=collect('on_approval');if(!doc)return;DOCS.unshift(doc);done('Отправлено на согласование');};
+}
+
+/* ===================== Импорт ===================== */
+const FAKE_FILES=['аренда-восточная-7.pdf','поставка-зелень-2025.pdf','аренда-малышева-12.pdf',
+  'доп-соглашение-флораопт.pdf','поставка-свечи.pdf','аренда-восточная-7.pdf'];
+function renderImport(){
+  const list=state.imported;
+  $('importList').innerHTML=list.length?`
+    <div class="sec-title">Разбор черновиков (${list.filter(x=>!x.done).length} осталось)</div>
+    ${list.map((f,i)=>f.done?`
+      <div class="import-row"><div>${esc(f.name)}</div>
+        <div class="muted" style="grid-column:span 3">Заведён как «${esc(f.title)}»</div>
+        <span class="bx-badge b-ok">в реестре</span></div>`:`
+      <div class="import-row">
+        <div>${esc(f.name)}<div class="muted">${f.dup?'дубль по содержимому':'новый файл'}</div></div>
+        <select class="bx-input" data-imp-type="${i}">${TYPES.map(t=>`<option value="${t.code}">${esc(t.name)}</option>`).join('')}</select>
+        <input class="bx-input" data-imp-cp="${i}" placeholder="Контрагент">
+        <input type="date" class="bx-input" data-imp-until="${i}">
+        <button class="bx-btn bx-btn--sm" data-imp-ok="${i}">В реестр</button>
+      </div>`).join('')}`:'';
+  $('importList').querySelectorAll('[data-imp-ok]').forEach(b=>b.onclick=()=>{
+    const i=+b.dataset.impOk,f=list[i];
+    const type=$('importList').querySelector(`[data-imp-type="${i}"]`).value;
+    const cp=$('importList').querySelector(`[data-imp-cp="${i}"]`).value.trim();
+    const until=$('importList').querySelector(`[data-imp-until="${i}"]`).value;
+    const t=typeOf(type);
+    if(t.counterparty&&!cp){toast('Для этого типа нужен контрагент');return;}
+    f.done=true;f.title=f.name.replace(/\.[a-z]+$/,'');
+    DOCS.unshift({id:++SEQ,type,title:f.title,number:'б/н',date:d(0),counterparty:cp||null,inn:null,
+      store:null,payer:PAYERS[0],amount:t.amount?0:null,valid_until:until||null,notice:null,auto_renew:false,
+      status:'signed',signed_method:'paper',created_by:PEOPLE[0],files:[{kind:'signed',name:f.name}],
+      history:[{t:d(0),who:PEOPLE[0],what:'Загружен при импорте архива'}],comments:[]});
+    renderAll();toast('Документ в реестре');
+  });
+}
+$('btnFakeUpload').onclick=()=>{
+  const seen=new Set(state.imported.map(f=>f.name));
+  let dups=0;
+  FAKE_FILES.forEach(name=>{
+    const dup=seen.has(name);if(dup){dups++;return;}
+    seen.add(name);state.imported.push({name,dup:false,done:false});
+  });
+  $('importReport').innerHTML=`<div class="report"><strong>Залито ${FAKE_FILES.length-dups} файлов.</strong>
+    Пропущено дублей: ${dups} (${esc(FAKE_FILES[FAKE_FILES.length-1])}) — файл с таким же содержимым уже загружен.
+    Без срока действия: ${state.imported.filter(f=>!f.done).length} — их видно отдельным фильтром в реестре.</div>`;
+  renderImport();toast('Файлы залиты, разберите карточки');
+};
+const iz=$('importZone');
+iz.addEventListener('dragover',e=>{e.preventDefault();iz.classList.add('dropzone--hot');});
+iz.addEventListener('dragleave',()=>iz.classList.remove('dropzone--hot'));
+iz.addEventListener('drop',e=>{e.preventDefault();iz.classList.remove('dropzone--hot');$('btnFakeUpload').click();});
+
+/* ===================== Типы ===================== */
+function renderTypes(){
+  const yn=v=>v?'<span class="bx-badge b-ok">да</span>':'<span class="bx-badge b-neutral">нет</span>';
+  $('typesBody').innerHTML=TYPES.map(t=>{
+    const req=[t.counterparty?'контрагент':null,t.amount?'сумма':null,t.validity?'срок':null,
+      t.subject?'на кого выписана':null].filter(Boolean).join(', ')||'—';
+    return `<tr><td><strong>${esc(t.name)}</strong></td><td class="muted">${esc(req)}</td>
+      <td>${t.remind?`за ${t.remind} дн.`:'<span class="muted">—</span>'}</td>
+      <td>${t.sla} ч</td><td>${yn(t.sensitive)}</td>
+      <td>${t.ai?yn(true):'<span class="bx-badge b-warn">запрещено</span>'}</td>
+      <td>${yn(t.managers)}</td></tr>`;}).join('');
+}
+
+/* ===================== Модалка и виды ===================== */
+function showModal(html,cls){
+  const m=$('modal');m.className='modal'+(cls?' '+cls:'');m.innerHTML=html;
+  $('overlay').classList.add('overlay--open');
+  m.querySelectorAll('[data-close]').forEach(b=>b.onclick=closeModal);
+}
+function closeModal(){$('overlay').classList.remove('overlay--open');}
+$('overlay').addEventListener('click',e=>{if(e.target===$('overlay'))closeModal();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+function switchView(v){
+  state.view=v;
+  document.querySelectorAll('.bx-tab').forEach(b=>b.classList.toggle('bx-tab--active',b.dataset.view===v));
+  $('viewRegistry').style.display=v==='registry'?'':'none';
+  $('viewQueue').style.display=v==='queue'?'':'none';
+  $('viewImport').style.display=v==='import'?'':'none';
+  $('viewTypes').style.display=v==='types'?'':'none';
+}
+document.querySelectorAll('.bx-tab').forEach(b=>b.onclick=()=>{switchView(b.dataset.view);renderAll();});
+$('btnNew').onclick=openForm;
+
+/* ===================== Фильтры ===================== */
+function syncFilterInputs(){
+  $('fSearch').value=state.search;$('fType').value=state.type;
+  $('fStatus').value=state.status;$('fStore').value=state.store;$('fDeadline').value=state.deadline;
+}
+function initFilters(){
+  $('fType').innerHTML='<option value="">Тип — любой</option>'+
+    TYPES.map(t=>`<option value="${t.code}">${esc(t.name)}</option>`).join('');
+  $('fStatus').innerHTML='<option value="">Статус — любой</option>'+
+    Object.entries(STATUS).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
+  $('fStore').innerHTML='<option value="">Салон — любой</option>'+
+    STORES.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  let t=null;
+  $('fSearch').addEventListener('input',e=>{clearTimeout(t);
+    t=setTimeout(()=>{state.search=e.target.value;state.kpi='';renderAll();},350);});
+  ['fType','fStatus','fStore','fDeadline'].forEach(id=>$(id).addEventListener('change',e=>{
+    state[{fType:'type',fStatus:'status',fStore:'store',fDeadline:'deadline'}[id]]=e.target.value;
+    state.kpi='';renderAll();}));
+  document.querySelectorAll('th[data-sort]').forEach(th=>th.onclick=()=>{
+    const f=th.dataset.sort;
+    if(state.sort===f)state.dir=state.dir==='asc'?'desc':'asc';else{state.sort=f;state.dir='asc';}
+    renderAll();});
+}
+
+/* ===================== Рендер ===================== */
+function renderAll(){
+  renderKpis();renderChips();renderRegistry();renderQueue();renderTypes();renderImport();
+  const wait=DOCS.filter(x=>x.status==='on_approval').length;
+  $('headerSub').textContent=wait
+    ? `${wait} ${wait===1?'документ ждёт':'документа ждут'} вашего решения`
+    : 'Очередь пуста — всё разобрано';
+}
+initFilters();syncFilterInputs();renderAll();
+</script>
+</body>
+</html>
