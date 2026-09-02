@@ -113,11 +113,21 @@
 .bx-dialog-btn-danger { background: var(--bx-down, #c0322f); color: #fff; }
 .bx-dialog-btn-danger:hover { filter: brightness(1.1); }
 
+/* bottom с запасом: в правом нижнем углу живёт кнопка обратной связи
+   (feedback.js), и тосты не должны её закрывать. */
 .bx-toast-stack {
-    position: fixed; right: 20px; bottom: 20px; z-index: ${Z_TOAST};
+    position: fixed; right: 20px; bottom: 84px; z-index: ${Z_TOAST};
     display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
     pointer-events: none;
 }
+.bx-toast-action {
+    display: block; margin-top: 8px; padding: 6px 12px;
+    font: inherit; font-size: 13px; font-weight: 500;
+    color: #fff; background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.35); border-radius: var(--bx-r-lg, 8px);
+    cursor: pointer;
+}
+.bx-toast-action:hover { background: rgba(255,255,255,0.28); }
 .bx-toast {
     max-width: min(420px, calc(100vw - 40px));
     padding: 12px 16px;
@@ -187,6 +197,21 @@
         }
         el.addEventListener('click', close);
         setTimeout(close, lifetime);
+
+        // Ошибку человек и так собирается кому-то пересказать — пусть перескажет
+        // сразу владельцу, с уже собранным техническим контекстом.
+        if (resolvedType === 'error' && window.BarhatFeedback && window.BarhatFeedback.openFromError) {
+            const action = document.createElement('button');
+            action.type = 'button';
+            action.className = 'bx-toast-action';
+            action.textContent = 'Сообщить владельцу';
+            action.addEventListener('click', (e) => {
+                e.stopPropagation();
+                close();
+                window.BarhatFeedback.openFromError(text);
+            });
+            el.appendChild(action);
+        }
 
         getToastStack().appendChild(el);
     }
@@ -429,11 +454,59 @@
         });
     }
 
+    // === Буфер последних ошибок (для обратной связи) ===
+    //
+    // «Не сохраняется счёт» без подробностей превращается в три круга переписки.
+    // Обёртка вокруг fetch и так видит каждый неудачный ответ — пусть запомнит
+    // последние, чтобы виджет обратной связи приложил их сам.
+    //
+    // ЧТО ИМЕННО ЗАПОМИНАЕТСЯ: путь, код, время и короткий текст из поля error.
+    // Тело ответа целиком не берём никогда — в ответах наших ручек лежат данные
+    // клиентов и суммы, а обращение читает владелец и хранит база.
+
+    const ERROR_BUFFER_LIMIT = 5;
+    const errorBuffer = [];
+
+    function rememberError(input, status, message) {
+        const path = requestPath(input);
+        if (!path || !path.startsWith('/api/')) return;
+        // В ответах авторизации лежат токены и данные входа
+        if (path.startsWith('/api/auth/') || path.startsWith('/api/sso/')) return;
+
+        errorBuffer.push({
+            path: path.slice(0, 200),
+            status: String(status).slice(0, 10),
+            error: String(message || '').slice(0, 200),
+            at: new Date().toTimeString().slice(0, 8),
+        });
+        if (errorBuffer.length > ERROR_BUFFER_LIMIT) errorBuffer.shift();
+    }
+
+    function captureErrorBody(response, input) {
+        // clone() обязателен: тело — поток, и прочитав его здесь, мы отняли бы
+        // ответ у вызывающего модуля.
+        try {
+            response.clone().json().then(function (data) {
+                rememberError(input, response.status, data && data.error);
+            }).catch(function () {
+                rememberError(input, response.status, '');
+            });
+        } catch (e) {
+            rememberError(input, response.status, '');
+        }
+    }
+
     if (nativeFetch) {
         window.fetch = function (input, init) {
             return nativeFetch(input, init).then(function (response) {
                 if (response && response.status === 401) handleUnauthorized(input);
+                if (response && response.status >= 400) captureErrorBody(response, input);
                 return response;
+            }).catch(function (error) {
+                // Сеть отвалилась совсем: ответа нет, но это ровно тот случай,
+                // о котором пишут «ничего не работает».
+                rememberError(input, 'network', error && error.message);
+                throw error;
             });
         };
     }
@@ -445,5 +518,6 @@
         prompt: promptDialog,
         inIframe,
         nativeAlert,
+        recentErrors: function () { return errorBuffer.slice(); },
     };
 })();
