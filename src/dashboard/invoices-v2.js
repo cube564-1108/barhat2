@@ -1821,6 +1821,9 @@
                 <div class="iv2-hint">${escapeHtml(row.planfact_account_title || 'счёт в ПланФакте')}</div>
                 <dl class="iv2-cardbal__rows">
                     <dt>По нашим заявкам</dt><dd>${escapeHtml(money(accountable.balance || 0))}</dd>
+                    ${accountable.opening
+                        ? `<dt>Было на начало учёта</dt><dd>${escapeHtml(money(accountable.opening))}</dd>`
+                        : ''}
                     <dt>Выдано</dt><dd>${escapeHtml(money(accountable.issued || 0))}</dd>
                     <dt>Отчитано</dt><dd>${escapeHtml(money(accountable.spent_confirmed || 0))}</dd>
                     ${accountable.spent_pending
@@ -4897,9 +4900,13 @@
         const balance = card.balance;
         const pending = balance.spent_pending > 0
             ? ` · ждёт подтверждения ${money(balance.spent_pending)}` : '';
+        // Расшифровка обязана складываться в итог, иначе она путает сильнее,
+        // чем её отсутствие: со стартовым сальдо «выдано − отчитано» больше
+        // не равно остатку.
+        const opening = balance.opening ? `было ${money(balance.opening)}, ` : '';
         const negative = balance.balance < 0 ? ' iv2-hint--warn' : '';
         return `<div class="iv2-hint${negative}">На карте по нашим данным ${money(balance.balance)}
-                    (выдано ${money(balance.issued)}, отчитано ${money(balance.spent_confirmed)}${pending})</div>`;
+                    (${opening}выдано ${money(balance.issued)}, отчитано ${money(balance.spent_confirmed)}${pending})</div>`;
     }
 
     function formValidationError() {
@@ -5914,6 +5921,7 @@
             planfact_account_title: '',
             source_planfact_account_id: '',
             source_planfact_account_title: '',
+            opening_balance: '',
             store_ids: [],
         };
     }
@@ -6019,6 +6027,10 @@
                     <div class="iv2-hint">${storeNames.length
                         ? 'салоны: ' + escapeHtml(storeNames.join(', '))
                         : 'салоны не привязаны — карта не появится ни у одного управляющего'}</div>
+                    ${Number(card.opening_balance)
+                        ? `<div class="iv2-hint">остаток на начало учёта: ${
+                            escapeHtml(money(card.opening_balance))}</div>`
+                        : ''}
                 </div>
                 <div class="iv2-tools-row__btns">
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
@@ -6071,6 +6083,15 @@
                     'Списываем с него траты управляющего')}
                 ${accountField('source_planfact_account_id', 'source_planfact_account_title',
                     'Пополняется со счёта', 'С него уходит перемещение при пополнении карты')}
+                <div class="iv2-field">
+                    <label class="iv2-field__label">Остаток на начало учёта, ₽</label>
+                    <input class="iv2-input" type="text" inputmode="decimal"
+                           data-card-field="opening_balance" placeholder="0"
+                           value="${escapeHtml(draft.opening_balance === '' || draft.opening_balance === null
+                                || draft.opening_balance === undefined ? '' : draft.opening_balance)}">
+                    <div class="iv2-hint">Сколько лежало на карте до того, как её завели здесь.
+                        Никуда в ПланФакт не уходит — только чтобы подотчёт сходился с ним</div>
+                </div>
             </div>
             <div class="iv2-field">
                 <label class="iv2-field__label">Салоны карты</label>
@@ -6142,6 +6163,13 @@
                     value = value.replace(/\D/g, '');
                     if (input.value !== value) input.value = value;
                 }
+                // Сальдо — деньги: цифры и один разделитель. Тоже на вводе, по
+                // той же причине: сервер отклонит нечисловое значение уже после
+                // нажатия «Сохранить», а видно это должно быть сразу.
+                if (key === 'opening_balance') {
+                    value = value.replace(/[^\d.,-]/g, '');
+                    if (input.value !== value) input.value = value;
+                }
                 state.tools.cards.draft[key] = value;
 
                 // Выбор из списка ПланФакта заполняет и текстовое поле id,
@@ -6188,6 +6216,9 @@
                 planfact_account_title: card.planfact_account_title || '',
                 source_planfact_account_id: card.source_planfact_account_id || '',
                 source_planfact_account_title: card.source_planfact_account_title || '',
+                // Ноль показываем пустым полем: «0» в поле выглядит как уже
+                // заполненное значение, а сальдо чаще всего просто не заводили
+                opening_balance: Number(card.opening_balance) ? String(card.opening_balance) : '',
                 store_ids: (card.store_ids || []).slice(),
             } : null;
             renderCardList();
@@ -6221,11 +6252,17 @@
                 planfact_account_title: draft.planfact_account_title || '',
                 source_planfact_account_id: (draft.source_planfact_account_id || '').trim(),
                 source_planfact_account_title: draft.source_planfact_account_title || '',
+                opening_balance: String(draft.opening_balance || '').trim(),
                 store_ids: (draft.store_ids || []).map(Number),
             };
             if (!payload.title) { toast('Укажите название карты', 'error'); return; }
             if (!payload.planfact_account_id || !payload.source_planfact_account_id) {
                 toast('Укажите оба счёта ПланФакта', 'error');
+                return;
+            }
+            if (payload.opening_balance
+                    && !Number.isFinite(Number(payload.opening_balance.replace(',', '.')))) {
+                toast('Остаток на начало учёта: нужно число', 'error');
                 return;
             }
 

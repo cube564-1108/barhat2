@@ -139,6 +139,7 @@ from .cards import (
     user_can_use_card,
     get_cards_balances,
     get_planfact_balances,
+    empty_accountable,
 )
 
 logger = logging.getLogger(__name__)
@@ -294,9 +295,7 @@ def get_work_cards():
     if request.args.get("with_balance", "").lower() == "true":
         balances = get_cards_balances()
         for card in cards:
-            card["balance"] = balances.get(card["id"], {
-                "issued": 0.0, "spent_confirmed": 0.0, "spent_pending": 0.0, "balance": 0.0,
-            })
+            card["balance"] = balances.get(card["id"]) or empty_accountable()
 
     return jsonify({"work_cards": cards})
 
@@ -330,9 +329,7 @@ def get_work_card_balances():
     for card in cards:
         account_id = str(card.get("planfact_account_id") or "").strip()
         entry = planfact.get(account_id) or {"balance": None, "fetched_at": None, "stale": True}
-        accountable = own.get(card["id"], {
-            "issued": 0.0, "spent_confirmed": 0.0, "spent_pending": 0.0, "balance": 0.0,
-        })
+        accountable = own.get(card["id"]) or empty_accountable()
         planfact_balance = entry.get("balance")
         rows.append({
             "card_id": card["id"],
@@ -377,7 +374,26 @@ def _card_payload_error(data, *, require_all: bool):
         for store_id in data["store_ids"]:
             if not get_store_by_id(store_id):
                 return f"Некорректный салон в списке: {store_id}"
+
+    # Стартовое сальдо участвует в подотчёте, поэтому строка «4 527 ₽» вместо
+    # числа не должна доехать до SQLite: там она молча ляжет в REAL как есть и
+    # сложится с суммами уже при чтении.
+    if "opening_balance" in data and data["opening_balance"] not in (None, ""):
+        if _parse_opening_balance(data["opening_balance"]) is None:
+            return "Остаток на начало учёта: нужно число"
     return None
+
+
+def _parse_opening_balance(value):
+    """Число или None, если это не число. Запятую принимаем: её набирают чаще точки."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+    try:
+        return round(float(str(value).replace(",", ".").replace(" ", "").strip()), 2)
+    except (TypeError, ValueError):
+        return None
 
 
 @invoices_bp.route("/work-cards", methods=["POST"])
@@ -395,6 +411,7 @@ def add_work_card():
         store_ids=data.get("store_ids") or [],
         planfact_account_title=(data.get("planfact_account_title") or "").strip() or None,
         source_planfact_account_title=(data.get("source_planfact_account_title") or "").strip() or None,
+        opening_balance=_parse_opening_balance(data.get("opening_balance")) or 0.0,
     )
     log_action(current_user.username, "create_work_card", f"{card_id}: {data['title'].strip()}")
     return jsonify({"ok": True, "work_card": get_card_by_id(card_id)}), 201
@@ -416,6 +433,10 @@ def edit_work_card(card_id):
                   "source_planfact_account_id", "source_planfact_account_title"):
         if field in data:
             values[field] = (str(data[field] or "").strip() or None)
+    # Пустое поле — это «сальдо нет», то есть ноль, а не «не трогать»: иначе
+    # стереть однажды введённую цифру было бы нечем.
+    if "opening_balance" in data:
+        values["opening_balance"] = _parse_opening_balance(data["opening_balance"]) or 0.0
     if "is_active" in data:
         values["is_active"] = 1 if data["is_active"] else 0
 

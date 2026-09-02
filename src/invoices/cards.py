@@ -16,7 +16,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from .storage import get_db, _table_exists, get_user_stores
+from .storage import get_db, _table_exists, _column_exists, get_user_stores
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,7 @@ def init_cards_tables():
                 planfact_account_title TEXT,
                 source_planfact_account_id TEXT NOT NULL,
                 source_planfact_account_title TEXT,
+                opening_balance REAL NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
@@ -135,9 +136,41 @@ def init_cards_tables():
         """)
         conn.commit()
 
+        _ensure_card_columns(conn)
         _seed_cards_if_empty(conn)
     finally:
         conn.close()
+
+
+def _ensure_card_columns(conn: sqlite3.Connection):
+    """
+    Дозалить колонки, появившиеся после первого выпуска справочника.
+
+    `opening_balance` — сколько лежало на карте до того, как её завели в модуле.
+    Без него подотчёт считается «с нуля» и всегда расходится с ПланФактом ровно
+    на эту сумму: 02.09.26 по томской карте вкладка вечно показывала
+    «расхождение 4 527 ₽», хотя все операции были занесены правильно. Постоянно
+    горящая плашка обесценивает индикатор — настоящую незанесённую трату в ней
+    уже не разглядеть.
+
+    Блокировка как в остальных миграциях модуля: два gunicorn-воркера стартуют
+    параллельно и без BEGIN IMMEDIATE падают на "duplicate column".
+    """
+    columns = {
+        "opening_balance": "REAL NOT NULL DEFAULT 0",
+    }
+    if all(_column_exists(conn, "work_cards", column) for column in columns):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for column, definition in columns.items():
+            if not _column_exists(conn, "work_cards", column):
+                conn.execute(f"ALTER TABLE work_cards ADD COLUMN {column} {definition}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _seed_cards_if_empty(conn: sqlite3.Connection):
@@ -346,6 +379,7 @@ def create_card(
     store_ids: Optional[List[int]] = None,
     planfact_account_title: Optional[str] = None,
     source_planfact_account_title: Optional[str] = None,
+    opening_balance: float = 0.0,
 ) -> int:
     conn = get_db()
     try:
@@ -353,11 +387,13 @@ def create_card(
             """
             INSERT INTO work_cards (
                 title, planfact_account_id, planfact_account_title,
-                source_planfact_account_id, source_planfact_account_title
-            ) VALUES (?, ?, ?, ?, ?)
+                source_planfact_account_id, source_planfact_account_title,
+                opening_balance
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (title, str(planfact_account_id).strip(), planfact_account_title,
-             str(source_planfact_account_id).strip(), source_planfact_account_title),
+             str(source_planfact_account_id).strip(), source_planfact_account_title,
+             float(opening_balance or 0)),
         )
         card_id = cursor.lastrowid
         _replace_card_stores(conn, card_id, store_ids or [])
@@ -371,7 +407,8 @@ def update_card(card_id: int, values: Dict[str, Any], store_ids: Optional[List[i
     """Обновить поля карты и (если передан) список салонов."""
     allowed = (
         "title", "planfact_account_id", "planfact_account_title",
-        "source_planfact_account_id", "source_planfact_account_title", "is_active",
+        "source_planfact_account_id", "source_planfact_account_title",
+        "opening_balance", "is_active",
     )
     changes = {key: values[key] for key in allowed if key in values}
 
@@ -414,14 +451,26 @@ def _replace_card_stores(conn: sqlite3.Connection, card_id: int, store_ids: List
         )
 
 
+def empty_accountable() -> Dict[str, float]:
+    """Пустой подотчёт. Одна форма ответа на всех потребителей: потребитель,
+    собравший словарь сам, рано или поздно забудет новый ключ."""
+    return {"opening": 0.0, "issued": 0.0, "spent_confirmed": 0.0,
+            "spent_pending": 0.0, "balance": 0.0}
+
+
 def get_cards_balances() -> Dict[int, Dict[str, float]]:
     """
-    Подотчёт по каждой карте одним запросом: сколько выдано, сколько отчитано,
-    сколько ждёт подтверждения и что в остатке.
+    Подотчёт по каждой карте одним запросом: что было на начало учёта, сколько
+    выдано, сколько отчитано, сколько ждёт подтверждения и что в остатке.
 
     Считается по нашим заявкам, а не по ПланФакту: остаток из ПФ — внешний
     вызов, ему не место в форме, которую управляющий открывает по десять раз
     на дню. Сверка с ПФ идёт отдельно (Фаза 4).
+
+    Стартовое сальдо (`work_cards.opening_balance`) — деньги, лежавшие на карте
+    до того, как её завели в модуле. Без него подотчёт считается «с нуля» и
+    расходится с ПланФактом ровно на эту сумму навсегда, а вкладка сверки
+    показывает вечное расхождение при полностью корректном учёте.
 
     Выдано — только пополнения в статусе `paid`: согласованное, но ещё не
     переведённое на карту не лежит. Потрачено считаем в двух корзинах:
@@ -430,6 +479,7 @@ def get_cards_balances() -> Dict[int, Dict[str, float]]:
     """
     conn = get_db()
     try:
+        cards = conn.execute("SELECT id, opening_balance FROM work_cards").fetchall()
         rows = conn.execute(
             """
             SELECT card_id, kind, status, COALESCE(SUM(amount), 0) AS total
@@ -441,11 +491,16 @@ def get_cards_balances() -> Dict[int, Dict[str, float]]:
     finally:
         conn.close()
 
+    # Карты берём из справочника, а не из заявок: у новой карты заявок ещё нет,
+    # а стартовое сальдо уже есть, и показать его надо с первого дня.
     balances: Dict[int, Dict[str, float]] = {}
+    for card_row in cards:
+        entry = empty_accountable()
+        entry["opening"] = float(card_row["opening_balance"] or 0)
+        balances[card_row["id"]] = entry
+
     for row in rows:
-        card = balances.setdefault(
-            row["card_id"], {"issued": 0.0, "spent_confirmed": 0.0, "spent_pending": 0.0, "balance": 0.0}
-        )
+        card = balances.setdefault(row["card_id"], empty_accountable())
         if row["kind"] == "card_topup" and row["status"] == "paid":
             card["issued"] += row["total"]
         elif row["kind"] == "card_expense":
@@ -453,8 +508,10 @@ def get_cards_balances() -> Dict[int, Dict[str, float]]:
             card[key] += row["total"]
 
     for card in balances.values():
-        card["balance"] = round(card["issued"] - card["spent_confirmed"] - card["spent_pending"], 2)
-        for key in ("issued", "spent_confirmed", "spent_pending"):
+        card["balance"] = round(
+            card["opening"] + card["issued"] - card["spent_confirmed"] - card["spent_pending"], 2
+        )
+        for key in ("opening", "issued", "spent_confirmed", "spent_pending"):
             card[key] = round(card[key], 2)
     return balances
 
