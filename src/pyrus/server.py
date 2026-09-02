@@ -314,6 +314,16 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint задач дашборда: {e}")
 
+# Регистрируем blueprint обратной связи от сотрудников
+try:
+    from feedback.server import feedback_bp
+    app.register_blueprint(feedback_bp)
+    logger.info("Blueprint обратной связи зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint обратной связи: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint обратной связи: {e}")
+
 # Инициализация таблиц авторизации
 with app.app_context():
     init_auth_tables()
@@ -355,6 +365,16 @@ with app.app_context():
         logger.warning(f"Не удалось импортировать модуль задач дашборда: {e}")
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц задач дашборда: {e}")
+
+    # Инициализация таблиц обратной связи
+    try:
+        from feedback.storage import init_feedback_tables
+        init_feedback_tables()
+        logger.info("Таблицы обратной связи инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль обратной связи: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц обратной связи: {e}")
 
     # Инициализация таблиц оплаты курьерам
     try:
@@ -996,6 +1016,11 @@ def serve_tasks():
 def serve_writeoffs():
     """Отдаёт скрипт раздела списаний товара"""
     return send_from_directory(DASHBOARD_DIR, 'writeoffs.js')
+
+@app.route('/feedback.js')
+def serve_feedback():
+    """Отдаёт виджет обратной связи (грузится на всех страницах дашборда)"""
+    return send_from_directory(DASHBOARD_DIR, 'feedback.js')
 
 @app.route('/courier-payouts.js')
 def serve_courier_payouts():

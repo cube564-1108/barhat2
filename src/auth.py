@@ -716,6 +716,47 @@ def section_required(*section_names):
     return decorator
 
 
+# Заголовок, которым фронт дашборда помечает свои запросы. Значение неважно —
+# важен сам факт кастомного заголовка.
+AJAX_HEADER = "X-Requested-With"
+AJAX_HEADER_VALUE = "barhat-dashboard"
+
+
+def require_ajax_header(fn):
+    """Простая защита POST-ручки от межсайтовой подделки запроса (CSRF).
+
+    ЗАЧЕМ. CSRF-токенов в проекте нет, и единственной защитой служит
+    SESSION_COOKIE_SAMESITE="Lax" (см. src/pyrus/server.py). Но для сессий,
+    выданных через SSO из портала БАРХАТ Пульс, кука уходит с SameSite=None —
+    иначе Chrome режет её внутри чужого <iframe> (_PartitionedSsoSessionInterface
+    там же). То есть у тех, кто ходит через портал — а это большинство
+    сотрудников, — защиты Lax нет вообще, и сторонняя страница может слать
+    POST от их имени.
+
+    КАК РАБОТАЕТ. Браузер не даёт добавить кастомный заголовок к межсайтовому
+    запросу без CORS-предпроверки, а её мы не одобряем: ответ на OPTIONS не
+    содержит Access-Control-Allow-Headers, поэтому сам POST не уходит.
+    Обычные формы и <img>/<script> кастомных заголовков ставить не умеют вовсе.
+
+    Свой домен это не задевает: запросы дашборда идут на собственный origin,
+    предпроверка для них не нужна.
+
+    Вешать на новые POST-ручки, доступные широкому кругу ролей. К старым
+    ручкам не применять задним числом без правки их фронтенда — они начнут
+    отвечать 403.
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if request.headers.get(AJAX_HEADER) != AJAX_HEADER_VALUE:
+            logger.warning(
+                "Запрос без %s на %s (origin=%s)",
+                AJAX_HEADER, request.path, request.headers.get("Origin"),
+            )
+            return jsonify({"error": "Запрос отклонён"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
 # ---------- Роуты авторизации ----------
 
 @auth_bp.route("/api/auth/login", methods=["POST"])
