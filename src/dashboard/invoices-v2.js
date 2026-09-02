@@ -134,6 +134,9 @@
         { key: 'queue', label: 'Очередь' },
         { key: 'table', label: 'Таблица' },
         { key: 'board', label: 'Платёжный борд' },
+        // Остатки на рабочих картах по данным ПланФакта. Фильтры счетов к
+        // этому виду не относятся — он про карты, а не про заявки.
+        { key: 'cards', label: 'Остатки на картах' },
     ];
 
     const PAGE_SIZE = 25;
@@ -242,6 +245,10 @@
 
         // Платёжный борд: свой запрос и свой набор строк (см. loadBoard)
         board: { rows: [], total: 0, loading: false, loaded: false, error: '' },
+
+        // Вкладка «Остатки на картах»: своя загрузка, к списку счетов
+        // отношения не имеет
+        cards: { rows: [], loading: false, loaded: false, error: '', apiError: '' },
 
         // Инструменты раздела (справочники, контрагенты, ПланФакт) — одна
         // модалка за раз, поэтому одно поле `open` на все три.
@@ -1403,17 +1410,36 @@
     }
 
     function renderViews() {
-        const map = { table: 'iv2ViewTable', queue: 'iv2ViewQueue', board: 'iv2ViewBoard' };
+        const map = {
+            table: 'iv2ViewTable', queue: 'iv2ViewQueue',
+            board: 'iv2ViewBoard', cards: 'iv2ViewCards',
+        };
         Object.keys(map).forEach(view => {
             const el = $(map[view]);
             if (el) el.hidden = view !== state.view;
         });
 
+        // Панель фильтров и KPI-плитки — про счета. На вкладке карт они не
+        // фильтруют ничего, и оставлять их значит обещать несуществующее.
+        const filters = $('iv2Filters');
+        if (filters) filters.hidden = state.view === 'cards';
+        const kpi = $('iv2Kpis');
+        if (kpi) kpi.hidden = state.view === 'cards';
+
         const hint = $('iv2ViewHint');
         if (hint) {
-            hint.textContent = state.view === 'board'
-                ? 'Перетащите карточку в другую колонку — изменится плановая дата оплаты'
-                : 'Фильтры общие для всех видов';
+            if (state.view === 'board') {
+                hint.textContent = 'Перетащите карточку в другую колонку — изменится плановая дата оплаты';
+            } else if (state.view === 'cards') {
+                hint.textContent = 'Остатки приходят из ПланФакта';
+            } else {
+                hint.textContent = 'Фильтры общие для всех видов';
+            }
+        }
+
+        if (state.view === 'cards') {
+            renderCards();
+            if (!state.cards.loaded && !state.cards.loading) loadCardBalances(false);
         }
 
         // Панель массовых действий имеет смысл только в таблице — там чекбоксы
@@ -1682,6 +1708,127 @@
         // считаются по нему же
         loadSummary();
         loadList(false);
+    }
+
+    // =========================================================================
+    // Вкладка «Остатки на картах»
+    // =========================================================================
+    //
+    // Две цифры по каждой карте: остаток из ПланФакта («сколько на карте
+    // есть») и наш подотчёт по заявкам («сколько выдано минус отчитано»).
+    // Ради их расхождения вкладка и нужна: трату сделали, а заявку не завели.
+    //
+    // Остатки приходят из кэша сервера (TTL 10 минут); кнопка «Обновить»
+    // ходит в ПланФакт, но не чаще раза в минуту — воркеров на проде два.
+
+    async function loadCardBalances(refresh) {
+        if (state.cards.loading) return;
+        state.cards.loading = true;
+        state.cards.error = '';
+        renderCards();
+
+        try {
+            const data = await apiGet('/api/invoices/work-cards/balances'
+                + (refresh ? '?refresh=1' : ''));
+            state.cards.rows = data.cards || [];
+            // Ошибка ПланФакта не отменяет показ: остатки из кэша полезнее
+            // пустого экрана, но помечены как устаревшие
+            state.cards.apiError = data.error || '';
+            state.cards.loaded = true;
+            if (refresh && !data.error) {
+                toast(data.refreshed ? 'Остатки обновлены' : 'Остатки уже актуальны');
+            }
+        } catch (error) {
+            state.cards.error = error.message;
+        } finally {
+            state.cards.loading = false;
+            renderCards();
+        }
+    }
+
+    function renderCards() {
+        const host = $('iv2ViewCards');
+        if (!host) return;
+
+        if (state.cards.error) {
+            host.innerHTML = `<div class="iv2-board-msg">Не удалось загрузить остатки:
+                ${escapeHtml(state.cards.error)}</div>`;
+            return;
+        }
+        if (!state.cards.rows.length && (state.cards.loading || !state.cards.loaded)) {
+            host.innerHTML = '<div class="iv2-board-msg">Загрузка…</div>';
+            return;
+        }
+        if (!state.cards.rows.length) {
+            host.innerHTML = `<div class="iv2-board-msg">Рабочих карт, доступных вам, нет.
+                Карты привязаны к салонам — доступ открывает админ.</div>`;
+            return;
+        }
+
+        const fetched = state.cards.rows
+            .map(row => row.fetched_at)
+            .filter(Boolean)
+            .sort()
+            .pop();
+
+        host.innerHTML = `
+            <div class="bx-card iv2-cards">
+                <div class="iv2-cards__head">
+                    <div>
+                        <h3 class="bx-card__title">Остатки на рабочих картах</h3>
+                        <div class="iv2-hint">${fetched
+                            ? 'Данные ПланФакта на ' + escapeHtml(fmtCreated(fetched))
+                            : 'Данных ПланФакта ещё нет'}</div>
+                    </div>
+                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2CardsRefresh"
+                            ${state.cards.loading ? 'disabled' : ''}>Обновить</button>
+                </div>
+                ${state.cards.apiError
+                    ? `<div class="iv2-locked">ПланФакт не ответил: ${escapeHtml(state.cards.apiError)}.
+                           Показаны последние сохранённые остатки.</div>`
+                    : ''}
+                <div class="iv2-cards__grid">
+                    ${state.cards.rows.map(cardBalanceHtml).join('')}
+                </div>
+            </div>`;
+
+        const refresh = $('iv2CardsRefresh');
+        if (refresh) refresh.addEventListener('click', () => loadCardBalances(true));
+    }
+
+    function cardBalanceHtml(row) {
+        const hasBalance = row.planfact_balance !== null && row.planfact_balance !== undefined;
+        const accountable = row.accountable || {};
+        // Расхождение показываем только когда есть с чем сравнивать. Ноль —
+        // это ответ («сходится»), а не отсутствие данных.
+        const diff = row.difference;
+        const diffLabel = diff === null || diff === undefined
+            ? ''
+            : (Math.abs(diff) < 0.01
+                ? '<span class="bx-badge b-appr">сходится с подотчётом</span>'
+                : `<span class="bx-badge b-warn">расхождение ${escapeHtml(money(diff))}</span>`);
+
+        return `
+            <div class="iv2-cardbal">
+                <div class="iv2-cardbal__head">
+                    <div class="iv2-cardbal__title">${escapeHtml(row.title)}</div>
+                    ${row.stale ? '<span class="bx-badge b-warn">данные устарели</span>' : ''}
+                </div>
+                <div class="iv2-cardbal__sum${hasBalance && row.planfact_balance < 0
+                    ? ' iv2-cardbal__sum--neg' : ''}">
+                    ${hasBalance ? escapeHtml(money(row.planfact_balance)) : '—'}
+                </div>
+                <div class="iv2-hint">${escapeHtml(row.planfact_account_title || 'счёт в ПланФакте')}</div>
+                <dl class="iv2-cardbal__rows">
+                    <dt>По нашим заявкам</dt><dd>${escapeHtml(money(accountable.balance || 0))}</dd>
+                    <dt>Выдано</dt><dd>${escapeHtml(money(accountable.issued || 0))}</dd>
+                    <dt>Отчитано</dt><dd>${escapeHtml(money(accountable.spent_confirmed || 0))}</dd>
+                    ${accountable.spent_pending
+                        ? `<dt>Ждёт подтверждения</dt><dd>${escapeHtml(money(accountable.spent_pending))}</dd>`
+                        : ''}
+                </dl>
+                ${diffLabel}
+            </div>`;
     }
 
     // =========================================================================

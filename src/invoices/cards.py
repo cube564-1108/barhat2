@@ -121,6 +121,18 @@ def init_cards_tables():
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        # Кэш остатков из ПланФакта. Живой вызов на каждое открытие вкладки
+        # недопустим: воркеров на проде два, и такой «безобидный GET для
+        # интерфейса» уже клал сайт целиком (инцидент 2026-08-18). Ключ —
+        # счёт ПланФакта, а не карта: у карты счёт можно переставить, и
+        # остаток от прежнего счёта показывать нельзя.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS work_card_balances (
+                planfact_account_id TEXT PRIMARY KEY,
+                balance REAL,
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         conn.commit()
 
         _seed_cards_if_empty(conn)
@@ -471,3 +483,160 @@ def user_can_use_card(card_id: int, username: str, role: str) -> bool:
     if role == "admin":
         return True
     return any(card["id"] == card_id for card in get_cards_for_user(username, role))
+
+
+# =============================================================================
+# ОСТАТКИ НА КАРТАХ ПО ДАННЫМ ПЛАНФАКТА
+# =============================================================================
+#
+# Наш подотчёт (get_cards_balances) считается по заявкам и отвечает на вопрос
+# «сколько мы выдали и сколько за карту отчитались». Остаток из ПланФакта
+# отвечает на другой: «сколько на карте есть на самом деле». Расходятся они
+# всегда, когда трату сделали, а заявку не завели, — ради этого расхождения
+# вкладка и нужна.
+#
+# Внешний вызов здесь ровно один на все карты сразу (POST
+# /dashboards/accountbalance принимает accountIds списком), и он спрятан за
+# кэшем в БД: «безобидный GET для интерфейса» без кэша уже забирал оба
+# воркера прода и клал сайт целиком (инцидент 2026-08-18).
+
+# Сколько остаток считается свежим. Десять минут — компромисс: деньги на карте
+# меняются не ежеминутно, а вкладку открывают и переоткрывают часто.
+BALANCE_TTL_SECONDS = 600
+
+# Насколько часто кнопка «Обновить» вправе ходить в ПланФакт. Без этого порога
+# кнопка превращается в способ дёргать внешний API сколько угодно раз.
+BALANCE_REFRESH_MIN_INTERVAL = 60
+
+_BALANCE_LOCK = "planfact_balances"
+
+
+def _read_balance_cache(account_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not account_ids:
+        return {}
+    conn = get_db()
+    try:
+        placeholders = ",".join("?" * len(account_ids))
+        rows = conn.execute(
+            f"SELECT planfact_account_id, balance, fetched_at FROM work_card_balances "
+            f"WHERE planfact_account_id IN ({placeholders})",
+            account_ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    return {row["planfact_account_id"]: dict(row) for row in rows}
+
+
+def _save_balance_cache(balances: Dict[str, float]) -> None:
+    if not balances:
+        return
+    conn = get_db()
+    try:
+        conn.executemany(
+            "INSERT INTO work_card_balances (planfact_account_id, balance, fetched_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(planfact_account_id) DO UPDATE SET "
+            "balance = excluded.balance, fetched_at = excluded.fetched_at",
+            [(account_id, balance) for account_id, balance in balances.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _cache_is_fresh(cache: Dict[str, Dict[str, Any]], account_ids: List[str], ttl: int) -> bool:
+    """Свежий кэш — это когда есть запись по КАЖДОМУ счёту и все они моложе TTL."""
+    if not account_ids:
+        return True
+    threshold = (datetime.utcnow() - timedelta(seconds=ttl)).strftime("%Y-%m-%d %H:%M:%S")
+    for account_id in account_ids:
+        entry = cache.get(account_id)
+        if not entry or (entry.get("fetched_at") or "") < threshold:
+            return False
+    return True
+
+
+def fetch_planfact_balances(account_ids: List[str]) -> Dict[str, float]:
+    """
+    Живой запрос остатков в ПланФакт. Возвращает {account_id: остаток}.
+
+    Один вызов на все счета сразу. Исключения не глушим: вызывающая сторона
+    решает, показать ли устаревший кэш или сказать об ошибке.
+    """
+    from planfact.client import get_client
+
+    items = get_client().get_account_balances([int(a) for a in account_ids])
+    if items is None:
+        raise RuntimeError("ПланФакт не ответил на запрос остатков")
+
+    result: Dict[str, float] = {}
+    for item in items:
+        account_id = str(item.get("accountId") or "")
+        if not account_id:
+            continue
+        try:
+            result[account_id] = round(float(item.get("total") or 0), 2)
+        except (TypeError, ValueError):
+            logger.warning("ПланФакт вернул нечисловой остаток по счёту %s: %r",
+                           account_id, item.get("total"))
+    return result
+
+
+def get_planfact_balances(cards: List[Dict[str, Any]], refresh: bool = False) -> Dict[str, Any]:
+    """
+    Остатки по счетам переданных карт: из кэша, а при устаревании — из ПланФакта.
+
+    Возвращает {"balances": {account_id: {"balance", "fetched_at", "stale"}},
+                "error": текст или None, "refreshed": bool}.
+
+    Обновление идёт под локом: воркеров два, и без него оба уходят в ПланФакт
+    на одном и том же открытии вкладки. Проигравший лок отдаёт кэш — пустой
+    экран хуже, чем цифра десятиминутной давности с пометкой.
+    """
+    account_ids = sorted({str(card.get("planfact_account_id") or "").strip()
+                          for card in cards
+                          if is_valid_account_id(card.get("planfact_account_id"))})
+    cache = _read_balance_cache(account_ids)
+
+    if not account_ids:
+        return {"balances": {}, "error": None, "refreshed": False}
+
+    # Кнопка «Обновить» не даёт ходить в ПланФакт чаще, чем раз в минуту:
+    # частый клик по ней — тот же неограниченный внешний вызов из интерфейса.
+    if refresh and _cache_is_fresh(cache, account_ids, BALANCE_REFRESH_MIN_INTERVAL):
+        refresh = False
+
+    if not refresh and _cache_is_fresh(cache, account_ids, BALANCE_TTL_SECONDS):
+        return {"balances": _decorate(cache, account_ids), "error": None, "refreshed": False}
+
+    if not try_acquire_sync_lock(_BALANCE_LOCK, ttl_seconds=60):
+        return {"balances": _decorate(cache, account_ids), "error": None, "refreshed": False}
+
+    try:
+        fresh = fetch_planfact_balances(account_ids)
+        _save_balance_cache(fresh)
+        cache = _read_balance_cache(account_ids)
+        return {"balances": _decorate(cache, account_ids), "error": None, "refreshed": True}
+    except Exception as error:
+        logger.exception("Не удалось получить остатки карт из ПланФакта")
+        # Кэш всё равно отдаём: устаревший остаток с пометкой полезнее пустоты
+        return {"balances": _decorate(cache, account_ids), "error": str(error), "refreshed": False}
+    finally:
+        release_sync_lock(_BALANCE_LOCK)
+
+
+def _decorate(cache: Dict[str, Dict[str, Any]], account_ids: List[str]) -> Dict[str, Any]:
+    """Разложить кэш по счетам и пометить устаревшие — интерфейс обязан их отличать."""
+    threshold = (datetime.utcnow() - timedelta(seconds=BALANCE_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+    result: Dict[str, Any] = {}
+    for account_id in account_ids:
+        entry = cache.get(account_id)
+        if not entry:
+            result[account_id] = {"balance": None, "fetched_at": None, "stale": True}
+            continue
+        result[account_id] = {
+            "balance": entry.get("balance"),
+            "fetched_at": entry.get("fetched_at"),
+            "stale": (entry.get("fetched_at") or "") < threshold,
+        }
+    return result

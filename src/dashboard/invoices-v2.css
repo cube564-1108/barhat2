@@ -2053,3 +2053,61 @@
     padding: 10px 12px;
     margin-bottom: 12px;
 }
+
+/* === Вкладка «Остатки на картах» ===================================== */
+
+.iv2 .iv2-cards { padding: 18px; }
+
+.iv2 .iv2-cards__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+/* Карты укладываются в столько колонок, сколько влезает: их пять и они
+   короткие — таблица на такую сетку тратила бы ширину впустую. */
+.iv2 .iv2-cards__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+}
+
+.iv2 .iv2-cardbal {
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    padding: 14px;
+    background: #fff;
+}
+
+.iv2 .iv2-cardbal__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.iv2 .iv2-cardbal__title { font-weight: 600; font-size: 13.5px; }
+
+/* Главная цифра карточки — остаток из ПланФакта, ради него вкладка и есть */
+.iv2 .iv2-cardbal__sum {
+    font-family: var(--bx-font-head);
+    font-size: 24px;
+    line-height: 1.2;
+    color: var(--bx-wine);
+}
+
+.iv2 .iv2-cardbal__sum--neg { color: var(--bx-down); }
+
+.iv2 .iv2-cardbal__rows {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 2px 10px;
+    margin: 10px 0;
+    font-size: 12.5px;
+}
+
+.iv2 .iv2-cardbal__rows dt { color: var(--bx-muted); }
+.iv2 .iv2-cardbal__rows dd { margin: 0; text-align: right; }

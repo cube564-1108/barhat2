@@ -138,6 +138,7 @@ from .cards import (
     is_valid_account_id,
     user_can_use_card,
     get_cards_balances,
+    get_planfact_balances,
 )
 
 logger = logging.getLogger(__name__)
@@ -298,6 +299,57 @@ def get_work_cards():
             })
 
     return jsonify({"work_cards": cards})
+
+
+@invoices_bp.route("/work-cards/balances", methods=["GET"])
+@section_required(*INVOICE_SECTIONS)
+def get_work_card_balances():
+    """
+    Остатки на рабочих картах по данным ПланФакта + наш подотчёт по заявкам.
+
+    Видимость та же, что у самих карт (get_cards_for_user): админ видит все
+    карты, управляющий — карты своих салонов. Считать по всем картам и резать
+    на клиенте нельзя: остаток чужого города — не его дело.
+
+    Две цифры рядом намеренно. ПланФакт отвечает «сколько на карте есть»,
+    наш подотчёт — «сколько мы выдали и за сколько отчитались». Их расхождение
+    и есть повод открыть вкладку: трату сделали, а заявку не завели.
+
+    `?refresh=1` — кнопка «Обновить». Внешний вызов идёт не чаще раза в минуту
+    и не чаще, чем истекает TTL кэша: воркеров на проде два, и вкладка с
+    неограниченным живым вызовом уже клала сайт целиком (2026-08-18).
+    """
+    cards = get_cards_for_user(current_user.username, current_user.role)
+    refresh = request.args.get("refresh", "").lower() in ("1", "true")
+
+    result = get_planfact_balances(cards, refresh=refresh)
+    planfact = result["balances"]
+    own = get_cards_balances()
+
+    rows = []
+    for card in cards:
+        account_id = str(card.get("planfact_account_id") or "").strip()
+        entry = planfact.get(account_id) or {"balance": None, "fetched_at": None, "stale": True}
+        accountable = own.get(card["id"], {
+            "issued": 0.0, "spent_confirmed": 0.0, "spent_pending": 0.0, "balance": 0.0,
+        })
+        planfact_balance = entry.get("balance")
+        rows.append({
+            "card_id": card["id"],
+            "title": card["title"],
+            "planfact_account_id": account_id,
+            "planfact_account_title": card.get("planfact_account_title"),
+            "store_ids": card.get("store_ids", []),
+            "planfact_balance": planfact_balance,
+            "fetched_at": entry.get("fetched_at"),
+            "stale": entry.get("stale", True),
+            "accountable": accountable,
+            # Расхождение считаем на сервере: одна формула на всех потребителей
+            "difference": (None if planfact_balance is None
+                           else round(planfact_balance - accountable["balance"], 2)),
+        })
+
+    return jsonify({"cards": rows, "error": result["error"], "refreshed": result["refreshed"]})
 
 
 def _card_payload_error(data, *, require_all: bool):
