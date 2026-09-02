@@ -40,6 +40,31 @@ def get_db():
     return sqlite_connect(DB_PATH, timeout=20)
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """
+    Идемпотентная миграция колонки — тот же приём, что в cashshifts/storage.py.
+
+    На проде два воркера gunicorn стартуют одновременно и оба выполняют
+    init_writeoffs_tables(). Оба исхода гонки штатные и не должны ронять старт:
+    "duplicate column name" — сосед успел закоммитить ALTER, "database is
+    locked" — держит write-лок прямо сейчас. В обоих случаях колонку создаёт
+    сосед, цель достигнута.
+    """
+    existing = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column in existing:
+        return
+
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        message = str(e).lower()
+        if "duplicate column name" in message or "locked" in message:
+            logger.info("Миграцию %s.%s выполняет параллельный воркер: %s", table, column, e)
+            return
+        raise
+
+
 def init_writeoffs_tables():
     """Инициализация таблиц модуля списаний (вызывается при старте приложения)."""
 
@@ -125,6 +150,7 @@ def init_writeoffs_tables():
             moysklad_product_href TEXT NOT NULL,
             product_name TEXT NOT NULL,
             quantity REAL NOT NULL CHECK (quantity > 0),
+            uom_name TEXT,
             reason TEXT
         )
     """)
@@ -132,6 +158,13 @@ def init_writeoffs_tables():
         CREATE INDEX IF NOT EXISTS idx_writeoff_positions_writeoff
         ON writeoff_positions(writeoff_id)
     """)
+
+    # Единица измерения из МойСклад, зафиксированная на момент заявки: у клубники,
+    # бананов, винограда, фиников и чернослива это граммы, а не штуки. Храним
+    # подпись рядом с количеством, чтобы карточка заявки не зависела от того,
+    # доступен ли МойСклад сейчас и не поменяли ли товару единицу потом.
+    # У заявок, заведённых до этой колонки, значения нет — показываем голое число.
+    _add_column_if_missing(conn, "writeoff_positions", "uom_name", "TEXT")
 
     # ========================================================================
     # Фото списанного товара — по одной позиции, а не по заявке в целом
@@ -255,7 +288,7 @@ def create_writeoff(store_id: int, created_by: str, positions: List[Dict[str, An
     Создать заявку на списание с одной или несколькими позициями.
 
     positions: [{"moysklad_product_id", "moysklad_product_href", "product_name",
-                 "quantity", "reason"}, ...] — минимум одна позиция.
+                 "quantity", "uom_name", "reason"}, ...] — минимум одна позиция.
     """
     if not positions:
         raise ValueError("Заявка на списание должна содержать хотя бы одну позицию")
@@ -272,8 +305,9 @@ def create_writeoff(store_id: int, created_by: str, positions: List[Dict[str, An
             conn.execute(
                 """
                 INSERT INTO writeoff_positions
-                    (writeoff_id, moysklad_product_id, moysklad_product_href, product_name, quantity, reason)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (writeoff_id, moysklad_product_id, moysklad_product_href, product_name,
+                     quantity, uom_name, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     writeoff_id,
@@ -281,6 +315,7 @@ def create_writeoff(store_id: int, created_by: str, positions: List[Dict[str, An
                     pos["moysklad_product_href"],
                     pos["product_name"],
                     pos["quantity"],
+                    pos.get("uom_name"),
                     pos.get("reason"),
                 ),
             )
@@ -344,8 +379,19 @@ def list_writeoffs(
     """
     Список заявок с фильтрами. store_ids=None означает "без ограничения по точкам"
     (роль admin) — передавайте [] явно, если нужно гарантированно пустой результат.
+
+    Каждая заявка отдаётся с positions_count — сами позиции здесь не грузим
+    (это отдельный запрос на каждую строку списка), но число позиций таблица
+    показывает в колонке «Позиций». Раньше его там не было вовсе: фронт считал
+    длину writeoffs[].positions, которого в ответе этого эндпоинта нет, и
+    колонка у всех заявок показывала 0.
     """
-    query = "SELECT * FROM writeoffs WHERE 1=1"
+    query = """
+        SELECT w.*,
+               (SELECT COUNT(*) FROM writeoff_positions p WHERE p.writeoff_id = w.id) AS positions_count
+        FROM writeoffs w
+        WHERE 1=1
+    """
     params: List[Any] = []
 
     if store_ids is not None:

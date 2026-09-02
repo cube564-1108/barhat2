@@ -69,6 +69,112 @@ def _accessible_store_ids():
 
 
 # =============================================================================
+# ЕДИНИЦЫ ИЗМЕРЕНИЯ
+#
+# Единица берётся из МойСклад по каждому товару, а не подписывается словом
+# "шт." в интерфейсе. У клубники, бананов, винограда, фиников и чернослива в
+# МойСклад стоят граммы (у остальных ~145 позиций — штуки), и зашитое "шт."
+# заставляло флориста вводить количество в штуках там, где склад считает
+# граммы. Список товаров-исключений в коде не держим: единицу меняют в
+# МойСклад, а не в дашборде.
+#
+# Справочник единиц и связка товар -> единица меняются раз в год, а живой
+# запрос к внешнему API на каждый вход в форму уже клал воркеров (см. память
+# по внешним API) — держим в памяти воркера с TTL.
+# =============================================================================
+
+_UOM_CACHE_TTL_SEC = 6 * 3600
+_UOM_REQUEST_TIMEOUT_SEC = 8
+_UOM_MIN_SECONDS_LEFT = 10
+
+_uom_names_cache = {"value": None, "expires": 0.0}
+_product_uom_cache = {"value": None, "expires": 0.0}
+
+
+def _cached(cache, loader):
+    """Значение из кэша или свежее. Отказ МойСклад не затирает прошлое значение."""
+    now = time.monotonic()
+    if cache["value"] is not None and now < cache["expires"]:
+        return cache["value"]
+    value = loader()
+    if value is None:
+        return cache["value"]  # просроченный справочник полезнее пустого
+    cache["value"] = value
+    cache["expires"] = now + _UOM_CACHE_TTL_SEC
+    return value
+
+
+def _id_from_href(href: str) -> str:
+    return href.split('?')[0].rstrip('/').split('/')[-1] if href else ''
+
+
+def _load_uom_names(client):
+    """{uom_id: 'г'} — справочник единиц измерения (несколько десятков строк)."""
+    response = client.get('/entity/uom', params={'limit': 1000}, timeout=_UOM_REQUEST_TIMEOUT_SEC)
+    if not response:
+        return None
+    return {
+        row.get('id'): (row.get('name') or '').strip()
+        for row in response.get('rows', [])
+        if row.get('id')
+    }
+
+
+def _load_product_uoms(client):
+    """{product_id: uom_id} по всему ассортименту — на случай, если отчёт остатков единицу не отдал."""
+    result = {}
+    offset = 0
+    for _ in range(5):
+        response = client.get(
+            '/entity/assortment',
+            params={'limit': 1000, 'offset': offset},
+            timeout=_UOM_REQUEST_TIMEOUT_SEC,
+        )
+        if response is None:
+            return None
+        rows = response.get('rows', [])
+        for row in rows:
+            product_id = row.get('id')
+            uom_id = _id_from_href(((row.get('uom') or {}).get('meta') or {}).get('href', ''))
+            if product_id and uom_id:
+                result[product_id] = uom_id
+        if len(rows) < 1000:
+            break
+        offset += 1000
+    return result
+
+
+def _fill_uom_names(client, items, seconds_left):
+    """
+    Проставить позициям каталога единицу измерения.
+
+    Первый источник — сам отчёт остатков (бесплатно, если он отдаёт uom).
+    Дальше — справочник единиц, и только если и этого мало — ассортимент.
+    Каждый шаг делается лишь для позиций, у которых единицы ещё нет, и только
+    пока остаётся запас времени: каталог без подписи единицы хуже, чем с ней,
+    но занятый на минуту воркер хуже обоих.
+    """
+    if seconds_left() < _UOM_MIN_SECONDS_LEFT or all(i["uom_name"] for i in items):
+        return
+
+    names = _cached(_uom_names_cache, lambda: _load_uom_names(client)) or {}
+    for item in items:
+        if not item["uom_name"] and item["_uom_id"]:
+            item["uom_name"] = names.get(item["_uom_id"], "")
+
+    if not names or all(i["uom_name"] for i in items) or seconds_left() < _UOM_MIN_SECONDS_LEFT:
+        return
+
+    product_uoms = _cached(_product_uom_cache, lambda: _load_product_uoms(client)) or {}
+    for item in items:
+        if item["uom_name"]:
+            continue
+        uom_id = product_uoms.get(item["moysklad_product_id"])
+        if uom_id:
+            item["uom_name"] = names.get(uom_id, "")
+
+
+# =============================================================================
 # СПРАВОЧНИКИ
 # =============================================================================
 
@@ -134,10 +240,12 @@ def get_catalog():
     DEADLINE_SEC = 25
 
     started = time.monotonic()
+    seconds_left = lambda: DEADLINE_SEC - (time.monotonic() - started)  # noqa: E731
+
     items = []
     offset = 0
     for _ in range(PAGE_CAP):
-        if time.monotonic() - started > DEADLINE_SEC:
+        if seconds_left() < 0:
             logger.warning("Каталог списаний: превышен дедлайн %s сек (точка %s)", DEADLINE_SEC, store_id)
             return jsonify({"error": "МойСклад отвечает слишком долго — попробуйте ещё раз"}), 504
 
@@ -155,6 +263,7 @@ def get_catalog():
             product_id = product_href.rstrip('/').split('/')[-1] if product_href else None
             if not product_id:
                 continue
+            uom = row.get('uom') or {}
             items.append({
                 "moysklad_product_id": product_id,
                 "moysklad_product_href": product_href,
@@ -164,6 +273,11 @@ def get_catalog():
                 "article": row.get('article') or '',
                 "code": row.get('code') or '',
                 "quantity_available": row.get('stock', 0) or 0,
+                # Единица измерения товара в МойСклад: у клубники и других
+                # ягод/фруктов это граммы. Отчёт остатков её отдаёт не всегда,
+                # поэтому ниже добираем через справочники (_fill_uom_names)
+                "uom_name": (uom.get('name') or '').strip(),
+                "_uom_id": _id_from_href((uom.get('meta') or {}).get('href', '')),
             })
 
         if len(rows) < PAGE_SIZE:
@@ -174,6 +288,10 @@ def get_catalog():
         # нельзя: пропавший товар без единой ошибки — ровно тот баг, что чиним.
         logger.error("Каталог списаний: достигнут предел страниц (%s) для точки %s", PAGE_CAP, store_id)
         return jsonify({"error": "Не удалось получить весь каталог из МойСклад — обратитесь к админу"}), 502
+
+    _fill_uom_names(client, items, seconds_left)
+    for item in items:
+        item.pop("_uom_id", None)
 
     items.sort(key=lambda i: i["product_name"].lower())
     return jsonify({"items": items})
@@ -414,11 +532,18 @@ def add_writeoff():
         if not isinstance(quantity, (int, float)) or quantity <= 0:
             return jsonify({"error": "Количество должно быть положительным числом"}), 400
 
+        # Единица измерения приходит из нашего же каталога и нужна только для
+        # показа («250 г», а не «250 шт.»): в МойСклад количество и так уходит
+        # в базовой единице товара. Поэтому не сверяем со справочником, но
+        # режем длину — это подпись, а не идентификатор.
+        uom_name = (pos.get("uom_name") or "").strip()[:20] or None
+
         positions.append({
             "moysklad_product_id": product_id,
             "moysklad_product_href": build_entity_href("product", product_id),
             "product_name": product_name,
             "quantity": quantity,
+            "uom_name": uom_name,
             "reason": pos.get("reason"),
         })
 

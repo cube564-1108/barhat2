@@ -207,7 +207,7 @@
                 <tr>
                     <td>#${w.id}</td>
                     <td>${escapeHtml(storeName(w.store_id))}</td>
-                    <td>${(w.positions || []).length}</td>
+                    <td>${w.positions_count ?? (w.positions || []).length}</td>
                     <td>${badge}</td>
                     <td>${escapeHtml(w.created_by_full_name || w.created_by || '')}</td>
                     <td>${createdDate}</td>
@@ -493,13 +493,17 @@
                 const stockClass = stock > 0 ? '' : ' empty';
                 const title = stock > 0 ? '' : ' title="Остаток по МойСклад не больше нуля — списать можно, но учёт разошёлся"';
                 const code = item.article || item.code || '';
+                // Остаток подписываем единицей самого товара: у клубники, бананов,
+                // винограда, фиников и чернослива в МойСклад граммы, и «-2695»
+                // без подписи читается как штуки
+                const unit = unitSuffix(item.uom_name);
                 return `
                     <div class="writeoff-suggest-item${i === suggestIndex ? ' active' : ''}" data-index="${i}">
                         <span>
                             ${code ? `<span class="writeoff-suggest-code">${highlightMatches(code, terms)}</span> — ` : ''}
                             ${highlightMatches(item.product_name, terms)}
                         </span>
-                        <span class="writeoff-suggest-stock${stockClass}"${title}>${stock}</span>
+                        <span class="writeoff-suggest-stock${stockClass}"${title}>${stock}${unit}</span>
                     </div>`;
             }).join('');
         }
@@ -521,8 +525,10 @@
         if (!item) return;
         input.dataset.productId = item.moysklad_product_id;
         input.dataset.productName = item.product_name;
+        input.dataset.uomName = item.uom_name || '';
         input.value = item.article ? `${item.article} — ${item.product_name}` : item.product_name;
         input.classList.remove('invalid');
+        applyUnitToRow(input.closest('.writeoff-position-row'), item.uom_name);
         closeSuggestions();
     }
 
@@ -530,6 +536,8 @@
     function clearSelection(input) {
         delete input.dataset.productId;
         delete input.dataset.productName;
+        delete input.dataset.uomName;
+        applyUnitToRow(input.closest('.writeoff-position-row'), '');
     }
 
     function createProductInput() {
@@ -582,6 +590,38 @@
         else { clearSelection(input); input.value = ''; }
     }
 
+    // =========================================================================
+    // ЕДИНИЦА ИЗМЕРЕНИЯ
+    //
+    // Единицу берём из МойСклад по каждому товару (поле uom_name каталога), а не
+    // подписываем «шт.» в вёрстке: у клубники, бананов, винограда, фиников и
+    // чернослива на складе граммы, и без подписи флорист вводил штуки.
+    // Список товаров-исключений в коде не держим — единица меняется в МойСклад.
+    // =========================================================================
+
+    // Единицы, где дробное количество бессмысленно: спиннер должен шагать целыми
+    const WHOLE_STEP_UNITS = ['г', 'гр', 'мл'];
+
+    function unitSuffix(uom) {
+        const unit = String(uom || '').trim();
+        return unit ? ` ${escapeHtml(unit)}` : '';
+    }
+
+    /** Проставить строке позиции подпись единицы и шаг ввода количества. */
+    function applyUnitToRow(row, uom) {
+        if (!row) return;
+        const unit = String(uom || '').trim();
+        const label = row.querySelector('.writeoff-position-uom');
+        const qtyInput = row.querySelector('.writeoff-position-qty');
+        if (label) label.textContent = unit;
+        if (!qtyInput) return;
+
+        const whole = WHOLE_STEP_UNITS.includes(unit.toLowerCase());
+        qtyInput.step = whole ? '1' : '0.01';
+        qtyInput.min = whole ? '1' : '0.01';
+        qtyInput.placeholder = unit ? `Кол-во, ${unit}` : 'Кол-во';
+    }
+
     function createPositionRow() {
         const row = document.createElement('div');
         row.className = 'writeoff-position-row';
@@ -594,8 +634,13 @@
         qtyInput.min = '0.01';
         qtyInput.step = '0.01';
         qtyInput.className = 'form-input writeoff-position-qty';
-        qtyInput.style.width = '90px';
+        qtyInput.style.width = '110px';
         qtyInput.placeholder = 'Кол-во';
+
+        // Единица подставляется после выбора товара — до выбора она неизвестна
+        const uomLabel = document.createElement('span');
+        uomLabel.className = 'writeoff-position-uom';
+        uomLabel.style.cssText = 'min-width:22px; color: var(--bx-text-2, #6F6F6F); font-size:13px;';
 
         const reasonInput = document.createElement('input');
         reasonInput.type = 'text';
@@ -625,6 +670,7 @@
 
         row.appendChild(productInput);
         row.appendChild(qtyInput);
+        row.appendChild(uomLabel);
         row.appendChild(reasonInput);
         row.appendChild(photoLabel);
         row.appendChild(fileInput);
@@ -658,6 +704,7 @@
             return {
                 moysklad_product_id: input.dataset.productId || '',
                 product_name: input.dataset.productName || '',
+                uom_name: input.dataset.uomName || '',
                 inputEl: input,
                 quantity: parseFloat(row.querySelector('.writeoff-position-qty').value),
                 reason: row.querySelector('.writeoff-position-reason').value.trim() || null,
@@ -697,6 +744,7 @@
                         moysklad_product_id: p.moysklad_product_id,
                         product_name: p.product_name,
                         quantity: p.quantity,
+                        uom_name: p.uom_name,
                         reason: p.reason,
                     })),
                 }),
@@ -783,7 +831,7 @@
 
         elements.detailsPositions.innerHTML = (writeoff.positions || []).map(pos => `
             <div style="border-top:1px solid #eee; padding:8px 0;">
-                <div><strong>${escapeHtml(pos.product_name)}</strong> — ${pos.quantity} шт.</div>
+                <div><strong>${escapeHtml(pos.product_name)}</strong> — ${pos.quantity}${unitSuffix(pos.uom_name)}</div>
                 ${pos.reason ? `<div class="form-hint">Причина: ${escapeHtml(pos.reason)}</div>` : ''}
                 <div style="display:flex; gap:8px; margin-top:4px; flex-wrap:wrap;">
                     ${(pos.attachments || []).map(a => `
