@@ -2675,7 +2675,16 @@
         }
 
         const invoiceId = attachTargetId();
-        if (!invoiceId) return;
+        if (!invoiceId) {
+            // Молчать здесь нельзя. В буфере лежит именно файл — значит человек
+            // осознанно вставил скриншот счёта, и «ничего не произошло» он
+            // прочтёт как поломку вложений, а не как «некуда прикладывать»
+            // (обращение #2 от 03.09.2026). Перетаскивание ниже говорит об этом
+            // с самого начала — вставка обязана вести себя так же.
+            event.preventDefault();
+            toast('Некуда приложить: сначала откройте счёт или форму нового счёта', 'error');
+            return;
+        }
 
         event.preventDefault();
         uploadAttachments(invoiceId, named);
@@ -2717,7 +2726,7 @@
 
         const invoiceId = attachTargetId();
         if (!invoiceId) {
-            toast('Откройте счёт, чтобы приложить к нему файл');
+            toast('Некуда приложить: сначала откройте счёт или форму нового счёта', 'error');
             return;
         }
         uploadAttachments(invoiceId, files);

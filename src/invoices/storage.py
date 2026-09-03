@@ -2588,15 +2588,9 @@ def list_invoice_authors(
     where = "WHERE 1 = 1"
     params: List[Any] = []
     if restrict_username is not None:
-        if restrict_store_ids:
-            where += " AND (" + _visibility_clause(restrict_store_ids) + ")"
-            params.append(restrict_username)
-            params.extend(restrict_store_ids)
-            if _has_card_columns():
-                params.extend(restrict_store_ids)
-        else:
-            where += " AND i.created_by = ?"
-            params.append(restrict_username)
+        clause, clause_params = _visibility_clause(restrict_username, restrict_store_ids or [])
+        where += " AND (" + clause + ")"
+        params.extend(clause_params)
 
     conn = get_db()
     try:
