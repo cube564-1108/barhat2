@@ -111,9 +111,9 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
 @media(max-width:640px){.summary{padding:14px;gap:12px}.summary__text{font-size:14px}}
 
 /* ---------- KPI ---------- */
-.kpis{display:grid;gap:12px;grid-template-columns:repeat(5,1fr);margin-bottom:14px}
-@media(max-width:1180px){.kpis{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:820px){.kpis{grid-template-columns:repeat(2,1fr)}}
+/* Плиток семь — фиксированное число колонок оставляло бы дыры на средних
+   экранах, поэтому колонки подбираются под ширину */
+.kpis{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(214px,1fr));margin-bottom:14px}
 @media(max-width:520px){.kpis{grid-template-columns:1fr;gap:8px}}
 .kpi{position:relative;padding:16px;text-align:left;font:inherit;border:1px solid var(--bx-border);
   background:#fff;border-radius:var(--bx-r-2xl);display:flex;flex-direction:column;gap:2px}
@@ -147,8 +147,9 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
 .section-head__hint{font-size:12.5px;color:var(--bx-muted)}
 .rows{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);overflow:hidden;
   box-shadow:0 1px 2px rgba(65,19,48,.04)}
-.row-head,.row{display:grid;grid-template-columns:minmax(200px,2.2fr) 1.4fr 1fr 1fr .9fr 1.1fr 30px;
-  gap:14px;align-items:center;padding:13px 20px}
+.row-head,.row{display:grid;
+  grid-template-columns:minmax(180px,1.8fr) 1.2fr .8fr .8fr .9fr 1fr .8fr 1fr 28px;
+  gap:12px;align-items:center;padding:13px 18px}
 .row-head{background:linear-gradient(180deg,#fdf8fc 0%,#faf5f9 100%);font-size:11px;
   text-transform:uppercase;letter-spacing:.04em;color:var(--bx-muted);font-weight:600;
   border-bottom:1px solid var(--bx-border)}
@@ -170,6 +171,7 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
 .row__num{font-variant-numeric:tabular-nums lining-nums;font-weight:600;color:var(--bx-text);
   line-height:1.25;display:block}
 .row__num small{display:block;font-weight:400;font-size:11.5px;color:var(--bx-muted);margin-top:2px}
+.row__num--bad{color:var(--bx-down)}
 /* Числа выравниваем по правому краю — так столбец читается сверху вниз без спотыканий */
 .row-head > :not(:first-child),.row > :not(:first-child):not(.row__chev){text-align:right}
 .row__chev{justify-self:end;color:var(--bx-scroll);transition:transform .2s,color .15s;line-height:0}
@@ -177,8 +179,9 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
 .row__chev--open{transform:rotate(180deg);color:var(--bx-wine)}
 .cell-label{display:none}
 
-/* мобильный вид: строки становятся карточками */
-@media(max-width:900px){
+/* Колонок стало восемь — на среднем экране они уже не помещаются,
+   поэтому в карточки переходим раньше */
+@media(max-width:1180px){
   .row-head{display:none}
   .rows{background:none;border:none;border-radius:0;box-shadow:none;overflow:visible}
   .row{position:relative;grid-template-columns:1fr 1fr;gap:12px;background:#fff;
@@ -196,11 +199,11 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
 /* ---------- Детали салона ---------- */
 .details{background:linear-gradient(180deg,#fbf6fa 0%,var(--bx-bg) 100%);
   border-top:1px solid var(--bx-border);padding:16px 20px}
-.details__grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-@media(max-width:900px){
+.details__grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+@media(max-width:1180px){
   .details{border:1px solid var(--bx-border);border-top:none;
-    border-radius:0 0 var(--bx-r-2xl) var(--bx-r-2xl);margin:0 0 8px;padding:14px}
-  .details__grid{grid-template-columns:1fr}}
+    border-radius:0 0 var(--bx-r-2xl) var(--bx-r-2xl);margin:0 0 8px;padding:14px}}
+@media(max-width:640px){.details__grid{grid-template-columns:1fr}}
 .dcard{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);padding:14px}
 .dcard h4{font-size:14px;margin-bottom:10px}
 .dlist{display:flex;flex-direction:column;gap:7px}
@@ -513,6 +516,43 @@ const SALONS = [
 
 const MAX_14 = 14, MAX_18 = 18;
 
+// ============================================================================
+// Склад (МойСклад). Цифры за август — РЕАЛЬНЫЕ, из выгрузки документов
+// «Оприходование» (enter) и «Списание» (loss) по папкам Товары МС/Цветы и
+// Товары МС/Клубника. Сентябрь — пропорционально прошедшей части месяца.
+//
+// fIn/fOut  — сумма оприходованного и списанного цветка, ₽
+// bInSum    — сумма оприходованной клубники, ₽
+// bInQty/bOutQty — вес оприходованной и списанной клубники, граммы
+//   (в МойСкладе у товара «Клубника» единица не задана, фактически это граммы:
+//    305 280 «единиц» на 298 161 ₽ — это 305 кг по ~977 ₽/кг)
+// ============================================================================
+const WAREHOUSE = {
+  //            id: [месяц]      fIn      fOut    bInSum   bInQty  bOutQty
+  1: {'2026-08':{fIn:279616, fOut:37692, bInSum:184506, bInQty:177224, bOutQty:2290},
+      '2026-09':{fIn: 38400, fOut: 4900, bInSum: 24100, bInQty: 23400, bOutQty: 380}},
+  2: {'2026-08':{fIn:152946, fOut:149487, bInSum:104850, bInQty:106970, bOutQty:71564},
+      '2026-09':{fIn: 21200, fOut: 18900, bInSum: 14300, bInQty: 14600, bOutQty: 8900}},
+  9: {'2026-08':{fIn:166683, fOut:56509, bInSum:111840, bInQty:106157, bOutQty:20038},
+      '2026-09':{fIn: 22800, fOut: 6100, bInSum: 15200, bInQty: 14400, bOutQty: 2600}},
+  4: {'2026-08':{fIn:532542, fOut:20740, bInSum:298161, bInQty:305280, bOutQty:29153},
+      '2026-09':{fIn: 71300, fOut: 2800, bInSum: 40100, bInQty: 41000, bOutQty: 3800}},
+  5: {'2026-08':{fIn: 93581, fOut:12100, bInSum: 60644, bInQty: 65970, bOutQty:11855},
+      '2026-09':{fIn: 12700, fOut: 1600, bInSum:  8200, bInQty:  8900, bOutQty: 1500}},
+  6: {'2026-08':{fIn:132063, fOut:11926, bInSum: 75287, bInQty: 82292, bOutQty: 9110},
+      '2026-09':{fIn: 17900, fOut: 1500, bInSum: 10100, bInQty: 11000, bOutQty: 1200}},
+  3: {'2026-08':{fIn:208234, fOut:10306, bInSum:130400, bInQty:141134, bOutQty:21783},
+      '2026-09':{fIn: 28100, fOut: 1400, bInSum: 17600, bInQty: 19000, bOutQty: 2900}},
+  7: {'2026-08':{fIn:302256, fOut:13860, bInSum:114116, bInQty:125580, bOutQty: 2979},
+      '2026-09':{fIn: 40800, fOut: 1900, bInSum: 15400, bInQty: 16900, bOutQty:  400}},
+  8: {'2026-08':{fIn:182768, fOut:14928, bInSum: 84918, bInQty: 94310, bOutQty: 4366},
+      '2026-09':{fIn: 24700, fOut: 2000, bInSum: 11400, bInQty: 12700, bOutQty:  590}}
+};
+
+// Доля списания цветка, выше которой это уже не потери, а вопрос к учёту
+const FLOWER_LOSS_ALERT = 20;
+const GRAMS_IN_KG = 1000;
+
 // Ключи, встреченные в данных, но не привязанные ни к одному салону.
 // Это и есть защита от тихой потери: видно, сколько теряется и на чём.
 const UNMAPPED = [
@@ -610,9 +650,13 @@ function scoreCounts(o){
 // Агрегат по набору салонов — тем же способом считается и «город», и «итого»
 function aggregate(list){
   const acc = {plan:0, planKnown:false, planMissing:0, fact:0, prevToDate:0, street:0, nosOk:0, nosReview:0,
-    s14:0, c14:0, s18:0, c18:0, courierOrders:0, taxiOrders:0, nosCats:{}, channels:{}, florists:{}};
+    s14:0, c14:0, s18:0, c18:0, courierOrders:0, taxiOrders:0, nosCats:{}, channels:{}, florists:{},
+    fIn:0, fOut:0, bInSum:0, bInQty:0, bOutQty:0};
   list.forEach(s => {
     const d = md(s);
+    const w = (WAREHOUSE[s.id] || {})[state.month];
+    if(w){ acc.fIn += w.fIn; acc.fOut += w.fOut;
+           acc.bInSum += w.bInSum; acc.bInQty += w.bInQty; acc.bOutQty += w.bOutQty; }
     if(d.plan === null) acc.planMissing++; else { acc.plan += d.plan; acc.planKnown = true; }
     acc.fact += d.fact; acc.prevToDate += d.prevToDate; acc.street += d.street;
     acc.nosOk += d.nosOk; acc.nosReview += d.nosReview;
@@ -636,6 +680,15 @@ function aggregate(list){
   acc.qPct = qualityPercent(acc);
   acc.streetShare = acc.fact ? acc.street / acc.fact * 100 : 0;
   acc.taxiShare = acc.courierOrders ? acc.taxiOrders / acc.courierOrders * 100 : 0;
+  // Доля списания цветка: списано ₽ / оприходовано ₽ за тот же период
+  acc.flowerLoss = acc.fIn ? acc.fOut / acc.fIn * 100 : null;
+  // Средняя цена клубники: сумма прихода / (вес прихода − вес списания).
+  // Знаменатель может уйти в ноль или минус (списали больше, чем приняли за период,
+  // например остаток прошлого месяца) — тогда цена не считается, а не врёт
+  const berryUsed = acc.bInQty - acc.bOutQty;
+  acc.berryUsed = berryUsed;
+  acc.berryPrice = berryUsed > 0 ? acc.bInSum / berryUsed * GRAMS_IN_KG : null;
+  acc.berryBuyPrice = acc.bInQty ? acc.bInSum / acc.bInQty * GRAMS_IN_KG : null;
   acc.planDone = acc.planKnown && acc.plan ? acc.fact / acc.plan * 100 : null;
   acc.factDelta = acc.prevToDate ? (acc.fact - acc.prevToDate) / acc.prevToDate * 100 : null;
   return acc;
@@ -708,6 +761,9 @@ function summaryHtml(agg, title){
   else text += 'План на месяц не задан — процент выполнения не считается. ';
 
   const worries = [];
+  if(agg.flowerLoss !== null && agg.flowerLoss >= FLOWER_LOSS_ALERT){
+    worries.push('списано ' + pct(agg.flowerLoss, 0) + ' оприходованного цветка');
+  }
   if(agg.nosOk >= 5) worries.push('подтверждённого негатива ' + agg.nosOk);
   if(agg.qPct && agg.qPct < 90) worries.push('качество ниже 90% от максимума');
   if(agg.taxiShare > 60) worries.push('такси-службам отдано ' + pct(agg.taxiShare, 0) + ' курьерских заказов');
@@ -820,6 +876,40 @@ function kpisHtml(agg){
         'такси-служба. Считается по количеству заказов, не по сумме.'
   }));
 
+  // 6. Списание цветка
+  const lossHigh = agg.flowerLoss !== null && agg.flowerLoss >= FLOWER_LOSS_ALERT;
+  out.push(kpi({
+    id:'flowerloss', label:'Списание цветка', value:agg.flowerLoss === null ? '—' : pct(agg.flowerLoss, 0),
+    unit:agg.flowerLoss === null ? '' : 'от прихода',
+    mean:agg.flowerLoss === null ? 'Оприходования за период нет'
+      : '<b>' + short(agg.fOut) + ' ₽</b> списано из ' + short(agg.fIn) + ' ₽',
+    sub:lossHigh ? 'Похоже на вопрос к учёту, а не на потери' : 'По документам МойСклада',
+    flag:lossHigh, delta:'',
+    how:'Сумма списанного цветка за период, делённая на сумму оприходованного цветка за тот же ' +
+        'период по складу салона. Товары берутся из папки «Товары МС / Цветы», документы — ' +
+        '«Списание» и «Оприходование» в МойСкладе.'
+  }));
+
+  // 7. Средняя цена клубники
+  out.push(kpi({
+    id:'berry', label:'Средняя цена клубники',
+    value:agg.berryPrice === null ? '—' : Math.round(agg.berryPrice).toString().replace(/\B(?=(\d{3})+(?!\d))/g, nbsp),
+    unit:agg.berryPrice === null ? '' : '₽/кг',
+    mean:agg.berryPrice === null
+      ? 'Списано больше, чем оприходовано — цена не считается'
+      : 'Закупочная <b>' + Math.round(agg.berryBuyPrice) + ' ₽/кг</b>',
+    sub:agg.bInQty
+      ? 'Приход ' + num(agg.bInQty / GRAMS_IN_KG, 0) + ' кг, списано ' +
+        num(agg.bOutQty / GRAMS_IN_KG, 0) + ' кг'
+      : 'Оприходования за период нет',
+    flag:agg.berryPrice !== null && agg.berryBuyPrice && agg.berryPrice > agg.berryBuyPrice * 1.3,
+    delta:'',
+    how:'Сумма оприходованной клубники за период, делённая на разницу веса: вес оприходованной ' +
+        'минус вес списанной. То есть во сколько обошёлся килограмм клубники, реально пошедшей ' +
+        'в дело: чем больше списали, тем дороже вышел остаток. Рядом — закупочная цена, чтобы ' +
+        'было видно, сколько добавило списание.'
+  }));
+
   return out.join('');
 }
 
@@ -842,15 +932,18 @@ function rowsHtml(){
     fact:(a,b) => b.agg.fact - a.agg.fact,
     nos:(a,b) => b.agg.nosOk - a.agg.nosOk,
     quality:(a,b) => a.agg.qPct - b.agg.qPct,
-    taxi:(a,b) => b.agg.taxiShare - a.agg.taxiShare
+    taxi:(a,b) => b.agg.taxiShare - a.agg.taxiShare,
+    loss:(a,b) => (b.agg.flowerLoss || 0) - (a.agg.flowerLoss || 0)
   };
   rows.sort(sorters[state.sort] || sorters.plan);
 
   const head = '<div class="row-head">' +
     '<div>' + (state.scope === 'city' ? 'Город' : 'Салон') + '</div>' +
     '<div><button type="button" data-sort="fact">Отгружено / план</button></div>' +
-    '<div><button type="button" data-sort="plan">Выполнение</button></div>' +
+    '<div><button type="button" data-sort="plan">Выполн.</button></div>' +
     '<div>Улица</div>' +
+    '<div><button type="button" data-sort="loss">Спис. цветка</button></div>' +
+    '<div>Клубника</div>' +
     '<div><button type="button" data-sort="nos">Негатив</button></div>' +
     '<div><button type="button" data-sort="quality">Качество</button></div>' +
     '<div></div></div>';
@@ -870,6 +963,15 @@ function rowsHtml(){
       '<div><span class="cell-label">Выполнение</span>' + planCell + '</div>' +
       '<div><span class="cell-label">Улица</span><span class="row__num">' + pct(a.streetShare, 0) +
         '<small>' + short(a.street) + ' ₽</small></span></div>' +
+      '<div><span class="cell-label">Списание цветка</span><span class="row__num' +
+        (a.flowerLoss !== null && a.flowerLoss >= FLOWER_LOSS_ALERT ? ' row__num--bad' : '') + '">' +
+        (a.flowerLoss === null ? '—' : pct(a.flowerLoss, 0)) +
+        '<small>' + (a.fOut ? short(a.fOut) + ' ₽' : 'нет списаний') + '</small></span></div>' +
+      '<div><span class="cell-label">Клубника</span><span class="row__num">' +
+        (a.berryPrice === null ? '—' : Math.round(a.berryPrice).toString()
+          .replace(/\B(?=(\d{3})+(?!\d))/g, nbsp) + ' ₽/кг') +
+        '<small>' + (a.berryBuyPrice ? 'закуп. ' + Math.round(a.berryBuyPrice) + ' ₽/кг' : 'нет прихода') +
+        '</small></span></div>' +
       '<div><span class="cell-label">Негатив</span><span class="row__num">' + a.nosOk +
         '<small>' + (a.nosReview ? '+' + a.nosReview + ' в разборе' : 'разобрано') + '</small></span></div>' +
       '<div><span class="cell-label">Качество</span><span class="row__num">' + pct(a.qPct, 0) +
@@ -922,7 +1024,29 @@ function detailsHtml(r){
         'Ещё ' + a.nosReview + ' в разборе — попадут сюда, когда проставят объективность.</div>' : '') +
       '</div>' +
     '<div class="dcard"><h4>Отгрузки по каналам</h4>' + barList(channels, 'money') + '</div>' +
+    '<div class="dcard"><h4>Склад: цветок и клубника</h4>' + warehouseHtml(a) + '</div>' +
     '</div></div>';
+}
+
+// Расшифровка складских показателей — чтобы процент и цену можно было проверить
+function warehouseHtml(a){
+  if(!a.fIn && !a.bInQty) return '<div class="dempty">Документов склада за период нет</div>';
+  const lines = [];
+  lines.push(['Оприходовано цветка', short(a.fIn) + ' ₽']);
+  lines.push(['Списано цветка', short(a.fOut) + ' ₽']);
+  lines.push(['Доля списания', a.flowerLoss === null ? '—' : pct(a.flowerLoss, 1)]);
+  lines.push(['Оприходовано клубники', num(a.bInQty / GRAMS_IN_KG, 1) + ' кг · ' + short(a.bInSum) + ' ₽']);
+  lines.push(['Списано клубники', num(a.bOutQty / GRAMS_IN_KG, 1) + ' кг']);
+  lines.push(['Пошло в дело', a.berryUsed > 0 ? num(a.berryUsed / GRAMS_IN_KG, 1) + ' кг' : '—']);
+  lines.push(['Закупочная цена', a.berryBuyPrice ? Math.round(a.berryBuyPrice) + ' ₽/кг' : '—']);
+  lines.push(['С учётом списания', a.berryPrice ? Math.round(a.berryPrice) + ' ₽/кг' : '—']);
+
+  return '<div class="dlist">' + lines.map(l =>
+    '<div class="dline"><span class="dline__name">' + esc(l[0]) + '</span>' +
+    '<span class="dline__val">' + l[1] + '</span></div>').join('') + '</div>' +
+    '<div style="font-size:11.5px;color:var(--bx-muted);margin-top:9px">' +
+    'Документы «Оприходование» и «Списание» в МойСкладе по складу салона, ' +
+    'товары из папок «Товары МС / Цветы» и «/ Клубника».</div>';
 }
 
 // ============================================================================
