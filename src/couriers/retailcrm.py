@@ -137,6 +137,14 @@ class CourierOrdersClient:
             })
         return [c for c in couriers if c["id"] is not None]
 
+    def get_delivery_types(self) -> List[Dict[str, Any]]:
+        """Справочник типов доставки: от него считается доля такси-служб."""
+        data = self._get("api/v5/reference/delivery-types")
+        return [
+            {"code": code, "name": item.get("name") or code, "active": bool(item.get("active", True))}
+            for code, item in (data.get("deliveryTypes") or {}).items()
+        ]
+
     def get_sites(self) -> List[Dict[str, Any]]:
         """Справочник салонов с определённым городом."""
         data = self._get("api/v5/reference/sites")
@@ -232,6 +240,11 @@ def parse_order(order: Dict[str, Any], site_cities: Dict[str, Optional[str]]) ->
         "city": site_cities.get(site_code),
         "delivery_city": address.get("city"),
         "status": order.get("status"),
+        # Поля для показателей салонов. summ — стоимость товаров БЕЗ доставки
+        # (решение владельца); totalSumm включал бы доставку и скидки
+        "total_summ": float(order.get("summ") or 0),
+        "order_method": order.get("orderMethod"),
+        "delivery_code": delivery.get("code"),
     }
 
 

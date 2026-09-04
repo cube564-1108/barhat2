@@ -25,6 +25,7 @@ sys.path.insert(0, auth_path)
 from auth import section_required, role_required
 
 from .storage import get_storage
+from . import warehouse
 
 load_dotenv()
 
@@ -736,6 +737,139 @@ def _scheduled_mode(storage) -> Optional[str]:
     return 'incremental'
 
 
+# ============================================================================
+# Движение товара по складам (оприходование/списание) для показателей салонов
+# ============================================================================
+
+WAREHOUSE_SYNC_LOCK = 'warehouse-flows'
+WAREHOUSE_SYNC_LOCK_TTL = 900
+# Реже, чем заказы: документы склада заводят пачками раз в день, а не поминутно
+WAREHOUSE_SYNC_INTERVAL_SECONDS = 3 * 60 * 60
+# Окно пересобирается кусками: DELETE+INSERT одного куска атомарен, поэтому
+# отчёт никогда не видит период, где приход уже удалён, а списание не записано
+WAREHOUSE_CHUNK_DAYS = 15
+MAX_MANUAL_WAREHOUSE_DAYS = 800
+
+
+def run_warehouse_sync(days: int = None) -> dict:
+    """
+    Пересобрать движение товара за последние `days` дней.
+
+    Возвращает счётчики документов; при занятом локе — {'skipped': True}.
+    """
+    from datetime import date, timedelta
+    from .client import get_client
+
+    storage = get_db()
+    if not storage.try_acquire_sync_lock(WAREHOUSE_SYNC_LOCK, WAREHOUSE_SYNC_LOCK_TTL):
+        logger.info("Синхронизация движения товара уже идёт — пропускаем")
+        return {'skipped': True}
+
+    days = days or warehouse.SYNC_WINDOW_DAYS
+    log_id = storage.start_sync_log('warehouse_flows')
+    totals = {'enter': 0, 'loss': 0, 'positions': 0}
+
+    try:
+        warehouse.init_warehouse_tables(storage)
+        warehouse.seed_groups(storage)
+
+        client = get_client()
+        today = date.today()
+        start = today - timedelta(days=days)
+
+        cursor = start
+        while cursor <= today:
+            chunk_end = min(cursor + timedelta(days=WAREHOUSE_CHUNK_DAYS - 1), today)
+            counts = warehouse.sync_window(
+                storage, client, cursor.isoformat(), chunk_end.isoformat()
+            )
+            for key in totals:
+                totals[key] += counts.get(key, 0)
+            storage.update_sync_log_progress(log_id, totals['positions'])
+            storage.renew_sync_lock(WAREHOUSE_SYNC_LOCK, WAREHOUSE_SYNC_LOCK_TTL)
+            cursor = chunk_end + timedelta(days=1)
+
+        storage.finish_sync_log(log_id, totals['positions'], 'completed')
+        return totals
+    except Exception as e:
+        logger.error(f"Ошибка синхронизации движения товара: {e}")
+        storage.finish_sync_log(log_id, totals['positions'], 'failed', str(e))
+        raise
+    finally:
+        storage.release_sync_lock(WAREHOUSE_SYNC_LOCK)
+
+
+@moysklad_bp.route('/warehouse/sync', methods=['POST'])
+@role_required('admin')
+def trigger_warehouse_sync():
+    """
+    Загрузить движение товара за последние N дней.
+
+    Body: {"days": 365} — для первичного наполнения витрины.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        days = max(1, min(int(data.get('days', warehouse.SYNC_WINDOW_DAYS)),
+                          MAX_MANUAL_WAREHOUSE_DAYS))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'days должен быть числом'}), 400
+
+    thread = threading.Thread(
+        target=lambda: run_warehouse_sync(days), daemon=True, name='moysklad-warehouse-sync'
+    )
+    thread.start()
+    return jsonify({'success': True, 'message': f'Загрузка движения товара за {days} дн. запущена'})
+
+
+@moysklad_bp.route('/warehouse/groups', methods=['GET'])
+@role_required('admin')
+def get_warehouse_groups():
+    """Папки каталога, отнесённые к «цветку» и «клубнике»."""
+    storage = get_db()
+    warehouse.init_warehouse_tables(storage)
+    return jsonify({
+        'success': True,
+        'groups': warehouse.list_groups(storage),
+        'folders': [
+            {'id': fid, 'path': path}
+            for fid, path in sorted(warehouse.folder_paths(storage).items(), key=lambda x: x[1])
+        ],
+    })
+
+
+@moysklad_bp.route('/warehouse/groups', methods=['POST'])
+@role_required('admin')
+def set_warehouse_group():
+    """
+    Отнести папку каталога к группе.
+
+    Body: {"folder_id": str, "kind": "flower"|"berry"|null, "qty_per_kg": float|null}
+    """
+    data = request.get_json(silent=True) or {}
+    folder_id = (data.get('folder_id') or '').strip()
+    if not folder_id:
+        return jsonify({'success': False, 'error': 'Не передан folder_id'}), 400
+
+    kind = data.get('kind')
+    if kind not in (None, warehouse.KIND_FLOWER, warehouse.KIND_BERRY):
+        return jsonify({'success': False, 'error': f'Неизвестная группа: {kind}'}), 400
+
+    qty_per_kg = data.get('qty_per_kg')
+    if qty_per_kg is not None:
+        try:
+            qty_per_kg = float(qty_per_kg)
+            if qty_per_kg <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': 'qty_per_kg должен быть положительным числом'}), 400
+
+    storage = get_db()
+    warehouse.init_warehouse_tables(storage)
+    paths = warehouse.folder_paths(storage)
+    warehouse.set_group(storage, folder_id, kind, qty_per_kg, paths.get(folder_id))
+    return jsonify({'success': True, 'groups': warehouse.list_groups(storage)})
+
+
 def _scheduler_loop():
     """Фоновый цикл синхронизации (по одному в каждом воркере, работает — один)"""
     time.sleep(SCHEDULER_START_DELAY_SECONDS)
@@ -756,6 +890,16 @@ def _scheduler_loop():
                     _run_orders_sync(mode=mode)
         except Exception as e:
             logger.error(f"Ошибка планировщика синхронизации МойСклад: {e}")
+
+        # Второй шаг того же тика — движение товара по складам (оприходование и
+        # списание) для раздела «Показатели салонов». Своего планировщика не
+        # заводим: в moysklad.db уже пишет этот цикл, а /data общий на все базы,
+        # и вторая волна записи туда однажды уже клала сайт.
+        try:
+            if get_db().try_claim_scheduled_run('warehouse', WAREHOUSE_SYNC_INTERVAL_SECONDS):
+                run_warehouse_sync()
+        except Exception as e:
+            logger.error(f"Ошибка синхронизации движения товара: {e}")
 
         time.sleep(SCHEDULER_INTERVAL_SECONDS)
 

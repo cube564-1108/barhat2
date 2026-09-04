@@ -49,6 +49,7 @@ from .client import get_client
 # по коду было не понять, какая работает в проде. Теперь это обычный модуль
 # пакета, а scripts/quality_report_v2.py — тонкая обёртка над ним.
 from . import quality as quality_report
+from . import nos as nos_report
 
 load_dotenv()
 
@@ -314,6 +315,16 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint задач дашборда: {e}")
 
+# Регистрируем blueprint показателей салонов
+try:
+    from salonkpi.server import salonkpi_bp
+    app.register_blueprint(salonkpi_bp)
+    logger.info("Blueprint показателей салонов зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint показателей салонов: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint показателей салонов: {e}")
+
 # Регистрируем blueprint обратной связи от сотрудников
 try:
     from feedback.server import feedback_bp
@@ -404,6 +415,18 @@ with app.app_context():
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц списаний товара: {e}")
 
+    # Инициализация таблиц показателей салонов (справочник соответствий и планы).
+    # Здесь же проставляется стартовое соответствие салонов: без него первый
+    # запуск показал бы нули по всем показателям.
+    try:
+        from salonkpi.storage import init_salonkpi_tables
+        init_salonkpi_tables()
+        logger.info("Таблицы показателей салонов инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль показателей салонов: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц показателей салонов: {e}")
+
 
 # Инициализация хранилища
 db_path = os.getenv('PYRUS_DB_PATH', 'data/pyrus.db')
@@ -413,6 +436,10 @@ storage = get_storage(db_path)
 # если пуста (первый деплой после появления таблицы) — делать это в обработчике
 # запроса нельзя: инициализация на каждом запросе уже клала сайт.
 quality_report.ensure_projection()
+
+# Витрина негативной обратной связи — тот же принцип: собирается один раз при
+# старте процесса и только если пуста.
+nos_report.ensure_projection()
 
 
 def _disk_free_info():
@@ -1679,6 +1706,127 @@ def _import_tasks_background(log_id, start_date, end_date, step_days):
         storage.release_sync_lock(QUALITY_SYNC_LOCK)
 
 
+# ============================================================================
+# Синхронизация формы «Негативная ОС по заказу» (1291124)
+#
+# Отдельного планировщика у неё намеренно НЕТ: в pyrus.db уже пишет цикл синка
+# качества, а /data на Amvera — общий медленный диск, по которому бьют все базы
+# сразу. Вторая волна записи туда же однажды уже клала сайт целиком, поэтому
+# НОС грузится вторым шагом в том же тике, последовательно.
+# ============================================================================
+
+NOS_SYNC_LOCK = 'pyrus-nos-sync'
+NOS_SYNC_LOCK_TTL = SYNC_STALE_MINUTES * 60
+
+# Окно регулярной подкачки. Больше, чем у качества (7 дней): обращение правят и
+# через месяц после создания — проставляют объективность, категорию, компенсацию.
+NOS_SYNC_DAYS = int(os.getenv('PYRUS_NOS_SYNC_DAYS', '60'))
+
+
+def sync_nos_window(days: int, step_days: int = 30) -> dict:
+    """
+    Загрузить обращения за последние `days` дней и обновить витрину.
+
+    Работает синхронно в вызывающем потоке: объём смешной (сотни задач),
+    заводить ради него ещё один фоновый поток незачем.
+    """
+    from datetime import timedelta
+
+    if not storage.try_acquire_sync_lock(NOS_SYNC_LOCK, NOS_SYNC_LOCK_TTL):
+        logger.info("Синхронизация НОС уже идёт — пропускаем")
+        return {'skipped': True}
+
+    log_id = storage.start_sync_log(job='nos', message='Загрузка негативной ОС...')
+    total_saved = 0
+
+    try:
+        client = get_client()
+        if not client.authenticate():
+            raise Exception('Ошибка авторизации Pyrus')
+
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+
+        cursor_date = start_date
+        while cursor_date <= end_date:
+            window_end = min(cursor_date + timedelta(days=step_days - 1), end_date)
+            offset = 0
+            seen_ids = set()
+
+            while True:
+                tasks = _fetch_register_page(
+                    client,
+                    nos_report.NOS_FORM_ID,
+                    cursor_date.strftime('%Y-%m-%dT00:00:00Z'),
+                    window_end.strftime('%Y-%m-%dT23:59:59Z'),
+                    offset
+                )
+                if not tasks:
+                    break
+
+                page_ids = {t.get('id') for t in tasks}
+                if page_ids and page_ids <= seen_ids:
+                    logger.warning("Pyrus вернул повторную страницу реестра НОС — прекращаем")
+                    break
+                seen_ids |= page_ids
+
+                storage.save_tasks(nos_report.NOS_FORM_ID, tasks)
+                nos_report.upsert_tasks(tasks)
+                total_saved += len(tasks)
+
+                storage.update_sync_log(log_id, f'Загружено {total_saved} обращений', total_saved)
+                storage.renew_sync_lock(NOS_SYNC_LOCK, NOS_SYNC_LOCK_TTL)
+
+                if len(tasks) < REGISTER_PAGE_SIZE:
+                    break
+                offset += REGISTER_PAGE_SIZE
+
+            cursor_date = window_end + timedelta(days=1)
+
+        storage.finish_sync_log(
+            log_id, forms_count=1, tasks_count=total_saved, status='completed',
+            message=f'Обновлено {total_saved} обращений'
+        )
+        logger.info(f"Синхронизация НОС завершена: {total_saved} обращений за {days} дн.")
+        return {'saved': total_saved}
+
+    except Exception as e:
+        logger.error(f"Ошибка синхронизации НОС: {e}")
+        storage.finish_sync_log(
+            log_id, forms_count=1, tasks_count=total_saved, status='failed',
+            error_message=str(e), message=f'Ошибка после {total_saved} обращений'
+        )
+        raise
+    finally:
+        storage.release_sync_lock(NOS_SYNC_LOCK)
+
+
+@app.route('/api/pyrus/nos/sync', methods=['POST'])
+@role_required('admin')
+def trigger_nos_sync():
+    """
+    Загрузить обращения негативной ОС за последние N дней.
+
+    Body: {"days": 365} — для первичного наполнения витрины. По умолчанию окно
+    регулярной подкачки.
+    """
+    import threading
+
+    data = request.get_json(silent=True) or {}
+    try:
+        days = max(1, min(int(data.get('days', NOS_SYNC_DAYS)), 1100))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'days должен быть числом'}), 400
+
+    # Первичная загрузка за год идёт минуты — в фоне, чтобы не держать воркер
+    thread = threading.Thread(
+        target=lambda: sync_nos_window(days), daemon=True, name='pyrus-nos-import'
+    )
+    thread.start()
+
+    return jsonify({'success': True, 'message': f'Загрузка негативной ОС за {days} дн. запущена'})
+
+
 def _launch_import(job, start_date, end_date, step_days):
     """
     Захватить лок и запустить фоновую загрузку.
@@ -1744,6 +1892,15 @@ def _scheduler_loop():
                 logger.info("Плановая синхронизация Pyrus пропущена: прогон уже идёт")
         except Exception as e:
             logger.error(f"Ошибка планировщика синхронизации Pyrus: {e}")
+
+        # Второй шаг того же тика — негативная ОС. Отдельным планировщиком её
+        # не заводим: см. комментарий у NOS_SYNC_LOCK. Свой талон нужен, чтобы
+        # окна двух форм можно было развести по частоте, не трогая друг друга.
+        try:
+            if storage.try_claim_scheduled_run('nos', SCHEDULER_INTERVAL_SECONDS):
+                sync_nos_window(NOS_SYNC_DAYS)
+        except Exception as e:
+            logger.error(f"Ошибка плановой синхронизации НОС: {e}")
 
 
 def start_quality_scheduler():

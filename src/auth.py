@@ -51,8 +51,8 @@ ROLE_SECTIONS = {
     # снятие права закрыло бы доступ к данным тем, кого забыли перевести.
     # Ручки счетов проверяют @section_required("invoices", "invoices_v2") —
     # пускает любая из двух секций (INVOICE_SECTIONS в src/invoices/server.py).
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "link_watch"},
-    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts"},
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "link_watch", "salon_kpi"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts", "salon_kpi"},
     "florist": {"cash_shifts", "writeoffs"},
     "florist_analyst": {"quality"},
     # Пользователи, залогиненные через SSO из портала БАРХАТ Пульс (см. src/sso.py).
@@ -60,7 +60,7 @@ ROLE_SECTIONS = {
     # все входящие через портал получают один и тот же набор — всё, КРОМЕ
     # управления пользователями. Админку через внешний JWT не открываем, иначе
     # пропуск Пульса позволял бы заводить и править учётки в нашем сервисе.
-    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts"},
+    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "salon_kpi"},
 }
 
 
@@ -479,6 +479,11 @@ def init_auth_tables():
     # выдаётся всем, у кого раньше был старый раздел. Старую секцию `invoices`
     # при этом НЕ снимаем — см. комментарий у ROLE_SECTIONS.
     migrate_new_module_permissions("invoices_v2", ["admin", "manager", "sso_viewer"])
+
+    # Догрузка права на раздел salon_kpi («Показатели салонов»). Управляющие
+    # заходят и своими логинами (manager), и через Пульс (sso_viewer) — право
+    # нужно обеим ролям, иначе половина людей раздела просто не увидит.
+    migrate_new_module_permissions("salon_kpi", ["admin", "manager", "sso_viewer"])
 
     # Догрузка прав SSO-пользователям: первые из них были заведены, когда
     # sso_viewer имел доступ только к "quality" (см. SSO_MODULES выше).

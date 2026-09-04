@@ -123,6 +123,7 @@ def _sync_range(date_from: str, date_to: str) -> int:
 
     storage.upsert_couriers(client.get_couriers())
     storage.upsert_sites(client.get_sites())
+    storage.upsert_delivery_types(client.get_delivery_types())
     site_cities = storage.get_site_cities()
 
     total = 0
@@ -138,13 +139,15 @@ def _sync_range(date_from: str, date_to: str) -> int:
                     parsed = retailcrm.parse_order(order, site_cities)
                     if not parsed or not parsed["retailcrm_order_id"]:
                         continue
-                    # Заказ без курьера и с нулевой себестоимостью — это
-                    # самовывоз (таких больше половины выполненных). К оплате
-                    # курьерам он отношения не имеет и только раздувает базу.
-                    # А вот без курьера, но с себестоимостью — уже дырка в
-                    # заполнении CRM, её храним и показываем отдельно.
-                    if not parsed["courier_id"] and not parsed["net_cost"]:
-                        continue
+                    # Пишем ВСЕ выполненные заказы, включая самовывоз.
+                    #
+                    # Раньше заказ без курьера и с нулевой себестоимостью здесь
+                    # отбрасывался — он не нужен для выплат. Но это как раз
+                    # самовывоз, а самовывоз — основа канала «Улица», и без него
+                    # показатели салонов считать не из чего: доля «Улицы» не
+                    # считалась бы вовсе, а сумма отгрузок была занижена вдвое.
+                    # Отбор «за что платим курьеру» переехал в чтение —
+                    # storage.PAYOUT_FILTER.
                     rows.append(parsed)
                 # Долгий прогон обязан продлевать лок, иначе по TTL его
                 # подхватит соседний воркер и оба пойдут качать одно и то же.
@@ -362,6 +365,48 @@ def set_courier_flag(courier_id: int):
         return error_response("Курьер не найден", 404)
 
     return success_response({"id": courier_id, "is_service": bool(data["is_service"])})
+
+
+@couriers_bp.route("/<int:courier_id>/taxi-flag", methods=["POST"])
+@role_required("admin")
+def set_courier_taxi(courier_id: int):
+    """
+    Пометить курьера внешней такси-службой — от этого флага считается показатель
+    «доля заказов, отданных такси-службам» в разделе «Показатели салонов».
+
+    Отдельно от is_service намеренно: тот флаг шире (Купер, Flowwow, «Общий»).
+    """
+    data = request.get_json(silent=True) or {}
+    if "is_external_taxi" not in data:
+        return error_response("Не передан is_external_taxi")
+
+    value = bool(data["is_external_taxi"])
+    if not storage.set_courier_taxi_flag(courier_id, value):
+        return error_response("Курьер не найден", 404)
+
+    return success_response({"id": courier_id, "is_external_taxi": value})
+
+
+@couriers_bp.route("/delivery-types", methods=["GET"])
+@section_required("courier_payouts")
+def get_delivery_types():
+    """Типы доставки с флагом «считается курьерской»."""
+    return success_response(storage.list_delivery_types())
+
+
+@couriers_bp.route("/delivery-types/<path:code>/flag", methods=["POST"])
+@role_required("admin")
+def set_delivery_type(code: str):
+    """Отметить тип доставки как курьерский (или снять отметку)."""
+    data = request.get_json(silent=True) or {}
+    if "counts_as_courier" not in data:
+        return error_response("Не передан counts_as_courier")
+
+    value = bool(data["counts_as_courier"])
+    if not storage.set_delivery_type_flag(code, value):
+        return error_response("Тип доставки не найден", 404)
+
+    return success_response({"code": code, "counts_as_courier": value})
 
 
 # ============================================================================

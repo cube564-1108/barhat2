@@ -29,11 +29,51 @@ DB_PATH = resolve_data_path("COURIERS_DB_PATH", "couriers.db")
 # но платить по ним владелец не хочет (решение от 2026-08-24).
 COMPLETED_STATUS = "complete"
 
+# Условие «заказ участвует в выплате курьерам»: либо курьер указан, либо
+# потрачена себестоимость доставки. Раньше этот отбор стоял на ЗАПИСИ — самовывоз
+# в базу не попадал вовсе. Для показателей салонов нужны все выполненные заказы
+# («Улица» это в основном самовывоз), поэтому витрина хранит всё, а отбор
+# переехал сюда, в чтение. Любой новый запрос модуля выплат обязан его добавлять.
+PAYOUT_FILTER = "(courier_id IS NOT NULL OR net_cost > 0)"
+
+# Такси-службы: Яндекс Доставка (2), Максим Такси (12), Драйв такси (169).
+# Сид для нового флага; дальше значение правится в интерфейсе.
+TAXI_COURIER_IDS = (2, 12, 169)
+
+# Коды типа доставки «Доставка курьером» в RetailCRM. Три записи с одним
+# названием: две неактивные, оставшиеся от исторических заказов.
+COURIER_DELIVERY_CODES = ("dostavka-kurerom", "courier", "2")
+
+# Канал «Улица» — это способ оформления offline в RetailCRM («Заказ в салоне»).
+# Код, а не название: названия в справочнике переименовывают.
+STREET_ORDER_METHOD = "offline"
+
 
 def _ensure_parent_dir(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
         os.makedirs(parent, exist_ok=True)
+
+
+def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
+    """
+    Идемпотентная миграция колонки.
+
+    На проде 2 воркера gunicorn стартуют одновременно, оба видят «колонки нет» и
+    оба выполняют ALTER. Оба штатных исхода гонки (duplicate column name,
+    database is locked) означают, что колонку создаёт сосед, — цель достигнута,
+    ронять старт воркера нельзя.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column in existing:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    except sqlite3.OperationalError as e:
+        message = str(e).lower()
+        if "duplicate column" not in message and "locked" not in message:
+            raise
+        logger.info(f"Миграция {table}.{column}: колонку создаёт другой воркер ({e})")
 
 
 @contextmanager
@@ -92,6 +132,18 @@ def init_couriers_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_courier_orders_city ON courier_orders(city)"
         )
 
+        # Поля для модуля «Показатели салонов»: сумма заказа, канал продаж и тип
+        # доставки. Живут здесь, а не во второй витрине, потому что это тот же
+        # самый набор заказов — второй синк означал бы двойную нагрузку на CRM и
+        # два расходящихся ответа на вопрос «сколько отгрузили».
+        _add_column_if_missing(conn, "courier_orders", "total_summ", "REAL NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "courier_orders", "order_method", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "delivery_code", "TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_courier_orders_site_date "
+            "ON courier_orders(site_code, delivery_date)"
+        )
+
         # ====================================================================
         # Справочник курьеров. is_service=1 — служба доставки/агрегатор
         # (Яндекс Доставка, Купер, Максим Такси...), их отделяем от штатных
@@ -108,6 +160,38 @@ def init_couriers_tables() -> None:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+
+        # is_external_taxi — отдельный флаг, а не переиспользованный is_service:
+        # тот шире и включает Купер, Flowwow, «Общий», а в показателе салонов
+        # считаются только такси-службы (решение владельца 2026-09-04).
+        _add_column_if_missing(conn, "couriers", "is_external_taxi", "INTEGER NOT NULL DEFAULT 0")
+        for courier_id in TAXI_COURIER_IDS:
+            conn.execute(
+                "UPDATE couriers SET is_external_taxi = 1 WHERE id = ? AND is_external_taxi = 0",
+                (courier_id,),
+            )
+
+        # ====================================================================
+        # Типы доставки RetailCRM. counts_as_courier=1 — «Доставка курьером»:
+        # именно от этого набора считается доля такси-служб. Флаг правится
+        # руками и синхронизацией не перетирается — какой тип доставки считать
+        # курьерским, решает человек, а не название записи.
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS delivery_types (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                counts_as_courier INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        for code in COURIER_DELIVERY_CODES:
+            conn.execute(
+                "INSERT OR IGNORE INTO delivery_types (code, name, counts_as_courier) "
+                "VALUES (?, ?, 1)",
+                (code, "Доставка курьером"),
+            )
 
         # ====================================================================
         # Салоны RetailCRM (site) и их города — по ним фильтр «город».
@@ -171,8 +255,9 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
             """
             INSERT OR REPLACE INTO courier_orders (
                 retailcrm_order_id, order_number, delivery_date, courier_id, courier_name,
-                net_cost, site_code, city, delivery_city, status, synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                net_cost, site_code, city, delivery_city, status,
+                total_summ, order_method, delivery_code, synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             """,
             [
                 (
@@ -186,6 +271,9 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                     row.get("city"),
                     row.get("delivery_city"),
                     row.get("status") or COMPLETED_STATUS,
+                    float(row.get("total_summ") or 0),
+                    row.get("order_method"),
+                    row.get("delivery_code"),
                 )
                 for row in rows
             ],
@@ -298,6 +386,10 @@ def report_by_courier(
         params.append(city)
 
     where_sql = " AND ".join(w.replace("delivery_date", "o.delivery_date") for w in where)
+    # Витрина хранит ВСЕ выполненные заказы (нужны показателям салонов), поэтому
+    # отбор «за что вообще платим» ставится здесь — см. PAYOUT_FILTER
+    where_sql += " AND " + PAYOUT_FILTER.replace("courier_id", "o.courier_id").replace(
+        "net_cost", "o.net_cost")
 
     own_filter = " AND COALESCE(c.is_service, 0) = 0" if only_own else ""
 
@@ -323,7 +415,7 @@ def report_by_courier(
         # Заказы без курьера, но с потраченной себестоимостью доставки —
         # показатель качества заполнения CRM: деньги ушли, а кому платить,
         # из заказа не видно. Самовывоз (нулевая себестоимость) сюда не
-        # попадает — он и в базу не пишется, см. server.py::_sync_range.
+        # попадает: его отсекает условие net_cost > 0 (раньше отсекала запись).
         missing = conn.execute(
             f"""
             SELECT COUNT(*) AS cnt, COALESCE(SUM(o.net_cost), 0) AS total
@@ -372,6 +464,7 @@ def list_orders(
     if city:
         where.append("city = ?")
         params.append(city)
+    where.append(PAYOUT_FILTER)  # витрина шире отчёта, см. PAYOUT_FILTER
     if without_courier:
         where.append("courier_id IS NULL")
     elif courier_id is not None:
@@ -397,14 +490,15 @@ def list_cities() -> List[str]:
     """Города, по которым реально есть данные (для выпадающего фильтра)."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT city FROM courier_orders WHERE city IS NOT NULL AND city != '' ORDER BY city"
+            "SELECT DISTINCT city FROM courier_orders "
+            f"WHERE city IS NOT NULL AND city != '' AND {PAYOUT_FILTER} ORDER BY city"
         ).fetchall()
     return [row["city"] for row in rows]
 
 
 def list_couriers(only_active: bool = False) -> List[Dict[str, Any]]:
     """Справочник курьеров (для экрана настройки флага «служба доставки»)."""
-    query = "SELECT id, name, is_service, active FROM couriers"
+    query = "SELECT id, name, is_service, active, COALESCE(is_external_taxi, 0) AS is_external_taxi FROM couriers"
     if only_active:
         query += " WHERE active = 1"
     query += " ORDER BY is_service, name"
@@ -415,6 +509,7 @@ def list_couriers(only_active: bool = False) -> List[Dict[str, Any]]:
             "id": row["id"],
             "name": row["name"],
             "is_service": bool(row["is_service"]),
+            "is_external_taxi": bool(row["is_external_taxi"]),
             "active": bool(row["active"]),
         }
         for row in rows
@@ -425,9 +520,208 @@ def get_orders_date_range() -> Dict[str, Optional[str]]:
     """Границы загруженных данных — чтобы на странице было видно, за что отчёт вообще есть."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT MIN(delivery_date) AS min_date, MAX(delivery_date) AS max_date FROM courier_orders"
+            "SELECT MIN(delivery_date) AS min_date, MAX(delivery_date) AS max_date "
+            f"FROM courier_orders WHERE {PAYOUT_FILTER}"
         ).fetchone()
     return {"min_date": row["min_date"], "max_date": row["max_date"]}
+
+
+# ============================================================================
+# Чтение: показатели салонов (отгрузки, «Улица», такси-службы)
+#
+# Отдельные функции, а не параметр к отчёту выплат: набор заказов здесь другой
+# (все выполненные, включая самовывоз) и группировка идёт по салону, а не по
+# курьеру. Живут в модуле-владельце данных, чтобы salonkpi не лез SQL-запросами
+# в чужую базу.
+# ============================================================================
+
+def aggregate_shipments(date_from: str, date_to: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Отгрузки за период в разрезе сайтов RetailCRM.
+
+    Возвращает {site_code: {fact, street, orders, courier_orders, taxi_orders}}:
+      fact          — сумма заказов (стоимость товаров, без доставки)
+      street        — из них с каналом «Улица» (offline)
+      courier_orders — заказы с типом доставки «Доставка курьером»
+      taxi_orders   — из них отданные внешним такси-службам
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                o.site_code                                        AS site_code,
+                COUNT(*)                                           AS orders,
+                COALESCE(SUM(o.total_summ), 0)                     AS fact,
+                COALESCE(SUM(CASE WHEN o.order_method = ?
+                                  THEN o.total_summ ELSE 0 END), 0) AS street,
+                SUM(CASE WHEN d.counts_as_courier = 1 THEN 1 ELSE 0 END) AS courier_orders,
+                SUM(CASE WHEN d.counts_as_courier = 1
+                          AND COALESCE(c.is_external_taxi, 0) = 1
+                         THEN 1 ELSE 0 END)                        AS taxi_orders
+            FROM courier_orders o
+            LEFT JOIN delivery_types d ON d.code = o.delivery_code
+            LEFT JOIN couriers c ON c.id = o.courier_id
+            WHERE o.status = ? AND o.delivery_date >= ? AND o.delivery_date <= ?
+            GROUP BY o.site_code
+            """,
+            (STREET_ORDER_METHOD, COMPLETED_STATUS, date_from, date_to),
+        ).fetchall()
+
+        channels = conn.execute(
+            """
+            SELECT site_code, COALESCE(order_method, 'не указан') AS method,
+                   COALESCE(SUM(total_summ), 0) AS amount
+            FROM courier_orders
+            WHERE status = ? AND delivery_date >= ? AND delivery_date <= ?
+            GROUP BY site_code, method
+            """,
+            (COMPLETED_STATUS, date_from, date_to),
+        ).fetchall()
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        result[row["site_code"]] = {
+            "fact": round(row["fact"] or 0, 2),
+            "street": round(row["street"] or 0, 2),
+            "orders": row["orders"],
+            "courier_orders": row["courier_orders"] or 0,
+            "taxi_orders": row["taxi_orders"] or 0,
+            "channels": {},
+        }
+    for row in channels:
+        site = result.get(row["site_code"])
+        if site is not None:
+            site["channels"][row["method"]] = round(row["amount"] or 0, 2)
+    return result
+
+
+def shipments_data_range() -> Dict[str, Optional[str]]:
+    """
+    С какой даты в витрине заполнены поля показателей.
+
+    Нужно, чтобы экран мог сказать «данные по каналам с такого-то числа», а не
+    показывать честный ноль по периоду, который просто не перезалит после
+    миграции.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT MIN(delivery_date) AS since, MAX(delivery_date) AS until "
+            "FROM courier_orders WHERE order_method IS NOT NULL"
+        ).fetchone()
+    return {"since": row["since"], "until": row["until"]}
+
+
+def list_unmapped_sites(date_from: str, date_to: str, known_sites: List[str]) -> List[Dict[str, Any]]:
+    """Сайты CRM с отгрузками за период, которых нет в справочнике салонов."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT site_code, COUNT(*) AS orders, COALESCE(SUM(total_summ), 0) AS amount
+            FROM courier_orders
+            WHERE status = ? AND delivery_date >= ? AND delivery_date <= ?
+            GROUP BY site_code
+            """,
+            (COMPLETED_STATUS, date_from, date_to),
+        ).fetchall()
+
+    known = set(known_sites)
+    return [
+        {"key": row["site_code"], "orders": row["orders"], "amount": round(row["amount"] or 0, 2)}
+        for row in rows
+        if row["site_code"] and row["site_code"] not in known
+    ]
+
+
+def list_unflagged_couriers(date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    """
+    Курьеры периода, похожие на службу доставки, но без флага такси-службы.
+
+    Появление нового агрегатора иначе выглядит как «доля такси упала»: заказы
+    ушли наружу, а показатель их не считает. Это тот же класс тихой потери, что
+    и переименование салона, — поэтому такие курьеры показываются человеку.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT o.courier_id, COALESCE(c.name, o.courier_name) AS name, COUNT(*) AS orders,
+                   MIN(o.delivery_date) AS since
+            FROM courier_orders o
+            LEFT JOIN couriers c ON c.id = o.courier_id
+            LEFT JOIN delivery_types d ON d.code = o.delivery_code
+            WHERE o.status = ? AND o.delivery_date >= ? AND o.delivery_date <= ?
+              AND o.courier_id IS NOT NULL
+              AND d.counts_as_courier = 1
+              AND COALESCE(c.is_external_taxi, 0) = 0
+              AND COALESCE(c.is_service, 0) = 1
+            GROUP BY o.courier_id, name
+            ORDER BY orders DESC
+            """,
+            (COMPLETED_STATUS, date_from, date_to),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_courier_taxi_flag(courier_id: int, is_taxi: bool) -> bool:
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE couriers SET is_external_taxi = ?, updated_at = datetime('now') WHERE id = ?",
+            (1 if is_taxi else 0, courier_id),
+        )
+    return bool(cur.rowcount)
+
+
+def list_delivery_types() -> List[Dict[str, Any]]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT code, name, counts_as_courier, active FROM delivery_types ORDER BY name, code"
+        ).fetchall()
+    return [
+        {"code": r["code"], "name": r["name"],
+         "counts_as_courier": bool(r["counts_as_courier"]), "active": bool(r["active"])}
+        for r in rows
+    ]
+
+
+def set_delivery_type_flag(code: str, counts_as_courier: bool) -> bool:
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE delivery_types SET counts_as_courier = ?, updated_at = datetime('now') "
+            "WHERE code = ?",
+            (1 if counts_as_courier else 0, code),
+        )
+    return bool(cur.rowcount)
+
+
+def upsert_delivery_types(types: List[Dict[str, Any]]) -> None:
+    """
+    Обновить справочник типов доставки из CRM.
+
+    counts_as_courier пишется только при первой встрече кода: выставленный руками
+    флаг синхронизация не перетирает (тот же принцип, что у is_service).
+    """
+    if not types:
+        return
+    with get_db() as conn:
+        conn.executemany(
+            """
+            INSERT INTO delivery_types (code, name, counts_as_courier, active, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(code) DO UPDATE SET
+                name = excluded.name,
+                active = excluded.active,
+                updated_at = datetime('now')
+            """,
+            [
+                (
+                    t["code"],
+                    t.get("name") or t["code"],
+                    1 if t["code"] in COURIER_DELIVERY_CODES else 0,
+                    1 if t.get("active", True) else 0,
+                )
+                for t in types
+                if t.get("code")
+            ],
+        )
 
 
 # ============================================================================
