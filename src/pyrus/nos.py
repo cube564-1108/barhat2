@@ -346,6 +346,39 @@ def list_salons(date_from: str, date_to: str) -> List[Dict]:
     return [{"key": r["salon"], "count": r["cnt"]} for r in rows if r["salon"]]
 
 
+def health_snapshot() -> Dict:
+    """Техническое состояние витрины для /health: счётчики и границы дат."""
+    conn = _connect()
+    try:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "nos_feedback" not in tables:
+            return {"table": False, "rows": 0}
+
+        row = conn.execute("""
+            SELECT COUNT(*) AS rows,
+                   SUM(CASE WHEN objectivity = ? THEN 1 ELSE 0 END) AS confirmed,
+                   SUM(CASE WHEN salon IS NULL OR salon = '' THEN 1 ELSE 0 END) AS no_salon,
+                   MIN(feedback_date) AS since, MAX(feedback_date) AS until
+            FROM nos_feedback WHERE form_id = ?
+        """, (OBJECTIVITY_CONFIRMED, NOS_FORM_ID)).fetchone()
+        raw = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM latest_tasks WHERE form_id = ?", (NOS_FORM_ID,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return {
+        "table": True,
+        "rows": row["rows"],
+        "confirmed": row["confirmed"] or 0,
+        "without_salon": row["no_salon"] or 0,
+        "since": row["since"],
+        "until": row["until"],
+        "raw_tasks": raw["cnt"] if raw else 0,
+    }
+
+
 def data_range() -> Dict[str, Optional[str]]:
     conn = _connect()
     try:

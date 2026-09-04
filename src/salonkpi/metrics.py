@@ -577,6 +577,76 @@ def salon_details(store_id: int, month: str) -> Dict[str, Any]:
     }
 
 
+def pipeline_health() -> Dict[str, Any]:
+    """
+    Состояние всех четырёх витрин раздела — для публичного /health.
+
+    Смысл: «показатели нулевые» снаружи выглядит одинаково и когда синк не
+    отработал, и когда миграция не прошла, и когда данные ещё грузятся. Консоли
+    у контейнера нет, логи недоступны, поэтому единственный способ различить эти
+    случаи, не заходя в интерфейс, — отдать техническое состояние отсюда.
+
+    Только счётчики, даты и статусы: сумм, выручки и названий салонов здесь нет,
+    ручка публичная.
+    """
+    result: Dict[str, Any] = {}
+
+    try:
+        from couriers import storage as couriers_storage
+        result["crm_orders"] = couriers_storage.health_snapshot()
+    except Exception as e:
+        result["crm_orders"] = {"error": f"{type(e).__name__}: {e}"}
+
+    try:
+        from pyrus import nos
+        result["nos"] = nos.health_snapshot()
+    except Exception as e:
+        result["nos"] = {"error": f"{type(e).__name__}: {e}"}
+
+    try:
+        from moysklad import warehouse
+        from moysklad.server import get_db as get_ms_db
+        result["warehouse"] = warehouse.health_snapshot(get_ms_db())
+    except Exception as e:
+        result["warehouse"] = {"error": f"{type(e).__name__}: {e}"}
+
+    try:
+        conn = storage.get_db()
+        try:
+            links = conn.execute(
+                "SELECT source, COUNT(*) AS cnt FROM salon_links GROUP BY source"
+            ).fetchall()
+            plans = conn.execute(
+                "SELECT month, COUNT(*) AS cnt FROM salon_plans GROUP BY month "
+                "ORDER BY month DESC LIMIT 3"
+            ).fetchall()
+        finally:
+            conn.close()
+        result["directory"] = {
+            "links": {r["source"]: r["cnt"] for r in links},
+            "plans": {r["month"]: r["cnt"] for r in plans},
+        }
+    except Exception as e:
+        result["directory"] = {"error": f"{type(e).__name__}: {e}"}
+
+    # Витрина качества своя, её наполняет синк формы 1327961
+    try:
+        from pyrus import quality
+        conn = quality._connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS rows, MIN(task_date) AS since, MAX(task_date) AS until "
+                "FROM quality_scores WHERE form_id = ?", (quality.QUALITY_FORM_ID,)
+            ).fetchone()
+        finally:
+            conn.close()
+        result["quality"] = {"rows": row["rows"], "since": row["since"], "until": row["until"]}
+    except Exception as e:
+        result["quality"] = {"error": f"{type(e).__name__}: {e}"}
+
+    return result
+
+
 def _freshness() -> Dict[str, Any]:
     """Когда данные обновлялись в последний раз и с какого числа они полны."""
     info: Dict[str, Any] = {}

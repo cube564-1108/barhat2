@@ -595,6 +595,65 @@ def aggregate_shipments(date_from: str, date_to: str) -> Dict[str, Dict[str, Any
     return result
 
 
+def health_snapshot() -> Dict[str, Any]:
+    """
+    Техническое состояние витрины для /health.
+
+    Нужно, чтобы состояние прода можно было проверить снаружи, не заходя в
+    интерфейс: консоли у контейнера нет, логи недоступны, а «показатели
+    нулевые» — это одинаково и «синк не отработал», и «миграция не прошла»,
+    и «данные ещё грузятся». Здесь только счётчики, даты и статусы: сумм и
+    названий не отдаём, ручка публичная.
+    """
+    with get_db() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(courier_orders)")}
+        # Колонки могло не быть: ALTER на старте воркера мог не пройти
+        has_new = {"total_summ", "order_method", "delivery_code"} <= columns
+
+        if has_new:
+            row = conn.execute("""
+                SELECT COUNT(*) AS rows,
+                       SUM(CASE WHEN total_summ > 0 THEN 1 ELSE 0 END) AS with_summ,
+                       SUM(CASE WHEN order_method IS NOT NULL THEN 1 ELSE 0 END) AS with_method,
+                       MIN(delivery_date) AS since, MAX(delivery_date) AS until
+                FROM courier_orders
+            """).fetchone()
+            data = {
+                "rows": row["rows"],
+                "with_summ": row["with_summ"] or 0,
+                "with_method": row["with_method"] or 0,
+                "since": row["since"],
+                "until": row["until"],
+            }
+        else:
+            row = conn.execute("SELECT COUNT(*) AS rows FROM courier_orders").fetchone()
+            data = {"rows": row["rows"]}
+
+        types_row = conn.execute(
+            "SELECT COUNT(*) AS total, SUM(counts_as_courier) AS courier FROM delivery_types"
+        ).fetchone()
+        taxi_row = conn.execute(
+            "SELECT SUM(COALESCE(is_external_taxi, 0)) AS taxi FROM couriers"
+        ).fetchone() if "is_external_taxi" in {
+            r[1] for r in conn.execute("PRAGMA table_info(couriers)")} else None
+
+    data["schema_migrated"] = has_new
+    data["delivery_types"] = types_row["total"] if types_row else 0
+    data["delivery_types_courier"] = (types_row["courier"] or 0) if types_row else 0
+    data["taxi_couriers"] = (taxi_row["taxi"] or 0) if taxi_row else None
+
+    last = get_latest_sync_log()
+    if last:
+        data["last_sync"] = {
+            "status": last.get("status"),
+            "started_at": last.get("started_at"),
+            "finished_at": last.get("finished_at"),
+            "records": last.get("records_count"),
+            "error": (last.get("error_message") or "")[:300] or None,
+        }
+    return data
+
+
 def shipments_data_range() -> Dict[str, Optional[str]]:
     """
     С какой даты в витрине заполнены поля показателей.

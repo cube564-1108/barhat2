@@ -352,6 +352,43 @@ def list_stores_with_flows(storage, date_from: str, date_to: str) -> List[Dict[s
     ]
 
 
+def health_snapshot(storage) -> Dict[str, Any]:
+    """Техническое состояние витрины движения товара для /health."""
+    with storage._get_connection() as conn:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "warehouse_flows" not in tables:
+            return {"table": False, "rows": 0}
+
+        row = conn.execute("""
+            SELECT COUNT(*) AS rows, COUNT(DISTINCT doc_id) AS docs,
+                   COUNT(DISTINCT store_id) AS stores,
+                   MIN(moment) AS since, MAX(moment) AS until
+            FROM warehouse_flows
+        """).fetchone()
+        groups = conn.execute(
+            "SELECT kind, COUNT(*) AS cnt FROM warehouse_groups GROUP BY kind"
+        ).fetchall() if "warehouse_groups" in tables else []
+        # Позиции, чья папка не отнесена ни к одной группе, в расчёт не идут —
+        # если их много, показатели занижены, и это видно только отсюда
+        unknown = conn.execute("""
+            SELECT COUNT(*) AS cnt FROM warehouse_flows f
+            LEFT JOIN warehouse_groups g ON g.folder_id = f.folder_id
+            WHERE g.folder_id IS NULL
+        """).fetchone() if "warehouse_groups" in tables else None
+
+    return {
+        "table": True,
+        "rows": row["rows"],
+        "documents": row["docs"],
+        "stores": row["stores"],
+        "since": row["since"],
+        "until": row["until"],
+        "groups": {r["kind"]: r["cnt"] for r in groups},
+        "rows_outside_groups": unknown["cnt"] if unknown else None,
+    }
+
+
 def data_range(storage) -> Dict[str, Optional[str]]:
     with storage._get_connection() as conn:
         row = conn.execute(

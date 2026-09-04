@@ -567,6 +567,16 @@ def health_check():
     except Exception as e:
         guarantees['one_open_shift_per_store'] = {'error': f'{type(e).__name__}: {e}'}
 
+    # Состояние витрин раздела «Показатели салонов». Нулевые показатели снаружи
+    # выглядят одинаково и когда синк не отработал, и когда миграция не прошла,
+    # и когда данные ещё грузятся — а консоли у контейнера нет. Здесь только
+    # счётчики, даты и статусы синков: сумм и названий салонов нет.
+    try:
+        from salonkpi.metrics import pipeline_health
+        pipelines = pipeline_health()
+    except Exception as e:
+        pipelines = {'error': f'{type(e).__name__}: {e}'}
+
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
@@ -575,6 +585,7 @@ def health_check():
         'attachments': attachments,
         'disk': _disk_free_info(),
         'guarantees': guarantees,
+        'pipelines': pipelines,
         'write_test': _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
     })
 
