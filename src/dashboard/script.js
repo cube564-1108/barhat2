@@ -200,6 +200,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (pageName === 'writeoffs' && window.WriteoffsModule) {
                 window.WriteoffsModule.onPageActivated(currentUser);
             }
+
+            // Активируем раздел показателей салонов
+            if (pageName === 'salon_kpi' && window.SalonKpiModule) {
+                window.SalonKpiModule.onPageActivated(currentUser);
+            }
         } else {
             // Если страницы нет, показываем заглушку
             const targetNav = document.querySelector(`.nav-item[data-page="${pageName}"]`);
@@ -257,6 +262,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'writeoffs': 'СПИСАНИЯ ТОВАРА',
             'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
             'courier_payouts': 'ОПЛАТА КУРЬЕРАМ',
+            'salon_kpi': 'ПОКАЗАТЕЛИ САЛОНОВ',
             'link_watch': 'ССЫЛКИ НА ТОВАРЫ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'

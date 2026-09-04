@@ -1,0 +1,245 @@
+/*
+ * Раздел «Показатели салонов».
+ *
+ * Свои токены --bx-* по DESIGN-SPEC.md: остальной дашборд написан на старом
+ * наборе --barkhat-*, переписывать его отдельной задачей не входит в модуль.
+ * Значения цветов те же, отличается только неймспейс и полнота набора.
+ *
+ * Всё внутри .page[data-page="salon_kpi"], чтобы стили не текли на соседние
+ * разделы одностраничного дашборда.
+ */
+
+.page[data-page="salon_kpi"] {
+  --bx-wine: #411330;
+  --bx-pink-deep: #B26FA1;
+  --bx-pink-wash: #F3E3EE;
+  --bx-bg: #faf4f9;
+  --bx-bg-2: #f5e8f3;
+  --bx-text: #3C3C3C;
+  --bx-text-2: #6F6F6F;
+  --bx-muted: #9b8f97;
+  --bx-border: #eee2ea;
+  --bx-scroll: #d1b8ce;
+  --bx-up: #0a7d3f;
+  --bx-down: #c0322f;
+  --bx-grad-header: linear-gradient(135deg, #411330 0%, #B26FA1 100%);
+  --bx-grad-accent: linear-gradient(135deg, #E1A4C9 0%, #B26FA1 100%);
+  --bx-r-lg: 8px;
+  --bx-r-xl: 12px;
+  --bx-r-2xl: 16px;
+  --bx-font-head: 'Vollkorn', Georgia, serif;
+  font-size: 14px;
+  color: var(--bx-text);
+}
+
+/* ---------- Шапка ---------- */
+.skpi-header {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  background: var(--bx-grad-header); color: #fff;
+  border-radius: var(--bx-r-2xl); padding: 24px 28px; margin-bottom: 16px;
+}
+.skpi-header__title { font-family: var(--bx-font-head); font-size: 26px; font-weight: 700; margin: 0; color: #fff; }
+.skpi-header__sub { color: rgba(255,255,255,.72); font-size: 13px; margin: 6px 0 0; }
+.skpi-header__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.skpi-btn-light { background: rgba(255,255,255,.16); color: #fff; border: none;
+  border-radius: var(--bx-r-xl); padding: 9px 14px; font-size: 13.5px; font-weight: 600;
+  cursor: pointer; font-family: inherit; }
+.skpi-btn-light:hover { background: rgba(255,255,255,.26); }
+@media (max-width: 768px) {
+  .skpi-header { flex-direction: column; padding: 18px; border-radius: var(--bx-r-xl); }
+  .skpi-header__title { font-size: 20px; }
+  .skpi-header__actions { width: 100%; }
+  .skpi-header__actions .skpi-btn-light { flex: 1; }
+}
+
+/* ---------- Фильтры ---------- */
+.skpi-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.skpi-select { padding: 9px 12px; border-radius: var(--bx-r-xl); border: 1px solid #e5e7eb;
+  font-size: 14px; font-family: inherit; background: #fff; color: var(--bx-text); min-width: 150px; }
+.skpi-tabs { display: inline-flex; gap: 4px; padding: 4px; border-radius: var(--bx-r-xl);
+  background: rgba(228,194,221,.2); }
+.skpi-tab { padding: 8px 14px; font-size: 13.5px; border-radius: var(--bx-r-lg); color: var(--bx-wine);
+  background: none; border: none; cursor: pointer; font-family: inherit; }
+.skpi-tab.is-active { background: var(--bx-wine); color: #fff; font-weight: 500; }
+@media (max-width: 768px) { .skpi-select { flex: 1 1 45%; min-width: 0; } }
+
+/* ---------- Плашки ---------- */
+.skpi-notice { display: flex; gap: 10px; align-items: flex-start; border-radius: var(--bx-r-xl);
+  padding: 11px 14px; font-size: 13px; margin-bottom: 10px; line-height: 1.5; }
+.skpi-notice--warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+.skpi-notice--info { background: #fff; border: 1px solid var(--bx-border); color: var(--bx-text-2); }
+.skpi-notice__act { margin-left: auto; flex: 0 0 auto; }
+.skpi-notice svg { flex: 0 0 auto; margin-top: 1px; }
+@media (max-width: 640px) {
+  .skpi-notice { flex-wrap: wrap; }
+  .skpi-notice__act { margin-left: 0; width: 100%; }
+}
+
+/* ---------- Итог месяца ---------- */
+.skpi-summary { background: #fff; border: 1px solid var(--bx-border); border-radius: var(--bx-r-2xl);
+  padding: 18px 20px; margin-bottom: 12px; display: flex; gap: 16px; align-items: flex-start; }
+.skpi-summary__mark { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bx-pink-wash); color: var(--bx-wine); }
+.skpi-summary__text { font-size: 15px; line-height: 1.55; }
+.skpi-summary__text b { color: var(--bx-wine); }
+.skpi-summary__meta { font-size: 12px; color: var(--bx-muted); margin-top: 6px; }
+
+/* ---------- KPI ---------- */
+.skpi-kpis { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(214px, 1fr));
+  margin-bottom: 14px; }
+@media (max-width: 520px) { .skpi-kpis { grid-template-columns: 1fr; gap: 8px; } }
+.skpi-kpi { position: relative; padding: 16px; border: 1px solid var(--bx-border); background: #fff;
+  border-radius: var(--bx-r-2xl); display: flex; flex-direction: column; }
+.skpi-kpi--flag { border-color: #fde68a; background: #fffdf7; }
+.skpi-kpi__label { font-size: 11.5px; color: var(--bx-muted); text-transform: uppercase;
+  letter-spacing: .03em; line-height: 1.2; padding-right: 26px; }
+.skpi-kpi__value { font-weight: 700; font-size: 27px; color: var(--bx-wine); margin: 6px 0 2px;
+  line-height: 1; font-variant-numeric: tabular-nums lining-nums; letter-spacing: -.01em; }
+.skpi-kpi__unit { font-size: 13px; color: var(--bx-text-2); font-weight: 500; margin-left: 4px; }
+.skpi-kpi__mean { font-size: 13px; color: var(--bx-text); margin-top: 2px; }
+.skpi-kpi__sub { font-size: 12px; color: var(--bx-muted); margin-top: 3px; }
+.skpi-kpi__info { position: absolute; top: 12px; right: 12px; width: 22px; height: 22px;
+  border-radius: 50%; border: 1px solid var(--bx-border); background: #fff; color: var(--bx-muted);
+  cursor: pointer; font-size: 11px; font-weight: 600; line-height: 1; display: flex;
+  align-items: center; justify-content: center; padding: 0; font-family: inherit; }
+.skpi-kpi__info:hover { border-color: var(--bx-pink-deep); color: var(--bx-wine); }
+.skpi-kpi__how { display: none; font-size: 12px; color: var(--bx-text-2); background: var(--bx-bg);
+  border-radius: var(--bx-r-lg); padding: 9px 11px; margin-top: 10px; line-height: 1.5; }
+.skpi-kpi__how.is-open { display: block; }
+.skpi-delta { font-size: 12.5px; font-weight: 600; display: inline-flex; align-items: center;
+  gap: 5px; margin-top: 4px; }
+.skpi-delta--up { color: var(--bx-up); }
+.skpi-delta--down { color: var(--bx-down); }
+.skpi-delta--flat { color: var(--bx-muted); }
+.skpi-delta__vs { color: var(--bx-muted); font-weight: 400; }
+.skpi-bar { height: 7px; border-radius: 4px; background: var(--bx-pink-wash); overflow: hidden;
+  margin: 9px 0 3px; }
+.skpi-bar__fill { height: 100%; border-radius: 4px; background: var(--bx-grad-accent); }
+.skpi-bar__fill--low { background: linear-gradient(135deg, #f0b3b2 0%, #c0322f 100%); }
+.skpi-bar__pace { position: relative; height: 0; }
+.skpi-pace-mark { position: absolute; top: -10px; width: 2px; height: 7px; background: var(--bx-wine);
+  opacity: .55; }
+
+/* ---------- Список салонов ---------- */
+.skpi-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  margin: 22px 2px 10px; }
+.skpi-section-head h3 { font-family: var(--bx-font-head); font-size: 18px; color: var(--bx-wine);
+  margin: 0; font-weight: 700; }
+.skpi-section-head span { font-size: 12.5px; color: var(--bx-muted); }
+.skpi-rows { background: #fff; border: 1px solid var(--bx-border); border-radius: var(--bx-r-2xl);
+  overflow: hidden; box-shadow: 0 1px 2px rgba(65,19,48,.04); }
+.skpi-row-head, .skpi-row { display: grid;
+  grid-template-columns: minmax(170px, 1.7fr) 1.1fr .7fr .7fr .9fr .9fr 1fr .7fr .9fr 26px;
+  gap: 10px; align-items: center; padding: 13px 16px; font-size: 13.5px; }
+.skpi-row-head { background: linear-gradient(180deg, #fdf8fc 0%, #faf5f9 100%); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--bx-muted); font-weight: 600;
+  border-bottom: 1px solid var(--bx-border); }
+/* font: inherit не переносит text-transform — без этого шапка была вразнобой */
+.skpi-row-head button { background: none; border: none; font: inherit; color: inherit; cursor: pointer;
+  padding: 0; text-align: inherit; text-transform: inherit; letter-spacing: inherit; }
+.skpi-row-head button:hover { color: var(--bx-wine); }
+/* .skpi-row — это <button>: собственную рамку браузера снимаем явно, иначе она
+   рисуется поверх разделителей и строки выглядят как отдельные коробки */
+.skpi-row { border: none; border-top: 1px solid var(--bx-border); cursor: pointer; background: #fff;
+  width: 100%; text-align: left; font-family: inherit; color: inherit; appearance: none;
+  -webkit-appearance: none; }
+.skpi-row:first-of-type { border-top: none; }
+.skpi-row:hover, .skpi-row.is-open { background: #fdf9fc; }
+.skpi-row__name { font-weight: 600; color: var(--bx-wine); font-size: 14.5px; line-height: 1.3; }
+.skpi-row__city { font-size: 12px; color: var(--bx-muted); font-weight: 400; margin-top: 2px; }
+.skpi-row__num { font-variant-numeric: tabular-nums lining-nums; font-weight: 600; line-height: 1.25;
+  display: block; }
+.skpi-row__num small { display: block; font-weight: 400; font-size: 11.5px; color: var(--bx-muted);
+  margin-top: 2px; }
+.skpi-row__num--bad { color: var(--bx-down); }
+.skpi-row-head > :not(:first-child),
+.skpi-row > :not(:first-child):not(.skpi-row__chev) { text-align: right; }
+.skpi-row__chev { justify-self: end; color: var(--bx-scroll); line-height: 0; }
+.skpi-row.is-open .skpi-row__chev { transform: rotate(180deg); color: var(--bx-wine); }
+.skpi-cell-label { display: none; }
+.skpi-badge { display: inline-block; border-radius: 9999px; padding: 2px 10px; font-size: 11px;
+  font-weight: 500; white-space: nowrap; }
+.skpi-badge--ok { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.skpi-badge--warn { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+.skpi-badge--neutral { background: rgba(0,0,0,.05); color: #6F6F6F; }
+
+/* На среднем экране восемь колонок не помещаются — строки становятся карточками */
+@media (max-width: 1180px) {
+  .skpi-row-head { display: none; }
+  .skpi-rows { background: none; border: none; border-radius: 0; box-shadow: none; overflow: visible; }
+  .skpi-row { position: relative; grid-template-columns: 1fr 1fr; gap: 12px; background: #fff;
+    border: 1px solid var(--bx-border); border-radius: var(--bx-r-2xl); margin-bottom: 8px; padding: 16px; }
+  .skpi-row:first-of-type { border-top: 1px solid var(--bx-border); }
+  .skpi-row.is-open { margin-bottom: 0; border-radius: var(--bx-r-2xl) var(--bx-r-2xl) 0 0;
+    border-bottom: none; }
+  .skpi-row__name { grid-column: 1 / -1; font-size: 16px; padding-right: 28px; }
+  .skpi-row__chev { position: absolute; right: 16px; top: 16px; }
+  .skpi-row-head > :not(:first-child),
+  .skpi-row > :not(:first-child):not(.skpi-row__chev) { text-align: left; }
+  .skpi-cell-label { display: block; font-size: 10.5px; color: var(--bx-muted);
+    text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+  .skpi-row__num { font-size: 15.5px; }
+}
+
+/* ---------- Детали ---------- */
+.skpi-details { background: linear-gradient(180deg, #fbf6fa 0%, var(--bx-bg) 100%);
+  border-top: 1px solid var(--bx-border); padding: 16px 20px; }
+.skpi-details__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px; }
+@media (max-width: 1180px) {
+  .skpi-details { border: 1px solid var(--bx-border); border-top: none;
+    border-radius: 0 0 var(--bx-r-2xl) var(--bx-r-2xl); margin: 0 0 8px; padding: 14px; }
+}
+@media (max-width: 640px) { .skpi-details__grid { grid-template-columns: 1fr; } }
+.skpi-dcard { background: #fff; border: 1px solid var(--bx-border); border-radius: var(--bx-r-xl);
+  padding: 14px; }
+.skpi-dcard h4 { font-family: var(--bx-font-head); font-size: 14px; color: var(--bx-wine);
+  margin: 0 0 10px; font-weight: 700; }
+.skpi-dlist { display: flex; flex-direction: column; gap: 7px; }
+.skpi-dline { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.skpi-dline--stack { align-items: flex-start; }
+.skpi-dline__name { flex: 1 1 auto; min-width: 0; }
+.skpi-dline__name small { display: block; font-size: 11.5px; color: var(--bx-muted);
+  font-variant-numeric: tabular-nums; margin-top: 1px; }
+.skpi-dline__val { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--bx-wine); }
+.skpi-dbar { height: 6px; border-radius: 3px; background: var(--bx-pink-wash); overflow: hidden;
+  flex: 0 0 76px; }
+.skpi-dbar__fill { height: 100%; background: var(--bx-grad-accent); }
+.skpi-dempty { font-size: 13px; color: var(--bx-muted); }
+.skpi-dnote { font-size: 11.5px; color: var(--bx-muted); margin-top: 9px; line-height: 1.45; }
+
+/* ---------- Пустые состояния ---------- */
+.skpi-empty { background: #fff; border: 1px solid var(--bx-border); border-radius: var(--bx-r-2xl);
+  padding: 32px; text-align: center; }
+.skpi-empty h3 { font-family: var(--bx-font-head); font-size: 17px; color: var(--bx-wine);
+  margin: 0 0 8px; }
+.skpi-empty p { color: var(--bx-text-2); font-size: 13.5px; margin: 0 auto; max-width: 520px; line-height: 1.5; }
+
+/* ---------- Модалки ---------- */
+.skpi-modal-body { padding: 4px 2px; }
+.skpi-hint { font-size: 12.5px; color: var(--bx-text-2); background: var(--bx-bg);
+  border-radius: var(--bx-r-lg); padding: 10px 12px; margin-bottom: 14px; line-height: 1.5; }
+.skpi-plan-row { display: grid; grid-template-columns: 1fr 170px; gap: 10px; align-items: center;
+  padding: 9px 0; border-bottom: 1px solid var(--bx-border); }
+.skpi-plan-row:last-child { border-bottom: none; }
+.skpi-plan-row__fact { font-size: 12px; color: var(--bx-muted); }
+.skpi-input { width: 100%; padding: 9px 12px; border-radius: var(--bx-r-xl); border: 1px solid #e5e7eb;
+  font-size: 14px; font-family: inherit; background: #fff; color: var(--bx-text); }
+.skpi-input:focus { outline: none; border-color: var(--bx-pink-deep);
+  box-shadow: 0 0 0 3px rgba(178,111,161,.15); }
+.skpi-map-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+  padding: 11px 0; border-bottom: 1px solid var(--bx-border); }
+.skpi-map-row:last-child { border-bottom: none; }
+.skpi-map-row__key { font-weight: 600; color: var(--bx-wine); font-size: 14px; }
+.skpi-map-row__meta { font-size: 12px; color: var(--bx-muted); margin-top: 2px; }
+.skpi-map-row__act { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.skpi-map-row__act .skpi-select { min-width: 190px; }
+@media (max-width: 640px) {
+  .skpi-plan-row { grid-template-columns: 1fr; gap: 6px; }
+  .skpi-map-row { grid-template-columns: 1fr; }
+  .skpi-map-row__act { width: 100%; }
+  .skpi-map-row__act .skpi-select { flex: 1; }
+}
+.skpi-suggest { background: rgba(228,194,221,.4); color: #411330; border-radius: 9999px;
+  padding: 2px 10px; font-size: 11px; }

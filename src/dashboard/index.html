@@ -13,6 +13,7 @@
     <!-- Стили раздела «Согласование счетов» на токенах --bx-* (DESIGN-SPEC.md).
          Все правила внутри скоуплены под .iv2 — на остальной дашборд не влияют. -->
     <link rel="stylesheet" href="/invoices-v2.css">
+    <link rel="stylesheet" href="/salon-kpi.css">
     <!-- chart.js — со своего домена, не с jsdelivr: чужой CDN означал лишние
          DNS + TLS перед первой отрисовкой и зависимость от его доступности.
          defer у всех скриптов: качаются параллельно с разбором страницы,
@@ -116,6 +117,14 @@
                             <line x1="6" y1="20" x2="6" y2="14"/>
                         </svg>
                         <span>ABC-анализ товаров</span>
+                    </a>
+                    <a href="/salon-kpi" class="nav-item" data-page="salon_kpi">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M3 3v18h18"/>
+                            <path d="M7 14l4-4 3 3 5-6"/>
+                        </svg>
+                        <span>Показатели салонов</span>
                     </a>
                     <a href="/courier-payouts" class="nav-item" data-page="courier_payouts">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
@@ -901,6 +910,12 @@
                             </div>
                         </div>
                     </section>
+                </div>
+
+                <!-- Показатели салонов: раздел рисуется целиком из salon-kpi.js,
+                     поэтому в разметке только контейнер -->
+                <div class="page" data-page="salon_kpi">
+                    <div id="salonKpiContent"></div>
                 </div>
 
                 <!-- Оплата курьерам -->
@@ -2315,6 +2330,7 @@
     <script defer src="/abc-analysis.js"></script>
     <script defer src="/tasks.js"></script>
     <script defer src="/writeoffs.js"></script>
+    <script defer src="/salon-kpi.js"></script>
     <script defer src="/courier-payouts.js"></script>
     <script defer src="/invoices-v2.js"></script>
     <script defer src="/link-watch.js"></script>

@@ -965,6 +965,19 @@ def courier_payouts_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/salon-kpi')
+def salon_kpi_page():
+    """Страница показателей салонов"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return _serve_dashboard_shell()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /salon-kpi: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 @app.route('/link-watch')
 def link_watch_page():
     """Страница сторожа ссылок на товары"""
@@ -1061,6 +1074,18 @@ def serve_feedback():
 def serve_courier_payouts():
     """Отдаёт скрипт раздела оплаты курьерам"""
     return send_from_directory(DASHBOARD_DIR, 'courier-payouts.js')
+
+
+@app.route('/salon-kpi.js')
+def serve_salon_kpi_js():
+    """Отдаёт скрипт раздела показателей салонов"""
+    return send_from_directory(DASHBOARD_DIR, 'salon-kpi.js')
+
+
+@app.route('/salon-kpi.css')
+def serve_salon_kpi_css():
+    """Отдаёт стили раздела показателей салонов (токены --bx-* по DESIGN-SPEC)"""
+    return send_from_directory(DASHBOARD_DIR, 'salon-kpi.css')
 
 @app.route('/link-watch.js')
 def serve_link_watch():

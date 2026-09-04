@@ -26,6 +26,7 @@
         'writeoffs': 'Списания товара',
         'abc_analysis': 'ABC-анализ товаров',
         'courier_payouts': 'Оплата курьерам',
+        'salon_kpi': 'Показатели салонов',
         'link_watch': 'Ссылки на товары',
         'users_manage': 'Управление пользователями'
     };
@@ -34,8 +35,8 @@
     const ROLE_PERMISSIONS = {
         // invoices_v2 — основной раздел счетов; invoices (старый) остаётся в
         // пресетах, но пункт меню виден только админу (см. ROLE_SECTIONS в src/auth.py)
-        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'abc_analysis', 'courier_payouts', 'link_watch', 'users_manage'],
-        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'courier_payouts'],
+        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'abc_analysis', 'courier_payouts', 'salon_kpi', 'link_watch', 'users_manage'],
+        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'courier_payouts', 'salon_kpi'],
         'florist': ['cash_shifts', 'writeoffs'],
         'florist_analyst': ['quality']
     };
