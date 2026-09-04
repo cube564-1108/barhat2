@@ -996,17 +996,25 @@
             </div>`;
     }
 
-    /** Название значения по справочнику; неизвестное показываем как есть. */
-    function refName(f, value) {
-        const item = (state.refs[f.ref] || []).find(x => String(x.id) === String(value));
-        return item ? item.name : String(value);
+    /**
+     * Название значения фильтра по его справочнику; неизвестное показываем
+     * как есть (id лучше пустоты: по нему хотя бы видно, что фильтр стоит).
+     *
+     * Отдельное имя, а не второй `refName`: раньше функций с этим именем в
+     * файле было две, и объявленная ниже молча перекрывала эту — вызовы
+     * отсюда уходили в неё с объектом вместо ключа справочника, и все
+     * названия в тегах, на кнопке мультивыбора и в чипах активных фильтров
+     * выводились пустыми.
+     */
+    function filterValueName(f, value) {
+        return refName(f.ref, value) || String(value);
     }
 
     /** Что написано на кнопке свёрнутого мультивыбора. */
     function multiSelectLabel(f) {
         const chosen = filterValues(f.key);
         if (!chosen.length) return f.any;
-        if (chosen.length <= MULTI_LABEL_LIMIT) return chosen.map(v => refName(f, v)).join(', ');
+        if (chosen.length <= MULTI_LABEL_LIMIT) return chosen.map(v => filterValueName(f, v)).join(', ');
         return 'Выбрано ' + chosen.length;
     }
 
@@ -1025,9 +1033,9 @@
      */
     function multiSelectTagsHtml(f) {
         return filterValues(f.key).map(value => `
-            <span class="iv2-ms__tag">${escapeHtml(refName(f, value))}
+            <span class="iv2-ms__tag">${escapeHtml(filterValueName(f, value))}
                 <button type="button" data-ms-untag="${escapeHtml(value)}"
-                        aria-label="Убрать ${escapeHtml(refName(f, value))}">
+                        aria-label="Убрать ${escapeHtml(filterValueName(f, value))}">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                          stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                 </button>
@@ -1330,7 +1338,7 @@
         if (f.type === 'select') {
             // В чипе названия важнее краткости: он и есть ответ на вопрос
             // «почему видно именно это». Сворачиваем только длинный хвост.
-            const names = filterValues(f.key).map(value => refName(f, value));
+            const names = filterValues(f.key).map(value => filterValueName(f, value));
             if (names.length <= MULTI_LABEL_LIMIT) return names.join(', ');
             const head = names.slice(0, MULTI_LABEL_LIMIT).join(', ');
             return `${head} и ещё ${names.length - MULTI_LABEL_LIMIT}`;
