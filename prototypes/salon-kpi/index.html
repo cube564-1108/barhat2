@@ -145,48 +145,72 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
 .section-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:22px 2px 10px}
 .section-head h2{font-size:18px}
 .section-head__hint{font-size:12.5px;color:var(--bx-muted)}
-.rows{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);overflow:hidden}
-.row-head,.row{display:grid;grid-template-columns:minmax(190px,2fr) 1.5fr 1fr 1fr 1fr 1fr 34px;
-  gap:12px;align-items:center;padding:12px 16px}
-.row-head{background:#faf5f9;font-size:11.5px;text-transform:uppercase;letter-spacing:.03em;
-  color:var(--bx-muted);font-weight:600;border-bottom:1px solid var(--bx-border)}
-.row-head button{background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;text-align:left}
+.rows{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);overflow:hidden;
+  box-shadow:0 1px 2px rgba(65,19,48,.04)}
+.row-head,.row{display:grid;grid-template-columns:minmax(200px,2.2fr) 1.4fr 1fr 1fr .9fr 1.1fr 30px;
+  gap:14px;align-items:center;padding:13px 20px}
+.row-head{background:linear-gradient(180deg,#fdf8fc 0%,#faf5f9 100%);font-size:11px;
+  text-transform:uppercase;letter-spacing:.04em;color:var(--bx-muted);font-weight:600;
+  border-bottom:1px solid var(--bx-border)}
+/* font:inherit не переносит text-transform — без этого часть заголовков шла не капсом */
+.row-head button{background:none;border:none;font:inherit;color:inherit;cursor:pointer;padding:0;
+  text-align:inherit;text-transform:inherit;letter-spacing:inherit;display:inline-flex;align-items:center;gap:4px}
 .row-head button:hover{color:var(--bx-wine)}
-.row{border-bottom:1px solid var(--bx-border);cursor:pointer;background:#fff;width:100%;text-align:left;font:inherit}
-.row:last-of-type{border-bottom:none}
-.row:hover{background:#fdfafc}
-.row__name{font-weight:600;color:var(--bx-wine)}
-.row__city{font-size:12px;color:var(--bx-muted);font-weight:400}
-.row__num{font-variant-numeric:tabular-nums;font-weight:600}
-.row__num small{display:block;font-weight:400;font-size:11.5px;color:var(--bx-muted)}
-.row__chev{justify-self:end;color:var(--bx-muted);transition:transform .2s}
-.row__chev--open{transform:rotate(180deg)}
+.row-head button[data-active]{color:var(--bx-wine)}
+/* .row — это <button>: собственную рамку браузера нужно снять явно, иначе поверх
+   разделителей рисуется вторая линия (было видно как двойное обрамление строк) */
+.row{border:none;border-top:1px solid var(--bx-border);cursor:pointer;background:#fff;width:100%;
+  text-align:left;font:inherit;color:inherit;appearance:none;-webkit-appearance:none;
+  transition:background .15s}
+.row:first-of-type{border-top:none}
+.row:hover{background:#fdf9fc}
+.row--open{background:#fdf9fc}
+.row__name{font-weight:600;color:var(--bx-wine);font-size:14.5px;line-height:1.3}
+.row__city{font-size:12px;color:var(--bx-muted);font-weight:400;margin-top:2px}
+.row__num{font-variant-numeric:tabular-nums lining-nums;font-weight:600;color:var(--bx-text);
+  line-height:1.25;display:block}
+.row__num small{display:block;font-weight:400;font-size:11.5px;color:var(--bx-muted);margin-top:2px}
+/* Числа выравниваем по правому краю — так столбец читается сверху вниз без спотыканий */
+.row-head > :not(:first-child),.row > :not(:first-child):not(.row__chev){text-align:right}
+.row__chev{justify-self:end;color:var(--bx-scroll);transition:transform .2s,color .15s;line-height:0}
+.row:hover .row__chev{color:var(--bx-pink-deep)}
+.row__chev--open{transform:rotate(180deg);color:var(--bx-wine)}
 .cell-label{display:none}
 
 /* мобильный вид: строки становятся карточками */
 @media(max-width:900px){
   .row-head{display:none}
-  .rows{background:none;border:none;border-radius:0}
-  .row{grid-template-columns:1fr 1fr;gap:10px 12px;background:#fff;border:1px solid var(--bx-border);
-    border-radius:var(--bx-r-2xl);margin-bottom:8px;padding:14px}
-  .row:last-of-type{border-bottom:1px solid var(--bx-border)}
-  .row__name{grid-column:1 / -1;font-size:15px}
-  .row__chev{position:absolute;right:14px;top:14px}
-  .row{position:relative}
-  .cell-label{display:block;font-size:11px;color:var(--bx-muted);text-transform:uppercase;letter-spacing:.03em}
-  .row__num{font-size:15px}
+  .rows{background:none;border:none;border-radius:0;box-shadow:none;overflow:visible}
+  .row{position:relative;grid-template-columns:1fr 1fr;gap:12px;background:#fff;
+    border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);margin-bottom:8px;padding:16px}
+  .row:first-of-type{border-top:1px solid var(--bx-border)}
+  .row--open{margin-bottom:0;border-radius:var(--bx-r-2xl) var(--bx-r-2xl) 0 0;border-bottom:none}
+  .row__name{grid-column:1 / -1;font-size:16px;padding-right:28px}
+  .row__chev{position:absolute;right:16px;top:16px}
+  .row-head > :not(:first-child),.row > :not(:first-child):not(.row__chev){text-align:left}
+  .cell-label{display:block;font-size:10.5px;color:var(--bx-muted);text-transform:uppercase;
+    letter-spacing:.04em;margin-bottom:3px}
+  .row__num{font-size:15.5px}
 }
 
 /* ---------- Детали салона ---------- */
-.details{background:var(--bx-bg);border-bottom:1px solid var(--bx-border);padding:16px}
+.details{background:linear-gradient(180deg,#fbf6fa 0%,var(--bx-bg) 100%);
+  border-top:1px solid var(--bx-border);padding:16px 20px}
 .details__grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-@media(max-width:900px){.details{border-radius:var(--bx-r-2xl);border:1px solid var(--bx-border);margin:-4px 0 8px}
+@media(max-width:900px){
+  .details{border:1px solid var(--bx-border);border-top:none;
+    border-radius:0 0 var(--bx-r-2xl) var(--bx-r-2xl);margin:0 0 8px;padding:14px}
   .details__grid{grid-template-columns:1fr}}
 .dcard{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-xl);padding:14px}
 .dcard h4{font-size:14px;margin-bottom:10px}
 .dlist{display:flex;flex-direction:column;gap:7px}
 .dline{display:flex;align-items:center;gap:8px;font-size:13px}
 .dline__name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dline--stack{align-items:flex-start}
+.dline--stack .dline__name{white-space:normal}
+.dline__name small{display:block;font-size:11.5px;color:var(--bx-muted);
+  font-variant-numeric:tabular-nums;margin-top:1px}
+.dline--stack .dbar,.dline--stack .dline__val{margin-top:4px}
 .dline__val{font-variant-numeric:tabular-nums;font-weight:600;color:var(--bx-wine)}
 .dbar{height:6px;border-radius:3px;background:var(--bx-pink-wash);overflow:hidden;flex:0 0 76px}
 .dbar__fill{height:100%;background:var(--bx-grad-accent)}
@@ -364,120 +388,130 @@ const MONTHS = {
   '2026-08': {label:'Август 2026',   days:31, passed:31, asOf:'1 сентября, 03:10', running:false}
 };
 
-const FLORISTS = ['Флорист 3','Флорист 4','Флорист 9','Флорист 12','Флорист 6'];
-
 // fact — отгружено; prevToDate — сколько было в прошлом месяце НА ЭТУ ЖЕ ДАТУ
 // (сравнивать неполный месяц с полным прошлым бессмысленно);
 // courierOrders/taxiOrders — заказы с типом «Доставка курьером» и из них отданные такси-службам.
+//
+// Качество: у видов заказа РАЗНЫЙ максимум — 14 баллов (клубничный и цветочный букет,
+// коробочка, боксы) и 18 баллов (комбинированные: клубнично-цветочный букет, коробочка
+// с букетом, цветочно-клубничный бокс). Средний балл между ними не усредняется — это
+// разные шкалы. Поэтому храним пару {a14,c14,a18,c18}, а сравнимая величина —
+// процент от максимума: (сумма баллов) / (сумма максимумов).
 const SALONS = [
   {id:1, name:'НСК Восход, 3', city:'Новосибирск', data:{
     '2026-09':{plan:2600000, fact:348200, prevToDate:321500, street:63400, nosOk:2, nosReview:3,
-      nosCats:[['Доставка',1],['Цветок',1]], qAvg:13.2, qPct:94.3, qCount:11, qPrev:13.0,
+      nosCats:[['Доставка',1],['Цветок',1]], q:{a14:13.3, c14:8, a18:16.4, c18:3},
       courierOrders:92, taxiOrders:57,
-      florists:[['Флорист 3',13.4,5],['Флорист 4',13.0,4],['Флорист 9',12.6,2]],
+      florists:[{n:'Флорист 3',a14:13.6,c14:4,a18:16.5,c18:1},{n:'Флорист 4',a14:13.0,c14:3,a18:16.2,c18:1},
+                {n:'Флорист 9',a14:12.9,c14:1,a18:16.4,c18:1}],
       channels:[['Заказ с сайта',118400],['Яндекс Еда',92100],['Улица',63400],['По телефону',41800],['Flowwow',32500]]},
     '2026-08':{plan:2400000, fact:2471000, prevToDate:2190000, street:452000, nosOk:6, nosReview:7,
-      nosCats:[['Доставка',3],['Цветок',2],['Сервис',1]], qAvg:13.0, qPct:92.9, qCount:73, qPrev:12.8,
+      nosCats:[['Доставка',3],['Цветок',2],['Сервис',1]], q:{a14:13.1, c14:55, a18:16.2, c18:18},
       courierOrders:690, taxiOrders:430,
-      florists:[['Флорист 3',13.2,28],['Флорист 4',12.9,25],['Флорист 9',12.7,12],['Флорист 12',12.4,8]],
+      florists:[{n:'Флорист 3',a14:13.3,c14:22,a18:16.5,c18:6},{n:'Флорист 4',a14:12.9,c14:19,a18:16.0,c18:6},
+                {n:'Флорист 9',a14:12.8,c14:9,a18:16.1,c18:3},{n:'Флорист 12',a14:12.6,c14:5,a18:15.8,c18:3}],
       channels:[['Заказ с сайта',812000],['Яндекс Еда',640000],['Улица',452000],['По телефону',310000],['Flowwow',257000]]}}},
 
   {id:2, name:'НСК Блюхера, 61', city:'Новосибирск', data:{
     '2026-09':{plan:1900000, fact:198600, prevToDate:242300, street:31200, nosOk:1, nosReview:1,
-      nosCats:[['Сборка букета',1]], qAvg:12.4, qPct:88.6, qCount:8, qPrev:12.9,
+      nosCats:[['Сборка букета',1]], q:{a14:12.5, c14:6, a18:15.6, c18:2},
       courierOrders:64, taxiOrders:41,
-      florists:[['Флорист 6',12.8,4],['Флорист 12',12.0,4]],
+      florists:[{n:'Флорист 6',a14:12.9,c14:3,a18:16.0,c18:1},{n:'Флорист 12',a14:12.1,c14:3,a18:15.2,c18:1}],
       channels:[['Яндекс Еда',68300],['Заказ с сайта',54100],['Улица',31200],['Flowwow',26400],['По телефону',18600]]},
     '2026-08':{plan:1850000, fact:1846000, prevToDate:1712000, street:295000, nosOk:2, nosReview:2,
-      nosCats:[['Сборка букета',1],['Ягода',1]], qAvg:12.9, qPct:92.1, qCount:64, qPrev:12.7,
+      nosCats:[['Сборка букета',1],['Ягода',1]], q:{a14:12.9, c14:48, a18:16.1, c18:16},
       courierOrders:512, taxiOrders:330,
-      florists:[['Флорист 6',13.1,30],['Флорист 12',12.6,26],['Флорист 3',12.8,8]],
+      florists:[{n:'Флорист 6',a14:13.1,c14:25,a18:16.3,c18:8},{n:'Флорист 12',a14:12.7,c14:23,a18:15.9,c18:8}],
       channels:[['Яндекс Еда',612000],['Заказ с сайта',498000],['Улица',295000],['Flowwow',241000],['По телефону',200000]]}}},
 
   {id:9, name:'НСК Железнодорожная, 15/1', city:'Новосибирск', data:{
     '2026-09':{plan:2100000, fact:264800, prevToDate:238900, street:52700, nosOk:2, nosReview:2,
-      nosCats:[['Доставка',2]], qAvg:13.0, qPct:92.9, qCount:9, qPrev:12.6,
+      nosCats:[['Доставка',2]], q:{a14:13.0, c14:7, a18:16.1, c18:2},
       courierOrders:71, taxiOrders:52,
-      florists:[['Флорист 4',13.2,5],['Флорист 9',12.7,4]],
+      florists:[{n:'Флорист 4',a14:13.2,c14:4,a18:16.3,c18:1},{n:'Флорист 9',a14:12.7,c14:3,a18:15.9,c18:1}],
       channels:[['Заказ с сайта',88600],['Яндекс Еда',64200],['Улица',52700],['Flowwow',33100],['По телефону',26200]]},
     '2026-08':{plan:2000000, fact:1978000, prevToDate:1834000, street:381000, nosOk:5, nosReview:4,
-      nosCats:[['Доставка',3],['Сервис',2]], qAvg:12.6, qPct:90.0, qCount:66, qPrev:12.5,
+      nosCats:[['Доставка',3],['Сервис',2]], q:{a14:12.7, c14:50, a18:15.8, c18:16},
       courierOrders:548, taxiOrders:392,
-      florists:[['Флорист 4',12.8,31],['Флорист 9',12.4,27],['Флорист 6',12.6,8]],
+      florists:[{n:'Флорист 4',a14:12.9,c14:26,a18:16.0,c18:8},{n:'Флорист 9',a14:12.5,c14:24,a18:15.6,c18:8}],
       channels:[['Заказ с сайта',655000],['Яндекс Еда',498000],['Улица',381000],['Flowwow',252000],['По телефону',192000]]}}},
 
   {id:4, name:'ЕКБ Бажова', city:'Екатеринбург', data:{
     '2026-09':{plan:3200000, fact:452100, prevToDate:398700, street:71300, nosOk:9, nosReview:12,
-      nosCats:[['Доставка',5],['Цветок',2],['Ягода',2]], qAvg:13.4, qPct:95.7, qCount:14, qPrev:13.1,
+      nosCats:[['Доставка',5],['Цветок',2],['Ягода',2]], q:{a14:13.5, c14:10, a18:17.0, c18:4},
       courierOrders:118, taxiOrders:79,
-      florists:[['Флорист 3',13.6,6],['Флорист 4',13.3,5],['Флорист 12',13.0,3]],
+      florists:[{n:'Флорист 3',a14:13.7,c14:4,a18:17.2,c18:2},{n:'Флорист 4',a14:13.4,c14:4,a18:16.9,c18:1},
+                {n:'Флорист 12',a14:13.1,c14:2,a18:16.8,c18:1}],
       channels:[['Яндекс Еда',146200],['Заказ с сайта',121400],['Flowwow',78900],['Улица',71300],['По телефону',34300]]},
     '2026-08':{plan:3000000, fact:3082000, prevToDate:2740000, street:521000, nosOk:22, nosReview:16,
-      nosCats:[['Доставка',11],['Цветок',5],['Ягода',4],['Сервис',2]], qAvg:13.1, qPct:93.6, qCount:90, qPrev:12.9,
+      nosCats:[['Доставка',11],['Цветок',5],['Ягода',4],['Сервис',2]], q:{a14:13.2, c14:68, a18:16.7, c18:22},
       courierOrders:842, taxiOrders:560,
-      florists:[['Флорист 3',13.3,34],['Флорист 4',13.0,31],['Флорист 12',12.9,25]],
+      florists:[{n:'Флорист 3',a14:13.4,c14:26,a18:16.9,c18:8},{n:'Флорист 4',a14:13.1,c14:24,a18:16.6,c18:7},
+                {n:'Флорист 12',a14:13.0,c14:18,a18:16.5,c18:7}],
       channels:[['Яндекс Еда',982000],['Заказ с сайта',864000],['Flowwow',512000],['Улица',521000],['По телефону',203000]]}}},
 
   {id:5, name:'Барнаул Советская', city:'Барнаул', data:{
     '2026-09':{plan:1500000, fact:212400, prevToDate:181200, street:44900, nosOk:0, nosReview:1,
-      nosCats:[], qAvg:12.8, qPct:91.4, qCount:7, qPrev:12.5,
+      nosCats:[], q:{a14:12.9, c14:5, a18:16.0, c18:2},
       courierOrders:52, taxiOrders:19,
-      florists:[['Флорист 6',13.0,4],['Флорист 9',12.5,3]],
+      florists:[{n:'Флорист 6',a14:13.1,c14:3,a18:16.2,c18:1},{n:'Флорист 9',a14:12.6,c14:2,a18:15.8,c18:1}],
       channels:[['Заказ с сайта',72300],['Улица',44900],['Яндекс Еда',43800],['По телефону',31200],['Flowwow',20200]]},
     '2026-08':{plan:1450000, fact:1462000, prevToDate:1338000, street:318000, nosOk:1, nosReview:0,
-      nosCats:[['Сервис',1]], qAvg:12.5, qPct:89.3, qCount:54, qPrev:12.6,
+      nosCats:[['Сервис',1]], q:{a14:12.6, c14:41, a18:15.9, c18:13},
       courierOrders:398, taxiOrders:141,
-      florists:[['Флорист 6',12.7,29],['Флорист 9',12.3,25]],
+      florists:[{n:'Флорист 6',a14:12.8,c14:22,a18:16.1,c18:7},{n:'Флорист 9',a14:12.4,c14:19,a18:15.6,c18:6}],
       channels:[['Заказ с сайта',498000],['Улица',318000],['Яндекс Еда',302000],['По телефону',201000],['Flowwow',143000]]}}},
 
   {id:6, name:'Барнаул Лазурная', city:'Барнаул', data:{
     '2026-09':{plan:1700000, fact:178300, prevToDate:206400, street:38100, nosOk:3, nosReview:2,
-      nosCats:[['Ягода',2],['Цветок',1]], qAvg:12.2, qPct:87.1, qCount:6, qPrev:12.8,
+      nosCats:[['Ягода',2],['Цветок',1]], q:{a14:12.3, c14:4, a18:15.4, c18:2},
       courierOrders:48, taxiOrders:31,
-      florists:[['Флорист 12',12.4,3],['Флорист 6',12.0,3]],
+      florists:[{n:'Флорист 12',a14:12.5,c14:2,a18:15.6,c18:1},{n:'Флорист 6',a14:12.1,c14:2,a18:15.2,c18:1}],
       channels:[['Заказ с сайта',61200],['Яндекс Еда',42800],['Улица',38100],['Flowwow',21100],['По телефону',15100]]},
     '2026-08':{plan:1650000, fact:1602000, prevToDate:1588000, street:284000, nosOk:6, nosReview:5,
-      nosCats:[['Ягода',3],['Цветок',2],['Доставка',1]], qAvg:12.8, qPct:91.4, qCount:64, qPrev:12.7,
+      nosCats:[['Ягода',3],['Цветок',2],['Доставка',1]], q:{a14:12.9, c14:48, a18:16.2, c18:16},
       courierOrders:421, taxiOrders:268,
-      florists:[['Флорист 12',12.9,33],['Флорист 6',12.7,31]],
+      florists:[{n:'Флорист 12',a14:13.0,c14:25,a18:16.4,c18:8},{n:'Флорист 6',a14:12.8,c14:23,a18:16.0,c18:8}],
       channels:[['Заказ с сайта',521000],['Яндекс Еда',402000],['Улица',284000],['Flowwow',231000],['По телефону',164000]]}}},
 
   {id:3, name:'Томск Дальне-Ключевская, 16а', city:'Томск', data:{
     '2026-09':{plan:1800000, fact:243700, prevToDate:212800, street:49600, nosOk:5, nosReview:6,
-      nosCats:[['Доставка',3],['Сборка букета',2]], qAvg:12.9, qPct:92.1, qCount:8, qPrev:12.7,
+      nosCats:[['Доставка',3],['Сборка букета',2]], q:{a14:13.0, c14:6, a18:16.2, c18:2},
       courierOrders:58, taxiOrders:44,
-      florists:[['Флорист 9',13.1,5],['Флорист 3',12.6,3]],
+      florists:[{n:'Флорист 9',a14:13.2,c14:4,a18:16.4,c18:1},{n:'Флорист 3',a14:12.7,c14:2,a18:16.0,c18:1}],
       channels:[['Яндекс Еда',81400],['Заказ с сайта',62300],['Улица',49600],['Flowwow',31200],['По телефону',19200]]},
     '2026-08':{plan:1750000, fact:1721000, prevToDate:1602000, street:342000, nosOk:12, nosReview:9,
-      nosCats:[['Доставка',6],['Сборка букета',4],['Сервис',2]], qAvg:12.7, qPct:90.7, qCount:63, qPrev:12.6,
+      nosCats:[['Доставка',6],['Сборка букета',4],['Сервис',2]], q:{a14:12.8, c14:47, a18:16.0, c18:16},
       courierOrders:452, taxiOrders:341,
-      florists:[['Флорист 9',12.9,32],['Флорист 3',12.5,31]],
+      florists:[{n:'Флорист 9',a14:13.0,c14:24,a18:16.2,c18:8},{n:'Флорист 3',a14:12.6,c14:23,a18:15.8,c18:8}],
       channels:[['Яндекс Еда',562000],['Заказ с сайта',441000],['Улица',342000],['Flowwow',221000],['По телефону',155000]]}}},
 
   {id:7, name:'Челябинск Цвиллинга, 59', city:'Челябинск', data:{
     '2026-09':{plan:2300000, fact:301500, prevToDate:288200, street:58700, nosOk:4, nosReview:3,
-      nosCats:[['Цветок',2],['Доставка',2]], qAvg:12.6, qPct:90.0, qCount:6, qPrev:12.4,
+      nosCats:[['Цветок',2],['Доставка',2]], q:{a14:12.7, c14:4, a18:15.9, c18:2},
       courierOrders:84, taxiOrders:61,
-      florists:[['Флорист 4',12.8,3],['Флорист 12',12.4,3]],
+      florists:[{n:'Флорист 4',a14:12.9,c14:2,a18:16.1,c18:1},{n:'Флорист 12',a14:12.5,c14:2,a18:15.7,c18:1}],
       channels:[['Яндекс Еда',102300],['Заказ с сайта',78400],['Улица',58700],['Flowwow',38200],['По телефону',23900]]},
     '2026-08':{plan:2200000, fact:2214000, prevToDate:2018000, street:398000, nosOk:7, nosReview:5,
-      nosCats:[['Цветок',3],['Доставка',3],['Ягода',1]], qAvg:12.4, qPct:88.6, qCount:45, qPrev:12.3,
+      nosCats:[['Цветок',3],['Доставка',3],['Ягода',1]], q:{a14:12.5, c14:34, a18:15.7, c18:11},
       courierOrders:601, taxiOrders:442,
-      florists:[['Флорист 4',12.6,23],['Флорист 12',12.2,22]],
+      florists:[{n:'Флорист 4',a14:12.7,c14:17,a18:15.9,c18:6},{n:'Флорист 12',a14:12.3,c14:17,a18:15.5,c18:5}],
       channels:[['Яндекс Еда',742000],['Заказ с сайта',602000],['Улица',398000],['Flowwow',282000],['По телефону',190000]]}}},
 
   {id:8, name:'Челябинск пр-кт Свердловский, 23', city:'Челябинск', data:{
     '2026-09':{plan:null, fact:164900, prevToDate:151700, street:29800, nosOk:1, nosReview:2,
-      nosCats:[['Сервис',1]], qAvg:13.1, qPct:93.6, qCount:5, qPrev:12.9,
+      nosCats:[['Сервис',1]], q:{a14:13.2, c14:4, a18:16.5, c18:1},
       courierOrders:44, taxiOrders:33,
-      florists:[['Флорист 6',13.2,3],['Флорист 9',12.9,2]],
+      florists:[{n:'Флорист 6',a14:13.3,c14:2,a18:16.5,c18:1},{n:'Флорист 9',a14:13.0,c14:2,a18:0,c18:0}],
       channels:[['Яндекс Еда',54200],['Заказ с сайта',42100],['Улица',29800],['Flowwow',22600],['По телефону',16200]]},
     '2026-08':{plan:1400000, fact:1389000, prevToDate:1244000, street:241000, nosOk:2, nosReview:1,
-      nosCats:[['Сервис',1],['Цветок',1]], qAvg:12.9, qPct:92.1, qCount:57, qPrev:12.8,
+      nosCats:[['Сервис',1],['Цветок',1]], q:{a14:13.0, c14:43, a18:16.3, c18:14},
       courierOrders:352, taxiOrders:262,
-      florists:[['Флорист 6',13.0,29],['Флорист 9',12.8,28]],
+      florists:[{n:'Флорист 6',a14:13.1,c14:22,a18:16.4,c18:7},{n:'Флорист 9',a14:12.9,c14:21,a18:16.2,c18:7}],
       channels:[['Яндекс Еда',442000],['Заказ с сайта',352000],['Улица',241000],['Flowwow',201000],['По телефону',153000]]}}}
 ];
+
+const MAX_14 = 14, MAX_18 = 18;
 
 // Ключи, встреченные в данных, но не привязанные ни к одному салону.
 // Это и есть защита от тихой потери: видно, сколько теряется и на чём.
@@ -547,26 +581,59 @@ function visibleSalons(){
 
 function md(salon){ return salon.data[state.month]; }
 
+// Процент от максимума: (набранные баллы) / (возможные баллы).
+// Именно так качество можно сравнивать между салонами и флористами — средний балл
+// нельзя, потому что у 14- и 18-балльных видов заказа разные шкалы.
+function qualityPercent(o){
+  const possible = o.c14 * MAX_14 + o.c18 * MAX_18;
+  return possible ? (o.s14 + o.s18) / possible * 100 : 0;
+}
+
+// «13,1 из 14 · 16,2 из 18» — обе шкалы рядом, без смешивания
+function scorePair(o, compact){
+  const parts = [];
+  if(o.c14) parts.push(num(o.s14 / o.c14) + (compact ? '/14' : ' из 14'));
+  if(o.c18) parts.push(num(o.s18 / o.c18) + (compact ? '/18' : ' из 18'));
+  return parts.join(' · ') || '—';
+}
+
+// «73 оценки: 55 по 14-балльным, 18 по 18-балльным»
+function scoreCounts(o){
+  const total = o.c14 + o.c18;
+  if(!total) return 'Оценок за период нет';
+  const parts = [];
+  if(o.c14) parts.push(o.c14 + ' по 14-балльным');
+  if(o.c18) parts.push(o.c18 + ' по 18-балльным');
+  return total + nbsp + plural(total, 'оценка', 'оценки', 'оценок') + ': ' + parts.join(', ');
+}
+
 // Агрегат по набору салонов — тем же способом считается и «город», и «итого»
 function aggregate(list){
   const acc = {plan:0, planKnown:false, planMissing:0, fact:0, prevToDate:0, street:0, nosOk:0, nosReview:0,
-    qScoreSum:0, qCount:0, qPctSum:0, courierOrders:0, taxiOrders:0, nosCats:{}, channels:{}, florists:{}};
+    s14:0, c14:0, s18:0, c18:0, courierOrders:0, taxiOrders:0, nosCats:{}, channels:{}, florists:{}};
   list.forEach(s => {
     const d = md(s);
     if(d.plan === null) acc.planMissing++; else { acc.plan += d.plan; acc.planKnown = true; }
     acc.fact += d.fact; acc.prevToDate += d.prevToDate; acc.street += d.street;
     acc.nosOk += d.nosOk; acc.nosReview += d.nosReview;
-    acc.qScoreSum += d.qAvg * d.qCount; acc.qCount += d.qCount; acc.qPctSum += d.qPct * d.qCount;
+    // Баллы 14- и 18-балльных видов копим ОТДЕЛЬНО: смешивать их в один средний нельзя
+    acc.s14 += d.q.a14 * d.q.c14; acc.c14 += d.q.c14;
+    acc.s18 += d.q.a18 * d.q.c18; acc.c18 += d.q.c18;
     acc.courierOrders += d.courierOrders; acc.taxiOrders += d.taxiOrders;
     d.nosCats.forEach(c => { acc.nosCats[c[0]] = (acc.nosCats[c[0]] || 0) + c[1]; });
     d.channels.forEach(c => { acc.channels[c[0]] = (acc.channels[c[0]] || 0) + c[1]; });
     d.florists.forEach(f => {
-      const cur = acc.florists[f[0]] || {sum:0, count:0};
-      cur.sum += f[1] * f[2]; cur.count += f[2]; acc.florists[f[0]] = cur;
+      const cur = acc.florists[f.n] || {s14:0, c14:0, s18:0, c18:0};
+      cur.s14 += f.a14 * f.c14; cur.c14 += f.c14;
+      cur.s18 += f.a18 * f.c18; cur.c18 += f.c18;
+      acc.florists[f.n] = cur;
     });
   });
-  acc.qAvg = acc.qCount ? acc.qScoreSum / acc.qCount : 0;
-  acc.qPct = acc.qCount ? acc.qPctSum / acc.qCount : 0;
+  acc.q14 = acc.c14 ? acc.s14 / acc.c14 : null;
+  acc.q18 = acc.c18 ? acc.s18 / acc.c18 : null;
+  acc.qCount = acc.c14 + acc.c18;
+  // Сравнимая между салонами величина — доля набранных баллов от возможных
+  acc.qPct = qualityPercent(acc);
   acc.streetShare = acc.fact ? acc.street / acc.fact * 100 : 0;
   acc.taxiShare = acc.courierOrders ? acc.taxiOrders / acc.courierOrders * 100 : 0;
   acc.planDone = acc.planKnown && acc.plan ? acc.fact / acc.plan * 100 : null;
@@ -731,15 +798,16 @@ function kpisHtml(agg){
         'пока их не разобрали, основная цифра занижена.'
   }));
 
-  // 4. Качество
+  // 4. Качество: главная цифра — процент от максимума, потому что шкалы две
   out.push(kpi({
-    id:'quality', label:'Качество сборки', value:num(agg.qAvg), unit:'балла',
-    mean:'<b>' + pct(agg.qPct, 0) + '</b> от максимума',
-    sub:agg.qCount + nbsp + plural(agg.qCount, 'оценка', 'оценки', 'оценок') +
-      (agg.qCount < 15 ? ' — для выводов маловато' : ''),
+    id:'quality', label:'Качество сборки', value:pct(agg.qPct, 0), unit:'от максимума',
+    mean:'<b>' + scorePair(agg) + '</b>',
+    sub:scoreCounts(agg) + (agg.qCount && agg.qCount < 15 ? ' — для выводов маловато' : ''),
     delta:'', flag:agg.qPct > 0 && agg.qPct < 90,
-    how:'Средний балл проверок сборки из формы качества в Pyrus. Максимум зависит от вида заказа (14 или 18 ' +
-        'баллов), поэтому рядом — процент от максимума: его можно сравнивать между салонами.'
+    how:'Проверки сборки из формы качества в Pyrus. У видов заказа два максимума: 14 баллов (клубничный и ' +
+        'цветочный букет, коробочка, боксы) и 18 (клубнично-цветочный букет, коробочка с букетом, ' +
+        'цветочно-клубничный бокс). Средние баллы этих групп не смешиваются — показаны отдельно, ' +
+        'а сравнимая величина одна: набранные баллы к возможным.'
   }));
 
   // 5. Такси-службы
@@ -794,7 +862,8 @@ function rowsHtml(){
       ? '<span class="' + (a.planDone < 90 ? 'b-warn' : 'b-ok') + ' bx-badge">' + pct(a.planDone, 0) + '</span>'
       : '<span class="bx-badge b-neutral">план не задан</span>';
 
-    return '<button class="row" type="button" data-row="' + esc(r.key) + '" aria-expanded="' + open + '">' +
+    return '<button class="row' + (open ? ' row--open' : '') + '" type="button" data-row="' +
+      esc(r.key) + '" aria-expanded="' + open + '">' +
       '<div class="row__name">' + esc(r.title) + '<div class="row__city">' + esc(r.sub) + '</div></div>' +
       '<div><span class="cell-label">Отгружено</span><span class="row__num">' + short(a.fact) + ' ₽' +
         '<small>план ' + (a.plan ? short(a.plan) + ' ₽' : '—') + '</small></span></div>' +
@@ -803,8 +872,8 @@ function rowsHtml(){
         '<small>' + short(a.street) + ' ₽</small></span></div>' +
       '<div><span class="cell-label">Негатив</span><span class="row__num">' + a.nosOk +
         '<small>' + (a.nosReview ? '+' + a.nosReview + ' в разборе' : 'разобрано') + '</small></span></div>' +
-      '<div><span class="cell-label">Качество</span><span class="row__num">' + num(a.qAvg) +
-        '<small>' + pct(a.qPct, 0) + ' от макс.</small></span></div>' +
+      '<div><span class="cell-label">Качество</span><span class="row__num">' + pct(a.qPct, 0) +
+        '<small>' + scorePair(a, true) + '</small></span></div>' +
       '<div class="row__chev' + (open ? ' row__chev--open' : '') + '">' +
         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" ' +
         'stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></div>' +
@@ -825,10 +894,12 @@ function barList(items, unit){
 
 function detailsHtml(r){
   const a = r.agg;
+  // Флориста оцениваем по проценту от максимума: один собирает больше 18-балльных
+  // комбинированных заказов, другой — 14-балльные букеты, и сырые баллы несравнимы
   const florists = Object.keys(a.florists).map(name => {
     const f = a.florists[name];
-    return [name + ' · ' + f.count + nbsp + plural(f.count, 'оценка', 'оценки', 'оценок'), f.sum / f.count];
-  }).sort((x, y) => y[1] - x[1]);
+    return {name:name, pct:qualityPercent(f), f:f};
+  }).sort((x, y) => y.pct - x.pct);
 
   const cats = Object.keys(a.nosCats).map(k => [k, a.nosCats[k]]).sort((x, y) => y[1] - x[1]);
   const channels = Object.keys(a.channels).map(k => [k, a.channels[k]]).sort((x, y) => y[1] - x[1]);
@@ -836,11 +907,15 @@ function detailsHtml(r){
   return '<div class="details"><div class="details__grid">' +
     '<div class="dcard"><h4>Качество по флористам</h4>' +
       (florists.length
-        ? '<div class="dlist">' + florists.map(f =>
-            '<div class="dline"><span class="dline__name">' + esc(f[0]) + '</span>' +
-            '<span class="dline__val">' + num(f[1]) + '</span></div>').join('') + '</div>'
+        ? '<div class="dlist">' + florists.map(x =>
+            '<div class="dline dline--stack"><span class="dline__name">' + esc(x.name) +
+            '<small>' + scorePair(x.f, true) + ' · ' + (x.f.c14 + x.f.c18) + nbsp +
+            plural(x.f.c14 + x.f.c18, 'оценка', 'оценки', 'оценок') + '</small></span>' +
+            '<span class="dbar"><span class="dbar__fill" style="width:' + x.pct + '%"></span></span>' +
+            '<span class="dline__val">' + pct(x.pct, 0) + '</span></div>').join('') + '</div>'
         : '<div class="dempty">Оценок за период нет</div>') +
       '<div style="font-size:11.5px;color:var(--bx-muted);margin-top:9px">' +
+      'Процент — от максимума своего вида заказа: 14-балльные и 18-балльные не смешиваются. ' +
       'Имена обезличены в форме Pyrus — так они и приходят.</div></div>' +
     '<div class="dcard"><h4>Негатив по категориям</h4>' + barList(cats, 'count') +
       (a.nosReview ? '<div style="font-size:11.5px;color:var(--bx-muted);margin-top:9px">' +
