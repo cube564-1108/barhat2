@@ -106,7 +106,7 @@ def get_salon(store_id: int):
 @section_required("salon_kpi")
 def get_stores():
     """Салоны, доступные пользователю (для фильтра)."""
-    return success_response({"stores": storage.list_stores(_allowed_store_ids())})
+    return success_response({"stores": storage.list_stores(_allowed_store_ids(), only_linked=True)})
 
 
 # ============================================================================
@@ -120,7 +120,7 @@ def get_plans():
     if not metrics.valid_month(month):
         return error_response("month должен быть в формате YYYY-MM")
 
-    stores = storage.list_stores(_allowed_store_ids())
+    stores = storage.list_stores(_allowed_store_ids(), only_linked=True)
     plans = storage.get_plans(month)
     return success_response({
         "month": month,
@@ -150,7 +150,8 @@ def save_plans():
     if not isinstance(plans, list):
         return error_response("plans должен быть списком")
 
-    known = {s["id"] for s in storage.list_stores()}
+    # План можно задать только тому, кто участвует в показателях
+    known = {s["id"] for s in storage.list_stores(only_linked=True)}
     saved = 0
     for item in plans:
         try:
@@ -184,6 +185,8 @@ def save_plans():
 @salonkpi_bp.route("/links", methods=["GET"])
 @role_required("admin")
 def get_links():
+    # Список салонов здесь полный (без only_linked): именно отсюда привязывают
+    # новый салон, а он по определению ещё ни с чем не связан
     return success_response({"links": storage.list_links(), "sources": storage.SOURCES,
                              "stores": storage.list_stores()})
 

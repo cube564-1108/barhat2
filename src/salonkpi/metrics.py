@@ -430,7 +430,10 @@ def build_summary(month: str, store_ids: Optional[List[int]], scope: str = "salo
         if cached and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
             return cached[1]
 
-    stores = storage.list_stores(store_ids)
+    # only_linked: в общем справочнике точек кроме салонов живут статьи и
+    # подразделения («ГО», «Налоги», «Маркетинг») — они нужны счетам, но в
+    # показателях выглядят пустыми строками
+    stores = storage.list_stores(store_ids, only_linked=True)
     date_from, date_to = month_bounds(month)
     prev_from, prev_to = comparable_bounds(month)
     progress = month_progress(month)
@@ -521,7 +524,7 @@ def build_summary(month: str, store_ids: Optional[List[int]], scope: str = "salo
 
 def salon_details(store_id: int, month: str) -> Dict[str, Any]:
     """Детализация одного салона: флористы, категории негатива, каналы, склад."""
-    stores = storage.list_stores([store_id])
+    stores = storage.list_stores([store_id], only_linked=True)
     if not stores:
         return {}
 

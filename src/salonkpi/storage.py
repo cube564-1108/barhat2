@@ -186,16 +186,34 @@ def seed_links() -> int:
 # Салоны
 # ============================================================================
 
-def list_stores(store_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:
-    """Активные салоны (при store_ids — только они), с городом."""
-    query = "SELECT id, name FROM stores WHERE is_active = 1"
+def list_stores(
+    store_ids: Optional[List[int]] = None,
+    only_linked: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Активные записи справочника точек (при store_ids — только они), с городом.
+
+    only_linked=True оставляет те, у которых есть хотя бы одно соответствие с
+    источником данных. Таблица `stores` общая на весь дашборд, и кроме салонов
+    в ней живут статьи расходов и подразделения — «ГО», «Налоги», «Маркетинг»,
+    «Кофферс»: они нужны счетам, но салонами не являются и в показателях
+    выглядят как девять пустых строк.
+
+    Отбор идёт по данным (есть ли связь с CRM, Pyrus или складом), а не по
+    списку названий в коде: названия правят руками, и разбор строки сломается
+    на первой же новой записи. Новый салон появляется в отчёте сам, как только
+    его привязали в «Сопоставлении».
+    """
+    query = "SELECT s.id, s.name FROM stores s WHERE s.is_active = 1"
     params: list = []
     if store_ids is not None:
         if not store_ids:
             return []
-        query += f" AND id IN ({','.join('?' * len(store_ids))})"
+        query += f" AND s.id IN ({','.join('?' * len(store_ids))})"
         params.extend(store_ids)
-    query += " ORDER BY name"
+    if only_linked:
+        query += " AND EXISTS (SELECT 1 FROM salon_links l WHERE l.store_id = s.id)"
+    query += " ORDER BY s.name"
 
     conn = get_db()
     try:

@@ -279,6 +279,43 @@ def main():
         check(restored.get(sample) == row["store_id"], "связь восстановлена после проверки")
 
     # ------------------------------------------------------------------
+    section("5а. Служебные записи справочника точек не идут в показатели")
+
+    # Таблица stores общая на весь дашборд: кроме салонов там живут статьи и
+    # подразделения («ГО», «Налоги», «Маркетинг») — они нужны счетам, а в
+    # показателях выглядели девятью пустыми строками
+    conn = kpi_storage.get_db()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO stores (name, is_active, created_at) "
+            "VALUES ('Тест: служебная статья', 1, datetime('now'))"
+        )
+        conn.commit()
+        service_id = conn.execute(
+            "SELECT id FROM stores WHERE name = 'Тест: служебная статья'"
+        ).fetchone()["id"]
+    finally:
+        conn.close()
+
+    metrics.invalidate_cache()
+    fresh = metrics.build_summary(MONTH, None, "salon")
+    ids = {row["store_id"] for row in fresh["rows"]}
+    check(service_id not in ids, "запись без связей не попала в показатели",
+          f"store_id={service_id}")
+    check(all(s["id"] != service_id for s in kpi_storage.list_stores(only_linked=True)),
+          "и не попала в список для планов")
+    check(any(s["id"] == service_id for s in kpi_storage.list_stores()),
+          "но осталась доступной для привязки в справочнике")
+
+    conn = kpi_storage.get_db()
+    try:
+        conn.execute("DELETE FROM stores WHERE id = ?", (service_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    metrics.invalidate_cache()
+
+    # ------------------------------------------------------------------
     section("6. Подсказки сопоставления")
 
     from salonkpi.metrics import _suggest_store  # noqa: E402
