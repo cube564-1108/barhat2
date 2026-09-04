@@ -500,6 +500,11 @@ def init_invoices_tables():
     finally:
         conn.close()
 
+    # Плательщик у ранее заведённых пополнений — последним: читает и
+    # work_cards.topup_payer_id (её заполняет init_cards_tables), и
+    # invoices.card_id (её добавляет _ensure_card_invoice_columns выше).
+    _backfill_topup_invoice_payers()
+
 
 def _ensure_invoices_migrated(conn: sqlite3.Connection):
     """
@@ -644,6 +649,56 @@ def _ensure_vat_rate_column(conn: sqlite3.Connection):
     except Exception:
         conn.rollback()
         raise
+
+
+def _backfill_topup_invoice_payers():
+    """
+    Проставить плательщика ранее заведённым пополнениям карт.
+
+    Плательщик пополнения определяется картой (решение владельца 04.09.2026,
+    см. cards.TOPUP_PAYER_SEED), но заявки, созданные до этого, лежат с
+    пустым payer_id — а именно по нему потом смотрят, с какого юрлица ушли
+    деньги. Трогаем только пустые значения: выставленное руками не переписываем.
+
+    Соединение своё: вызывается после init_cards_tables, когда соединение
+    инициализации уже закрыто.
+    """
+    conn = get_db()
+    try:
+        if not _table_exists(conn, "work_cards") or not _table_exists(conn, "invoices"):
+            return
+        # Колонки проверяем поимённо: порядок вызовов в init меняется, а
+        # падать на «no such column» посреди старта воркера нельзя
+        if not _column_exists(conn, "work_cards", "topup_payer_id"):
+            return
+        if not all(_column_exists(conn, "invoices", column) for column in ("kind", "card_id")):
+            return
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE invoices
+                SET payer_id = (
+                    SELECT c.topup_payer_id FROM work_cards c WHERE c.id = invoices.card_id
+                )
+                WHERE kind = 'card_topup'
+                  AND payer_id IS NULL
+                  AND card_id IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM work_cards c
+                    WHERE c.id = invoices.card_id AND c.topup_payer_id IS NOT NULL
+                  )
+                """
+            )
+            conn.commit()
+            if cursor.rowcount:
+                logger.info("[Invoices] Плательщик проставлен %d пополнениям карт", cursor.rowcount)
+        except Exception:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
 
 
 def _ensure_invoice_bank_columns(conn: sqlite3.Connection):

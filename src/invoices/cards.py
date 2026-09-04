@@ -12,6 +12,7 @@
 """
 
 import logging
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -138,6 +139,8 @@ def init_cards_tables():
 
         _ensure_card_columns(conn)
         _seed_cards_if_empty(conn)
+        # После сида: у только что заведённых карт плательщика тоже нет
+        _backfill_topup_payers(conn)
     finally:
         conn.close()
 
@@ -158,6 +161,11 @@ def _ensure_card_columns(conn: sqlite3.Connection):
     """
     columns = {
         "opening_balance": "REAL NOT NULL DEFAULT 0",
+        # На кого выставлять заявку на пополнение этой карты (invoice_payers.id).
+        # Решение владельца 04.09.2026: пополнение идёт с расчётного счёта
+        # конкретного юрлица, и человеку выбирать это незачем — связка
+        # «карта → плательщик» постоянная (см. _backfill_topup_payers).
+        "topup_payer_id": "INTEGER",
     }
     if all(_column_exists(conn, "work_cards", column) for column in columns):
         return
@@ -168,6 +176,78 @@ def _ensure_card_columns(conn: sqlite3.Connection):
             if not _column_exists(conn, "work_cards", column):
                 conn.execute(f"ALTER TABLE work_cards ADD COLUMN {column} {definition}")
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+# Разовая раскладка карт по плательщикам (владелец, 04.09.2026). Совпадает со
+# счётом-источником пополнения, который уже есть у карты: «06 Альфа Бизнес
+# Кваша» — НСК и Томск, «16 РСБ Насуленко» — Барнаул, ЕКБ, ЧЛБ.
+#
+# Сравнение по названию — только здесь и только для первичного заполнения:
+# id плательщика на проде и в локальной базе разные, а связка дальше живёт
+# полем topup_payer_id, которое правится в справочнике карт. Выводить
+# плательщика из названия карты в рабочем коде нельзя — см. CLAUDE.md,
+# «то, что уходит во внешнюю систему, — данные, а не название».
+TOPUP_PAYER_SEED = {
+    "рабочая карта барнаул (рсб)": "рабочая карта насуленко",
+    "рабочая карта екб (рсб)": "рабочая карта насуленко",
+    "рабочая карта члб гпб": "рабочая карта насуленко",
+    "рабочая карта нск": "рабочая карта кваша",
+    "рабочая карта томск (гпб)": "рабочая карта кваша",
+}
+
+
+def _normalize_title(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").lower().replace("ё", "е")).strip(" \t«»\"'.,")
+
+
+def _backfill_topup_payers(conn: sqlite3.Connection):
+    """
+    Проставить картам плательщика пополнения по раскладке владельца.
+
+    Идёт каждый старт, но трогает только карты с пустым topup_payer_id:
+    привязку, выставленную руками в справочнике, не перезаписывает, а один
+    недоехавший старт иначе оставил бы карты без плательщика навсегда.
+
+    Плательщика, которого нет в справочнике, не создаём: названия юрлиц —
+    не наше дело, а карта без привязки просто не подставляет плательщика
+    (заявка на пополнение при этом создаётся, см. _topup_payer_for_card).
+    Такие карты помечены в справочнике карт бейджем.
+    """
+    if not _table_exists(conn, "invoice_payers"):
+        return
+
+    cards = conn.execute(
+        "SELECT id, title FROM work_cards WHERE topup_payer_id IS NULL"
+    ).fetchall()
+    if not cards:
+        return
+
+    payers = {_normalize_title(row["name"]): row["id"] for row in conn.execute(
+        "SELECT id, name FROM invoice_payers WHERE is_active = 1"
+    ).fetchall()}
+    if not payers:
+        return
+
+    updates = []
+    for card in cards:
+        payer_name = TOPUP_PAYER_SEED.get(_normalize_title(card["title"]))
+        payer_id = payers.get(payer_name) if payer_name else None
+        if payer_id:
+            updates.append((payer_id, card["id"]))
+    if not updates:
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            "UPDATE work_cards SET topup_payer_id = ? WHERE id = ? AND topup_payer_id IS NULL",
+            updates,
+        )
+        conn.commit()
+        logger.info("[Cards] Плательщик пополнения проставлен %d картам", len(updates))
     except Exception:
         conn.rollback()
         raise
@@ -380,6 +460,7 @@ def create_card(
     planfact_account_title: Optional[str] = None,
     source_planfact_account_title: Optional[str] = None,
     opening_balance: float = 0.0,
+    topup_payer_id: Optional[int] = None,
 ) -> int:
     conn = get_db()
     try:
@@ -388,12 +469,12 @@ def create_card(
             INSERT INTO work_cards (
                 title, planfact_account_id, planfact_account_title,
                 source_planfact_account_id, source_planfact_account_title,
-                opening_balance
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                opening_balance, topup_payer_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (title, str(planfact_account_id).strip(), planfact_account_title,
              str(source_planfact_account_id).strip(), source_planfact_account_title,
-             float(opening_balance or 0)),
+             float(opening_balance or 0), topup_payer_id),
         )
         card_id = cursor.lastrowid
         _replace_card_stores(conn, card_id, store_ids or [])
@@ -408,7 +489,7 @@ def update_card(card_id: int, values: Dict[str, Any], store_ids: Optional[List[i
     allowed = (
         "title", "planfact_account_id", "planfact_account_title",
         "source_planfact_account_id", "source_planfact_account_title",
-        "opening_balance", "is_active",
+        "opening_balance", "is_active", "topup_payer_id",
     )
     changes = {key: values[key] for key in allowed if key in values}
 

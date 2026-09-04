@@ -431,6 +431,12 @@ def _card_payload_error(data, *, require_all: bool):
     if "opening_balance" in data and data["opening_balance"] not in (None, ""):
         if _parse_opening_balance(data["opening_balance"]) is None:
             return "Остаток на начало учёта: нужно число"
+
+    # На кого выставляется пополнение этой карты. Пусто — «не привязан»:
+    # заявка тогда создаётся без плательщика, но не блокируется.
+    if data.get("topup_payer_id") not in (None, ""):
+        if not isinstance(data["topup_payer_id"], int) or not get_payer_by_id(data["topup_payer_id"]):
+            return "Некорректный плательщик пополнения"
     return None
 
 
@@ -462,6 +468,7 @@ def add_work_card():
         planfact_account_title=(data.get("planfact_account_title") or "").strip() or None,
         source_planfact_account_title=(data.get("source_planfact_account_title") or "").strip() or None,
         opening_balance=_parse_opening_balance(data.get("opening_balance")) or 0.0,
+        topup_payer_id=data.get("topup_payer_id") or None,
     )
     log_action(current_user.username, "create_work_card", f"{card_id}: {data['title'].strip()}")
     return jsonify({"ok": True, "work_card": get_card_by_id(card_id)}), 201
@@ -489,6 +496,9 @@ def edit_work_card(card_id):
         values["opening_balance"] = _parse_opening_balance(data["opening_balance"]) or 0.0
     if "is_active" in data:
         values["is_active"] = 1 if data["is_active"] else 0
+    # Пустое значение = «отвязать»: снять ошибочную привязку иначе нечем
+    if "topup_payer_id" in data:
+        values["topup_payer_id"] = data["topup_payer_id"] or None
 
     update_card(card_id, values, store_ids=data.get("store_ids"))
     log_action(current_user.username, "update_work_card", str(card_id))
@@ -1039,6 +1049,25 @@ _BANK_REQUISITE_LABELS = (
 _INVOICE_REQUIRED_BANK_FIELDS = tuple(field for field, _ in _BANK_REQUISITE_LABELS)
 
 
+def _topup_payer_for_card(card_id):
+    """
+    На кого выставляется пополнение этой карты (invoice_payers.id) или None.
+
+    Связка живёт полем work_cards.topup_payer_id и правится в справочнике
+    карт. Плательщика, которого удалили из справочника, не подставляем —
+    заявка создастся без него, и это лучше ссылки на мёртвую запись.
+    Отсутствие привязки тоже не блокирует создание: пополнение — внутренняя
+    заявка, вставать из-за незаполненного справочника ей нельзя.
+    """
+    if not card_id:
+        return None
+    card = get_card_by_id(card_id)
+    payer_id = (card or {}).get("topup_payer_id")
+    if payer_id and get_payer_by_id(payer_id):
+        return payer_id
+    return None
+
+
 def _bank_transfer_error(payer_id, values):
     """
     Проверка реквизитов для счетов, которые оплачиваются с расчётного счёта
@@ -1090,7 +1119,9 @@ def edit_invoice(invoice_id):
             return jsonify({"error": "Некорректный город"}), 400
         changes["city_id"] = data["city_id"]
 
-    if "payer_id" in data:
+    # У пополнения плательщик берётся из карты и правке не подлежит: иначе
+    # заявка и справочник карт разошлись бы, и было бы неясно, что правда.
+    if "payer_id" in data and invoice.get("kind") != "card_topup":
         if not isinstance(data["payer_id"], int) or not get_payer_by_id(data["payer_id"]):
             return jsonify({"error": "Некорректный плательщик"}), 400
         changes["payer_id"] = data["payer_id"]
@@ -1120,6 +1151,11 @@ def edit_invoice(invoice_id):
         if not user_can_use_card(card_id, current_user.username, current_user.role):
             return jsonify({"error": "Нет доступа к этой карте"}), 403
         changes["card_id"] = card_id
+        # Плательщик пополнения — свойство карты, поэтому переставить карту
+        # значит переставить и его. Иначе заявка осталась бы с юрлицом от
+        # прежней карты, и это никак не бросалось бы в глаза.
+        if invoice.get("kind") == "card_topup":
+            changes["payer_id"] = _topup_payer_for_card(card_id)
 
     if "amount" in data:
         if not isinstance(data["amount"], (int, float)) or data["amount"] <= 0:
@@ -1322,6 +1358,13 @@ def add_invoice():
             return jsonify({"error": "Нет доступа к этой карте"}), 403
     else:
         card_id = None
+
+    # Пополнение карты идёт с расчётного счёта конкретного юрлица, и какого
+    # именно — свойство карты, а не выбор человека (решение владельца
+    # 04.09.2026). Ставим на сервере, а не в форме: у ручки несколько
+    # потребителей, и подстановка только во фронте разъехалась бы с ними.
+    if kind == "card_topup":
+        payer_id = _topup_payer_for_card(card_id)
 
     if kind == "card_expense":
         # Деньги уже потрачены — платить нечего, срока оплаты не бывает.

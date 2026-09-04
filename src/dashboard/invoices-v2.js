@@ -4524,6 +4524,7 @@
                                         values.card_id, 'Выберите карту')}
                     </select>
                     ${cardBalanceHintHtml(values.card_id)}
+                    ${topupPayerHintHtml(values.card_id)}
                 </div>`
             : `<div class="iv2-field">
                     <label class="iv2-field__label" for="iv2form-city_id">Город <span class="iv2-req">*</span></label>
@@ -5089,6 +5090,23 @@
         const negative = balance.balance < 0 ? ' iv2-hint--warn' : '';
         return `<div class="iv2-hint${negative}">На карте по нашим данным ${money(balance.balance)}
                     (${opening}выдано ${money(balance.issued)}, отчитано ${money(balance.spent_confirmed)}${pending})</div>`;
+    }
+
+    /**
+     * На кого будет выставлено пополнение. Плательщик определяется картой и
+     * в форме не выбирается (его ставит сервер), но человек должен видеть
+     * результат до сохранения — иначе «на кого выставлен счёт» появляется
+     * из ниоткуда уже в карточке.
+     */
+    function topupPayerHintHtml(cardId) {
+        if (formKind() !== 'card_topup' || !cardId) return '';
+        const card = (state.refs.workCards || []).find(item => String(item.id) === String(cardId));
+        if (!card) return '';
+        const payerName = card.topup_payer_id ? refName('payers', card.topup_payer_id) : '';
+        return payerName
+            ? `<div class="iv2-hint">Будет выставлено на: ${escapeHtml(payerName)}</div>`
+            : `<div class="iv2-hint iv2-hint--warn">У карты не задано, на кого выставлять пополнение —
+                   заявка создастся без плательщика. Привязка задаётся в справочнике рабочих карт</div>`;
     }
 
     function formValidationError() {
@@ -6325,6 +6343,7 @@
             source_planfact_account_id: '',
             source_planfact_account_title: '',
             opening_balance: '',
+            topup_payer_id: '',
             store_ids: [],
         };
     }
@@ -6434,6 +6453,10 @@
                         ? `<div class="iv2-hint">остаток на начало учёта: ${
                             escapeHtml(money(card.opening_balance))}</div>`
                         : ''}
+                    <div class="iv2-hint">${card.topup_payer_id
+                        ? 'пополнение выставляется на: '
+                            + escapeHtml(refName('payers', card.topup_payer_id) || card.topup_payer_id)
+                        : 'плательщик пополнения не привязан — заявка создастся без него'}</div>
                 </div>
                 <div class="iv2-tools-row__btns">
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
@@ -6494,6 +6517,14 @@
                                 || draft.opening_balance === undefined ? '' : draft.opening_balance)}">
                     <div class="iv2-hint">Сколько лежало на карте до того, как её завели здесь.
                         Никуда в ПланФакт не уходит — только чтобы подотчёт сходился с ним</div>
+                </div>
+                <div class="iv2-field">
+                    <label class="iv2-field__label">На кого выставлять пополнение</label>
+                    <select class="iv2-input" data-card-field="topup_payer_id">
+                        ${selectOptions(state.refs.payers, draft.topup_payer_id, 'Не привязан')}
+                    </select>
+                    <div class="iv2-hint">Подставляется в заявку на пополнение этой карты —
+                        выбирать вручную при заведении заявки больше не нужно</div>
                 </div>
             </div>
             <div class="iv2-field">
@@ -6622,6 +6653,7 @@
                 // Ноль показываем пустым полем: «0» в поле выглядит как уже
                 // заполненное значение, а сальдо чаще всего просто не заводили
                 opening_balance: Number(card.opening_balance) ? String(card.opening_balance) : '',
+                topup_payer_id: card.topup_payer_id ? String(card.topup_payer_id) : '',
                 store_ids: (card.store_ids || []).slice(),
             } : null;
             renderCardList();
@@ -6656,6 +6688,8 @@
                 source_planfact_account_id: (draft.source_planfact_account_id || '').trim(),
                 source_planfact_account_title: draft.source_planfact_account_title || '',
                 opening_balance: String(draft.opening_balance || '').trim(),
+                // Пусто = отвязать: сервер ждёт null, а не пустую строку
+                topup_payer_id: draft.topup_payer_id ? Number(draft.topup_payer_id) : null,
                 store_ids: (draft.store_ids || []).map(Number),
             };
             if (!payload.title) { toast('Укажите название карты', 'error'); return; }
