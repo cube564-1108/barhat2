@@ -273,7 +273,8 @@
     function emptyTools() {
         return {
             open: null,           // 'refs' | 'counterparties' | 'planfact' | 'cards'
-            refs: { type: 'categories', list: [], loading: false, error: '', bankEditId: null, newName: '' },
+            refs: { type: 'categories', list: [], loading: false, error: '', bankEditId: null,
+                    newName: '', newRate: '' },
             // Состояние справочника банков ЦБ. Нужно именно здесь: поломку
             // синка (ЦБ сменил адрес или формат) иначе нечем заметить —
             // подстановка просто продолжит отдавать данные годичной давности
@@ -2919,6 +2920,13 @@
                 buttons.unshift(`<button class="bx-btn bx-btn--ghost" type="button" data-act="bank-test">Проверить сборку</button>`);
                 buttons.unshift(`<button class="bx-btn" type="button" data-act="bank">Отправить в банк</button>`);
             }
+            // «А что мы вообще отправили в банк» — вопрос, который встаёт
+            // позже отправки, когда в кабинете банка чего-то не хватает
+            // (04.09.2026 — пустая ставка НДС). До этого документ был виден
+            // только в отчёте сразу после отправки и исчезал вместе с ним.
+            if (invoice.status === 'sent_to_bank' || invoice.status === 'paid' || invoice.bank_send_error) {
+                buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="bank-doc">Платёжка в банк</button>`);
+            }
             if (!invoice.is_archived) {
                 buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="archive">В архив</button>`);
             }
@@ -3292,6 +3300,11 @@
             } else if (action === 'unarchive') {
                 await apiPost(`/api/invoices/${invoiceId}/unarchive`);
                 toast('Счёт возвращён из архива');
+            } else if (action === 'bank-doc') {
+                // Только показ сохранённого документа: статус не двигается,
+                // перечитывать счёт незачем
+                await showSavedBankDocument(invoiceId);
+                return;
             } else if (action === 'bank' || action === 'bank-test') {
                 // false = отменили в диалоге или это была проверка сборки:
                 // статус не двигался, перечитывать нечего
@@ -3863,6 +3876,24 @@
         renderBulkReport();
     }
 
+    /**
+     * Показать платёжку, ушедшую в банк по этому счёту.
+     *
+     * Ответ на «что мы туда отправили» должен быть в интерфейсе, а не в
+     * разборе кода: НДС, назначение платежа и реквизиты видно прямо в тексте
+     * документа — там же, где их читает банк.
+     */
+    async function showSavedBankDocument(invoiceId) {
+        let data;
+        try {
+            data = await apiGet(`/api/invoices/${invoiceId}/bank-document`);
+        } catch (error) {
+            toast(error.message, 'error');
+            return;
+        }
+        showBulkReport('bank-doc', data);
+    }
+
     function renderBulkReport() {
         const host = modalHost('report');
         if (!host) return;
@@ -3894,6 +3925,17 @@
                     : '')
                 + `<p class="iv2-hint">Статус счёта не менялся: в боевой банк ничего не уходило.</p>`
                 + bankDocumentHtml(data.result);
+        } else if (actionKey === 'bank-doc') {
+            // Документ уже отправленной платёжки: время и автор отправки —
+            // чтобы было видно, ту ли попытку смотрим
+            const when = data.sent_at ? fmtCreated(data.sent_at) : '';
+            body = `<div class="iv2-report__head">${data.sandbox
+                        ? 'Проверка сборки (тестовый контур банка)'
+                        : (data.accepted ? 'Платёжка, которую принял банк' : 'Платёжка, которую банк отклонил')}</div>`
+                + `<p class="iv2-hint">Отправлено${when ? ' ' + escapeHtml(when) : ''}${
+                        data.sent_by ? ', ' + escapeHtml(data.sent_by) : ''}.
+                        НДС банк читает из строки «НазначениеПлатежа».</p>`
+                + bankDocumentHtml({ document: data.document });
         } else if (actionKey === 'bank-one') {
             body = `<div class="iv2-report__head">Платёжка загружена в банк черновиком
                         на ${escapeHtml(money((data.invoice && data.invoice.amount) || 0))}.</div>`
@@ -5849,14 +5891,29 @@
 
     function refsBodyHtml() {
         const refs = state.tools.refs;
+        const isVat = refs.type === 'vat-options';
         return toolsTabsHtml(REF_TABS, refs.type, 'data-ref')
+            + (isVat ? `<div class="iv2-hint">Ставка — это то, что уйдёт в платёжку: банк берёт НДС из
+                    назначения платежа. Название варианта на неё больше не влияет.</div>` : '')
             + `<div class="iv2-tools-add">
                    <input class="iv2-input" type="text" id="iv2RefNewName" placeholder="Название"
                           autocomplete="off" value="${escapeHtml(refs.newName || '')}">
+                   ${isVat ? `<input class="iv2-input iv2-input--rate" type="text" id="iv2RefNewRate"
+                          placeholder="Ставка, %" autocomplete="off" inputmode="decimal"
+                          value="${escapeHtml(refs.newRate || '')}">` : ''}
                    <button class="bx-btn bx-btn--sm" type="button" id="iv2RefAdd">Добавить</button>
                </div>
                <div id="iv2RefList">${refsListHtml()}</div>
                <div id="iv2BanksStatus">${banksStatusHtml()}</div>`;
+    }
+
+    /** «20» / «0» → текст для списка. null — ставка не задана. */
+    function vatRateText(rate) {
+        if (rate === null || rate === undefined || rate === '') return '';
+        const value = Number(rate);
+        if (!isFinite(value)) return '';
+        if (value === 0) return 'без налога';
+        return String(value).replace('.', ',') + '%';
     }
 
     /**
@@ -5990,6 +6047,7 @@
         if (!refs.list.length) return '<p class="iv2-tools-empty">Список пуст</p>';
 
         const isPayers = refs.type === 'payers';
+        const isVat = refs.type === 'vat-options';
         return refs.list.map(item => `
             <div class="iv2-tools-row">
                 <div class="iv2-tools-row__main">
@@ -5999,13 +6057,22 @@
                         // поэтому переименование его отключает — без этой пометки такое
                         // прошло бы незамеченным до первого счёта без реквизитов.
                         isPayers && item.requires_bank_details
-                            ? ' <span class="bx-badge b-appr">оплата с расчётного счёта</span>' : ''}</div>
+                            ? ' <span class="bx-badge b-appr">оплата с расчётного счёта</span>' : ''}${
+                        // Вариант без ставки — это счёт, который встанет при отправке в
+                        // банк. Показываем это в справочнике, а не в момент оплаты.
+                        isVat && (item.rate === null || item.rate === undefined)
+                            ? ' <span class="bx-badge b-rej">ставка не задана</span>' : ''}</div>
                     ${isPayers ? `<div class="iv2-hint">${item.bank_account
                         ? 'реквизиты банка заполнены' : 'реквизиты банка не заполнены'}</div>` : ''}
+                    ${isVat ? `<div class="iv2-hint">${item.rate === null || item.rate === undefined
+                        ? 'счета с этим вариантом в банк не уйдут — укажите ставку'
+                        : 'в платёжку уйдёт: ' + escapeHtml(vatRateText(item.rate))}</div>` : ''}
                 </div>
                 <div class="iv2-tools-row__btns">
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
                             data-ref-act="rename" data-ref-id="${escapeHtml(item.id)}">Изменить</button>
+                    ${isVat ? `<button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
+                            data-ref-act="vat-rate" data-ref-id="${escapeHtml(item.id)}">Ставка</button>` : ''}
                     ${isPayers ? `<button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
                             data-ref-act="bank" data-ref-id="${escapeHtml(item.id)}">Реквизиты банка</button>` : ''}
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button"
@@ -6049,6 +6116,7 @@
                 tab.addEventListener('click', () => {
                     state.tools.refs.type = tab.getAttribute('data-ref');
                     state.tools.refs.bankEditId = null;
+                    state.tools.refs.newRate = '';
                     state.tools.refs.list = [];
                     loadRefList();
                 });
@@ -6062,6 +6130,16 @@
                 if (event.key === 'Enter') { event.preventDefault(); addRefItem(); }
             });
         }
+        // Ставка живёт в state, а не только в DOM: список справочника
+        // перерисовывается после каждой правки, и набранное иначе пропадало бы
+        const rateInput = $('iv2RefNewRate');
+        if (rateInput) {
+            rateInput.addEventListener('input', () => { state.tools.refs.newRate = rateInput.value; });
+            rateInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') { event.preventDefault(); addRefItem(); }
+            });
+        }
+
         const addButton = $('iv2RefAdd');
         if (addButton) addButton.addEventListener('click', addRefItem);
 
@@ -6113,6 +6191,30 @@
             await savePayerBank(id);
             return;
         }
+        if (action === 'vat-rate') {
+            const current = item && item.rate !== null && item.rate !== undefined ? String(item.rate) : '';
+            const entered = await window.BarhatUI.prompt(
+                'Ставка в процентах: 20, 10, 5, 0 (без налога). Именно она уйдёт в платёжку.',
+                current, { title: `Ставка НДС — ${item ? item.name : ''}`, confirmText: 'Сохранить' });
+            // null — «Отмена»; пустая строка — осознанная очистка ставки
+            if (entered === null || entered === undefined) return;
+            const rate = String(entered).trim();
+            if (rate && !/^\d+([.,]\d+)?$/.test(rate)) {
+                toast('Ставка — число: 20, 10, 5 или 0', 'error');
+                return;
+            }
+            try {
+                await apiPut(`${refApiBase()}/${refs.type}/${id}`, {
+                    name: item ? item.name : '', rate: rate === '' ? null : rate,
+                });
+                await loadRefList();
+                await reloadReferences();
+                toast('Ставка сохранена', 'success');
+            } catch (error) {
+                toast('Не удалось сохранить ставку: ' + error.message, 'error');
+            }
+            return;
+        }
         if (action === 'rename') {
             const name = await window.BarhatUI.prompt('Новое название:', item ? item.name : '', {
                 title: 'Переименовать запись',
@@ -6152,9 +6254,28 @@
             toast('Укажите название', 'error');
             return;
         }
+
+        // У нового варианта НДС ставка обязательна: именно её отсутствие
+        // (ставку выводили из названия) и роняло НДС в платёжках. Старые
+        // варианты без ставки правятся кнопкой «Ставка» в списке.
+        const payload = { name };
+        if (state.tools.refs.type === 'vat-options') {
+            const rate = String(state.tools.refs.newRate || '').trim();
+            if (!rate) {
+                toast('Укажите ставку: 20, 10, 5 или 0 (без налога)', 'error');
+                return;
+            }
+            if (!/^\d+([.,]\d+)?$/.test(rate)) {
+                toast('Ставка — число: 20, 10, 5 или 0', 'error');
+                return;
+            }
+            payload.rate = rate;
+        }
+
         try {
-            await apiPost(`${refApiBase()}/${state.tools.refs.type}`, { name });
+            await apiPost(`${refApiBase()}/${state.tools.refs.type}`, payload);
             state.tools.refs.newName = '';
+            state.tools.refs.newRate = '';
             await loadRefList();
             await reloadReferences();
             toast('Запись добавлена', 'success');

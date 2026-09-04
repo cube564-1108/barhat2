@@ -255,8 +255,10 @@ def test_send_invoice_to_bank():
     assert invoice_after_real["bank_send_error"] is None
     print("   ✓ боевая отправка переводит счёт в sent_to_bank")
 
-    # f) ошибка банка — bank_send_error записан, статус не двигается дальше
-    invoice_fail = _make_invoice(payer_id)
+    # f) ошибка банка — bank_send_error записан, статус не двигается дальше.
+    # НДС обязателен и здесь: без него отправка не доходит до банка вовсе
+    # (400 вместо 502) — см. scripts/test_vat_in_bank_document.py
+    invoice_fail = _make_invoice(payer_id, vat_id=vat_id)
     approve_invoice(invoice_fail["id"], "admin")
     invoice_fail = get_invoice_by_id(invoice_fail["id"])
 

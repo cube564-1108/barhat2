@@ -33,6 +33,20 @@ _MANDATORY_DOCUMENT_FIELDS = (
 )
 
 
+def _clean(value) -> str:
+    """
+    Значение поля в одну строку.
+
+    Формат 1С построчный (`ключ=значение`), а назначение платежа приходит из
+    textarea — перевод строки в нём разрывает документ: всё, что после \\n,
+    банк видит как строку без ключа и выбрасывает. Так молча терялся хвост
+    назначения вместе с фразой про НДС.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
 def _fmt_date(value) -> str:
     if isinstance(value, str):
         value = datetime.datetime.strptime(value, "%Y-%m-%d").date()
@@ -108,6 +122,11 @@ def build_1c_payment_document(
         f"РасчСчет={payer['account']}",
         "СекцияДокумент=Платежное поручение",
     ]
+    # Чистим значения все разом, а не только назначение платежа: реквизиты
+    # приезжают из справочников, куда их вставляют копипастом из писем и
+    # выписок — с переносами и табуляциями внутри.
+    values = {key: _clean(value) for key, value in values.items()}
+
     for key in _MANDATORY_DOCUMENT_FIELDS:
         lines.append(f"{key}={values.get(key, '')}")
     for key, value in values.items():

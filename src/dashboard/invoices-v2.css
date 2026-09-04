@@ -1654,6 +1654,9 @@
 
 .iv2 .iv2-tools-add .iv2-input { flex: 1; min-width: 200px; }
 
+/* Ставка НДС — короткое числовое поле рядом с названием варианта */
+.iv2 .iv2-tools-add .iv2-input--rate { flex: 0 0 130px; min-width: 110px; }
+
 .iv2 .iv2-tools-empty {
     padding: 22px 0;
     text-align: center;

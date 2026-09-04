@@ -57,6 +57,8 @@ from .storage import (
     payer_has_bank_requisites,
     payer_requires_bank_details,
     set_invoice_bank_send_error,
+    save_invoice_bank_document,
+    get_invoice_bank_document,
     get_all_vat_options,
     get_vat_option_by_id,
     create_vat_option,
@@ -173,20 +175,35 @@ INVOICE_SECTIONS = ("invoices", "invoices_v2")
 # СПРАВОЧНИКИ (для форм на фронте) — общий паттерн для 4 простых словарей
 # =============================================================================
 
-def _register_reference_crud(name, get_all, get_by_id, create, update, delete):
-    """Регистрирует стандартный набор роутов GET/POST/PUT/DELETE для справочника."""
+def _register_reference_crud(name, get_all, get_by_id, create, update, delete, read_extra=None):
+    """
+    Регистрирует стандартный набор роутов GET/POST/PUT/DELETE для справочника.
+
+    read_extra(data) -> (kwargs, ошибка) — необязательный разбор полей сверх
+    названия (у вариантов НДС это ставка). Живёт параметром, а не отдельной
+    парой ручек: иначе у справочника НДС разъехались бы с остальными и
+    реактивация мягко удалённой записи, и текст ошибок, и аудит.
+    """
 
     def list_view():
         return jsonify({name: get_all()})
     list_view.__name__ = f"get_{name}"
+
+    def _read_extra(data):
+        if not read_extra:
+            return {}, None
+        return read_extra(data)
 
     def create_view():
         data = request.get_json(silent=True) or {}
         item_name = (data.get("name") or "").strip()
         if not item_name:
             return jsonify({"error": "Название обязательно"}), 400
+        extra, extra_error = _read_extra(data)
+        if extra_error:
+            return jsonify({"error": extra_error}), 400
         try:
-            item_id = create(item_name)
+            item_id = create(item_name, **extra)
         except sqlite3.IntegrityError:
             return jsonify({"error": f"«{item_name}» уже есть в справочнике"}), 400
         except Exception:
@@ -208,8 +225,11 @@ def _register_reference_crud(name, get_all, get_by_id, create, update, delete):
         item_name = (data.get("name") or "").strip()
         if not item_name:
             return jsonify({"error": "Название обязательно"}), 400
+        extra, extra_error = _read_extra(data)
+        if extra_error:
+            return jsonify({"error": extra_error}), 400
         try:
-            update(item_id, item_name)
+            update(item_id, item_name, **extra)
         except sqlite3.IntegrityError:
             return jsonify({"error": f"«{item_name}» уже есть в справочнике"}), 400
         log_action(current_user.username, f"update_{name}", f"{item_id}: {item_name}")
@@ -243,8 +263,32 @@ _register_reference_crud("cities", get_all_cities, get_city_by_id,
                           create_city, update_city, delete_city)
 _register_reference_crud("payers", get_all_payers, get_payer_by_id,
                           create_payer, update_payer, delete_payer)
+def _read_vat_rate(data):
+    """
+    Ставка варианта НДС: число 0–100 («0» = без налога) либо пусто —
+    «ставка не задана». Пустую разрешаем сознательно: в справочнике уже
+    лежат варианты, названия которых машинно не разобрать, и запрет на
+    сохранение сделал бы их нередактируемыми. Цену пустой ставки платит не
+    бухгалтер задним числом, а тот, кто жмёт «Отправить в банк» — отправка
+    по такому варианту не проходит с внятным текстом (см. _vat_for_bank).
+    """
+    if "rate" not in data:
+        return {}, None
+    raw = data.get("rate")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {"rate": None}, None
+    try:
+        rate = float(str(raw).replace(",", "."))
+    except (TypeError, ValueError):
+        return None, "Ставка НДС должна быть числом (например 20) или пустой"
+    if rate < 0 or rate > 100:
+        return None, "Ставка НДС должна быть от 0 до 100"
+    return {"rate": rate}, None
+
+
 _register_reference_crud("vat-options", get_all_vat_options, get_vat_option_by_id,
-                          create_vat_option, update_vat_option, delete_vat_option)
+                          create_vat_option, update_vat_option, delete_vat_option,
+                          read_extra=_read_vat_rate)
 
 
 @invoices_bp.route("/payers/<int:payer_id>/bank-requisites", methods=["PUT"])
@@ -1521,33 +1565,37 @@ def mark_paid(invoice_id):
     return jsonify({"ok": True, "invoice": get_invoice_by_id(invoice_id)})
 
 
-_VAT_NO_TAX_RE = re.compile(r"без\s*нал|без\s*нд[сc]|не облага", re.IGNORECASE)
-_VAT_RATE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+def _format_rate(rate: float) -> str:
+    """20.0 -> «20», 7.5 -> «7,5» (в платёжке дробная часть — через запятую)."""
+    text = f"{rate:.2f}".rstrip("0").rstrip(".")
+    return text.replace(".", ",")
 
 
-def _format_vat_suffix(vat_name: Optional[str], amount: float) -> str:
+def _format_vat_suffix(rate: Optional[float], amount: float) -> str:
     """
     Фраза про НДС для назначения платежа. У 1С-обмена (document.py) нет
     отдельного структурного поля под НДС — по 383-П это указывается текстом
     внутри назначения платежа, банк вытаскивает ставку/сумму из него сам
     (баг: без этой фразы поле НДС в личном кабинете банка оставалось пустым).
-    Если название варианта НДС не удаётся распознать как ставку/безНДС —
-    подставляем его как есть, лучше показать что-то, чем ничего.
+
+    Ставка приходит числом из справочника (invoice_vat_options.rate), а не
+    вылавливается регуляркой из названия варианта, как было до 04.09.2026:
+    вариант, названный без знака «%» («С НДС», «НДС 20/120»), давал в банк
+    строку без ставки, и поле НДС в кабинете снова оставалось пустым — молча,
+    потому что платёжку банк при этом принимал.
+
+    Формулировку не меняем: ровно в этом виде банк её разбирает с 17.08.2026,
+    и трогать доказанно рабочий текст ради красоты — лишний риск.
     """
-    if not vat_name:
+    if rate is None:
         return ""
-    name = vat_name.strip()
-    if _VAT_NO_TAX_RE.search(name):
+    if rate == 0:
         return "Без налога (НДС)."
-    match = _VAT_RATE_RE.search(name)
-    if match:
-        rate = float(match.group(1).replace(",", "."))
-        vat_amount = round(amount * rate / (100 + rate), 2)
-        return f"В том числе НДС {match.group(1)}% — {vat_amount:.2f} руб."
-    return f"НДС: {name}."
+    vat_amount = round(amount * rate / (100 + rate), 2)
+    return f"В том числе НДС {_format_rate(rate)}% — {vat_amount:.2f} руб."
 
 
-def _build_bank_payment_purpose(invoice: dict, vat_name: Optional[str]) -> str:
+def _build_bank_payment_purpose(invoice: dict, vat_rate: Optional[float]) -> str:
     """
     match_code — строго в начале строки (см. план, "Уточнения от владельца
     после исследования API ПланФакт") — Фаза 6 матчит операции ПланФакт
@@ -1556,10 +1604,33 @@ def _build_bank_payment_purpose(invoice: dict, vat_name: Optional[str]) -> str:
     платежа при автоотправке в Модульбанк).
     """
     parts = [invoice["match_code"], invoice["payment_purpose"]]
-    vat_suffix = _format_vat_suffix(vat_name, invoice["amount"])
+    vat_suffix = _format_vat_suffix(vat_rate, invoice["amount"])
     if vat_suffix:
         parts.append(vat_suffix)
     return " ".join(parts)
+
+
+def _vat_for_bank(invoice: dict):
+    """
+    Ставка НДС для платёжки: (rate, ошибка). Ошибка — текст для человека,
+    отправку он останавливает.
+
+    Проверка стоит здесь, а не только в форме: в форме НДС обязателен лишь
+    для трёх юрлиц, узнаваемых по точному названию (BANK_TRANSFER_PAYER_NAMES),
+    а в банк уходит любой счёт, у плательщика которого заполнены реквизиты.
+    Всё, что мимо этого списка, раньше отправлялось без НДС молча.
+    """
+    if not invoice.get("vat_id"):
+        return None, ("В счёте не указан НДС — без него банк выставит платёжку "
+                      "с пустой ставкой. Укажите вариант НДС в счёте")
+    vat_option = get_vat_option_by_id(invoice["vat_id"])
+    if not vat_option:
+        return None, ("Вариант НДС из счёта удалён из справочника — "
+                      "выберите в счёте действующий")
+    if vat_option.get("rate") is None:
+        return None, (f"У варианта НДС «{vat_option['name']}» не задана ставка — "
+                      f"укажите её в справочнике НДС, иначе банк не увидит НДС в платёжке")
+    return vat_option["rate"], None
 
 
 def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict:
@@ -1600,6 +1671,10 @@ def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict
                      f"добавьте их в справочнике плательщиков или оплатите счёт вручную и отметьте оплаченным"
         }}
 
+    vat_rate, vat_error = _vat_for_bank(invoice)
+    if vat_error:
+        return {"ok": False, "http_status": 400, "body": {"error": vat_error}}
+
     payer_requisites = get_payer_bank_requisites(invoice["payer_id"])
     recipient = {
         "name": invoice["counterparty_name"],
@@ -1617,8 +1692,7 @@ def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict
     except ValueError as e:
         return {"ok": False, "http_status": 400, "body": {"error": str(e)}}
 
-    vat_option = get_vat_option_by_id(invoice["vat_id"]) if invoice.get("vat_id") else None
-    purpose = _build_bank_payment_purpose(invoice, vat_option["name"] if vat_option else None)
+    purpose = _build_bank_payment_purpose(invoice, vat_rate)
 
     result = client.send_invoice_payment(
         doc_num=str(invoice["id"]),
@@ -1631,6 +1705,17 @@ def _send_invoice_to_bank(invoice: dict, sandbox: bool, changed_by: str) -> dict
         payer=payer_requisites,
         recipient=recipient,
     )
+
+    # Сохраняем то, что реально ушло, включая неудачные и sandbox-попытки:
+    # именно неудачная и нужна для разбора, а «в кабинете банка чего-то не
+    # хватает» — это как раз про принятую платёжку (04.09.2026, пустой НДС).
+    if result.get("document"):
+        try:
+            save_invoice_bank_document(invoice["id"], result["document"], changed_by,
+                                       sandbox=sandbox, accepted=bool(result["ok"]))
+        except Exception:
+            # Отправка уже состоялась — архив документа не повод её провалить
+            logger.exception(f"не удалось сохранить платёжку счёта {invoice['id']}")
 
     if sandbox:
         return {"ok": result["ok"], "http_status": 200, "body": {"ok": result["ok"], "sandbox": True, "result": result}}
@@ -1674,6 +1759,34 @@ def send_to_bank(invoice_id):
         log_action(current_user.username, action, invoice["invoice_number"])
 
     return jsonify(outcome["body"]), outcome["http_status"]
+
+
+@invoices_bp.route("/<int:invoice_id>/bank-document", methods=["GET"])
+@role_required("admin")
+def get_bank_document(invoice_id):
+    """
+    Текст платёжки, ушедшей в Модульбанк по этому счёту.
+
+    Нужен ровно для одного вопроса — «что мы реально отправили»: он встаёт
+    каждый раз, когда в кабинете банка чего-то не хватает, и без этой ручки
+    ответ на него добывается чтением кода (04.09.2026, пустая ставка НДС).
+    Документ содержит банковские реквизиты обеих сторон, поэтому только админ.
+    """
+    invoice = get_invoice_by_id(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Счёт не найден"}), 404
+
+    saved = get_invoice_bank_document(invoice_id)
+    if not saved:
+        return jsonify({"error": "По этому счёту платёжка в банк ещё не отправлялась"}), 404
+
+    return jsonify({
+        "document": saved["document"],
+        "sent_at": saved["sent_at"],
+        "sent_by": saved["sent_by"],
+        "sandbox": bool(saved["sandbox"]),
+        "accepted": bool(saved["accepted"]),
+    })
 
 
 # =============================================================================

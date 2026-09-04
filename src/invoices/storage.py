@@ -142,6 +142,10 @@ def init_invoices_tables():
     # пришлось бы городить отдельный конфиг на каждую компанию.
     _ensure_payer_bank_columns(conn)
 
+    # Ставка НДС числом (04.09.2026): раньше её выводили регуляркой из
+    # названия варианта — см. _ensure_vat_rate_column.
+    _ensure_vat_rate_column(conn)
+
     # ========================================================================
     # 2. Миграция старой модели invoices (один store_id/category на счёт)
     #    на новую (распределение — в invoice_line_items)
@@ -235,6 +239,20 @@ def init_invoices_tables():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_counterparties_active
         ON invoice_counterparties(is_active) WHERE is_active = 1
+    """)
+
+    # Текст платёжки, ушедшей в Модульбанк (04.09.2026). Отдельной таблицей,
+    # а не колонкой в invoices: список счетов читается через SELECT *, и
+    # документ висел бы грузом на каждой выдаче списка.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_bank_documents (
+            invoice_id INTEGER PRIMARY KEY REFERENCES invoices(id),
+            document TEXT NOT NULL,
+            sent_by TEXT,
+            sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+            sandbox INTEGER NOT NULL DEFAULT 0,
+            accepted INTEGER NOT NULL DEFAULT 0
+        )
     """)
     conn.commit()
 
@@ -544,6 +562,84 @@ def _ensure_payer_bank_columns(conn: sqlite3.Connection):
         for col in _PAYER_BANK_COLUMNS:
             if not _column_exists(conn, "invoice_payers", col):
                 conn.execute(f"ALTER TABLE invoice_payers ADD COLUMN {col} TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+# Ставка НДС по названию варианта справочника. Раньше это был единственный
+# способ узнать ставку, и он же был багом: фраза для банка собиралась из
+# названия регуляркой, поэтому вариант, названный без знака «%» («С НДС»,
+# «НДС 20/120», «20»), уходил в платёжку как бесполезное «НДС: С НДС.» —
+# банк не видел ставки и оставлял поле НДС пустым, не сообщая об ошибке.
+# Всплыло 04.09.2026 (счёт REF-000168) после того, как НДС сделали
+# обязательным при оплате с расчётного счёта: варианты из справочника стали
+# выбирать все подряд, а не только привычные «20%» и «Без НДС».
+#
+# Теперь ставка — отдельное поле invoice_vat_options.rate, а разбор названия
+# остался только для разового бэкфилла существующих вариантов.
+_VAT_NO_TAX_RE = re.compile(r"без\s*нал|без\s*нд[сc]|не облага", re.IGNORECASE)
+_VAT_RATE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+
+
+def parse_vat_rate_from_name(name: Optional[str]) -> Optional[float]:
+    """
+    Ставка из названия варианта: 0.0 — без налога, число — процент,
+    None — по названию не понять (тогда ставку задаёт человек в справочнике).
+    """
+    if not name:
+        return None
+    text = name.strip()
+    if _VAT_NO_TAX_RE.search(text):
+        return 0.0
+    match = _VAT_RATE_RE.search(text)
+    if match:
+        return float(match.group(1).replace(",", "."))
+    return None
+
+
+def _ensure_vat_rate_column(conn: sqlite3.Connection):
+    """
+    Добивка invoice_vat_options.rate — ставка числом (0 = без налога,
+    NULL = не задана).
+
+    Блокировка как в остальных миграциях модуля: два gunicorn-воркера
+    стартуют параллельно и без BEGIN IMMEDIATE падают на "duplicate column".
+
+    Бэкфилл идёт каждый старт, а не только вместе с ALTER: запрос трогает
+    только строки с пустой ставкой, поэтому повторы безвредны, а один
+    недоехавший старт иначе оставил бы вариант без ставки навсегда.
+    Варианты, названия которых по-человечески не разобрать, остаются с
+    NULL — их видно в справочнике, и отправка в банк по ним не проходит
+    молча (см. _send_invoice_to_bank).
+    """
+    if not _table_exists(conn, "invoice_vat_options"):
+        return
+
+    if not _column_exists(conn, "invoice_vat_options", "rate"):
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not _column_exists(conn, "invoice_vat_options", "rate"):
+                conn.execute("ALTER TABLE invoice_vat_options ADD COLUMN rate REAL")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    rows = conn.execute(
+        "SELECT id, name FROM invoice_vat_options WHERE rate IS NULL"
+    ).fetchall()
+    updates = [(rate, row["id"]) for row in rows
+               if (rate := parse_vat_rate_from_name(row["name"])) is not None]
+    if not updates:
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            "UPDATE invoice_vat_options SET rate = ? WHERE id = ? AND rate IS NULL", updates
+        )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1114,12 +1210,44 @@ def get_vat_option_by_id(vat_id: int) -> Optional[Dict[str, Any]]:
     return _ref_get_by_id("invoice_vat_options", vat_id)
 
 
-def create_vat_option(name: str) -> int:
-    return _ref_create("invoice_vat_options", name)
+def _set_vat_rate(vat_id: int, rate: Optional[float]) -> None:
+    conn = get_db()
+    try:
+        conn.execute("UPDATE invoice_vat_options SET rate = ? WHERE id = ?", (rate, vat_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 
-def update_vat_option(vat_id: int, name: str) -> bool:
-    return _ref_update("invoice_vat_options", vat_id, name)
+def create_vat_option(name: str, rate: Optional[float] = None) -> int:
+    """
+    rate: 0 — без налога, число — процент, None — вывести из названия, если
+    оно однозначное («20%», «Без НДС»). Не вывелось — вариант остаётся без
+    ставки, и счёт с ним в банк не уйдёт (см. _send_invoice_to_bank): это
+    честнее, чем отправить платёжку с пустым НДС и узнать об этом от
+    бухгалтера через неделю.
+
+    Ставку пишем отдельным UPDATE, чтобы не расходиться с _ref_create — там
+    живёт реактивация мягко удалённой строки с тем же названием.
+    """
+    if rate is None:
+        rate = parse_vat_rate_from_name(name)
+    vat_id = _ref_create("invoice_vat_options", name)
+    _set_vat_rate(vat_id, rate)
+    return vat_id
+
+
+# «Ставку не передавали» и «ставку очистили» — разные вещи: переименование
+# варианта из общего CRUD ставку не присылает, и без этого различия оно
+# обнуляло бы её молча, возвращая ровно тот баг, ради которого поле заведено.
+_KEEP_RATE = object()
+
+
+def update_vat_option(vat_id: int, name: str, rate: Any = _KEEP_RATE) -> bool:
+    _ref_update("invoice_vat_options", vat_id, name)
+    if rate is not _KEEP_RATE:
+        _set_vat_rate(vat_id, rate)
+    return True
 
 
 def delete_vat_option(vat_id: int) -> bool:
@@ -2695,9 +2823,57 @@ def set_invoice_bank_send_error(invoice_id: int, error_message: Optional[str]) -
     терялся молча (см. план, Фаза 5).
     """
     conn = get_db()
-    conn.execute("UPDATE invoices SET bank_send_error = ? WHERE id = ?", (error_message, invoice_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("UPDATE invoices SET bank_send_error = ? WHERE id = ?", (error_message, invoice_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_invoice_bank_document(invoice_id: int, document: str, sent_by: str,
+                               sandbox: bool, accepted: bool) -> None:
+    """
+    Сохранить текст платёжки, реально ушедшей в банк.
+
+    Смысл — не в архиве ради архива: вопрос «а что мы туда отправили»
+    возникает каждый раз, когда в личном кабинете банка чего-то не хватает
+    (04.09.2026 — пустая ставка НДС), и без сохранённого документа он
+    закрывается расследованием по коду вместо одного взгляда.
+
+    Хранится отдельной таблицей, а не колонкой в invoices: список счетов
+    читается через SELECT *, и полтора килобайта текста на строку утяжелили
+    бы каждую выдачу списка на ровном месте. Запись одна на счёт —
+    перезаписываем последней отправкой.
+    """
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO invoice_bank_documents (invoice_id, document, sent_by, sent_at, sandbox, accepted)
+            VALUES (?, ?, ?, datetime('now'), ?, ?)
+            ON CONFLICT(invoice_id) DO UPDATE SET
+                document = excluded.document,
+                sent_by = excluded.sent_by,
+                sent_at = excluded.sent_at,
+                sandbox = excluded.sandbox,
+                accepted = excluded.accepted
+            """,
+            (invoice_id, document, sent_by, 1 if sandbox else 0, 1 if accepted else 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_invoice_bank_document(invoice_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM invoice_bank_documents WHERE invoice_id = ?", (invoice_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
 
 
 def mark_invoice_paid(invoice_id: int, changed_by: str = "system") -> bool:
