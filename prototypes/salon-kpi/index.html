@@ -148,8 +148,8 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
 .rows{background:#fff;border:1px solid var(--bx-border);border-radius:var(--bx-r-2xl);overflow:hidden;
   box-shadow:0 1px 2px rgba(65,19,48,.04)}
 .row-head,.row{display:grid;
-  grid-template-columns:minmax(180px,1.8fr) 1.2fr .8fr .8fr .9fr 1fr .8fr 1fr 28px;
-  gap:12px;align-items:center;padding:13px 18px}
+  grid-template-columns:minmax(170px,1.7fr) 1.1fr .7fr .7fr .9fr .9fr 1fr .7fr .9fr 26px;
+  gap:10px;align-items:center;padding:13px 16px;font-size:13.5px}
 .row-head{background:linear-gradient(180deg,#fdf8fc 0%,#faf5f9 100%);font-size:11px;
   text-transform:uppercase;letter-spacing:.04em;color:var(--bx-muted);font-weight:600;
   border-bottom:1px solid var(--bx-border)}
@@ -261,7 +261,8 @@ h1,h2,h3,h4{font-family:var(--bx-font-head);color:var(--bx-wine);font-weight:700
      экран глазами разных пользователей -->
 <div class="proto">
   <div class="proto__in">
-    <b>Прототип.</b> Данные вымышленные, пропорции взяты из реальных выгрузок CRM и Pyrus.
+    <b>Прототип.</b> Данные настоящие — выгрузка 4 сентября: заказы RetailCRM, документы
+    МойСклада, формы Pyrus. Выдуманы только планы продаж.
     <label>Смотреть как:
       <select id="roleSelect">
         <option value="manager">управляющий (2 салона)</option>
@@ -391,6 +392,10 @@ const MONTHS = {
   '2026-08': {label:'Август 2026',   days:31, passed:31, asOf:'1 сентября, 03:10', running:false}
 };
 
+// ВСЕ ЦИФРЫ НИЖЕ — РЕАЛЬНЫЕ, выгружены 2026-09-04: заказы RetailCRM (статус
+// «Выполнен», период по дате доставки), документы МойСклада, формы Pyrus 1291124
+// (негативная ОС) и 1327961 (качество). Выдуманы только планы продаж.
+//
 // fact — отгружено; prevToDate — сколько было в прошлом месяце НА ЭТУ ЖЕ ДАТУ
 // (сравнивать неполный месяц с полным прошлым бессмысленно);
 // courierOrders/taxiOrders — заказы с типом «Доставка курьером» и из них отданные такси-службам.
@@ -401,117 +406,113 @@ const MONTHS = {
 // разные шкалы. Поэтому храним пару {a14,c14,a18,c18}, а сравнимая величина —
 // процент от максимума: (сумма баллов) / (сумма максимумов).
 const SALONS = [
-  {id:1, name:'НСК Восход, 3', city:'Новосибирск', data:{
-    '2026-09':{plan:2600000, fact:348200, prevToDate:321500, street:63400, nosOk:2, nosReview:3,
-      nosCats:[['Доставка',1],['Цветок',1]], q:{a14:13.3, c14:8, a18:16.4, c18:3},
-      courierOrders:92, taxiOrders:57,
-      florists:[{n:'Флорист 3',a14:13.6,c14:4,a18:16.5,c18:1},{n:'Флорист 4',a14:13.0,c14:3,a18:16.2,c18:1},
-                {n:'Флорист 9',a14:12.9,c14:1,a18:16.4,c18:1}],
-      channels:[['Заказ с сайта',118400],['Яндекс Еда',92100],['Улица',63400],['По телефону',41800],['Flowwow',32500]]},
-    '2026-08':{plan:2400000, fact:2471000, prevToDate:2190000, street:452000, nosOk:6, nosReview:7,
-      nosCats:[['Доставка',3],['Цветок',2],['Сервис',1]], q:{a14:13.1, c14:55, a18:16.2, c18:18},
-      courierOrders:690, taxiOrders:430,
-      florists:[{n:'Флорист 3',a14:13.3,c14:22,a18:16.5,c18:6},{n:'Флорист 4',a14:12.9,c14:19,a18:16.0,c18:6},
-                {n:'Флорист 9',a14:12.8,c14:9,a18:16.1,c18:3},{n:'Флорист 12',a14:12.6,c14:5,a18:15.8,c18:3}],
-      channels:[['Заказ с сайта',812000],['Яндекс Еда',640000],['Улица',452000],['По телефону',310000],['Flowwow',257000]]}}},
+  {id:1, name:"НСК Восход, 3", city:"Новосибирск", data:{
+    '2026-09':{plan:2100000, fact:376971, prevToDate:202393, street:62012, nosOk:2, nosReview:0,
+      nosCats:[["Доставка", 2]], q:{a14:12.48, c14:23, a18:14.8, c18:5},
+      courierOrders:53, taxiOrders:13,
+      florists:[{n:"Флорист 3",a14:12.45,c14:11,a18:16.0,c18:1},{n:"Флорист 2",a14:12.2,c14:5,a18:12.5,c18:2},{n:"Флорист 5",a14:13.0,c14:4,a18:15.0,c18:1},{n:"Флорист 8",a14:12.33,c14:3,a18:18.0,c18:1}],
+      channels:[["Яндекс Еда", 112389], ["Заказ с сайта", 93608], ["Улица", 62012], ["Заказ с Flowwow", 52705], ["Telegram", 15492]]},
+    '2026-08':{plan:1950000, fact:1991000, prevToDate:1743488, street:294248, nosOk:7, nosReview:4,
+      nosCats:[["Доставка", 3], ["Обслуживание в салоне", 1], ["Сборка букета", 1], ["Насекомые", 1], ["Цветок", 1]], q:{a14:13.02, c14:62, a18:15.27, c18:11},
+      courierOrders:311, taxiOrders:101,
+      florists:[{n:"Флорист 8",a14:13.65,c14:23,a18:16.67,c18:3},{n:"Флорист 6",a14:13.44,c14:16,a18:15.67,c18:6},{n:"флорист 17",a14:11.8,c14:10,a18:12.0,c18:2},{n:"Флорист 2",a14:12.67,c14:6,a18:0,c18:0},{n:"флорист 15",a14:12.5,c14:4,a18:0,c18:0},{n:"Флорист 3",a14:11.0,c14:1,a18:0,c18:0}],
+      channels:[["Яндекс Еда", 642326], ["Заказ с Flowwow", 387497], ["Заказ с сайта", 326207], ["Улица", 294248], ["МАКС", 87444]]}}},
 
-  {id:2, name:'НСК Блюхера, 61', city:'Новосибирск', data:{
-    '2026-09':{plan:1900000, fact:198600, prevToDate:242300, street:31200, nosOk:1, nosReview:1,
-      nosCats:[['Сборка букета',1]], q:{a14:12.5, c14:6, a18:15.6, c18:2},
-      courierOrders:64, taxiOrders:41,
-      florists:[{n:'Флорист 6',a14:12.9,c14:3,a18:16.0,c18:1},{n:'Флорист 12',a14:12.1,c14:3,a18:15.2,c18:1}],
-      channels:[['Яндекс Еда',68300],['Заказ с сайта',54100],['Улица',31200],['Flowwow',26400],['По телефону',18600]]},
-    '2026-08':{plan:1850000, fact:1846000, prevToDate:1712000, street:295000, nosOk:2, nosReview:2,
-      nosCats:[['Сборка букета',1],['Ягода',1]], q:{a14:12.9, c14:48, a18:16.1, c18:16},
-      courierOrders:512, taxiOrders:330,
-      florists:[{n:'Флорист 6',a14:13.1,c14:25,a18:16.3,c18:8},{n:'Флорист 12',a14:12.7,c14:23,a18:15.9,c18:8}],
-      channels:[['Яндекс Еда',612000],['Заказ с сайта',498000],['Улица',295000],['Flowwow',241000],['По телефону',200000]]}}},
+  {id:2, name:"НСК Блюхера, 61", city:"Новосибирск", data:{
+    '2026-09':{plan:1100000, fact:171515, prevToDate:64842, street:9521, nosOk:0, nosReview:0,
+      nosCats:[], q:{a14:13.4, c14:25, a18:15.0, c18:3},
+      courierOrders:25, taxiOrders:1,
+      florists:[{n:"Флорист 10",a14:13.21,c14:14,a18:14.0,c18:2},{n:"флорист 13",a14:13.64,c14:11,a18:17.0,c18:1}],
+      channels:[["Яндекс Еда", 54995], ["Заказ с сайта", 51476], ["Заказ с Flowwow", 19764], ["По телефону", 14365], ["Улица", 9521]]},
+    '2026-08':{plan:1100000, fact:1012965, prevToDate:795277, street:77668, nosOk:2, nosReview:1,
+      nosCats:[["Доставка", 2]], q:{a14:13.61, c14:56, a18:16.5, c18:8},
+      courierOrders:134, taxiOrders:24,
+      florists:[{n:"флорист 13",a14:13.67,c14:36,a18:16.8,c18:5},{n:"Флорист 10",a14:13.88,c14:16,a18:17.0,c18:2},{n:"Флорист 3",a14:12.0,c14:4,a18:14.0,c18:1}],
+      channels:[["Яндекс Еда", 360131], ["Заказ с сайта", 191165], ["Заказ с Flowwow", 139629], ["Улица", 77668], ["ВКонтакте", 73089]]}}},
 
-  {id:9, name:'НСК Железнодорожная, 15/1', city:'Новосибирск', data:{
-    '2026-09':{plan:2100000, fact:264800, prevToDate:238900, street:52700, nosOk:2, nosReview:2,
-      nosCats:[['Доставка',2]], q:{a14:13.0, c14:7, a18:16.1, c18:2},
-      courierOrders:71, taxiOrders:52,
-      florists:[{n:'Флорист 4',a14:13.2,c14:4,a18:16.3,c18:1},{n:'Флорист 9',a14:12.7,c14:3,a18:15.9,c18:1}],
-      channels:[['Заказ с сайта',88600],['Яндекс Еда',64200],['Улица',52700],['Flowwow',33100],['По телефону',26200]]},
-    '2026-08':{plan:2000000, fact:1978000, prevToDate:1834000, street:381000, nosOk:5, nosReview:4,
-      nosCats:[['Доставка',3],['Сервис',2]], q:{a14:12.7, c14:50, a18:15.8, c18:16},
-      courierOrders:548, taxiOrders:392,
-      florists:[{n:'Флорист 4',a14:12.9,c14:26,a18:16.0,c18:8},{n:'Флорист 9',a14:12.5,c14:24,a18:15.6,c18:8}],
-      channels:[['Заказ с сайта',655000],['Яндекс Еда',498000],['Улица',381000],['Flowwow',252000],['По телефону',192000]]}}},
+  {id:9, name:"НСК Железнодорожная, 15/1", city:"Новосибирск", data:{
+    '2026-09':{plan:1200000, fact:180511, prevToDate:104011, street:24635, nosOk:1, nosReview:0,
+      nosCats:[["Сервис", 1]], q:{a14:13.0, c14:26, a18:15.5, c18:2},
+      courierOrders:22, taxiOrders:4,
+      florists:[{n:"Флорист 4",a14:13.62,c14:13,a18:15.5,c18:2},{n:"Флорист 9",a14:12.45,c14:11,a18:0,c18:0},{n:"Флорист 3",a14:12.0,c14:2,a18:0,c18:0}],
+      channels:[["Заказ с сайта", 64691], ["Улица", 24635], ["Заказ с Flowwow", 23830], ["WhatsApp", 21987], ["Яндекс Еда", 13509]]},
+    '2026-08':{plan:1100000, fact:1132622, prevToDate:990520, street:157402, nosOk:3, nosReview:2,
+      nosCats:[["Доставка", 1], ["Сервис", 1], ["Сборка букета", 1]], q:{a14:13.28, c14:61, a18:16.0, c18:5},
+      courierOrders:168, taxiOrders:15,
+      florists:[{n:"Флорист 9",a14:13.19,c14:37,a18:16.33,c18:3},{n:"Флорист 4",a14:13.42,c14:24,a18:15.5,c18:2}],
+      channels:[["Заказ с сайта", 268221], ["Яндекс Еда", 255248], ["Заказ с Flowwow", 178304], ["Улица", 157402], ["ВКонтакте", 79276]]}}},
 
-  {id:4, name:'ЕКБ Бажова', city:'Екатеринбург', data:{
-    '2026-09':{plan:3200000, fact:452100, prevToDate:398700, street:71300, nosOk:9, nosReview:12,
-      nosCats:[['Доставка',5],['Цветок',2],['Ягода',2]], q:{a14:13.5, c14:10, a18:17.0, c18:4},
-      courierOrders:118, taxiOrders:79,
-      florists:[{n:'Флорист 3',a14:13.7,c14:4,a18:17.2,c18:2},{n:'Флорист 4',a14:13.4,c14:4,a18:16.9,c18:1},
-                {n:'Флорист 12',a14:13.1,c14:2,a18:16.8,c18:1}],
-      channels:[['Яндекс Еда',146200],['Заказ с сайта',121400],['Flowwow',78900],['Улица',71300],['По телефону',34300]]},
-    '2026-08':{plan:3000000, fact:3082000, prevToDate:2740000, street:521000, nosOk:22, nosReview:16,
-      nosCats:[['Доставка',11],['Цветок',5],['Ягода',4],['Сервис',2]], q:{a14:13.2, c14:68, a18:16.7, c18:22},
-      courierOrders:842, taxiOrders:560,
-      florists:[{n:'Флорист 3',a14:13.4,c14:26,a18:16.9,c18:8},{n:'Флорист 4',a14:13.1,c14:24,a18:16.6,c18:7},
-                {n:'Флорист 12',a14:13.0,c14:18,a18:16.5,c18:7}],
-      channels:[['Яндекс Еда',982000],['Заказ с сайта',864000],['Flowwow',512000],['Улица',521000],['По телефону',203000]]}}},
+  {id:4, name:"ЕКБ Бажова", city:"Екатеринбург", data:{
+    '2026-09':{plan:3000000, fact:344415, prevToDate:316570, street:31261, nosOk:5, nosReview:1,
+      nosCats:[["Доставка", 4], ["Сборка букета", 1]], q:{a14:12.92, c14:25, a18:17.25, c18:4},
+      courierOrders:60, taxiOrders:20,
+      florists:[{n:"Флорист 2",a14:12.77,c14:13,a18:16.5,c18:2},{n:"Флорист 1",a14:13.1,c14:10,a18:18.0,c18:2},{n:"Флорист 3",a14:13.0,c14:2,a18:0,c18:0}],
+      channels:[["Заказ с сайта", 107283], ["Яндекс Еда", 83836], ["Заказ с Flowwow", 55845], ["Улица", 31261], ["МАКС", 23746]]},
+    '2026-08':{plan:2800000, fact:2864485, prevToDate:2334390, street:199073, nosOk:9, nosReview:17,
+      nosCats:[["Доставка", 4], ["Ягода", 3], ["Сервис", 1], ["Обслуживание в салоне", 1]], q:{a14:13.23, c14:78, a18:16.75, c18:12},
+      courierOrders:447, taxiOrders:122,
+      florists:[{n:"Флорист 2",a14:13.45,c14:31,a18:17.33,c18:6},{n:"Флорист 3",a14:13.0,c14:23,a18:15.67,c18:3},{n:"Флорист 4",a14:13.18,c14:11,a18:16.0,c18:2},{n:"Флорист 1",a14:13.18,c14:11,a18:0,c18:0},{n:"Флорист 5",a14:13.0,c14:2,a18:18.0,c18:1}],
+      channels:[["Яндекс Еда", 1315286], ["Заказ с сайта", 506191], ["Заказ с Flowwow", 499258], ["Улица", 199073], ["МАКС", 100023]]}}},
 
-  {id:5, name:'Барнаул Советская', city:'Барнаул', data:{
-    '2026-09':{plan:1500000, fact:212400, prevToDate:181200, street:44900, nosOk:0, nosReview:1,
-      nosCats:[], q:{a14:12.9, c14:5, a18:16.0, c18:2},
-      courierOrders:52, taxiOrders:19,
-      florists:[{n:'Флорист 6',a14:13.1,c14:3,a18:16.2,c18:1},{n:'Флорист 9',a14:12.6,c14:2,a18:15.8,c18:1}],
-      channels:[['Заказ с сайта',72300],['Улица',44900],['Яндекс Еда',43800],['По телефону',31200],['Flowwow',20200]]},
-    '2026-08':{plan:1450000, fact:1462000, prevToDate:1338000, street:318000, nosOk:1, nosReview:0,
-      nosCats:[['Сервис',1]], q:{a14:12.6, c14:41, a18:15.9, c18:13},
-      courierOrders:398, taxiOrders:141,
-      florists:[{n:'Флорист 6',a14:12.8,c14:22,a18:16.1,c18:7},{n:'Флорист 9',a14:12.4,c14:19,a18:15.6,c18:6}],
-      channels:[['Заказ с сайта',498000],['Улица',318000],['Яндекс Еда',302000],['По телефону',201000],['Flowwow',143000]]}}},
+  {id:5, name:"Барнаул Советская", city:"Барнаул", data:{
+    '2026-09':{plan:700000, fact:83752, prevToDate:60324, street:13486, nosOk:0, nosReview:0,
+      nosCats:[], q:{a14:13.17, c14:23, a18:17.0, c18:2},
+      courierOrders:12, taxiOrders:1,
+      florists:[{n:"Флорист 1",a14:13.15,c14:13,a18:17.0,c18:1},{n:"Флорист 5",a14:13.2,c14:10,a18:17.0,c18:1}],
+      channels:[["Заказ с сайта", 36189], ["Улица", 13486], ["Яндекс Еда", 10985], ["По телефону", 10774], ["Заказ с Flowwow", 7728]]},
+    '2026-08':{plan:700000, fact:661803, prevToDate:616708, street:45503, nosOk:1, nosReview:0,
+      nosCats:[["Доставка", 1]], q:{a14:13.37, c14:46, a18:17.0, c18:8},
+      courierOrders:88, taxiOrders:9,
+      florists:[{n:"Флорист 5",a14:13.53,c14:30,a18:18.0,c18:3},{n:"Флорист 1",a14:13.06,c14:16,a18:16.4,c18:5}],
+      channels:[["Яндекс Еда", 208403], ["Заказ с сайта", 136185], ["По телефону", 76872], ["Заказ с Flowwow", 76273], ["МАКС", 50380]]}}},
 
-  {id:6, name:'Барнаул Лазурная', city:'Барнаул', data:{
-    '2026-09':{plan:1700000, fact:178300, prevToDate:206400, street:38100, nosOk:3, nosReview:2,
-      nosCats:[['Ягода',2],['Цветок',1]], q:{a14:12.3, c14:4, a18:15.4, c18:2},
-      courierOrders:48, taxiOrders:31,
-      florists:[{n:'Флорист 12',a14:12.5,c14:2,a18:15.6,c18:1},{n:'Флорист 6',a14:12.1,c14:2,a18:15.2,c18:1}],
-      channels:[['Заказ с сайта',61200],['Яндекс Еда',42800],['Улица',38100],['Flowwow',21100],['По телефону',15100]]},
-    '2026-08':{plan:1650000, fact:1602000, prevToDate:1588000, street:284000, nosOk:6, nosReview:5,
-      nosCats:[['Ягода',3],['Цветок',2],['Доставка',1]], q:{a14:12.9, c14:48, a18:16.2, c18:16},
-      courierOrders:421, taxiOrders:268,
-      florists:[{n:'Флорист 12',a14:13.0,c14:25,a18:16.4,c18:8},{n:'Флорист 6',a14:12.8,c14:23,a18:16.0,c18:8}],
-      channels:[['Заказ с сайта',521000],['Яндекс Еда',402000],['Улица',284000],['Flowwow',231000],['По телефону',164000]]}}},
+  {id:6, name:"Барнаул Лазурная", city:"Барнаул", data:{
+    '2026-09':{plan:850000, fact:157877, prevToDate:70402, street:16352, nosOk:0, nosReview:2,
+      nosCats:[], q:{a14:13.38, c14:21, a18:16.29, c18:7},
+      courierOrders:18, taxiOrders:1,
+      florists:[{n:"Флорист 2",a14:13.75,c14:12,a18:15.67,c18:3},{n:"Флорист 3",a14:12.89,c14:9,a18:16.75,c18:4}],
+      channels:[["Заказ с сайта", 45176], ["Яндекс Еда", 39303], ["Заказ с Flowwow", 16933], ["Улица", 16352], ["МАКС", 16072]]},
+    '2026-08':{plan:800000, fact:831504, prevToDate:720160, street:74102, nosOk:3, nosReview:6,
+      nosCats:[["Сервис", 2], ["Доставка", 1]], q:{a14:13.54, c14:56, a18:17.0, c18:8},
+      courierOrders:128, taxiOrders:12,
+      florists:[{n:"Флорист 3",a14:13.49,c14:35,a18:17.25,c18:4},{n:"Флорист 2",a14:13.62,c14:21,a18:16.75,c18:4}],
+      channels:[["Яндекс Еда", 250160], ["Заказ с сайта", 194991], ["Заказ с Flowwow", 136375], ["Улица", 74102], ["МАКС", 50780]]}}},
 
-  {id:3, name:'Томск Дальне-Ключевская, 16а', city:'Томск', data:{
-    '2026-09':{plan:1800000, fact:243700, prevToDate:212800, street:49600, nosOk:5, nosReview:6,
-      nosCats:[['Доставка',3],['Сборка букета',2]], q:{a14:13.0, c14:6, a18:16.2, c18:2},
-      courierOrders:58, taxiOrders:44,
-      florists:[{n:'Флорист 9',a14:13.2,c14:4,a18:16.4,c18:1},{n:'Флорист 3',a14:12.7,c14:2,a18:16.0,c18:1}],
-      channels:[['Яндекс Еда',81400],['Заказ с сайта',62300],['Улица',49600],['Flowwow',31200],['По телефону',19200]]},
-    '2026-08':{plan:1750000, fact:1721000, prevToDate:1602000, street:342000, nosOk:12, nosReview:9,
-      nosCats:[['Доставка',6],['Сборка букета',4],['Сервис',2]], q:{a14:12.8, c14:47, a18:16.0, c18:16},
-      courierOrders:452, taxiOrders:341,
-      florists:[{n:'Флорист 9',a14:13.0,c14:24,a18:16.2,c18:8},{n:'Флорист 3',a14:12.6,c14:23,a18:15.8,c18:8}],
-      channels:[['Яндекс Еда',562000],['Заказ с сайта',441000],['Улица',342000],['Flowwow',221000],['По телефону',155000]]}}},
+  {id:3, name:"Томск Дальне-Ключевская, 16а", city:"Томск", data:{
+    '2026-09':{plan:1500000, fact:249002, prevToDate:124486, street:7431, nosOk:1, nosReview:2,
+      nosCats:[["Сборка букета", 1]], q:{a14:13.71, c14:24, a18:16.25, c18:4},
+      courierOrders:46, taxiOrders:5,
+      florists:[{n:"Флорист 2",a14:13.6,c14:10,a18:15.5,c18:2},{n:"Флорист 3",a14:14.0,c14:7,a18:18.0,c18:1},{n:"Флорист 6",a14:13.6,c14:5,a18:16.0,c18:1},{n:"Флорист 1",a14:13.5,c14:2,a18:0,c18:0}],
+      channels:[["Заказ с сайта", 80615], ["Яндекс Еда", 57481], ["Заказ с Flowwow", 44962], ["МАКС", 12993], ["По телефону", 12762]]},
+    '2026-08':{plan:1400000, fact:1458869, prevToDate:1147541, street:70994, nosOk:6, nosReview:7,
+      nosCats:[["Доставка", 3], ["Шары", 1], ["Сервис", 1], ["Ягода", 1]], q:{a14:13.16, c14:61, a18:15.5, c18:2},
+      courierOrders:242, taxiOrders:113,
+      florists:[{n:"Флорист 4",a14:12.82,c14:34,a18:15.5,c18:2},{n:"Флорист 3",a14:13.6,c14:20,a18:0,c18:0},{n:"Флорист 1",a14:13.75,c14:4,a18:0,c18:0},{n:"Флорист 2",a14:13.0,c14:2,a18:0,c18:0},{n:"флорист 14",a14:14.0,c14:1,a18:0,c18:0}],
+      channels:[["Яндекс Еда", 478415], ["Заказ с сайта", 365690], ["Заказ с Flowwow", 265338], ["МАКС", 76149], ["Улица", 70994]]}}},
 
-  {id:7, name:'Челябинск Цвиллинга, 59', city:'Челябинск', data:{
-    '2026-09':{plan:2300000, fact:301500, prevToDate:288200, street:58700, nosOk:4, nosReview:3,
-      nosCats:[['Цветок',2],['Доставка',2]], q:{a14:12.7, c14:4, a18:15.9, c18:2},
-      courierOrders:84, taxiOrders:61,
-      florists:[{n:'Флорист 4',a14:12.9,c14:2,a18:16.1,c18:1},{n:'Флорист 12',a14:12.5,c14:2,a18:15.7,c18:1}],
-      channels:[['Яндекс Еда',102300],['Заказ с сайта',78400],['Улица',58700],['Flowwow',38200],['По телефону',23900]]},
-    '2026-08':{plan:2200000, fact:2214000, prevToDate:2018000, street:398000, nosOk:7, nosReview:5,
-      nosCats:[['Цветок',3],['Доставка',3],['Ягода',1]], q:{a14:12.5, c14:34, a18:15.7, c18:11},
-      courierOrders:601, taxiOrders:442,
-      florists:[{n:'Флорист 4',a14:12.7,c14:17,a18:15.9,c18:6},{n:'Флорист 12',a14:12.3,c14:17,a18:15.5,c18:5}],
-      channels:[['Яндекс Еда',742000],['Заказ с сайта',602000],['Улица',398000],['Flowwow',282000],['По телефону',190000]]}}},
+  {id:7, name:"Челябинск Цвиллинга, 59", city:"Челябинск", data:{
+    '2026-09':{plan:1600000, fact:312595, prevToDate:148698, street:57211, nosOk:0, nosReview:3,
+      nosCats:[], q:{a14:12.73, c14:11, a18:14.5, c18:2},
+      courierOrders:36, taxiOrders:3,
+      florists:[{n:"Флорист 1",a14:12.2,c14:5,a18:14.0,c18:1},{n:"Флорист 2",a14:13.5,c14:4,a18:0,c18:0},{n:"Флорист 7",a14:12.5,c14:2,a18:0,c18:0},{n:"Флорист 5",a14:0,c14:0,a18:15.0,c18:1}],
+      channels:[["Яндекс Еда", 118728], ["Улица", 57211], ["Заказ с сайта", 48416], ["Заказ с Flowwow", 45875], ["По телефону", 13445]]},
+    '2026-08':{plan:1500000, fact:1542509, prevToDate:1238692, street:346236, nosOk:4, nosReview:4,
+      nosCats:[["Доставка", 2], ["Обслуживание в салоне", 1], ["Цветок", 1]], q:{a14:13.22, c14:40, a18:17.6, c18:5},
+      courierOrders:171, taxiOrders:8,
+      florists:[{n:"Флорист 2",a14:13.86,c14:14,a18:17.6,c18:5},{n:"Флорист 1",a14:12.2,c14:10,a18:0,c18:0},{n:"Флорист 5",a14:12.86,c14:7,a18:0,c18:0},{n:"Флорист 7",a14:13.57,c14:7,a18:0,c18:0},{n:"Флорист 4",a14:14.0,c14:2,a18:0,c18:0}],
+      channels:[["Яндекс Еда", 624292], ["Улица", 346236], ["Заказ с Flowwow", 276063], ["Заказ с сайта", 162529], ["По телефону", 59268]]}}},
 
-  {id:8, name:'Челябинск пр-кт Свердловский, 23', city:'Челябинск', data:{
-    '2026-09':{plan:null, fact:164900, prevToDate:151700, street:29800, nosOk:1, nosReview:2,
-      nosCats:[['Сервис',1]], q:{a14:13.2, c14:4, a18:16.5, c18:1},
-      courierOrders:44, taxiOrders:33,
-      florists:[{n:'Флорист 6',a14:13.3,c14:2,a18:16.5,c18:1},{n:'Флорист 9',a14:13.0,c14:2,a18:0,c18:0}],
-      channels:[['Яндекс Еда',54200],['Заказ с сайта',42100],['Улица',29800],['Flowwow',22600],['По телефону',16200]]},
-    '2026-08':{plan:1400000, fact:1389000, prevToDate:1244000, street:241000, nosOk:2, nosReview:1,
-      nosCats:[['Сервис',1],['Цветок',1]], q:{a14:13.0, c14:43, a18:16.3, c18:14},
-      courierOrders:352, taxiOrders:262,
-      florists:[{n:'Флорист 6',a14:13.1,c14:22,a18:16.4,c18:7},{n:'Флорист 9',a14:12.9,c14:21,a18:16.2,c18:7}],
-      channels:[['Яндекс Еда',442000],['Заказ с сайта',352000],['Улица',241000],['Flowwow',201000],['По телефону',153000]]}}}
+  {id:8, name:"Челябинск пр-кт Свердловский, 23", city:"Челябинск", data:{
+    '2026-09':{plan:null, fact:106338, prevToDate:111129, street:12020, nosOk:0, nosReview:0,
+      nosCats:[], q:{a14:13.64, c14:22, a18:16.33, c18:3},
+      courierOrders:19, taxiOrders:1,
+      florists:[{n:"Флорист 6",a14:13.64,c14:14,a18:16.5,c18:2},{n:"Флорист 4",a14:13.62,c14:8,a18:16.0,c18:1}],
+      channels:[["Яндекс Еда", 36477], ["Заказ с Flowwow", 34198], ["Заказ с сайта", 14271], ["Улица", 12020], ["По телефону", 3987]]},
+    '2026-08':{plan:900000, fact:916967, prevToDate:525780, street:92521, nosOk:1, nosReview:2,
+      nosCats:[["Доставка", 1]], q:{a14:13.89, c14:54, a18:18.0, c18:3},
+      courierOrders:140, taxiOrders:2,
+      florists:[{n:"Флорист 6",a14:13.87,c14:38,a18:18.0,c18:3},{n:"Флорист 4",a14:13.94,c14:16,a18:0,c18:0}],
+      channels:[["Яндекс Еда", 331883], ["Заказ с Flowwow", 288336], ["Заказ с сайта", 110570], ["Улица", 92521], ["Telegram", 25289]]}}}
 ];
 
 const MAX_14 = 14, MAX_18 = 18;
@@ -528,25 +529,24 @@ const MAX_14 = 14, MAX_18 = 18;
 //    305 280 «единиц» на 298 161 ₽ — это 305 кг по ~977 ₽/кг)
 // ============================================================================
 const WAREHOUSE = {
-  //            id: [месяц]      fIn      fOut    bInSum   bInQty  bOutQty
   1: {'2026-08':{fIn:279616, fOut:37692, bInSum:184506, bInQty:177224, bOutQty:2290},
-      '2026-09':{fIn: 38400, fOut: 4900, bInSum: 24100, bInQty: 23400, bOutQty: 380}},
+      '2026-09':{fIn:49308, fOut:0, bInSum:6990, bInQty:8670, bOutQty:0}},
   2: {'2026-08':{fIn:152946, fOut:149487, bInSum:104850, bInQty:106970, bOutQty:71564},
-      '2026-09':{fIn: 21200, fOut: 18900, bInSum: 14300, bInQty: 14600, bOutQty: 8900}},
+      '2026-09':{fIn:25547, fOut:0, bInSum:8388, bInQty:8755, bOutQty:0}},
   9: {'2026-08':{fIn:166683, fOut:56509, bInSum:111840, bInQty:106157, bOutQty:20038},
-      '2026-09':{fIn: 22800, fOut: 6100, bInSum: 15200, bInQty: 14400, bOutQty: 2600}},
+      '2026-09':{fIn:18171, fOut:1571, bInSum:8388, bInQty:10044, bOutQty:0}},
   4: {'2026-08':{fIn:532542, fOut:20740, bInSum:298161, bInQty:305280, bOutQty:29153},
-      '2026-09':{fIn: 71300, fOut: 2800, bInSum: 40100, bInQty: 41000, bOutQty: 3800}},
-  5: {'2026-08':{fIn: 93581, fOut:12100, bInSum: 60644, bInQty: 65970, bOutQty:11855},
-      '2026-09':{fIn: 12700, fOut: 1600, bInSum:  8200, bInQty:  8900, bOutQty: 1500}},
-  6: {'2026-08':{fIn:132063, fOut:11926, bInSum: 75287, bInQty: 82292, bOutQty: 9110},
-      '2026-09':{fIn: 17900, fOut: 1500, bInSum: 10100, bInQty: 11000, bOutQty: 1200}},
+      '2026-09':{fIn:3475, fOut:0, bInSum:22885, bInQty:23000, bOutQty:0}},
+  5: {'2026-08':{fIn:93581, fOut:12100, bInSum:60644, bInQty:65970, bOutQty:11855},
+      '2026-09':{fIn:0, fOut:632, bInSum:0, bInQty:0, bOutQty:700}},
+  6: {'2026-08':{fIn:132063, fOut:11926, bInSum:75287, bInQty:82292, bOutQty:9110},
+      '2026-09':{fIn:0, fOut:430, bInSum:0, bInQty:0, bOutQty:1215}},
   3: {'2026-08':{fIn:208234, fOut:10306, bInSum:130400, bInQty:141134, bOutQty:21783},
-      '2026-09':{fIn: 28100, fOut: 1400, bInSum: 17600, bInQty: 19000, bOutQty: 2900}},
-  7: {'2026-08':{fIn:302256, fOut:13860, bInSum:114116, bInQty:125580, bOutQty: 2979},
-      '2026-09':{fIn: 40800, fOut: 1900, bInSum: 15400, bInQty: 16900, bOutQty:  400}},
-  8: {'2026-08':{fIn:182768, fOut:14928, bInSum: 84918, bInQty: 94310, bOutQty: 4366},
-      '2026-09':{fIn: 24700, fOut: 2000, bInSum: 11400, bInQty: 12700, bOutQty:  590}}
+      '2026-09':{fIn:15782, fOut:0, bInSum:4560, bInQty:2900, bOutQty:626}},
+  7: {'2026-08':{fIn:302256, fOut:13860, bInSum:114116, bInQty:125580, bOutQty:2979},
+      '2026-09':{fIn:60445, fOut:0, bInSum:9215, bInQty:9700, bOutQty:0}},
+  8: {'2026-08':{fIn:182768, fOut:14928, bInSum:84918, bInQty:94310, bOutQty:4366},
+      '2026-09':{fIn:25180, fOut:0, bInSum:2850, bInQty:3000, bOutQty:0}}
 };
 
 // Доля списания цветка, выше которой это уже не потери, а вопрос к учёту
@@ -689,6 +689,11 @@ function aggregate(list){
   acc.berryUsed = berryUsed;
   acc.berryPrice = berryUsed > 0 ? acc.bInSum / berryUsed * GRAMS_IN_KG : null;
   acc.berryBuyPrice = acc.bInQty ? acc.bInSum / acc.bInQty * GRAMS_IN_KG : null;
+  // Доля расходов на сырьё: оприходовано (МойСклад) к отгружено (CRM) за тот же период.
+  // Цветок и клубника считаются отдельно — это разные закупки с разной логикой
+  acc.flowerCost = acc.fact ? acc.fIn / acc.fact * 100 : null;
+  acc.berryCost = acc.fact ? acc.bInSum / acc.fact * 100 : null;
+  acc.rawCost = acc.fact ? (acc.fIn + acc.bInSum) / acc.fact * 100 : null;
   acc.planDone = acc.planKnown && acc.plan ? acc.fact / acc.plan * 100 : null;
   acc.factDelta = acc.prevToDate ? (acc.fact - acc.prevToDate) / acc.prevToDate * 100 : null;
   return acc;
@@ -876,7 +881,23 @@ function kpisHtml(agg){
         'такси-служба. Считается по количеству заказов, не по сумме.'
   }));
 
-  // 6. Списание цветка
+  // 6. Доля расходов на сырьё — цветок и клубника отдельными строками
+  out.push(kpi({
+    id:'rawcost', label:'Расходы на цветок и клубнику',
+    value:agg.rawCost === null ? '—' : pct(agg.rawCost, 0),
+    unit:agg.rawCost === null ? '' : 'от отгрузок',
+    mean:agg.rawCost === null ? 'Нет отгрузок за период'
+      : 'Цветок <b>' + pct(agg.flowerCost, 0) + '</b> · клубника <b>' + pct(agg.berryCost, 0) + '</b>',
+    sub:'Оприходовано ' + short(agg.fIn) + ' ₽ и ' + short(agg.bInSum) + ' ₽',
+    delta:'',
+    how:'Сумма оприходованного за период товара, делённая на сумму отгруженных заказов за тот же ' +
+        'период. Цветок и клубника считаются отдельно, каждый — к общей сумме отгрузок салона. ' +
+        'Приход берётся из документов «Оприходование» МойСклада, отгрузки — из RetailCRM. ' +
+        'Это закупка периода, а не себестоимость проданного: если товар закупили в конце месяца, ' +
+        'доля вырастет, хотя продадут его уже в следующем.'
+  }));
+
+  // 7. Списание цветка
   const lossHigh = agg.flowerLoss !== null && agg.flowerLoss >= FLOWER_LOSS_ALERT;
   out.push(kpi({
     id:'flowerloss', label:'Списание цветка', value:agg.flowerLoss === null ? '—' : pct(agg.flowerLoss, 0),
@@ -890,7 +911,7 @@ function kpisHtml(agg){
         '«Списание» и «Оприходование» в МойСкладе.'
   }));
 
-  // 7. Средняя цена клубники
+  // 8. Средняя цена клубники
   out.push(kpi({
     id:'berry', label:'Средняя цена клубники',
     value:agg.berryPrice === null ? '—' : Math.round(agg.berryPrice).toString().replace(/\B(?=(\d{3})+(?!\d))/g, nbsp),
@@ -933,7 +954,8 @@ function rowsHtml(){
     nos:(a,b) => b.agg.nosOk - a.agg.nosOk,
     quality:(a,b) => a.agg.qPct - b.agg.qPct,
     taxi:(a,b) => b.agg.taxiShare - a.agg.taxiShare,
-    loss:(a,b) => (b.agg.flowerLoss || 0) - (a.agg.flowerLoss || 0)
+    loss:(a,b) => (b.agg.flowerLoss || 0) - (a.agg.flowerLoss || 0),
+    cost:(a,b) => (b.agg.rawCost || 0) - (a.agg.rawCost || 0)
   };
   rows.sort(sorters[state.sort] || sorters.plan);
 
@@ -942,6 +964,7 @@ function rowsHtml(){
     '<div><button type="button" data-sort="fact">Отгружено / план</button></div>' +
     '<div><button type="button" data-sort="plan">Выполн.</button></div>' +
     '<div>Улица</div>' +
+    '<div><button type="button" data-sort="cost">Сырьё</button></div>' +
     '<div><button type="button" data-sort="loss">Спис. цветка</button></div>' +
     '<div>Клубника</div>' +
     '<div><button type="button" data-sort="nos">Негатив</button></div>' +
@@ -963,6 +986,10 @@ function rowsHtml(){
       '<div><span class="cell-label">Выполнение</span>' + planCell + '</div>' +
       '<div><span class="cell-label">Улица</span><span class="row__num">' + pct(a.streetShare, 0) +
         '<small>' + short(a.street) + ' ₽</small></span></div>' +
+      '<div><span class="cell-label">Расходы на сырьё</span><span class="row__num">' +
+        (a.rawCost === null ? '—' : pct(a.rawCost, 0)) +
+        '<small>' + (a.rawCost === null ? 'нет отгрузок'
+          : 'цв ' + pct(a.flowerCost, 0) + ' · кл ' + pct(a.berryCost, 0)) + '</small></span></div>' +
       '<div><span class="cell-label">Списание цветка</span><span class="row__num' +
         (a.flowerLoss !== null && a.flowerLoss >= FLOWER_LOSS_ALERT ? ' row__num--bad' : '') + '">' +
         (a.flowerLoss === null ? '—' : pct(a.flowerLoss, 0)) +
@@ -1033,9 +1060,11 @@ function warehouseHtml(a){
   if(!a.fIn && !a.bInQty) return '<div class="dempty">Документов склада за период нет</div>';
   const lines = [];
   lines.push(['Оприходовано цветка', short(a.fIn) + ' ₽']);
+  lines.push(['— доля в отгрузках', a.flowerCost === null ? '—' : pct(a.flowerCost, 1)]);
   lines.push(['Списано цветка', short(a.fOut) + ' ₽']);
   lines.push(['Доля списания', a.flowerLoss === null ? '—' : pct(a.flowerLoss, 1)]);
   lines.push(['Оприходовано клубники', num(a.bInQty / GRAMS_IN_KG, 1) + ' кг · ' + short(a.bInSum) + ' ₽']);
+  lines.push(['— доля в отгрузках', a.berryCost === null ? '—' : pct(a.berryCost, 1)]);
   lines.push(['Списано клубники', num(a.bOutQty / GRAMS_IN_KG, 1) + ' кг']);
   lines.push(['Пошло в дело', a.berryUsed > 0 ? num(a.berryUsed / GRAMS_IN_KG, 1) + ' кг' : '—']);
   lines.push(['Закупочная цена', a.berryBuyPrice ? Math.round(a.berryBuyPrice) + ' ₽/кг' : '—']);
