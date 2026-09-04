@@ -24,7 +24,7 @@ from flask_login import login_required
 # Импортируем модуль авторизации (как в cashshifts/server.py)
 auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
-from auth import section_required, role_required  # noqa: E402
+from auth import section_required, role_required, require_ajax_header  # noqa: E402
 
 from . import retailcrm, storage  # noqa: E402
 
@@ -369,6 +369,7 @@ def set_courier_flag(courier_id: int):
 
 @couriers_bp.route("/<int:courier_id>/taxi-flag", methods=["POST"])
 @role_required("admin")
+@require_ajax_header
 def set_courier_taxi(courier_id: int):
     """
     Пометить курьера внешней такси-службой — от этого флага считается показатель
@@ -396,6 +397,7 @@ def get_delivery_types():
 
 @couriers_bp.route("/delivery-types/<path:code>/flag", methods=["POST"])
 @role_required("admin")
+@require_ajax_header
 def set_delivery_type(code: str):
     """Отметить тип доставки как курьерский (или снять отметку)."""
     data = request.get_json(silent=True) or {}

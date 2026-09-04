@@ -216,10 +216,16 @@ def main():
             check(response.status_code == 403, "справочник несопоставленного только админу",
                   str(response.status_code))
 
+            # Заголовок шлём правильный (barhat-dashboard, см. AJAX_HEADER_VALUE),
+            # иначе 403 вернёт защита от CSRF и проверка роли останется неproверенной
             response = client.post("/api/salon-kpi/plans",
                                    json={"month": MONTH, "plans": []},
-                                   headers={"X-Requested-With": "XMLHttpRequest"})
-            check(response.status_code == 403, "менеджер не может править планы",
+                                   headers={"X-Requested-With": "barhat-dashboard"})
+            check(response.status_code == 403, "менеджер не может править планы (по роли)",
+                  str(response.status_code))
+
+            response = client.get(f"/api/salon-kpi/summary?month={MONTH}")
+            check(response.status_code == 200, "чтение менеджеру доступно",
                   str(response.status_code))
 
         with app.test_client() as client:
@@ -258,9 +264,14 @@ def main():
         check(sample in {i["key"] for i in after["items"]},
               f"отвязанный ключ «{sample}» появился в несопоставленном")
 
+        # Подсказка не обязана быть всегда: для ключа, одинаково похожего на
+        # два салона («barkhat-barnaul»), система обязана промолчать, а не
+        # угадывать — ошибочную привязку человек подтвердит не глядя.
+        # Проверяем не наличие подсказки, а её корректность.
         suggestion = next((i.get("suggestion") for i in after["items"] if i["key"] == sample), None)
-        check(suggestion is not None,
-              f"для «{sample}» есть подсказка сопоставления", str(suggestion))
+        known_ids = {s["id"] for s in kpi_storage.list_stores()}
+        check(suggestion is None or suggestion["store_id"] in known_ids,
+              f"подсказка для «{sample}» указывает на существующий салон", str(suggestion))
 
         kpi_storage.set_link(kpi_storage.SOURCE_CRM, sample, row["store_id"])
         metrics.invalidate_cache()
@@ -268,7 +279,28 @@ def main():
         check(restored.get(sample) == row["store_id"], "связь восстановлена после проверки")
 
     # ------------------------------------------------------------------
-    section("6. Сравнение с прошлым месяцем — по ту же дату")
+    section("6. Подсказки сопоставления")
+
+    from salonkpi.metrics import _suggest_store  # noqa: E402
+
+    cases = [
+        ("Челябинск Свердловский 23", "Челябинск пр-кт Свердловский, д 23", True),
+        ("nsk-voskhod-3", "НСК Восход, 3", True),
+        ("barkhat-tomsk", "Томск Дальне-Ключевская, 16а", True),
+        ("barkhat-barnaul", None, False),   # два салона в Барнауле — ничья, молчим
+        ("kraft", None, False),             # ни на что не похоже
+    ]
+    for key, expected_name, should_suggest in cases:
+        suggestion = _suggest_store(key)
+        if should_suggest:
+            check(suggestion is not None and suggestion["name"] == expected_name,
+                  f"«{key}» → подсказка «{expected_name}»", str(suggestion))
+        else:
+            check(suggestion is None,
+                  f"«{key}» → подсказки нет (неоднозначно)", str(suggestion))
+
+    # ------------------------------------------------------------------
+    section("7. Сравнение с прошлым месяцем — по ту же дату")
 
     prev_from, prev_to = metrics.comparable_bounds(MONTH)
     check(prev_to[8:10] == metrics.month_bounds(MONTH)[1][8:10] or MONTH != metrics.current_month(),

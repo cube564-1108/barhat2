@@ -114,8 +114,10 @@
     function postOptions(body) {
         return {
             method: 'POST',
-            // Заголовок обязателен: ручки записи закрыты require_ajax_header
-            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            // Заголовок обязателен: ручки записи закрыты require_ajax_header.
+            // Значение проверяется точно ('barhat-dashboard', см. AJAX_HEADER_VALUE
+            // в src/auth.py) — привычное 'XMLHttpRequest' даст 403.
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'barhat-dashboard' },
             body: JSON.stringify(body)
         };
     }

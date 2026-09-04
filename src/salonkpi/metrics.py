@@ -687,44 +687,96 @@ def unmapped(month: str) -> Dict[str, Any]:
 
 _NORMALIZE_RE = re.compile(r"[^a-zа-я0-9]+")
 
+# Ключи RetailCRM записаны латиницей («barkhat-barnaul», «nsk-voskhod-3»), а
+# салоны в справочнике — кириллицей. Без транслитерации подсказка для них не
+# работала вовсе: общих токенов у «barkhat barnaul» и «барнаул советская» нет.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ж": "zh", "з": "z",
+    "и": "i", "й": "i", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p",
+    "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts", "ч": "ch",
+    "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "iu", "я": "ia",
+}
+
+# Сокращения городов, которыми пользуются в CRM и в формах Pyrus
+_CITY_TOKENS = {
+    "нск": "novosibirsk", "nsk": "novosibirsk", "новосибирск": "novosibirsk",
+    "екб": "ekaterinburg", "ekb": "ekaterinburg", "екатеринбург": "ekaterinburg",
+    "брн": "barnaul", "барнаул": "barnaul", "barnaul": "barnaul",
+    "томск": "tomsk", "tomsk": "tomsk",
+    "члб": "cheliabinsk", "челябинск": "cheliabinsk", "cheliabinsk": "cheliabinsk",
+}
+
 
 def _normalize(value: str) -> str:
     return _NORMALIZE_RE.sub(" ", (value or "").lower().replace("ё", "е")).strip()
+
+
+def _translit(value: str) -> str:
+    return "".join(_TRANSLIT.get(char, char) for char in value)
+
+
+def _tokens(value: str) -> set:
+    """Токены строки в латинице плюс нормализованные названия городов."""
+    raw = _normalize(value).split()
+    out = set()
+    for token in raw:
+        out.add(_translit(token))
+        if token in _CITY_TOKENS:
+            out.add(_CITY_TOKENS[token])
+    return out
 
 
 def _suggest_store(key: str) -> Optional[Dict[str, Any]]:
     """
     Предложить салон для непривязанного ключа.
 
-    Человек только подтверждает — автоматически связь не создаётся никогда:
-    ошибка сопоставления тихо перекладывает выручку между салонами.
+    Подсказка выдаётся, только когда лучший вариант ОДИН. Ключ «barkhat-barnaul»
+    одинаково похож на оба барнаульских салона — и такую подсказку показывать
+    нельзя: человек подтвердит её не глядя, а ошибка сопоставления тихо
+    переложит выручку между салонами. Лучше промолчать, чем угадать неверно.
+
+    Связь всегда создаёт человек: автоматически — никогда.
     """
-    normalized = _normalize(key)
-    if not normalized:
+    key_tokens = _tokens(key)
+    if not key_tokens:
         return None
 
-    key_tokens = set(normalized.split())
-    key_digits = {t for t in key_tokens if t.isdigit()}
-    best = None
+    key_digits = {t for t in _normalize(key).split() if t.isdigit()}
+    scored = []
 
     for store in storage.list_stores():
-        store_tokens = set(_normalize(store["name"]).split())
+        store_tokens = _tokens(store["name"])
         common = key_tokens & store_tokens
         if not common:
             continue
 
-        score = len(common)
+        # Служебные слова ничего не значат: «barkhat» есть в половине кодов CRM
+        meaningful = {t for t in common if t not in ("barkhat", "bh")}
+        if not meaningful:
+            continue
+
+        score = len(meaningful)
+        # Совпадение города — самостоятельный признак: «barkhat-tomsk» сходится
+        # с «Томск Дальне-Ключевская» только по нему. Ничью это не создаёт: если
+        # в городе два салона, оба получат одинаковый счёт и подсказки не будет
+        if meaningful & set(_CITY_TOKENS.values()):
+            score += 1
         # Совпадение номера дома — сильный признак: «Свердловский 23» и
         # «Челябинск пр-кт Свердловский, д 23»
-        if key_digits & store_tokens:
+        if key_digits & {t for t in _normalize(store["name"]).split() if t.isdigit()}:
             score += 2
-        city = storage.city_of(store["name"])
-        if city and _normalize(city) in normalized:
-            score += 1
 
-        if best is None or score > best["score"]:
-            best = {"store_id": store["id"], "name": store["name"], "score": score}
+        scored.append({"store_id": store["id"], "name": store["name"], "score": score})
 
-    if not best or best["score"] < 2:
+    if not scored:
         return None
+
+    scored.sort(key=lambda s: -s["score"])
+    best = scored[0]
+    if best["score"] < 2:
+        return None
+    # Ничья — значит непонятно, какой именно салон; подсказку не даём
+    if len(scored) > 1 and scored[1]["score"] == best["score"]:
+        return None
+
     return {"store_id": best["store_id"], "name": best["name"]}

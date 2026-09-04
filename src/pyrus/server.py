@@ -30,6 +30,7 @@ auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
 from auth import (
     auth_bp, login_manager, init_auth_tables, section_required, role_required, log_action,
+    require_ajax_header,
 )
 
 # ОТЛАДКА: показываем откуда запущен
@@ -1828,6 +1829,7 @@ def sync_nos_window(days: int, step_days: int = 30) -> dict:
 
 @app.route('/api/pyrus/nos/sync', methods=['POST'])
 @role_required('admin')
+@require_ajax_header
 def trigger_nos_sync():
     """
     Загрузить обращения негативной ОС за последние N дней.

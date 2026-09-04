@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 # Импортируем модуль авторизации (как в cashshifts/server.py)
 auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
-from auth import section_required, role_required
+from auth import section_required, role_required, require_ajax_header
 
 from .storage import get_storage
 from . import warehouse
@@ -801,6 +801,7 @@ def run_warehouse_sync(days: int = None) -> dict:
 
 @moysklad_bp.route('/warehouse/sync', methods=['POST'])
 @role_required('admin')
+@require_ajax_header
 def trigger_warehouse_sync():
     """
     Загрузить движение товара за последние N дней.
@@ -839,6 +840,7 @@ def get_warehouse_groups():
 
 @moysklad_bp.route('/warehouse/groups', methods=['POST'])
 @role_required('admin')
+@require_ajax_header
 def set_warehouse_group():
     """
     Отнести папку каталога к группе.
