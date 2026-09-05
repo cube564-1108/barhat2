@@ -360,6 +360,10 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
     при UPSERT такие записи навсегда остались бы в отчёте и раздули выплату.
     Всё в одной транзакции, чтобы отчёт никогда не читал полупустое окно.
     """
+    # Читаем настройку ДО открытия транзакции: внутри неё второе соединение —
+    # это тот самый вложенный коннект, который CLAUDE.md запрещает.
+    default_weight = get_default_weight()
+
     with get_db() as conn:
         # Часы готовности до пересборки: окно переписывается целиком, поэтому
         # «заказ переехал в другой слот» видно только так. Без этого нельзя
@@ -380,6 +384,19 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
             "DELETE FROM order_items WHERE delivery_date >= ? AND delivery_date <= ?",
             (date_from, date_to),
         )
+        # И позиции самих перезаливаемых заказов — по идентификатору. Заказ мог
+        # переехать в это окно с даты, которая сейчас не пересобирается: его
+        # старые позиции лежат под чужой датой и удалением по периоду не
+        # ловятся, а вес слота от них растёт.
+        if rows:
+            ids = [row["retailcrm_order_id"] for row in rows]
+            for start in range(0, len(ids), 400):   # потолок переменных SQLite
+                chunk = ids[start:start + 400]
+                conn.execute(
+                    f"DELETE FROM order_items WHERE retailcrm_order_id IN "
+                    f"({','.join('?' * len(chunk))})",
+                    chunk,
+                )
         conn.execute(
             "DELETE FROM courier_orders WHERE delivery_date >= ? AND delivery_date <= ?",
             (date_from, date_to),
@@ -458,7 +475,7 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                 moved,
             )
 
-        _recalc_weights(conn, date_from, date_to)
+        _recalc_weights(conn, date_from, date_to, default_weight)
     return len(rows)
 
 
@@ -478,7 +495,8 @@ def get_default_weight() -> float:
     return value if value > 0 else DEFAULT_WEIGHT_FALLBACK
 
 
-def _recalc_weights(conn, date_from: str, date_to: str) -> None:
+def _recalc_weights(conn, date_from: str, date_to: str,
+                    default_weight: Optional[float] = None) -> None:
     """
     Пересчитать вес заказов за окно одним запросом.
 
@@ -488,8 +506,14 @@ def _recalc_weights(conn, date_from: str, date_to: str) -> None:
 
     Заказ без позиций получает 0, а не NULL: это не «неизвестно», это «работы
     по позициям нет» (бывает у заказов, заведённых одной суммой).
+
+    Вес по умолчанию берётся ДО открытия транзакции и передаётся сюда: читать
+    его отсюда значило бы открыть второе соединение поверх незакрытой записи —
+    ровно тот вложенный коннект, которым уже вешали базу.
     """
-    default_weight = get_default_weight()
+    if default_weight is None:
+        # Вызов вне транзакции записи (пересчёт после правки справочника).
+        default_weight = get_default_weight()
     conn.execute(
         """
         UPDATE courier_orders
@@ -498,6 +522,10 @@ def _recalc_weights(conn, date_from: str, date_to: str) -> None:
                      FROM order_items i
                 LEFT JOIN product_weights w ON w.offer_id = i.offer_id
                     WHERE i.retailcrm_order_id = courier_orders.retailcrm_order_id
+                      -- Сверяем и дату: заказ мог переехать на другой день, а
+                      -- его старые позиции остаться в неперезалитом окне.
+                      -- Без этого условия вес слота тихо задваивался бы.
+                      AND i.delivery_date = courier_orders.delivery_date
                ), 0)
          WHERE delivery_date >= ? AND delivery_date <= ?
         """,
@@ -608,28 +636,42 @@ def set_product_weights(weights: Dict[int, Optional[float]], username: Optional[
     return len(weights)
 
 
-def weights_coverage(date_from: str, date_to: str) -> Dict[str, Any]:
+def weights_coverage(date_from: str, date_to: str,
+                     load_statuses: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Какая доля нагрузки посчитана весом по умолчанию.
 
     Это число обязано быть видно рядом с процентами загрузки: «140%» и «140%,
     из них 60% веса — по умолчанию» — разные основания для того, чтобы звонить
     клиенту и переносить заказ.
+
+    Считается по тем же заказам, что и сама сетка: витрина теперь хранит все
+    статусы, и без фильтра подпись описывала бы другую совокупность, чем
+    проценты, которые она поясняет.
     """
     default_weight = get_default_weight()
+    statuses = load_statuses if load_statuses is not None else load_status_codes()
+    if not statuses:
+        return {"default_weight": default_weight, "total_units": 0, "default_units": 0,
+                "default_share": 0.0, "products_missing": 0, "products_total": 0}
+
+    placeholders = ",".join("?" * len(statuses))
     with get_db() as conn:
         row = conn.execute(
-            """
+            f"""
             SELECT COALESCE(SUM(i.quantity * COALESCE(w.weight, ?)), 0) AS total_units,
                    COALESCE(SUM(CASE WHEN w.offer_id IS NULL THEN i.quantity * ? ELSE 0 END), 0)
                        AS default_units,
                    COUNT(DISTINCT CASE WHEN w.offer_id IS NULL THEN i.offer_id END) AS products_missing,
                    COUNT(DISTINCT i.offer_id) AS products_total
               FROM order_items i
+              JOIN courier_orders o ON o.retailcrm_order_id = i.retailcrm_order_id
+                                   AND o.delivery_date = i.delivery_date
          LEFT JOIN product_weights w ON w.offer_id = i.offer_id
              WHERE i.delivery_date >= ? AND i.delivery_date <= ?
+               AND o.status IN ({placeholders})
             """,
-            (default_weight, default_weight, date_from, date_to),
+            (default_weight, default_weight, date_from, date_to, *statuses),
         ).fetchone()
 
     total = row["total_units"] or 0

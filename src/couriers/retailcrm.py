@@ -318,7 +318,9 @@ def ready_slot(order: Dict[str, Any]) -> Dict[str, Optional[Any]]:
 
     # Значение есть, но это не время («уточ») — отличаем от «поля нет вовсе»:
     # первое разбирает человек, второе означает заказ без времени.
-    raw_availability = (custom.get(READY_TIME_FIELD) or "").strip()
+    # str() обязателен: кастомное поле правится в CRM и может прийти числом или
+    # булевым, а .strip() на нестроке уронил бы весь прогон синка.
+    raw_availability = str(custom.get(READY_TIME_FIELD) or "").strip()
     return {
         "ready_time": None,
         "ready_hour": None,

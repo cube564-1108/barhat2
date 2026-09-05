@@ -38,7 +38,18 @@ THRESHOLD_OVER = 100
 
 
 def valid_date(value: str) -> bool:
-    return bool(value and _DATE_RE.match(value))
+    """
+    Проверка даты, а не её формы. Регулярки мало: «2026-13-45» ей подходит,
+    а дальше `strptime` внутри расчёта роняет запрос пятисоткой вместо
+    внятного 400.
+    """
+    if not value or not _DATE_RE.match(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
 
 
 def today_iso() -> str:
@@ -109,8 +120,18 @@ def _stores_for(store_ids: Optional[List[int]]) -> List[Dict[str, Any]]:
     return stores
 
 
-def day_grid(day: str, store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
-    """Сетка «часы × салоны» за один день."""
+def day_grid(day: str, store_ids: Optional[List[int]] = None,
+             with_context: bool = True) -> Dict[str, Any]:
+    """
+    Сетка «часы × салоны» за один день.
+
+    with_context=False — не собирать свежесть данных и покрытие весами. Это не
+    украшательство: `freshness()` тянет `health_snapshot()`, а тот открывает
+    базу и обходит несколько таблиц. Внутренним вызовам (подбор свободных
+    слотов, расчёт предупреждений) этот контекст не нужен, а сеток они строят
+    по несколько штук на запрос — на диске `/data`, где запрос стоит 90–700 мс,
+    разница получается в сотни обращений.
+    """
     stores = _stores_for(store_ids)
     ids = [store["id"] for store in stores]
     key_to_store = {key: store["id"] for store in stores for key in store["keys"]}
@@ -201,10 +222,13 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
         "weekday": weekday,
         "hours": list(storage.HOURS),
         "stores": grid,
-        "unassigned": unassigned if unassigned["orders"] else None,
+        # Нераспределённые — сводка по всей сети: у заказа не заполнен склад,
+        # и чей он, неизвестно. Показываем только тому, кто видит все салоны:
+        # флористу это чужие цифры, а разобрать их он всё равно не может.
+        "unassigned": unassigned if (unassigned["orders"] and store_ids is None) else None,
         "thresholds": {"tight": THRESHOLD_TIGHT, "over": THRESHOLD_OVER},
-        "coverage": couriers_storage.weights_coverage(day, day),
-        "freshness": freshness(),
+        "coverage": couriers_storage.weights_coverage(day, day, statuses) if with_context else None,
+        "freshness": freshness() if with_context else None,
         "no_stores": not stores,
     }
 
@@ -297,31 +321,50 @@ def slot_orders(day: str, store_id: int, hour: Optional[int]) -> Dict[str, Any]:
     }
 
 
-def free_slots(store_id: int, date_from: str, days: int = 3,
-               need_units: float = 1.0) -> Dict[str, Any]:
+def free_slots(store_id: int, date_from: str, days: int = 3, need_units: float = 1.0,
+               grids: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """
     Ближайшие слоты, где ещё есть запас.
 
     Нужны не сами по себе: предупреждение о перегрузе без альтернативы не
     меняет решений — человек не станет звонить клиенту, чтобы предложить
     «когда-нибудь потом».
+
+    Прошедшие часы не предлагаем. «Перенесите заказ с 17:00 на 09:00 сегодня» —
+    это совет, который невозможно выполнить, и после пары таких подсказок
+    экраном перестают пользоваться. Час считается по часам салона: сервер живёт
+    в UTC, а салоны в UTC+5/+7.
+
+    grids — общий кэш сеток на запрос. Каждая сетка это несколько обращений к
+    медленному диску, а предупреждений на экране бывает десяток.
     """
-    grid_days = []
+    offset = storage.timezone_map().get(store_id)
+    now_local = salon_now(offset) if offset is not None else None
+
+    cache = grids if grids is not None else {}
     start = datetime.strptime(date_from, "%Y-%m-%d").date()
+    slots = []
+
     for i in range(days):
         day = (start + timedelta(days=i)).isoformat()
-        grid_days.append(day_grid(day, [store_id]))
+        grid = cache.get(day)
+        if grid is None:
+            grid = day_grid(day, None, with_context=False)
+            cache[day] = grid
 
-    slots = []
-    for grid in grid_days:
         for store in grid["stores"]:
+            if store["store_id"] != store_id:
+                continue
             for cell in store["cells"]:
                 if cell["closed"] or cell["capacity"] is None:
+                    continue
+                if now_local is not None and day == now_local.date().isoformat() \
+                        and cell["hour"] <= now_local.hour:
                     continue
                 free = cell["capacity"] - cell["units"]
                 if free >= need_units:
                     slots.append({
-                        "date": grid["date"],
+                        "date": day,
                         "hour": cell["hour"],
                         "free_units": round(free, 2),
                         "percent": cell["percent"],
@@ -370,7 +413,7 @@ def scan_alerts() -> Dict[str, Any]:
     for alert in storage.open_alerts_for_scan(today_any):
         grid = grids.get(alert["date"])
         if grid is None:
-            grid = day_grid(alert["date"], None)
+            grid = day_grid(alert["date"], None, with_context=False)
             grids[alert["date"]] = grid
         store = next((s for s in grid["stores"] if s["store_id"] == alert["store_id"]), None)
         if not store:
@@ -393,7 +436,7 @@ def scan_alerts() -> Dict[str, Any]:
         for day, horizon in ((today, HORIZON_SOON), (tomorrow, HORIZON_DAY)):
             grid = grids.get(day)
             if grid is None:
-                grid = day_grid(day, None)
+                grid = day_grid(day, None, with_context=False)
                 grids[day] = grid
             row = next((s for s in grid["stores"] if s["store_id"] == store["id"]), None)
             if not row:
@@ -423,13 +466,16 @@ def alerts(store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
 
     names = {store["id"]: store["name"] for store in salonkpi_storage.list_stores(store_ids)}
     result = []
+    # Общий кэш сеток на весь ответ: без него десяток предупреждений строил бы
+    # два десятка сеток, каждая — несколько обращений к общему медленному диску.
+    grids: Dict[str, Dict[str, Any]] = {}
     for item in items:
         if item["store_id"] not in names:
             continue
         # Альтернатива считается здесь же: предупреждение без ответа «куда
         # переносить» не меняет решений — человек не станет звонить клиенту,
         # чтобы предложить «когда-нибудь потом».
-        free = free_slots(item["store_id"], item["date"], days=2, need_units=1.0)
+        free = free_slots(item["store_id"], item["date"], days=2, need_units=1.0, grids=grids)
         suggestions = [slot for slot in free["slots"]
                        if not (slot["date"] == item["date"] and slot["hour"] == item["hour"])][:3]
         result.append({**item,
@@ -534,6 +580,10 @@ def freshness() -> Dict[str, Any]:
     return {
         "last_sync_at": last_sync.get("finished_at") or last_sync.get("started_at"),
         "last_sync_status": last_sync.get("status"),
+        # Пустой справочник статусов = нагрузкой не считается ничего, и сетка
+        # выглядит как честный ноль. Так будет сразу после первого деплоя, пока
+        # синк не заполнил справочник, — экран обязан сказать об этом словами.
+        "statuses_as_load": load.get("statuses_as_load"),
         "future_orders": load.get("future_orders"),
         "until": load.get("until_future"),
         "unparsed_ready": load.get("unparsed_ready"),

@@ -530,6 +530,91 @@ def test_capacity_suggestion():
           f"получено {suggestion}")
 
 
+def test_review_fixes():
+    """Находки ревью 2026-09-05 — чтобы не вернулись."""
+    print("\n13. Разбор ревью")
+    from datetime import datetime, timedelta
+    from pyrus.server import app
+
+    # Прошедшие часы не предлагаем: «перенесите с 17:00 на 09:00 сегодня» —
+    # совет, который невозможно выполнить.
+    offset = 7
+    storage.set_timezone(STORE_ID, offset)
+    now_local = datetime.utcnow() + timedelta(hours=offset)
+    today_local = now_local.date().isoformat()
+    storage.apply_working_hours(STORE_ID, 0, 24, capacity=10.0)
+
+    free = metrics.free_slots(STORE_ID, today_local, days=1)
+    past = [slot for slot in free["slots"] if slot["hour"] <= now_local.hour]
+    check("прошедшие часы не предлагаются", not past, f"получено {past}")
+
+    # Некорректная дата — 400, а не 500
+    with app.test_client() as client:
+        login_as(client, "test-load-admin")
+        for url in (f"/api/salon-load/day?date=2026-13-45",
+                    f"/api/salon-load/week?from=2026-02-30",
+                    f"/api/salon-load/exceptions?from=abc"):
+            response = client.get(url)
+            check(f"{url.split('?')[0]} на кривой дате отвечает 400",
+                  response.status_code == 400, f"получено {response.status_code}")
+
+    # Копия графика замещает, а не дополняет
+    storage.apply_working_hours(OTHER_STORE_ID, 0, 24, capacity=3.0)
+    storage.apply_working_hours(STORE_ID, 9, 12, capacity=5.0)
+    storage.copy_week(STORE_ID, OTHER_STORE_ID)
+    target = storage.weekly_grid(OTHER_STORE_ID)
+    check("после копирования у приёмника график источника",
+          target["0:20"]["closed"] is True and target["0:10"]["capacity"] == 5.0,
+          f"получено {target['0:20']}, {target['0:10']}")
+
+    # Покрытие весами считается по тем же статусам, что и сетка
+    coverage_all = couriers_storage.weights_coverage(DAY, DAY)
+    coverage_none = couriers_storage.weights_coverage(DAY, DAY, load_statuses=["nonexistent"])
+    check("покрытие весами фильтруется статусами",
+          coverage_all["total_units"] > 0 and coverage_none["total_units"] == 0,
+          f"получено {coverage_all['total_units']} и {coverage_none['total_units']}")
+
+    # Заказ переехал на другую дату — старые позиции не задваивают вес
+    day_a, day_b = "2026-10-01", "2026-10-02"
+    couriers_storage.replace_orders_window(day_a, day_a, [
+        retailcrm.parse_order(dict(order(500, hour=10),
+                                   delivery={"date": day_a, "code": "dostavka-kurerom"}), {}),
+    ])
+    couriers_storage.replace_orders_window(day_b, day_b, [
+        retailcrm.parse_order(dict(order(500, hour=10),
+                                   delivery={"date": day_b, "code": "dostavka-kurerom"}), {}),
+    ])
+    with couriers_storage.get_db() as conn:
+        weight = conn.execute("SELECT weight_units FROM courier_orders "
+                              "WHERE retailcrm_order_id = 500").fetchone()["weight_units"]
+        items = conn.execute("SELECT COUNT(*) AS c FROM order_items "
+                             "WHERE retailcrm_order_id = 500").fetchone()["c"]
+        # Ожидание берём из справочника, а не константой: вес товара к этому
+        # моменту могли поменять предыдущие проверки, а суть здесь в другом —
+        # позиция должна посчитаться ОДИН раз, а не два.
+        row = conn.execute("SELECT weight FROM product_weights WHERE offer_id = 1").fetchone()
+    expected = row["weight"] if row else couriers_storage.get_default_weight()
+    check("переезд заказа не задваивает вес", weight == expected,
+          f"получено {weight}, ожидалось {expected} (задвоение дало бы {expected * 2})")
+    check("старые позиции переехавшего заказа удалены", items == 1, f"получено {items}")
+
+    # Нечисловое значение кастомного поля не роняет разбор
+    weird = retailcrm.parse_order({
+        "id": 600, "number": "600", "site": STORE_KEY, "status": "at-work",
+        "shipmentStore": STORE_KEY, "delivery": {"date": DAY, "code": "dostavka-kurerom"},
+        "customFields": {"order_availability_time": 1000}, "items": [],
+    }, {})
+    check("нестроковое время готовности не роняет разбор", weird is not None,
+          "parse_order упал")
+
+    # Флорист не видит сводку по чужим салонам
+    grid = metrics.day_grid(DAY, [STORE_ID])
+    check("нераспределённые не показываются тому, кто видит не все салоны",
+          grid["unassigned"] is None, f"получено {grid['unassigned']}")
+    check("а администратору показываются",
+          metrics.day_grid(DAY, None)["unassigned"] is not None, "сводка пропала у админа")
+
+
 def main():
     setup_data()
     test_capacity_states()
@@ -544,6 +629,7 @@ def main():
     test_alerts()
     test_slot_moved()
     test_capacity_suggestion()
+    test_review_fixes()
 
     print()
     if failures:

@@ -436,10 +436,15 @@ def copy_capacity():
 def get_exceptions():
     """Исключения на даты: праздник, отпуск, поломка."""
     date_from = request.args.get("from") or metrics.today_iso()
+    # Сначала проверка, потом разбор: strptime на непроверенной строке падал
+    # пятисоткой раньше, чем срабатывала валидация ниже.
+    if not metrics.valid_date(date_from):
+        return error_response("from должен быть в формате YYYY-MM-DD")
+
     date_to = request.args.get("to") or (
         datetime.strptime(date_from, "%Y-%m-%d").date() + timedelta(days=60)).isoformat()
-    if not (metrics.valid_date(date_from) and metrics.valid_date(date_to)):
-        return error_response("from и to должны быть в формате YYYY-MM-DD")
+    if not metrics.valid_date(date_to):
+        return error_response("to должен быть в формате YYYY-MM-DD")
 
     store_ids = _allowed_store_ids()
     if store_ids is None:

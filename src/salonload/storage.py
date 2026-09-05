@@ -514,19 +514,30 @@ def apply_working_hours(store_id: int, open_hour: int, close_hour: int, capacity
 
 
 def copy_week(source_store_id: int, target_store_id: int, username: Optional[str] = None) -> int:
-    """Скопировать график другого салона — второй способ не заполнять 168 полей."""
+    """
+    Скопировать график другого салона — второй способ не заполнять 168 полей.
+
+    Копия ЗАМЕЩАЕТ, а не дополняет: иначе часы, которых нет у источника,
+    остались бы от прежнего графика приёмника, а интерфейс сказал бы «график
+    скопирован» — и человек считал бы, что видит копию.
+    """
     source = weekly_grid(source_store_id)
+    if not source:
+        return 0
+
     slots = []
-    for key, value in source.items():
-        weekday, hour = key.split(":")
-        slots.append({
-            "weekday": int(weekday),
-            "hour": int(hour),
-            "capacity": value["capacity"],
-            "pickup_capacity": value["pickup_capacity"],
-            "closed": value["closed"],
-        })
-    return set_slots(target_store_id, slots, username)
+    for weekday in WEEKDAYS:
+        for hour in HOURS:
+            value = source.get(f"{weekday}:{hour}")
+            slots.append({
+                "weekday": weekday,
+                "hour": hour,
+                "capacity": value["capacity"] if value else None,
+                "pickup_capacity": value["pickup_capacity"] if value else None,
+                "closed": value["closed"] if value else False,
+            })
+    set_slots(target_store_id, slots, username)
+    return len(source)
 
 
 def set_exception(store_id: int, date: str, hour: Optional[int], capacity: Optional[float],
