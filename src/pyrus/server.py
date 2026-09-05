@@ -326,6 +326,16 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint показателей салонов: {e}")
 
+# Регистрируем blueprint загрузки салонов
+try:
+    from salonload.server import salonload_bp
+    app.register_blueprint(salonload_bp)
+    logger.info("Blueprint загрузки салонов зарегистрирован")
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать blueprint загрузки салонов: {e}")
+except Exception as e:
+    logger.error(f"Ошибка регистрации blueprint загрузки салонов: {e}")
+
 # Регистрируем blueprint обратной связи от сотрудников
 try:
     from feedback.server import feedback_bp
@@ -427,6 +437,16 @@ with app.app_context():
         logger.warning(f"Не удалось импортировать модуль показателей салонов: {e}")
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц показателей салонов: {e}")
+
+    # Инициализация таблиц загрузки салонов (ёмкость и исключения на даты).
+    try:
+        from salonload.storage import init_salonload_tables
+        init_salonload_tables()
+        logger.info("Таблицы загрузки салонов инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль загрузки салонов: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц загрузки салонов: {e}")
 
 
 # Инициализация хранилища

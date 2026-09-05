@@ -61,6 +61,12 @@ TAXI_COURIER_IDS = (2, 12, 169)
 # названием: две неактивные, оставшиеся от исторических заказов.
 COURIER_DELIVERY_CODES = ("dostavka-kurerom", "courier", "2")
 
+# Самовывоз. В нагрузке салона он считается отдельным счётчиком: букет всё
+# равно собирает флорист (значит попадает в общий вес), но выдача — другой
+# ресурс, и узкое место может оказаться на стойке, а не в цехе.
+# Две записи с одним названием «Самовывоз», как и у курьерской доставки.
+PICKUP_DELIVERY_CODES = ("self-delivery", "3")
+
 # Канал «Улица» — это способ оформления offline в RetailCRM («Заказ в салоне»).
 # Код, а не название: названия в справочнике переименовывают.
 STREET_ORDER_METHOD = "offline"
@@ -1135,6 +1141,107 @@ def list_unmapped_sites(date_from: str, date_to: str, known_sites: List[str]) ->
         {"key": row["site_code"], "orders": row["orders"], "amount": round(row["amount"] or 0, 2)}
         for row in rows
         if row["site_code"] and row["site_code"] not in known
+    ]
+
+
+def load_by_slot(date_from: str, date_to: str,
+                 load_statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """
+    Нагрузка по слотам: дата × склад × час готовности.
+
+    Агрегат считает модуль-владелец данных, а не SQL-запросы соседнего модуля
+    по этой таблице: иначе изменение схемы витрины тихо ломает сетку нагрузки.
+
+    Заказы без часа готовности возвращаются с hour=None — их не выбрасываем и
+    не размазываем по сетке: это отдельная строка «без времени», которую
+    разбирает человек.
+
+    Самовывоз считается отдельным счётчиком: флорист и стойка выдачи — разные
+    ресурсы, и узкое место может быть не там, где кажется.
+    """
+    statuses = load_statuses if load_statuses is not None else load_status_codes()
+    if not statuses:
+        return []
+
+    placeholders = ",".join("?" * len(statuses))
+    pickup_codes = ",".join("?" * len(PICKUP_DELIVERY_CODES))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT delivery_date, store_key, ready_hour,
+                   COUNT(*)                                   AS orders,
+                   COALESCE(SUM(weight_units), 0)             AS units,
+                   SUM(CASE WHEN delivery_code IN ({pickup_codes}) THEN 1 ELSE 0 END)
+                                                              AS pickup_orders,
+                   COALESCE(SUM(CASE WHEN delivery_code IN ({pickup_codes})
+                                     THEN weight_units ELSE 0 END), 0)
+                                                              AS pickup_units,
+                   SUM(CASE WHEN ready_source = 'unparsed' THEN 1 ELSE 0 END)
+                                                              AS unparsed_orders
+              FROM courier_orders
+             WHERE delivery_date >= ? AND delivery_date <= ?
+               AND status IN ({placeholders})
+          GROUP BY delivery_date, store_key, ready_hour
+            """,
+            (*PICKUP_DELIVERY_CODES, *PICKUP_DELIVERY_CODES, date_from, date_to, *statuses),
+        ).fetchall()
+
+    return [
+        {
+            "date": row["delivery_date"],
+            "store_key": row["store_key"],
+            "hour": row["ready_hour"],
+            "orders": row["orders"],
+            "units": round(row["units"] or 0, 2),
+            "pickup_orders": row["pickup_orders"] or 0,
+            "pickup_units": round(row["pickup_units"] or 0, 2),
+            "unparsed_orders": row["unparsed_orders"] or 0,
+        }
+        for row in rows
+    ]
+
+
+def list_slot_orders(date: str, store_key: str, hour: Optional[int],
+                     load_statuses: Optional[List[str]] = None,
+                     limit: int = 200) -> List[Dict[str, Any]]:
+    """Заказы одного слота — для клика по ячейке. hour=None — «без времени»."""
+    statuses = load_statuses if load_statuses is not None else load_status_codes()
+    if not statuses:
+        return []
+
+    placeholders = ",".join("?" * len(statuses))
+    hour_condition = "ready_hour IS NULL" if hour is None else "ready_hour = ?"
+    params: List[Any] = [date, store_key]
+    if hour is not None:
+        params.append(hour)
+
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT retailcrm_order_id, order_number, ready_time, ready_source,
+                   delivery_code, status, weight_units, total_summ
+              FROM courier_orders
+             WHERE delivery_date = ? AND store_key = ? AND {hour_condition}
+               AND status IN ({placeholders})
+          ORDER BY ready_time, retailcrm_order_id
+             LIMIT ?
+            """,
+            (*params, *statuses, limit),
+        ).fetchall()
+
+    return [
+        {
+            "order_id": row["retailcrm_order_id"],
+            "number": row["order_number"],
+            "ready_time": row["ready_time"],
+            "ready_source": row["ready_source"],
+            "delivery_code": row["delivery_code"],
+            "is_pickup": row["delivery_code"] in PICKUP_DELIVERY_CODES,
+            "status": row["status"],
+            "units": row["weight_units"],
+            "amount": row["total_summ"],
+        }
+        for row in rows
     ]
 
 
