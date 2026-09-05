@@ -440,8 +440,13 @@ with app.app_context():
 
     # Инициализация таблиц загрузки салонов (ёмкость и исключения на даты).
     try:
-        from salonload.storage import init_salonload_tables
+        from salonload.storage import init_salonload_tables, seed_timezones
         init_salonload_tables()
+        # Пояс салона нужен, чтобы «перегруз через 3 часа» считался по часам
+        # салона, а не по времени сервера. Сидируется по городу один раз;
+        # салон с незнакомым городом остаётся без пояса и виден в логе.
+        from salonkpi.storage import list_stores
+        seed_timezones(list_stores(None, only_linked=True))
         logger.info("Таблицы загрузки салонов инициализированы")
     except ImportError as e:
         logger.warning(f"Не удалось импортировать модуль загрузки салонов: {e}")

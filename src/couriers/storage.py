@@ -198,6 +198,10 @@ def init_couriers_tables() -> None:
         _add_column_if_missing(conn, "courier_orders", "ready_source", "TEXT")
         _add_column_if_missing(conn, "courier_orders", "duration_slots", "INTEGER NOT NULL DEFAULT 1")
         _add_column_if_missing(conn, "courier_orders", "weight_units", "REAL")
+        # Когда у заказа последний раз менялся час готовности. Без этой отметки
+        # нельзя ответить, помогло ли предупреждение о перегрузе: перенос заказа
+        # виден только сравнением слота между прогонами синка.
+        _add_column_if_missing(conn, "courier_orders", "slot_changed_at", "TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_courier_orders_slot "
             "ON courier_orders(delivery_date, store_key, ready_hour)"
@@ -357,6 +361,18 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
     Всё в одной транзакции, чтобы отчёт никогда не читал полупустое окно.
     """
     with get_db() as conn:
+        # Часы готовности до пересборки: окно переписывается целиком, поэтому
+        # «заказ переехал в другой слот» видно только так. Без этого нельзя
+        # ответить, помогло ли предупреждение о перегрузе (пункт 7.7 плана).
+        previous = {
+            row["retailcrm_order_id"]: (row["ready_hour"], row["slot_changed_at"])
+            for row in conn.execute(
+                "SELECT retailcrm_order_id, ready_hour, slot_changed_at FROM courier_orders "
+                "WHERE delivery_date >= ? AND delivery_date <= ?",
+                (date_from, date_to),
+            )
+        }
+
         # Позиции чистим ДО заказов и по своей дате доставки: связь по
         # retailcrm_order_id тут не поможет — удаляемых заказов после DELETE
         # уже не найти, и позиции отменённых заказов остались бы навсегда.
@@ -419,6 +435,29 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                 for item in (row.get("items") or [])
             ],
         )
+
+        # Перенос слота: час был и стал другим. Заказ, которого раньше не было,
+        # переносом не считается — это новый заказ, а не разгрузка.
+        moved = []
+        for row in rows:
+            before = previous.get(row["retailcrm_order_id"])
+            if before is None:
+                continue
+            old_hour, changed_at = before
+            if old_hour == row.get("ready_hour"):
+                # Час не менялся — сохраняем прежнюю отметку, иначе она
+                # обнулялась бы при каждой пересборке окна.
+                if changed_at:
+                    moved.append((changed_at, row["retailcrm_order_id"]))
+                continue
+            moved.append((datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                          row["retailcrm_order_id"]))
+        if moved:
+            conn.executemany(
+                "UPDATE courier_orders SET slot_changed_at = ? WHERE retailcrm_order_id = ?",
+                moved,
+            )
+
         _recalc_weights(conn, date_from, date_to)
     return len(rows)
 

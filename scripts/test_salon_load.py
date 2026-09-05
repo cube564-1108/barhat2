@@ -407,6 +407,129 @@ def test_ui_contract():
               f"получено {cells[10]['capacity']}")
 
 
+def test_alerts():
+    """
+    Предупреждения (Фаза 7). Главное здесь — не «оно считается», а:
+      - о слоте не напоминают дважды;
+      - разгруженный слот закрывается сам;
+      - салон без часового пояса пропускается, а не получает сигнал по времени
+        сервера (это сдвиг на 5–7 часов, заметный только по жалобе);
+      - у предупреждения есть альтернатива, иначе оно не меняет решений.
+    """
+    print("\n10. Предупреждения о перегрузе")
+    from datetime import datetime, timedelta
+
+    # Перегруз на завтра: ёмкость 1 ед./час, а заказов на 2 ед.
+    offset = 7
+    storage.set_timezone(STORE_ID, offset)
+    tomorrow = (datetime.utcnow() + timedelta(hours=offset) + timedelta(days=1)).date().isoformat()
+
+    rows = [
+        retailcrm.parse_order(dict(order(200, hour=12), delivery={"date": tomorrow,
+                                                                  "code": "dostavka-kurerom"}), {}),
+        retailcrm.parse_order(dict(order(201, hour=12), delivery={"date": tomorrow,
+                                                                  "code": "dostavka-kurerom"}), {}),
+    ]
+    couriers_storage.replace_orders_window(tomorrow, tomorrow, rows)
+    storage.set_exception(STORE_ID, tomorrow, 12, capacity=1.0, reason="проверка")
+
+    result = metrics.scan_alerts()
+    check("перегруженный слот попал в предупреждения", result["created"] >= 1,
+          f"получено {result}")
+
+    again = metrics.scan_alerts()
+    check("повторно о том же слоте не напоминаем", again["created"] == 0, f"получено {again}")
+
+    data = metrics.alerts([STORE_ID])
+    alert = next((a for a in data["items"] if a["date"] == tomorrow and a["hour"] == 12), None)
+    check("предупреждение видно в списке", alert is not None, f"получено {data['items']}")
+    if alert:
+        check("к предупреждению приложены свободные слоты", len(alert["free_slots"]) > 0,
+              f"получено {alert['free_slots']}")
+        check("свободный слот — не тот же самый час",
+              all(not (s["date"] == tomorrow and s["hour"] == 12) for s in alert["free_slots"]),
+              f"получено {alert['free_slots']}")
+
+    # Слот разгрузили: подняли ёмкость — предупреждение обязано закрыться само
+    storage.set_exception(STORE_ID, tomorrow, 12, capacity=10.0, reason="вывели флориста")
+    resolved = metrics.scan_alerts()
+    check("разгруженный слот закрывает предупреждение", resolved["resolved"] >= 1,
+          f"получено {resolved}")
+    check("и оно уходит из активных",
+          all(not (a["date"] == tomorrow and a["hour"] == 12) for a in metrics.alerts([STORE_ID])["items"]),
+          "предупреждение осталось активным")
+
+    stats = storage.alerts_stats("2000-01-01")
+    check("счётчик пользы считает разгруженные", stats["resolved"] >= 1, f"получено {stats}")
+
+    # Салон без пояса: сигнал по времени сервера был бы мимо на 5-7 часов
+    conn = sqlite3.connect(os.environ["BARHAT_DB_PATH"])
+    conn.execute("DELETE FROM salon_timezones WHERE store_id = ?", (STORE_ID,))
+    conn.commit()
+    conn.close()
+    skipped = metrics.scan_alerts()
+    check("салон без часового пояса пропускается и виден",
+          any("Восход" in name for name in skipped["no_timezone"]), f"получено {skipped}")
+    storage.set_timezone(STORE_ID, offset)
+
+
+def test_slot_moved():
+    print("\n11. Перенос заказа виден")
+    day = "2026-09-25"
+    couriers_storage.replace_orders_window(day, day, [
+        retailcrm.parse_order(dict(order(300, hour=10),
+                                   delivery={"date": day, "code": "dostavka-kurerom"}), {}),
+    ])
+    with couriers_storage.get_db() as conn:
+        before = conn.execute("SELECT slot_changed_at FROM courier_orders "
+                              "WHERE retailcrm_order_id = 300").fetchone()["slot_changed_at"]
+    check("у нового заказа отметки переноса нет", before is None, f"получено {before}")
+
+    couriers_storage.replace_orders_window(day, day, [
+        retailcrm.parse_order(dict(order(300, hour=16),
+                                   delivery={"date": day, "code": "dostavka-kurerom"}), {}),
+    ])
+    with couriers_storage.get_db() as conn:
+        after = conn.execute("SELECT ready_hour, slot_changed_at FROM courier_orders "
+                             "WHERE retailcrm_order_id = 300").fetchone()
+    check("смена часа готовности отмечена", after["slot_changed_at"] is not None,
+          f"получено {dict(after)}")
+
+    couriers_storage.replace_orders_window(day, day, [
+        retailcrm.parse_order(dict(order(300, hour=16),
+                                   delivery={"date": day, "code": "dostavka-kurerom"}), {}),
+    ])
+    with couriers_storage.get_db() as conn:
+        kept = conn.execute("SELECT slot_changed_at FROM courier_orders "
+                            "WHERE retailcrm_order_id = 300").fetchone()["slot_changed_at"]
+    check("пересборка окна не обнуляет отметку", kept == after["slot_changed_at"],
+          f"было {after['slot_changed_at']}, стало {kept}")
+
+
+def test_capacity_suggestion():
+    print("\n12. Норма из факта")
+    from datetime import date as _date, timedelta as _td
+
+    # Норма считается по ПРОШЛОМУ: будущие заказы фактом ещё не стали.
+    # Поэтому кладём несколько отработанных часов на прошедшие дни.
+    for shift in (1, 2, 3):
+        past = (_date.today() - _td(days=shift)).isoformat()
+        couriers_storage.replace_orders_window(past, past, [
+            retailcrm.parse_order(dict(order(400 + shift * 10 + i, hour=11 + i),
+                                       delivery={"date": past, "code": "dostavka-kurerom"}), {})
+            for i in range(3)
+        ])
+
+    suggestion = metrics.suggest_capacity(STORE_ID, days=60)
+    check("подсказка считается по фактическим часам", suggestion["samples"] > 0,
+          f"получено {suggestion}")
+    check("медиана и перцентиль отдаются",
+          suggestion["median"] is not None and suggestion["p80"] is not None,
+          f"получено {suggestion}")
+    check("текущая ёмкость показана рядом", suggestion["current"] is not None,
+          f"получено {suggestion}")
+
+
 def main():
     setup_data()
     test_capacity_states()
@@ -418,6 +541,9 @@ def main():
     test_permissions()
     test_http_access()
     test_ui_contract()
+    test_alerts()
+    test_slot_moved()
+    test_capacity_suggestion()
 
     print()
     if failures:

@@ -329,6 +329,194 @@ def free_slots(store_id: int, date_from: str, days: int = 3,
     return {"store_id": store_id, "from": date_from, "days": days, "slots": slots}
 
 
+# Горизонты предупреждений. Сутки — чтобы успеть вывести ещё одного флориста,
+# три часа — чтобы успеть перенести заказ. Раньше суток предупреждать
+# бессмысленно: заказы ещё донесут, и слот всё равно пересчитается.
+HORIZON_DAY = "day"
+HORIZON_SOON = "soon"
+HORIZON_SOON_HOURS = 3
+
+# Синк не проходил дольше этого — сетка описывает не сегодняшний день, и
+# считать по ней проценты достоверными нельзя.
+STALE_SYNC_HOURS = 2
+
+
+def salon_now(utc_offset: int) -> datetime:
+    """Текущее время в салоне. Прод живёт в UTC, салоны — в UTC+5/+7."""
+    return datetime.utcnow() + timedelta(hours=utc_offset)
+
+
+def scan_alerts() -> Dict[str, Any]:
+    """
+    Найти перегруженные слоты на ближайшие сутки и закрыть те предупреждения,
+    по которым слот уже разгрузился.
+
+    Считается шагом синка, а не отдельным планировщиком: лишний фоновый поток —
+    это лишние обращения к общему медленному диску.
+
+    Салон без заданного часового пояса пропускается: «через 3 часа» без пояса
+    посчиталось бы по времени сервера и приехало бы мимо на 5–7 часов.
+    """
+    offsets = storage.timezone_map()
+    stores = _stores_for(None)
+    created = 0
+    resolved = 0
+    skipped_no_tz = []
+
+    # Сначала закрываем то, что разгрузилось: если человек перенёс заказ, он
+    # не должен видеть предупреждение до конца дня.
+    today_any = date.today().isoformat()
+    grids: Dict[str, Dict[str, Any]] = {}
+    for alert in storage.open_alerts_for_scan(today_any):
+        grid = grids.get(alert["date"])
+        if grid is None:
+            grid = day_grid(alert["date"], None)
+            grids[alert["date"]] = grid
+        store = next((s for s in grid["stores"] if s["store_id"] == alert["store_id"]), None)
+        if not store:
+            continue
+        cell = store["cells"][alert["hour"]] if alert["hour"] < len(store["cells"]) else None
+        if cell and cell["percent"] is not None and cell["percent"] < THRESHOLD_OVER:
+            storage.resolve_alert(alert["id"], cell["percent"])
+            resolved += 1
+
+    for store in stores:
+        offset = offsets.get(store["id"])
+        if offset is None:
+            skipped_no_tz.append(store["name"])
+            continue
+
+        now = salon_now(offset)
+        today = now.date().isoformat()
+        tomorrow = (now.date() + timedelta(days=1)).isoformat()
+
+        for day, horizon in ((today, HORIZON_SOON), (tomorrow, HORIZON_DAY)):
+            grid = grids.get(day)
+            if grid is None:
+                grid = day_grid(day, None)
+                grids[day] = grid
+            row = next((s for s in grid["stores"] if s["store_id"] == store["id"]), None)
+            if not row:
+                continue
+
+            for cell in row["cells"]:
+                if cell["closed"] or cell["percent"] is None:
+                    continue
+                if cell["percent"] < THRESHOLD_OVER:
+                    continue
+                if horizon == HORIZON_SOON:
+                    # Прошедший час не спасти, а дальше трёх часов — это уже
+                    # горизонт «за сутки», второе предупреждение о том же.
+                    if not (now.hour <= cell["hour"] <= now.hour + HORIZON_SOON_HOURS):
+                        continue
+                if storage.upsert_alert(store["id"], day, cell["hour"], horizon,
+                                        cell["percent"], cell["units"], cell["capacity"]):
+                    created += 1
+
+    return {"created": created, "resolved": resolved, "no_timezone": skipped_no_tz}
+
+
+def alerts(store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+    """Активные предупреждения с альтернативой: куда переставить заказ."""
+    today = date.today().isoformat()
+    items = storage.active_alerts(store_ids, today)
+
+    names = {store["id"]: store["name"] for store in salonkpi_storage.list_stores(store_ids)}
+    result = []
+    for item in items:
+        if item["store_id"] not in names:
+            continue
+        # Альтернатива считается здесь же: предупреждение без ответа «куда
+        # переносить» не меняет решений — человек не станет звонить клиенту,
+        # чтобы предложить «когда-нибудь потом».
+        free = free_slots(item["store_id"], item["date"], days=2, need_units=1.0)
+        suggestions = [slot for slot in free["slots"]
+                       if not (slot["date"] == item["date"] and slot["hour"] == item["hour"])][:3]
+        result.append({**item,
+                       "store_name": names[item["store_id"]],
+                       "free_slots": suggestions})
+
+    return {
+        "items": result,
+        "stats": storage.alerts_stats((date.today() - timedelta(days=30)).isoformat(), store_ids),
+    }
+
+
+def sync_is_stale() -> bool:
+    """Синк давно не проходил — молчание модуля не значит «всё спокойно»."""
+    info = freshness()
+    stamp = info.get("last_sync_at")
+    if not stamp:
+        return True
+    try:
+        last = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return True
+    return (datetime.utcnow() - last) > timedelta(hours=STALE_SYNC_HOURS)
+
+
+def suggest_capacity(store_id: int, days: int = 30) -> Dict[str, Any]:
+    """
+    Предложить норму из факта: сколько салон реально собирал в час.
+
+    Считаем по часам, когда салон работал и что-то делал. Медиана и 80-й
+    перцентиль: среднее занижает норму хвостом пустых часов, максимум —
+    завышает разовым праздником.
+
+    Значение только предлагается. Применять его автоматически нельзя: занижение
+    нормы превращается в постоянный ложный перегруз, и на модуль перестают
+    смотреть — это первый пункт pre-mortem.
+    """
+    date_to = date.today().isoformat()
+    date_from = (date.today() - timedelta(days=days)).isoformat()
+
+    links = salonkpi_storage.resolve_map(salonkpi_storage.SOURCE_CRM_STORE)
+    keys = {key for key, sid in links.items() if sid == store_id}
+    if not keys:
+        return {"store_id": store_id, "samples": 0, "median": None, "p80": None, "current": None}
+
+    rows = [row for row in couriers_storage.load_by_slot(date_from, date_to)
+            if row["store_key"] in keys and row["hour"] is not None]
+
+    hourly: Dict[str, float] = {}
+    for row in rows:
+        key = f"{row['date']}:{row['hour']}"
+        hourly[key] = hourly.get(key, 0.0) + row["units"]
+
+    values = sorted(v for v in hourly.values() if v > 0)
+    if not values:
+        return {"store_id": store_id, "samples": 0, "median": None, "p80": None,
+                "current": _current_capacity(store_id), "from": date_from, "to": date_to}
+
+    def percentile(data, share):
+        index = min(len(data) - 1, max(0, int(round((len(data) - 1) * share))))
+        return round(data[index], 1)
+
+    return {
+        "store_id": store_id,
+        "samples": len(values),
+        "median": percentile(values, 0.5),
+        "p80": percentile(values, 0.8),
+        "max": round(values[-1], 1),
+        "current": _current_capacity(store_id),
+        "from": date_from,
+        "to": date_to,
+    }
+
+
+def _current_capacity(store_id: int) -> Optional[float]:
+    """Самая частая ёмкость в недельной сетке — то, что стоит сейчас."""
+    grid = storage.weekly_grid(store_id)
+    counts: Dict[float, int] = {}
+    for value in grid.values():
+        if value["capacity"] is None or value["closed"]:
+            continue
+        counts[value["capacity"]] = counts.get(value["capacity"], 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
 def freshness() -> Dict[str, Any]:
     """
     На какой момент данные. Пустая сетка одинаково выглядит и как «заказов

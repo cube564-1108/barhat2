@@ -42,6 +42,23 @@ def get_db() -> sqlite3.Connection:
     return sqlite_connect(DB_PATH, timeout=20)
 
 
+# Часовые пояса городов. Нужны ровно для одного: понять, который сейчас час в
+# салоне, — «перегруз через 3 часа» иначе посчитается по времени сервера (UTC)
+# и приедет на 5–7 часов мимо.
+#
+# Значение сидируется по городу, но ХРАНИТСЯ полем и правится руками: город
+# выводится из названия салона, а название живёт по своим законам. Новый город
+# без записи в этой таблице не получает «наиболее вероятный» пояс — он просто
+# не участвует в предупреждениях и виден в списке «пояс не задан».
+CITY_OFFSETS = {
+    "Новосибирск": 7,
+    "Томск": 7,
+    "Барнаул": 7,
+    "Екатеринбург": 5,
+    "Челябинск": 5,
+}
+
+
 def init_salonload_tables() -> None:
     """Создать таблицы модуля (идемпотентно, зовётся при старте каждого воркера)."""
     conn = get_db()
@@ -83,9 +100,233 @@ def init_salonload_tables() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_salon_capacity_exc_slot "
             "ON salon_capacity_exceptions(store_id, date, hour)"
         )
+
+        # Пояс салона: смещение от UTC в часах.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS salon_timezones (
+                store_id INTEGER PRIMARY KEY,
+                utc_offset INTEGER NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # Предупреждения о перегрузе. Уникальность по (салон, дата, час,
+        # горизонт) — чтобы об одном и том же слоте не напоминать каждые
+        # полчаса: предупреждение, которое повторяется, перестают читать.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS salon_load_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                hour INTEGER NOT NULL,
+                horizon TEXT NOT NULL,
+                percent REAL,
+                units REAL,
+                capacity REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                dismissed_at TEXT,
+                resolved_at TEXT,
+                resolved_percent REAL
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_salon_load_alert_slot "
+            "ON salon_load_alerts(store_id, date, hour, horizon)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_salon_load_alert_date ON salon_load_alerts(date)"
+        )
         conn.commit()
     finally:
         conn.close()
+
+
+def seed_timezones(stores: List[Dict[str, Any]]) -> int:
+    """
+    Проставить пояса по городу — один раз, существующие записи не трогаем.
+
+    Салон, город которого мы не знаем, остаётся без пояса намеренно: угаданный
+    пояс сдвинул бы предупреждения на несколько часов, и заметили бы это только
+    по жалобе.
+    """
+    added = 0
+    conn = get_db()
+    try:
+        for store in stores:
+            offset = CITY_OFFSETS.get(store.get("city"))
+            if offset is None:
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO salon_timezones (store_id, utc_offset) VALUES (?, ?)",
+                (store["id"], offset),
+            )
+            added += cur.rowcount or 0
+        conn.commit()
+        return added
+    finally:
+        conn.close()
+
+
+def timezone_map() -> Dict[int, int]:
+    """{store_id: смещение от UTC}."""
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT store_id, utc_offset FROM salon_timezones").fetchall()
+    finally:
+        conn.close()
+    return {row["store_id"]: row["utc_offset"] for row in rows}
+
+
+def set_timezone(store_id: int, utc_offset: int, username: Optional[str] = None) -> None:
+    if not -12 <= utc_offset <= 14:
+        raise ValueError("Смещение должно быть от -12 до +14 часов")
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO salon_timezones (store_id, utc_offset, updated_by, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(store_id) DO UPDATE SET
+                utc_offset = excluded.utc_offset,
+                updated_by = excluded.updated_by,
+                updated_at = datetime('now')
+            """,
+            (store_id, utc_offset, username),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# Предупреждения о перегрузе
+# ============================================================================
+
+def upsert_alert(store_id: int, date: str, hour: int, horizon: str,
+                 percent: float, units: float, capacity: float) -> bool:
+    """
+    Записать предупреждение. False — про этот слот и горизонт уже говорили.
+
+    Повторно об одном и том же не напоминаем: предупреждение, которое приходит
+    каждые полчаса, перестают читать, и тогда молчит уже человек.
+    """
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO salon_load_alerts
+                   (store_id, date, hour, horizon, percent, units, capacity)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (store_id, date, hour, horizon, percent, units, capacity),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def active_alerts(store_ids: Optional[List[int]], date_from: str) -> List[Dict[str, Any]]:
+    """Неснятые предупреждения от указанной даты и дальше."""
+    query = ("SELECT id, store_id, date, hour, horizon, percent, units, capacity, created_at "
+             "FROM salon_load_alerts WHERE dismissed_at IS NULL AND resolved_at IS NULL "
+             "AND date >= ?")
+    params: List[Any] = [date_from]
+    if store_ids is not None:
+        if not store_ids:
+            return []
+        query += f" AND store_id IN ({','.join('?' * len(store_ids))})"
+        params.extend(store_ids)
+    query += " ORDER BY date, hour"
+
+    conn = get_db()
+    try:
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+def open_alerts_for_scan(date_from: str) -> List[Dict[str, Any]]:
+    """Предупреждения, по которым ещё не known, разгрузился слот или нет."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, store_id, date, hour, horizon, percent FROM salon_load_alerts "
+            "WHERE resolved_at IS NULL AND date >= ?",
+            (date_from,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+def resolve_alert(alert_id: int, percent: Optional[float]) -> None:
+    """Слот разгрузился — фиксируем факт: это единственная измеримая польза."""
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE salon_load_alerts SET resolved_at = datetime('now'), resolved_percent = ? "
+            "WHERE id = ? AND resolved_at IS NULL",
+            (percent, alert_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def dismiss_alert(alert_id: int, store_ids: Optional[List[int]]) -> bool:
+    """Снять предупреждение руками. Чужой салон снять нельзя."""
+    conn = get_db()
+    try:
+        if store_ids is not None:
+            if not store_ids:
+                return False
+            row = conn.execute("SELECT store_id FROM salon_load_alerts WHERE id = ?",
+                               (alert_id,)).fetchone()
+            if not row or row["store_id"] not in store_ids:
+                return False
+        cur = conn.execute(
+            "UPDATE salon_load_alerts SET dismissed_at = datetime('now') "
+            "WHERE id = ? AND dismissed_at IS NULL",
+            (alert_id,),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def alerts_stats(date_from: str, store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+    """
+    Сколько предупреждений было и сколько слотов после них разгрузилось.
+
+    Это ответ на вопрос «работает ли модуль вообще». Если через месяц
+    разгруженных ноль — предупреждения никто не читает, и это надо видеть
+    цифрой, а не ощущением.
+    """
+    query = ("SELECT COUNT(*) AS total, "
+             "SUM(CASE WHEN resolved_at IS NOT NULL THEN 1 ELSE 0 END) AS resolved, "
+             "SUM(CASE WHEN dismissed_at IS NOT NULL THEN 1 ELSE 0 END) AS dismissed "
+             "FROM salon_load_alerts WHERE date >= ?")
+    params: List[Any] = [date_from]
+    if store_ids is not None:
+        if not store_ids:
+            return {"total": 0, "resolved": 0, "dismissed": 0}
+        query += f" AND store_id IN ({','.join('?' * len(store_ids))})"
+        params.extend(store_ids)
+
+    conn = get_db()
+    try:
+        row = conn.execute(query, params).fetchone()
+    finally:
+        conn.close()
+    return {
+        "total": row["total"] or 0,
+        "resolved": row["resolved"] or 0,
+        "dismissed": row["dismissed"] or 0,
+    }
 
 
 # ============================================================================

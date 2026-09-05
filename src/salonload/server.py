@@ -238,6 +238,84 @@ def get_stores():
 # Ёмкость
 # ============================================================================
 
+@salonload_bp.route("/alerts", methods=["GET"])
+@section_required("salon_load")
+def get_alerts():
+    """
+    Активные предупреждения о перегрузе с альтернативой «куда перенести».
+
+    Плюс признак «синк давно не проходил»: молчание модуля не значит «всё
+    спокойно», и на экране это должно читаться по-разному.
+    """
+    store_ids = _allowed_store_ids()
+    data = metrics.alerts(store_ids)
+    data["stale_sync"] = metrics.sync_is_stale()
+    return success_response({"data": data})
+
+
+@salonload_bp.route("/alerts/<int:alert_id>/dismiss", methods=["POST"])
+@section_required("salon_load")
+@require_ajax_header
+def dismiss_alert(alert_id: int):
+    """Снять предупреждение: разобрались, больше не показывать."""
+    if not storage.dismiss_alert(alert_id, _allowed_store_ids()):
+        return error_response("Предупреждение не найдено или относится к чужому салону", 404)
+    _bump_version()
+    return success_response({"dismissed": alert_id})
+
+
+@salonload_bp.route("/alerts/scan", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def run_alert_scan():
+    """Пересчитать предупреждения руками — обычно это делает синк."""
+    result = metrics.scan_alerts()
+    _bump_version()
+    return success_response({"data": result})
+
+
+@salonload_bp.route("/capacity/suggest", methods=["GET"])
+@section_required("salon_load")
+def get_capacity_suggestion():
+    """
+    Норма из факта: сколько салон реально собирал в час за месяц.
+
+    Только предложение. Применяет человек: заниженная норма — это постоянный
+    ложный перегруз, после которого на модуль перестают смотреть.
+    """
+    try:
+        store_id = int(request.args.get("store_id"))
+    except (TypeError, ValueError):
+        return error_response("Не передан store_id")
+
+    denied = _check_store_access(store_id)
+    if denied:
+        return denied
+
+    return success_response({"data": metrics.suggest_capacity(store_id)})
+
+
+@salonload_bp.route("/timezones", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def save_timezone():
+    """Часовой пояс салона: от него считается «перегруз через 3 часа»."""
+    data = request.get_json(silent=True) or {}
+    try:
+        store_id = int(data.get("store_id"))
+        offset = int(data.get("utc_offset"))
+    except (TypeError, ValueError):
+        return error_response("Нужны store_id и utc_offset")
+
+    try:
+        storage.set_timezone(store_id, offset, getattr(current_user, "username", None))
+    except ValueError as e:
+        return error_response(str(e))
+
+    log_action(current_user.username, "salon_load_timezone", f"салон {store_id}: UTC+{offset}")
+    return success_response({"store_id": store_id, "utc_offset": offset})
+
+
 @salonload_bp.route("/capacity", methods=["GET"])
 @section_required("salon_load")
 def get_capacity():

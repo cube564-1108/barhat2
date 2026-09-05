@@ -206,6 +206,7 @@ def _sync_range(date_from: str, date_to: str) -> int:
 
         storage.set_sync_state(storage.NO_DATE_ORDERS_KEY, str(skipped_no_date))
         storage.finish_sync_log(log_id, total, "completed")
+        _scan_load_alerts()
         if skipped_no_date:
             logger.info(f"Курьеры: {skipped_no_date} заказов без даты доставки пропущено")
         return total
@@ -213,6 +214,30 @@ def _sync_range(date_from: str, date_to: str) -> int:
         logger.error(f"Ошибка синхронизации заказов курьеров: {e}")
         storage.finish_sync_log(log_id, total, "failed", str(e))
         raise
+
+
+def _scan_load_alerts() -> None:
+    """
+    Пересчитать предупреждения о перегрузе — шагом синка, а не своим
+    планировщиком: лишний фоновый поток означает лишние обращения к общему
+    медленному диску, за который дерутся все базы сразу.
+
+    Модуль нагрузки может отсутствовать или упасть — синк заказов из-за этого
+    падать не должен: выплаты и показатели салонов важнее сетки.
+    """
+    try:
+        from salonload.metrics import scan_alerts
+        result = scan_alerts()
+        if result["created"] or result["resolved"]:
+            logger.info(f"Загрузка салонов: предупреждений создано {result['created']}, "
+                        f"снято по разгрузке {result['resolved']}")
+        if result["no_timezone"]:
+            logger.warning("Загрузка салонов: пояс не задан у салонов "
+                           f"{', '.join(result['no_timezone'])} — предупреждения по ним не считаются")
+    except ImportError:
+        logger.debug("Модуль загрузки салонов недоступен — предупреждения не считаем")
+    except Exception as e:
+        logger.error(f"Не удалось пересчитать предупреждения о загрузке: {e}")
 
 
 def _run_sync(date_from: str, date_to: str, deep: bool = False) -> bool:

@@ -24,6 +24,7 @@
         weekDays: 7,
         data: null,
         week: null,
+        alerts: null,
         isAdmin: false,
         loading: false
     };
@@ -125,9 +126,15 @@
 
         try {
             if (state.view === 'day') {
-                const result = await api(`/api/salon-load/day?date=${encodeURIComponent(state.date)}`);
+                const [result, alerts] = await Promise.all([
+                    api(`/api/salon-load/day?date=${encodeURIComponent(state.date)}`),
+                    // Предупреждения грузим вместе с сеткой: отдельной кнопки
+                    // «проверить перегруз» быть не должно — её никто не нажмёт.
+                    api('/api/salon-load/alerts').catch(() => null)
+                ]);
                 state.data = result.data;
                 state.isAdmin = !!result.data.can_edit;
+                state.alerts = alerts ? alerts.data : null;
             } else {
                 const result = await api(
                     `/api/salon-load/week?from=${encodeURIComponent(state.date)}&days=${state.weekDays}`);
@@ -247,6 +254,71 @@
                 : 'Обратитесь к администратору.'));
     }
 
+    function alertsCard() {
+        const alerts = state.alerts;
+        if (!alerts) return '';
+
+        // Молчание модуля и «всё спокойно» — разные вещи. Если синк не
+        // проходил больше двух часов, предупреждений просто нет физически.
+        const stale = alerts.stale_sync
+            ? note('bad', 'Синхронизация давно не проходила',
+                'Предупреждения о перегрузе сейчас не считаются, а проценты в сетке ' +
+                'описывают устаревшую картину.')
+            : '';
+
+        const items = alerts.items || [];
+        if (!items.length) {
+            return stale + (alerts.stats && alerts.stats.total ? `
+                <div class="sload-note sload-note--info">
+                    <span style="line-height:0;flex:0 0 auto">${icon(ICON_ALERT, 18)}</span>
+                    <div class="sload-note__body">
+                        <div class="sload-note__title">Перегруженных слотов нет</div>
+                        <div>За 30 дней было ${alerts.stats.total}
+                            ${plural(alerts.stats.total, 'предупреждение', 'предупреждения', 'предупреждений')},
+                            из них ${alerts.stats.resolved} слотов разгрузили после сигнала.</div>
+                    </div>
+                </div>` : '');
+        }
+
+        return stale + `
+        <div class="sload-card">
+            <h2 class="sload-card__title">Перегруз: ${items.length}
+                ${plural(items.length, 'слот', 'слота', 'слотов')}</h2>
+            <p class="sload-card__caption">За сутки — успеть вывести ещё одного флориста,
+                за 3 часа — успеть перенести заказ. Рядом — куда его перенести.</p>
+            <div class="sload-extra">
+                ${items.map(alert => `
+                    <div class="sload-extra__item" style="cursor:default;flex-direction:column;align-items:stretch;gap:8px">
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+                            <span>
+                                <span class="sload-extra__label">${esc(alert.store_name)} ·
+                                    ${esc(dateLabel(alert.date))} · ${String(alert.hour).padStart(2, '0')}:00</span><br>
+                                <span class="sload-extra__value">${pct(alert.percent)}</span>
+                                <span class="sload-extra__label">${num(alert.units)} из
+                                    ${num(alert.capacity)} ед. ·
+                                    ${alert.horizon === 'soon' ? 'ближайшие часы' : 'завтра'}</span>
+                            </span>
+                            <button class="sload-btn sload-btn--ghost" data-dismiss="${alert.id}">Разобрался</button>
+                        </div>
+                        <div class="sload-extra__label">
+                            ${alert.free_slots && alert.free_slots.length
+                                ? 'Свободно рядом: ' + alert.free_slots.map(slot =>
+                                    `<button class="sload-badge sload-badge--pickup" style="border:none;cursor:pointer"
+                                        data-free-slot data-store="${alert.store_id}" data-date="${esc(slot.date)}"
+                                        data-hour="${slot.hour}">${esc(dateLabel(slot.date).split(',')[0])},
+                                        ${String(slot.hour).padStart(2, '0')}:00 — запас ${num(slot.free_units)} ед.</button>`).join(' ')
+                                : 'Свободных слотов рядом нет — здесь нужен ещё один флорист, а не перенос.'}
+                        </div>
+                    </div>`).join('')}
+            </div>
+            ${alerts.stats && alerts.stats.total ? `<p class="sload-card__caption" style="margin-top:10px">
+                За 30 дней: ${alerts.stats.total}
+                ${plural(alerts.stats.total, 'предупреждение', 'предупреждения', 'предупреждений')},
+                разгружено после сигнала — ${alerts.stats.resolved}. Если разгруженных ноль,
+                предупреждения не работают.</p>` : ''}
+        </div>`;
+    }
+
     function renderDay() {
         const data = state.data;
         if (!data) return '';
@@ -270,7 +342,7 @@
                 ${hours.map(hour => cell(store, store.cells[hour])).join('')}
             </tr>`).join('');
 
-        return header() + toolbar() +
+        return header() + toolbar() + alertsCard() +
             freshnessNote(data.freshness) + capacityNote(data) + coverageNote(data.coverage) + `
             <div class="sload-card">
                 <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -539,7 +611,11 @@
                         <input type="number" min="0" step="0.5" class="sload-input"
                             id="sloadPickup" style="width:100%;margin-top:4px"></label>
                 </div>
-                <button class="sload-btn" data-apply-hours>Заполнить неделю</button>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="sload-btn" data-apply-hours>Заполнить неделю</button>
+                    <button class="sload-btn sload-btn--ghost" data-suggest>Сколько собирали на самом деле</button>
+                </div>
+                <div id="sloadSuggest"></div>
             </div>
 
             <h4 style="font-family:'Vollkorn',Georgia,serif;color:#411330;margin:0 0 4px">Копировать график</h4>
@@ -568,6 +644,31 @@
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
 
         overlay.addEventListener('click', async e => {
+            const suggest = e.target.closest('[data-suggest]');
+            if (suggest) {
+                const storeId = Number(overlay.querySelector('#sloadCapStore').value);
+                const box = overlay.querySelector('#sloadSuggest');
+                suggest.disabled = true;
+                try {
+                    const result = await api(`/api/salon-load/capacity/suggest?store_id=${storeId}`);
+                    const data = result.data;
+                    box.innerHTML = data.samples
+                        ? note('info', `За месяц реально собирали ${num(data.median)} ед. в час (медиана)`,
+                            `Загруженные часы доходили до ${num(data.p80)} ед. (80% случаев) и ` +
+                            `${num(data.max)} ед. в пике. Сейчас стоит ${data.current === null
+                                ? 'ничего' : num(data.current) + ' ед.'}. ` +
+                            'Число только предложено: заниженная норма даёт постоянный ложный перегруз, ' +
+                            'и на сетку перестают смотреть. Решает человек.')
+                        : note('info', 'Данных пока нет',
+                            'За месяц в этом салоне не набралось часов с заказами — норму задайте руками, ' +
+                            'а через месяц работы вернитесь к этой кнопке.');
+                } catch (error) {
+                    toast('Не удалось посчитать: ' + error.message, 'error');
+                }
+                suggest.disabled = false;
+                return;
+            }
+
             const applyHours = e.target.closest('[data-apply-hours]');
             const copyWeek = e.target.closest('[data-copy-week]');
             const setException = e.target.closest('[data-set-exception]');
@@ -859,6 +960,33 @@
         const noTime = e.target.closest('[data-notime]');
         if (noTime) {
             openSlot(Number(noTime.dataset.store), null);
+            return;
+        }
+
+        const freeSlot = e.target.closest('[data-free-slot]');
+        if (freeSlot) {
+            // Переход на свободный слот: показываем тот день и тот час, чтобы
+            // человек видел, куда переносит, а не верил подписи на бейдже.
+            state.date = freeSlot.dataset.date;
+            state.data = null;
+            state.week = null;
+            load().then(() => openSlot(Number(freeSlot.dataset.store), Number(freeSlot.dataset.hour)));
+            return;
+        }
+
+        const dismiss = e.target.closest('[data-dismiss]');
+        if (dismiss) {
+            dismiss.disabled = true;
+            api(`/api/salon-load/alerts/${dismiss.dataset.dismiss}/dismiss`, postOptions({}))
+                .then(() => {
+                    toast('Предупреждение снято', 'success');
+                    state.data = null;
+                    load();
+                })
+                .catch(error => {
+                    toast('Не удалось снять: ' + error.message, 'error');
+                    dismiss.disabled = false;
+                });
         }
     });
 
