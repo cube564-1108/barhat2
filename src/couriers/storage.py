@@ -27,6 +27,13 @@ DB_PATH = resolve_data_path("COURIERS_DB_PATH", "couriers.db")
 # Статус RetailCRM, который считается оплачиваемым: ровно «Выполнен».
 # Не вся группа complete — «Заказ доставлен» и «Удержание» в неё тоже входят,
 # но платить по ним владелец не хочет (решение от 2026-08-24).
+#
+# ВАЖНО: КАЖДОЕ чтение витрины обязано фильтровать статус явно. До 2026-09-05
+# четыре запроса (list_cities, get_orders_date_range, shipments_data_range,
+# health_snapshot) статус не проверяли — их случайно прикрывал PAYOUT_FILTER и
+# то, что синк тянул только выполненные заказы. Модуль нагрузки салонов кладёт
+# в ту же витрину будущие заказы всех статусов, и без явного фильтра «данные
+# по такое-то число» в отчёте выплат уехало бы в будущее.
 COMPLETED_STATUS = "complete"
 
 # Условие «заказ участвует в выплате курьерам»: либо курьер указан, либо
@@ -491,7 +498,9 @@ def list_cities() -> List[str]:
     with get_db() as conn:
         rows = conn.execute(
             "SELECT DISTINCT city FROM courier_orders "
-            f"WHERE city IS NOT NULL AND city != '' AND {PAYOUT_FILTER} ORDER BY city"
+            f"WHERE status = ? AND city IS NOT NULL AND city != '' AND {PAYOUT_FILTER} "
+            "ORDER BY city",
+            (COMPLETED_STATUS,),
         ).fetchall()
     return [row["city"] for row in rows]
 
@@ -521,7 +530,8 @@ def get_orders_date_range() -> Dict[str, Optional[str]]:
     with get_db() as conn:
         row = conn.execute(
             "SELECT MIN(delivery_date) AS min_date, MAX(delivery_date) AS max_date "
-            f"FROM courier_orders WHERE {PAYOUT_FILTER}"
+            f"FROM courier_orders WHERE status = ? AND {PAYOUT_FILTER}",
+            (COMPLETED_STATUS,),
         ).fetchone()
     return {"min_date": row["min_date"], "max_date": row["max_date"]}
 
@@ -616,8 +626,8 @@ def health_snapshot() -> Dict[str, Any]:
                        SUM(CASE WHEN total_summ > 0 THEN 1 ELSE 0 END) AS with_summ,
                        SUM(CASE WHEN order_method IS NOT NULL THEN 1 ELSE 0 END) AS with_method,
                        MIN(delivery_date) AS since, MAX(delivery_date) AS until
-                FROM courier_orders
-            """).fetchone()
+                FROM courier_orders WHERE status = ?
+            """, (COMPLETED_STATUS,)).fetchone()
             data = {
                 "rows": row["rows"],
                 "with_summ": row["with_summ"] or 0,
@@ -626,8 +636,19 @@ def health_snapshot() -> Dict[str, Any]:
                 "until": row["until"],
             }
         else:
-            row = conn.execute("SELECT COUNT(*) AS rows FROM courier_orders").fetchone()
+            row = conn.execute(
+                "SELECT COUNT(*) AS rows FROM courier_orders WHERE status = ?",
+                (COMPLETED_STATUS,),
+            ).fetchone()
             data = {"rows": row["rows"]}
+
+        # Строки всех статусов — отдельным числом. Витрина шире отчёта (см.
+        # PAYOUT_FILTER), а после Фазы 1 в ней появятся ещё и будущие заказы для
+        # модуля нагрузки салонов. Смешивать их со счётчиком выполненных нельзя:
+        # «строк много, а показатели нулевые» — это разные поломки.
+        data["rows_all_statuses"] = conn.execute(
+            "SELECT COUNT(*) AS rows FROM courier_orders"
+        ).fetchone()["rows"]
 
         types_row = conn.execute(
             "SELECT COUNT(*) AS total, SUM(counts_as_courier) AS courier FROM delivery_types"
@@ -665,7 +686,8 @@ def shipments_data_range() -> Dict[str, Optional[str]]:
     with get_db() as conn:
         row = conn.execute(
             "SELECT MIN(delivery_date) AS since, MAX(delivery_date) AS until "
-            "FROM courier_orders WHERE order_method IS NOT NULL"
+            "FROM courier_orders WHERE status = ? AND order_method IS NOT NULL",
+            (COMPLETED_STATUS,),
         ).fetchone()
     return {"since": row["since"], "until": row["until"]}
 
