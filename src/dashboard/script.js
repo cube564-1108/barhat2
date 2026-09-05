@@ -205,6 +205,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (pageName === 'salon_kpi' && window.SalonKpiModule) {
                 window.SalonKpiModule.onPageActivated(currentUser);
             }
+
+            // Активируем раздел загрузки салонов
+            if (pageName === 'salon_load' && window.SalonLoadModule) {
+                window.SalonLoadModule.onPageActivated(currentUser);
+            }
         } else {
             // Если страницы нет, показываем заглушку
             const targetNav = document.querySelector(`.nav-item[data-page="${pageName}"]`);
@@ -263,6 +268,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             'abc_analysis': 'ABC-АНАЛИЗ ТОВАРОВ',
             'courier_payouts': 'ОПЛАТА КУРЬЕРАМ',
             'salon_kpi': 'ПОКАЗАТЕЛИ САЛОНОВ',
+            'salon_load': 'ЗАГРУЗКА САЛОНОВ',
             'link_watch': 'ССЫЛКИ НА ТОВАРЫ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'

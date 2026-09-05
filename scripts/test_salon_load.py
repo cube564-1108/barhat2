@@ -321,6 +321,92 @@ def test_http_access():
               f"получено {response.status_code}, {payload.get('data', {}).get('no_stores')}")
 
 
+def test_ui_contract():
+    """
+    Каждая ручка, которую дёргает salon-load.js, отвечает и отдаёт те поля,
+    которые экран читает. Проверка руками не заменяется node --check: тот
+    видит синтаксис, но не видит, что ручки нет или что поле называется иначе.
+    """
+    print("\n9. Контракт с экраном")
+    from pyrus.server import app
+
+    ensure_user("test-load-admin", "admin", [])
+
+    with app.test_client() as client:
+        login_as(client, "test-load-admin")
+
+        response = client.get(f"/api/salon-load/day?date={DAY}")
+        payload = (response.get_json() or {}).get("data", {})
+        check("/day отвечает", response.status_code == 200, f"получено {response.status_code}")
+        for field in ("hours", "stores", "thresholds", "coverage", "freshness", "can_edit"):
+            check(f"/day отдаёт {field}", field in payload, f"есть: {sorted(payload)}")
+        if payload.get("stores"):
+            cell = payload["stores"][0]["cells"][10]
+            for field in ("hour", "units", "capacity", "percent", "level", "closed", "orders"):
+                check(f"ячейка отдаёт {field}", field in cell, f"есть: {sorted(cell)}")
+
+        response = client.get(f"/api/salon-load/week?from={DAY}&days=7")
+        check("/week отвечает", response.status_code == 200, f"получено {response.status_code}")
+
+        response = client.get("/api/salon-load/stores")
+        payload = response.get_json() or {}
+        check("/stores отвечает и знает про заданную ёмкость",
+              response.status_code == 200 and
+              any(s.get("has_capacity") for s in payload.get("stores", [])),
+              f"получено {response.status_code}, {payload.get('stores')}")
+
+        response = client.get("/api/couriers/weights?only_missing=1")
+        payload = response.get_json() or {}
+        check("справочник весов отвечает", response.status_code == 200,
+              f"получено {response.status_code}")
+        check("в мета есть покрытие весами",
+              "coverage" in (payload.get("meta") or {}), f"получено {payload.get('meta')}")
+
+        response = client.get("/api/couriers/order-statuses")
+        payload = response.get_json() or {}
+        check("справочник статусов отвечает", response.status_code == 200,
+              f"получено {response.status_code}")
+        check("у статуса есть признак нагрузки",
+              all("counts_as_load" in s for s in payload.get("data", [])),
+              f"получено {payload.get('data')}")
+
+        # Запись: те же тела запроса, что шлёт экран
+        headers = {"X-Requested-With": "barhat-dashboard"}
+        response = client.post("/api/salon-load/capacity/working-hours", headers=headers,
+                               json={"store_id": STORE_ID, "open_hour": 9, "close_hour": 21,
+                                     "capacity": 6, "pickup_capacity": None})
+        check("часы работы сохраняются", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+
+        response = client.post("/api/salon-load/exceptions", headers=headers,
+                               json={"store_id": STORE_ID, "date": DAY, "hour": None,
+                                     "capacity": 12, "closed": False, "reason": "8 марта"})
+        check("исключение сохраняется", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+
+        response = client.post("/api/couriers/weights", headers=headers,
+                               json={"weights": {"1": 3.5}})
+        check("вес товара сохраняется", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+
+        response = client.post("/api/couriers/weights", headers=headers,
+                               json={"weights": {"1": 0}})
+        check("нулевой вес отклоняется ручкой", response.status_code == 400,
+              f"получено {response.status_code}")
+
+        response = client.post("/api/salon-load/capacity/working-hours",
+                               json={"store_id": STORE_ID, "open_hour": 9, "close_hour": 21,
+                                     "capacity": 6})
+        check("запись без заголовка AJAX отклоняется", response.status_code == 403,
+              f"получено {response.status_code}")
+
+        # Ёмкость поменялась — сетка обязана это увидеть, а не отдать кэш
+        response = client.get(f"/api/salon-load/day?date={DAY}")
+        cells = (response.get_json() or {})["data"]["stores"][0]["cells"]
+        check("правка ёмкости сразу видна в сетке (кэш сброшен)", cells[10]["capacity"] == 12.0,
+              f"получено {cells[10]['capacity']}")
+
+
 def main():
     setup_data()
     test_capacity_states()
@@ -331,6 +417,7 @@ def main():
     test_week()
     test_permissions()
     test_http_access()
+    test_ui_contract()
 
     print()
     if failures:

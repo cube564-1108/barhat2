@@ -14,6 +14,7 @@
          Все правила внутри скоуплены под .iv2 — на остальной дашборд не влияют. -->
     <link rel="stylesheet" href="/invoices-v2.css">
     <link rel="stylesheet" href="/salon-kpi.css">
+    <link rel="stylesheet" href="/salon-load.css">
     <!-- chart.js — со своего домена, не с jsdelivr: чужой CDN означал лишние
          DNS + TLS перед первой отрисовкой и зависимость от его доступности.
          defer у всех скриптов: качаются параллельно с разбором страницы,
@@ -125,6 +126,14 @@
                             <path d="M7 14l4-4 3 3 5-6"/>
                         </svg>
                         <span>Показатели салонов</span>
+                    </a>
+                    <a href="/salon-load" class="nav-item" data-page="salon_load">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="9"/>
+                            <path d="M12 7v5l3 2"/>
+                        </svg>
+                        <span>Загрузка салонов</span>
                     </a>
                     <a href="/courier-payouts" class="nav-item" data-page="courier_payouts">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
@@ -916,6 +925,12 @@
                      поэтому в разметке только контейнер -->
                 <div class="page" data-page="salon_kpi">
                     <div id="salonKpiContent"></div>
+                </div>
+
+                <!-- Загрузка салонов: раздел рисуется целиком из salon-load.js,
+                     поэтому в разметке только контейнер -->
+                <div class="page" data-page="salon_load">
+                    <div id="salonLoadContent"></div>
                 </div>
 
                 <!-- Оплата курьерам -->
@@ -2331,6 +2346,7 @@
     <script defer src="/tasks.js"></script>
     <script defer src="/writeoffs.js"></script>
     <script defer src="/salon-kpi.js"></script>
+    <script defer src="/salon-load.js"></script>
     <script defer src="/courier-payouts.js"></script>
     <script defer src="/invoices-v2.js"></script>
     <script defer src="/link-watch.js"></script>

@@ -1010,6 +1010,19 @@ def salon_kpi_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/salon-load')
+def salon_load_page():
+    """Страница загрузки салонов"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return _serve_dashboard_shell()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /salon-load: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 @app.route('/link-watch')
 def link_watch_page():
     """Страница сторожа ссылок на товары"""
@@ -1112,6 +1125,16 @@ def serve_courier_payouts():
 def serve_salon_kpi_js():
     """Отдаёт скрипт раздела показателей салонов"""
     return send_from_directory(DASHBOARD_DIR, 'salon-kpi.js')
+
+
+@app.route('/salon-load.js')
+def salon_load_js():
+    return send_from_directory(DASHBOARD_DIR, 'salon-load.js')
+
+
+@app.route('/salon-load.css')
+def salon_load_css():
+    return send_from_directory(DASHBOARD_DIR, 'salon-load.css')
 
 
 @app.route('/salon-kpi.css')
