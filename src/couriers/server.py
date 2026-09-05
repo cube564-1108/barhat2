@@ -55,10 +55,20 @@ RECENT_WINDOW_DAYS = 7
 # Ночной прогон: за квартал заказ уже точно не переоформят.
 DEEP_WINDOW_DAYS = 90
 
+# Окно вперёд — для модуля «Загрузка салонов»: сетка нагрузки живёт на будущих
+# заказах, которых в витрине раньше не было вовсе. 60 дней с запасом покрывают
+# предзаказы к праздникам, а стоят копейки: разведка 2026-09-05 нашла на 60
+# дней вперёд всего 79 заказов против ~180 в сутки на прошедших датах.
+FUTURE_WINDOW_DAYS = 60
+
 # Окно пересобирается кусками по неделе: DELETE+INSERT одного куска атомарен,
 # поэтому отчёт никогда не видит полупустой период, а память не держит
 # десятки тысяч заказов разом.
 CHUNK_DAYS = 7
+
+# Будущее пересобирается кусками покрупнее: заказов там единицы, а каждый кусок
+# это отдельная запись на медленный общий диск (см. _sync_chunks).
+FUTURE_CHUNK_DAYS = 30
 
 # Потолок на длину периода в ручном запросе — защита от «загрузить за 10 лет»
 MAX_MANUAL_PERIOD_DAYS = 400
@@ -111,6 +121,28 @@ def _chunks(date_from: str, date_to: str, chunk_days: int) -> List[tuple]:
     return result
 
 
+def _sync_chunks(date_from: str, date_to: str) -> List[tuple]:
+    """
+    Куски окна: прошлое — по неделе, будущее — по месяцу.
+
+    Каждый кусок это отдельная транзакция DELETE+INSERT на общий диск /data, за
+    который дерутся все базы сразу (там же авторизация всего сайта). На
+    прошедших датах неделя оправдана — там ~180 заказов в сутки и переписывать
+    приходится много. На будущих датах заказов единицы (79 на 60 дней), и
+    делить их на девять кусков значит девять лишних записей каждые полчаса
+    ради одних и тех же сорока строк.
+    """
+    today = date.today().isoformat()
+    if date_to <= today:
+        return _chunks(date_from, date_to, CHUNK_DAYS)
+    if date_from > today:
+        return _chunks(date_from, date_to, FUTURE_CHUNK_DAYS)
+    return (
+        _chunks(date_from, today, CHUNK_DAYS)
+        + _chunks((date.today() + timedelta(days=1)).isoformat(), date_to, FUTURE_CHUNK_DAYS)
+    )
+
+
 def _sync_range(date_from: str, date_to: str) -> int:
     """
     Пересобрать данные за период. Возвращает число записанных заказов.
@@ -124,20 +156,31 @@ def _sync_range(date_from: str, date_to: str) -> int:
     storage.upsert_couriers(client.get_couriers())
     storage.upsert_sites(client.get_sites())
     storage.upsert_delivery_types(client.get_delivery_types())
+    storage.upsert_order_statuses(client.get_statuses())
     site_cities = storage.get_site_cities()
 
     total = 0
+    # Заказы без даты доставки в витрину не попадают — по периоду их всё равно
+    # не показать. Но и молчать про них нельзя: это не ноль, это «мы не знаем,
+    # когда». Считаем и кладём в состояние, чтобы число было видно в /health.
+    skipped_no_date = 0
     log_id = storage.start_sync_log()
     last_renew = time.monotonic()
     try:
-        for chunk_from, chunk_to in _chunks(date_from, date_to, CHUNK_DAYS):
+        for chunk_from, chunk_to in _sync_chunks(date_from, date_to):
             rows: List[Dict[str, Any]] = []
-            for page in client.iter_completed_orders(
-                chunk_from, chunk_to, storage.COMPLETED_STATUS, deadline=deadline
+            # Статус не фильтруем: витрина общая для выплат, показателей салонов
+            # и загрузки салонов, а будущий заказ по определению не «Выполнен».
+            # Отбор по статусу стоит в каждом чтении (см. storage.COMPLETED_STATUS).
+            for page in client.iter_orders_by_delivery_date(
+                chunk_from, chunk_to, deadline=deadline
             ):
                 for order in page:
                     parsed = retailcrm.parse_order(order, site_cities)
-                    if not parsed or not parsed["retailcrm_order_id"]:
+                    if parsed is None:
+                        skipped_no_date += 1
+                        continue
+                    if not parsed["retailcrm_order_id"]:
                         continue
                     # Пишем ВСЕ выполненные заказы, включая самовывоз.
                     #
@@ -161,7 +204,10 @@ def _sync_range(date_from: str, date_to: str) -> int:
             storage.update_sync_log_progress(log_id, total)
             logger.info(f"Курьеры: {chunk_from}—{chunk_to} → {len(rows)} заказов")
 
+        storage.set_sync_state(storage.NO_DATE_ORDERS_KEY, str(skipped_no_date))
         storage.finish_sync_log(log_id, total, "completed")
+        if skipped_no_date:
+            logger.info(f"Курьеры: {skipped_no_date} заказов без даты доставки пропущено")
         return total
     except Exception as e:
         logger.error(f"Ошибка синхронизации заказов курьеров: {e}")
@@ -219,11 +265,14 @@ def _scheduled_run() -> None:
     # сразу, не дожидаясь ночи. Это ~150 запросов и пара минут, а не десятки
     # минут, как полный ресинк МойСклада.
     if empty_db or (night and _deep_sync_due()):
-        date_from, date_to = _window(DEEP_WINDOW_DAYS)
+        date_from, date_to = _window(DEEP_WINDOW_DAYS, FUTURE_WINDOW_DAYS)
         _run_sync(date_from, date_to, deep=True)
         return
 
-    date_from, date_to = _window(RECENT_WINDOW_DAYS)
+    # Окно вперёд берётся и в обычном прогоне: заказ на послезавтра могли
+    # оформить пять минут назад, а сетка нагрузки нужна именно на завтра.
+    # Будущих заказов мало (79 на 60 дней), так что прогон почти не тяжелеет.
+    date_from, date_to = _window(RECENT_WINDOW_DAYS, FUTURE_WINDOW_DAYS)
     _run_sync(date_from, date_to)
 
 

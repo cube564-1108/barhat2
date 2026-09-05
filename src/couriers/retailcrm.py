@@ -67,6 +67,20 @@ class RetailCRMError(Exception):
     """Ошибка обращения к RetailCRM."""
 
 
+# Кастомное поле «время готовности заказа». Разведка 2026-09-05 (4000 заказов):
+# заполнено у 100% заказов и расходится с delivery.time.from у 70% — у доставки
+# готовность раньше выезда на 10–60 минут, у самовывоза бывает и позже. Выводить
+# готовность из времени доставки нельзя, это разные величины.
+READY_TIME_FIELD = "order_availability_time"
+
+# Поле текстовое, его заполняет человек. В выборке встречались «9:00» без
+# ведущего нуля, «уточ», «ут», «уточнить», «Ждем уточнений» — около 1% заказов.
+# Поэтому разбор терпимый к формату, но не «угадывающий»: что не разобралось,
+# остаётся пустым и попадает в строку «требует уточнения», а не в 00:00.
+_TIME_RE = re.compile(r"^\s*(\d{1,2})\s*[:.\-]\s*(\d{1,2})\s*$")
+_HOUR_ONLY_RE = re.compile(r"^\s*(\d{1,2})\s*(?:ч|час|часов|:00)?\s*$", re.IGNORECASE)
+
+
 def is_configured() -> bool:
     return bool(RETAILCRM_URL and RETAILCRM_API_KEY)
 
@@ -158,15 +172,42 @@ class CourierOrdersClient:
     # Заказы
     # ------------------------------------------------------------------
 
-    def iter_completed_orders(
+    def get_statuses(self) -> List[Dict[str, Any]]:
+        """
+        Справочник статусов заказа с группой.
+
+        Группа (`new`, `approval`, `assembling`, `delivery`, `complete`,
+        `cancel`) — то, из чего сидируется признак «считать нагрузкой»: в CRM
+        41 статус, и заполнять их руками — ровно тот ручной труд, который
+        должен делать агент.
+        """
+        data = self._get("api/v5/reference/statuses")
+        return [
+            {
+                "code": code,
+                "name": item.get("name") or code,
+                "group_code": item.get("group"),
+                "active": bool(item.get("active", True)),
+            }
+            for code, item in (data.get("statuses") or {}).items()
+        ]
+
+    def iter_orders_by_delivery_date(
         self,
         date_from: str,
         date_to: str,
-        status: str,
+        status: Optional[str] = None,
         deadline: Optional[float] = None,
     ) -> Iterator[List[Dict[str, Any]]]:
         """
-        Страницы заказов в статусе `status` с датой доставки в [date_from, date_to].
+        Страницы заказов с датой доставки в [date_from, date_to].
+
+        status=None — все статусы. Именно так ходит синк с 2026-09-05: витрина
+        общая для выплат, показателей салонов и загрузки салонов, а будущий
+        заказ по определению не «Выполнен». Отдельный проход только за
+        будущим был бы вторым запросом к CRM ради тех же дат; отбор по статусу
+        и так стоит в каждом чтении (см. COMPLETED_STATUS в storage.py), а
+        отменённые заказы стоят всего ~5% объёма.
 
         Отдаём страницами, а не одним списком: вызывающий пишет прогресс и
         продлевает лок между страницами, а память не держит десятки тысяч
@@ -184,13 +225,16 @@ class CourierOrdersClient:
                     f"({date_from}—{date_to}, страниц получено: {page - 1})"
                 )
 
-            data = self._get("api/v5/orders", {
+            params = {
                 "filter[deliveryDateFrom]": date_from,
                 "filter[deliveryDateTo]": date_to,
-                "filter[extendedStatus][]": [status],
                 "limit": PAGE_LIMIT,
                 "page": page,
-            })
+            }
+            if status:
+                params["filter[extendedStatus][]"] = [status]
+
+            data = self._get("api/v5/orders", params)
 
             if not data.get("success", False):
                 raise RetailCRMError(f"RetailCRM отклонил запрос заказов: {data.get('errorMsg')}")
@@ -206,6 +250,103 @@ class CourierOrdersClient:
 
             page += 1
             time.sleep(PAGE_PAUSE_SECONDS)
+
+
+def parse_time_value(value: Any) -> Optional[str]:
+    """
+    Человеческая запись времени → «HH:MM». None — это не время.
+
+    Разбираем «10:20», «9:00», «9.00», «9-00», «18», «18ч». Не разбираем
+    «уточ», «Ждем уточнений», «уточнить заказ был на вчера до 00» — такие
+    значения обязаны остаться пустыми и попасть человеку на разбор.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    match = _TIME_RE.match(text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+    else:
+        match = _HOUR_ONLY_RE.match(text)
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), 0
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def ready_slot(order: Dict[str, Any]) -> Dict[str, Optional[Any]]:
+    """
+    Время готовности заказа → час слота.
+
+    Отдельная функция с тестом, а не ветка внутри parse_order: у самовывоза,
+    у интервальной доставки и у заказа «на сейчас» логика разная, и правило
+    вывода слота должно быть одним местом, которое можно прогнать на реальной
+    выгрузке (scripts/probe_crm_order_slots.py).
+
+    Часовой пояс не трогаем. Время в CRM — стенные часы салона: менеджер
+    вводит его так, как видит флорист. Разведка 2026-09-05 это подтверждает —
+    у салонов из UTC+5 и UTC+7 рабочее окно одинаковое (9:00–22:00), сдвига
+    между поясами в данных нет. Конвертировать здесь что-либо — значит сдвинуть
+    всю сетку на 2 часа у половины салонов.
+
+    Возвращает ready_time (HH:MM или None), ready_hour (0–23 или None) и
+    ready_source: откуда взято значение. Источник хранится не для отладки —
+    когда сетка поедет, первый вопрос будет «а из какого поля мы взяли час».
+    """
+    custom = order.get("customFields") or {}
+    delivery = order.get("delivery") or {}
+    time_block = delivery.get("time") or {}
+
+    candidates = (
+        ("availability", custom.get(READY_TIME_FIELD)),
+        ("delivery_from", time_block.get("from")),
+    )
+    for source, raw in candidates:
+        parsed = parse_time_value(raw)
+        if parsed:
+            return {
+                "ready_time": parsed,
+                "ready_hour": int(parsed[:2]),
+                "ready_source": source,
+            }
+
+    # Значение есть, но это не время («уточ») — отличаем от «поля нет вовсе»:
+    # первое разбирает человек, второе означает заказ без времени.
+    raw_availability = (custom.get(READY_TIME_FIELD) or "").strip()
+    return {
+        "ready_time": None,
+        "ready_hour": None,
+        "ready_source": "unparsed" if raw_availability else None,
+    }
+
+
+def parse_items(order: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Позиции заказа → строки order_items.
+
+    Ключ — offer.id: внутренний идентификатор CRM, заполнен у 100% позиций и
+    не меняется при переименовании товара (разведка 2026-09-05). Артикул и
+    название кладём для человека, ключом они быть не могут.
+    """
+    rows = []
+    for item in order.get("items") or []:
+        offer = item.get("offer") or {}
+        offer_id = offer.get("id")
+        if offer_id is None:
+            continue
+        rows.append({
+            "offer_id": int(offer_id),
+            "product_name": offer.get("displayName") or offer.get("name"),
+            "article": offer.get("article"),
+            "quantity": float(item.get("quantity") or 0),
+        })
+    return rows
 
 
 def parse_order(order: Dict[str, Any], site_cities: Dict[str, Optional[str]]) -> Optional[Dict[str, Any]]:
@@ -226,6 +367,7 @@ def parse_order(order: Dict[str, Any], site_cities: Dict[str, Optional[str]]) ->
 
     site_code = order.get("site")
     address = delivery.get("address") or {}
+    slot = ready_slot(order)
 
     return {
         "retailcrm_order_id": order.get("id"),
@@ -245,6 +387,15 @@ def parse_order(order: Dict[str, Any], site_cities: Dict[str, Optional[str]]) ->
         "total_summ": float(order.get("summ") or 0),
         "order_method": order.get("orderMethod"),
         "delivery_code": delivery.get("code"),
+        # Поля модуля «Загрузка салонов».
+        # store_key — склад-исполнитель, заполнен у 100% заказов (разведка
+        # 2026-09-05). Это именно он, а не site: сайт говорит, откуда пришёл
+        # заказ, а собирает букет склад.
+        "store_key": order.get("shipmentStore"),
+        "ready_time": slot["ready_time"],
+        "ready_hour": slot["ready_hour"],
+        "ready_source": slot["ready_source"],
+        "items": parse_items(order),
     }
 
 

@@ -43,6 +43,16 @@ COMPLETED_STATUS = "complete"
 # переехал сюда, в чтение. Любой новый запрос модуля выплат обязан его добавлять.
 PAYOUT_FILTER = "(courier_id IS NOT NULL OR net_cost > 0)"
 
+# Вес трудоёмкости товара, у которого вес не задан. Хранится в настройках
+# (sync_state), здесь только запасное значение на случай пустой настройки:
+# считать неизвестный товар нулём нельзя — нагрузка занизится незаметно.
+DEFAULT_WEIGHT_KEY = "load_default_weight"
+DEFAULT_WEIGHT_FALLBACK = 1.0
+
+# Сколько заказов синк пропустил из-за отсутствия даты доставки. Живёт здесь,
+# а не в server.py: ключ читает и диагностика витрины.
+NO_DATE_ORDERS_KEY = "orders_without_delivery_date"
+
 # Такси-службы: Яндекс Доставка (2), Максим Такси (12), Драйв такси (169).
 # Сид для нового флага; дальше значение правится в интерфейсе.
 TAXI_COURIER_IDS = (2, 12, 169)
@@ -152,6 +162,89 @@ def init_couriers_tables() -> None:
         )
 
         # ====================================================================
+        # Поля модуля «Загрузка салонов» (план 2026-09-04).
+        #
+        # store_key — склад-исполнитель (shipmentStore), заполнен у 100%
+        # заказов. Это не site_code: сайт говорит, откуда пришёл заказ, а
+        # собирает букет склад.
+        #
+        # ready_time/ready_hour — время готовности из customFields
+        # .order_availability_time, в стенных часах салона. Не время доставки:
+        # поля расходятся у 70% заказов.
+        #
+        # ready_source — из какого поля взято значение (availability /
+        # delivery_from / unparsed). Первый вопрос при съехавшей сетке.
+        #
+        # duration_slots — задел под крупный заказ, занимающий несколько часов.
+        # Логики пока нет, но добавлять колонку потом — переписывать витрину.
+        #
+        # weight_units — трудоёмкость заказа, посчитанная при синке (см.
+        # recalc_order_weights). Считать её join'ом позиций и весов на каждый
+        # показ сетки — это лишняя работа на каждом открытии экрана.
+        # ====================================================================
+        _add_column_if_missing(conn, "courier_orders", "store_key", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "ready_time", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "ready_hour", "INTEGER")
+        _add_column_if_missing(conn, "courier_orders", "ready_source", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "duration_slots", "INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_missing(conn, "courier_orders", "weight_units", "REAL")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_courier_orders_slot "
+            "ON courier_orders(delivery_date, store_key, ready_hour)"
+        )
+
+        # Позиции заказа. delivery_date дублируется намеренно: окно витрины
+        # чистится через DELETE по дате доставки, и без этого поля позиции
+        # отменённых заказов остались бы навсегда, а вес слота рос бы сам.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS order_items (
+                retailcrm_order_id INTEGER NOT NULL,
+                offer_id INTEGER NOT NULL,
+                delivery_date TEXT NOT NULL,
+                product_name TEXT,
+                article TEXT,
+                quantity REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (retailcrm_order_id, offer_id)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_items_date ON order_items(delivery_date)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_items_offer ON order_items(offer_id)"
+        )
+
+        # Справочник весов товаров. Ключ — offer.id (внутренний идентификатор
+        # CRM): заполнен у 100% позиций и не меняется при переименовании товара.
+        # weight IS NULL невозможен — строка заводится только когда вес задан;
+        # товар без строки считается по весу по умолчанию и попадает в список
+        # «требуют веса». Экран справочника — Фаза 3.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS product_weights (
+                offer_id INTEGER PRIMARY KEY,
+                weight REAL NOT NULL,
+                set_by TEXT,
+                set_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # Справочник статусов: counts_as_load решает, попадает ли заказ в
+        # нагрузку. Сидируется из группы CRM (cancel → не нагрузка), дальше
+        # правится руками и синком НЕ перетирается — какой статус считать
+        # работой, решает человек, а не название записи.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS order_statuses (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                group_code TEXT,
+                counts_as_load INTEGER NOT NULL DEFAULT 1,
+                active INTEGER NOT NULL DEFAULT 1,
+                reviewed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # ====================================================================
         # Справочник курьеров. is_service=1 — служба доставки/агрегатор
         # (Яндекс Доставка, Купер, Максим Такси...), их отделяем от штатных
         # курьеров переключателем в отчёте. Значение проставляется эвристикой
@@ -254,6 +347,13 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
     Всё в одной транзакции, чтобы отчёт никогда не читал полупустое окно.
     """
     with get_db() as conn:
+        # Позиции чистим ДО заказов и по своей дате доставки: связь по
+        # retailcrm_order_id тут не поможет — удаляемых заказов после DELETE
+        # уже не найти, и позиции отменённых заказов остались бы навсегда.
+        conn.execute(
+            "DELETE FROM order_items WHERE delivery_date >= ? AND delivery_date <= ?",
+            (date_from, date_to),
+        )
         conn.execute(
             "DELETE FROM courier_orders WHERE delivery_date >= ? AND delivery_date <= ?",
             (date_from, date_to),
@@ -263,8 +363,9 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
             INSERT OR REPLACE INTO courier_orders (
                 retailcrm_order_id, order_number, delivery_date, courier_id, courier_name,
                 net_cost, site_code, city, delivery_city, status,
-                total_summ, order_method, delivery_code, synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                total_summ, order_method, delivery_code,
+                store_key, ready_time, ready_hour, ready_source, synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             """,
             [
                 (
@@ -281,11 +382,137 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                     float(row.get("total_summ") or 0),
                     row.get("order_method"),
                     row.get("delivery_code"),
+                    row.get("store_key"),
+                    row.get("ready_time"),
+                    row.get("ready_hour"),
+                    row.get("ready_source"),
                 )
                 for row in rows
             ],
         )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO order_items (
+                retailcrm_order_id, offer_id, delivery_date, product_name, article, quantity
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["retailcrm_order_id"],
+                    item["offer_id"],
+                    row["delivery_date"],
+                    item.get("product_name"),
+                    item.get("article"),
+                    float(item.get("quantity") or 0),
+                )
+                for row in rows
+                for item in (row.get("items") or [])
+            ],
+        )
+        _recalc_weights(conn, date_from, date_to)
     return len(rows)
+
+
+def get_default_weight() -> float:
+    """
+    Вес трудоёмкости для товара, которого нет в справочнике весов.
+
+    Не ноль: молча считать неизвестный товар нулём — значит занижать нагрузку
+    невидимо. Значение правится в интерфейсе (Фаза 3), поэтому лежит в
+    настройках, а не константой в коде.
+    """
+    raw = get_sync_state(DEFAULT_WEIGHT_KEY)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_WEIGHT_FALLBACK
+    return value if value > 0 else DEFAULT_WEIGHT_FALLBACK
+
+
+def _recalc_weights(conn, date_from: str, date_to: str) -> None:
+    """
+    Пересчитать вес заказов за окно одним запросом.
+
+    Вес считается при синке и хранится числом: собирать его join'ом позиций и
+    весов на каждый показ сетки — лишняя работа на каждом открытии экрана, а
+    диск /data и без того медленный.
+
+    Заказ без позиций получает 0, а не NULL: это не «неизвестно», это «работы
+    по позициям нет» (бывает у заказов, заведённых одной суммой).
+    """
+    default_weight = get_default_weight()
+    conn.execute(
+        """
+        UPDATE courier_orders
+           SET weight_units = COALESCE((
+                   SELECT SUM(i.quantity * COALESCE(w.weight, ?))
+                     FROM order_items i
+                LEFT JOIN product_weights w ON w.offer_id = i.offer_id
+                    WHERE i.retailcrm_order_id = courier_orders.retailcrm_order_id
+               ), 0)
+         WHERE delivery_date >= ? AND delivery_date <= ?
+        """,
+        (default_weight, date_from, date_to),
+    )
+
+
+def recalc_weights_range(date_from: str, date_to: str) -> None:
+    """
+    Пересчёт весов за период отдельным вызовом — для смены веса товара.
+
+    Правка веса в справочнике меняет нагрузку задним числом, и без пересчёта
+    экран показывал бы старые числа до следующего синка.
+    """
+    with get_db() as conn:
+        _recalc_weights(conn, date_from, date_to)
+
+
+def upsert_order_statuses(statuses: List[Dict[str, Any]]) -> None:
+    """
+    Обновить справочник статусов.
+
+    counts_as_load сидируется из группы CRM: `cancel` — не нагрузка, остальное
+    нагрузка. Дальше значение правится руками и синхронизацией НЕ перетирается
+    (тот же приём, что у is_service и counts_as_courier): какой статус считать
+    работой флориста, решает человек.
+
+    Новый статус приходит с reviewed=0 — чтобы его было видно в справочнике,
+    а не чтобы он молча попал в расчёт с угаданным значением.
+    """
+    if not statuses:
+        return
+    with get_db() as conn:
+        conn.executemany(
+            """
+            INSERT INTO order_statuses (code, name, group_code, counts_as_load, active, reviewed)
+            VALUES (?, ?, ?, ?, ?, 0)
+            ON CONFLICT(code) DO UPDATE SET
+                name = excluded.name,
+                group_code = excluded.group_code,
+                active = excluded.active,
+                updated_at = datetime('now')
+            """,
+            [
+                (
+                    status["code"],
+                    status.get("name") or status["code"],
+                    status.get("group_code"),
+                    0 if status.get("group_code") == "cancel" else 1,
+                    1 if status.get("active", True) else 0,
+                )
+                for status in statuses
+                if status.get("code")
+            ],
+        )
+
+
+def load_status_codes() -> List[str]:
+    """Статусы, которые считаются нагрузкой салона."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT code FROM order_statuses WHERE counts_as_load = 1"
+        ).fetchall()
+    return [row["code"] for row in rows]
 
 
 def upsert_couriers(couriers: List[Dict[str, Any]]) -> None:
@@ -649,6 +876,38 @@ def health_snapshot() -> Dict[str, Any]:
         data["rows_all_statuses"] = conn.execute(
             "SELECT COUNT(*) AS rows FROM courier_orders"
         ).fetchone()["rows"]
+
+        # Состояние данных модуля «Загрузка салонов». Пустая сетка одинаково
+        # выглядит и как «заказов нет», и как «синк не дотянул будущее», и как
+        # «время готовности не разобралось» — здесь эти случаи разделены.
+        if "ready_hour" in columns:
+            load_row = conn.execute("""
+                SELECT SUM(CASE WHEN delivery_date > date('now') THEN 1 ELSE 0 END) AS future_orders,
+                       SUM(CASE WHEN ready_hour IS NOT NULL THEN 1 ELSE 0 END)      AS with_ready_hour,
+                       SUM(CASE WHEN ready_source = 'unparsed' THEN 1 ELSE 0 END)   AS unparsed_ready,
+                       SUM(CASE WHEN store_key IS NULL OR store_key = '' THEN 1 ELSE 0 END) AS without_store,
+                       MAX(delivery_date) AS until_future
+                FROM courier_orders
+            """).fetchone()
+            data["load"] = {
+                "future_orders": load_row["future_orders"] or 0,
+                "with_ready_hour": load_row["with_ready_hour"] or 0,
+                "unparsed_ready": load_row["unparsed_ready"] or 0,
+                "without_store": load_row["without_store"] or 0,
+                "until_future": load_row["until_future"],
+                "items": conn.execute("SELECT COUNT(*) AS c FROM order_items").fetchone()["c"],
+                "weights_set": conn.execute(
+                    "SELECT COUNT(*) AS c FROM product_weights").fetchone()["c"],
+                "statuses_as_load": conn.execute(
+                    "SELECT COUNT(*) AS c FROM order_statuses WHERE counts_as_load = 1"
+                ).fetchone()["c"],
+                # Читаем тем же соединением: открывать второе, пока это ещё
+                # живо, — тот самый вложенный коннект, которым уже вешали базу.
+                "orders_without_date": (
+                    conn.execute("SELECT value FROM sync_state WHERE key = ?",
+                                 (NO_DATE_ORDERS_KEY,)).fetchone() or {"value": None}
+                )["value"],
+            }
 
         types_row = conn.execute(
             "SELECT COUNT(*) AS total, SUM(counts_as_courier) AS courier FROM delivery_types"
