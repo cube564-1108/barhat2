@@ -771,14 +771,17 @@
                     <div><div class="skpi-map-row__key">${esc(item.label || item.key)}</div>
                         <div class="skpi-map-row__meta">${esc(item.source_name)} · ${esc(item.meta)}</div>
                         ${item.suggestion ? `<div class="skpi-map-row__meta">
-                            <span class="skpi-suggest">похоже на: ${esc(item.suggestion.name)}</span></div>` : ''}</div>
+                            <span class="skpi-suggest">похоже на: ${esc(item.suggestion.name)}</span></div>` : ''}
+                        ${item.unlinkable ? `<div class="skpi-map-row__meta">У заказа не заполнен склад —
+                            привязывать нечего, разбирать нужно в CRM</div>` : ''}</div>
                     <div class="skpi-map-row__act">
+                        ${item.unlinkable ? '' : `
                         <select class="skpi-select" data-store>
                             <option value="">Не привязывать</option>
                             ${options(item.suggestion ? item.suggestion.store_id : null)}
                         </select>
                         <button class="skpi-btn-light" style="background:#411330" data-bind
-                            data-source="${esc(item.source)}" data-key="${esc(item.key)}">Привязать</button>
+                            data-source="${esc(item.source)}" data-key="${esc(item.key)}">Привязать</button>`}
                     </div>
                 </div>`).join('') : '<p class="skpi-dempty">Всё сопоставлено — потерянных данных нет.</p>'}
             ${couriers.length ? couriers.map(c => `

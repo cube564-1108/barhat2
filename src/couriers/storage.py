@@ -104,6 +104,10 @@ def get_db():
     """
     _ensure_parent_dir(DB_PATH)
     conn = sqlite_connect(DB_PATH, timeout=30)
+    # SQLite приводит регистр только у латиницы: LOWER('Роза') возвращает
+    # 'Роза', и поиск по русскому названию товара молча ничего не находит.
+    conn.create_function("py_lower", 1, lambda text: text.lower() if text else text,
+                         deterministic=True)
     try:
         yield conn
         conn.commit()
@@ -467,6 +471,134 @@ def recalc_weights_range(date_from: str, date_to: str) -> None:
         _recalc_weights(conn, date_from, date_to)
 
 
+def set_default_weight(value: float) -> None:
+    """Вес по умолчанию правится в интерфейсе, а не константой в коде."""
+    if value <= 0:
+        raise ValueError("Вес по умолчанию должен быть больше нуля")
+    set_sync_state(DEFAULT_WEIGHT_KEY, str(float(value)))
+
+
+def list_weight_catalog(date_from: str, date_to: str, only_missing: bool = False,
+                        search: Optional[str] = None, limit: int = 300) -> List[Dict[str, Any]]:
+    """
+    Товары, встреченные в заказах за период, с их весом трудоёмкости.
+
+    Сортировка по числу заказов, а не по алфавиту: заполнять веса нужно начиная
+    с того, что реально влияет на нагрузку, — иначе человек уходит в хвост
+    справочника и бросает на середине.
+
+    only_missing=True — только те, у кого веса нет: это вкладка «требуют веса».
+    """
+    where = ["i.delivery_date >= ?", "i.delivery_date <= ?"]
+    params: List[Any] = [date_from, date_to]
+    if search:
+        where.append("(py_lower(i.product_name) LIKE ? OR py_lower(COALESCE(i.article, '')) LIKE ?)")
+        pattern = f"%{search.lower()}%"
+        params.extend([pattern, pattern])
+    if only_missing:
+        where.append("w.offer_id IS NULL")
+
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT i.offer_id,
+                   MAX(i.product_name)              AS product_name,
+                   MAX(i.article)                   AS article,
+                   COUNT(DISTINCT i.retailcrm_order_id) AS orders,
+                   COALESCE(SUM(i.quantity), 0)     AS quantity,
+                   w.weight                         AS weight
+              FROM order_items i
+         LEFT JOIN product_weights w ON w.offer_id = i.offer_id
+             WHERE {' AND '.join(where)}
+          GROUP BY i.offer_id, w.weight
+          ORDER BY orders DESC, quantity DESC
+             LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+
+    return [
+        {
+            "offer_id": row["offer_id"],
+            "product_name": row["product_name"],
+            "article": row["article"],
+            "orders": row["orders"],
+            "quantity": round(row["quantity"] or 0, 2),
+            "weight": row["weight"],
+        }
+        for row in rows
+    ]
+
+
+def set_product_weights(weights: Dict[int, Optional[float]], username: Optional[str] = None) -> int:
+    """
+    Проставить вес пачкой. Значение None снимает вес (товар вернётся в
+    «требуют веса» и будет считаться по весу по умолчанию).
+
+    Пачкой, а не по одному: проставлять вес 300 товарам поштучно — тот самый
+    ручной труд, ради устранения которого модуль и делается.
+    """
+    if not weights:
+        return 0
+    to_set = [(offer_id, float(w), username) for offer_id, w in weights.items() if w is not None]
+    to_clear = [(offer_id,) for offer_id, w in weights.items() if w is None]
+
+    for _, weight, _ in to_set:
+        if weight <= 0:
+            raise ValueError("Вес должен быть больше нуля")
+
+    with get_db() as conn:
+        if to_set:
+            conn.executemany(
+                """
+                INSERT INTO product_weights (offer_id, weight, set_by, set_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(offer_id) DO UPDATE SET
+                    weight = excluded.weight, set_by = excluded.set_by, set_at = datetime('now')
+                """,
+                to_set,
+            )
+        if to_clear:
+            conn.executemany("DELETE FROM product_weights WHERE offer_id = ?", to_clear)
+    return len(weights)
+
+
+def weights_coverage(date_from: str, date_to: str) -> Dict[str, Any]:
+    """
+    Какая доля нагрузки посчитана весом по умолчанию.
+
+    Это число обязано быть видно рядом с процентами загрузки: «140%» и «140%,
+    из них 60% веса — по умолчанию» — разные основания для того, чтобы звонить
+    клиенту и переносить заказ.
+    """
+    default_weight = get_default_weight()
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(i.quantity * COALESCE(w.weight, ?)), 0) AS total_units,
+                   COALESCE(SUM(CASE WHEN w.offer_id IS NULL THEN i.quantity * ? ELSE 0 END), 0)
+                       AS default_units,
+                   COUNT(DISTINCT CASE WHEN w.offer_id IS NULL THEN i.offer_id END) AS products_missing,
+                   COUNT(DISTINCT i.offer_id) AS products_total
+              FROM order_items i
+         LEFT JOIN product_weights w ON w.offer_id = i.offer_id
+             WHERE i.delivery_date >= ? AND i.delivery_date <= ?
+            """,
+            (default_weight, default_weight, date_from, date_to),
+        ).fetchone()
+
+    total = row["total_units"] or 0
+    default_units = row["default_units"] or 0
+    return {
+        "default_weight": default_weight,
+        "total_units": round(total, 2),
+        "default_units": round(default_units, 2),
+        "default_share": round(100.0 * default_units / total, 1) if total else 0.0,
+        "products_missing": row["products_missing"] or 0,
+        "products_total": row["products_total"] or 0,
+    }
+
+
 def upsert_order_statuses(statuses: List[Dict[str, Any]]) -> None:
     """
     Обновить справочник статусов.
@@ -504,6 +636,40 @@ def upsert_order_statuses(statuses: List[Dict[str, Any]]) -> None:
                 if status.get("code")
             ],
         )
+
+
+def list_order_statuses() -> List[Dict[str, Any]]:
+    """Справочник статусов для экрана: что считается нагрузкой салона."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT code, name, group_code, counts_as_load, active, reviewed "
+            "FROM order_statuses ORDER BY counts_as_load DESC, group_code, name"
+        ).fetchall()
+    return [
+        {
+            "code": row["code"],
+            "name": row["name"],
+            "group": row["group_code"],
+            "counts_as_load": bool(row["counts_as_load"]),
+            "active": bool(row["active"]),
+            "reviewed": bool(row["reviewed"]),
+        }
+        for row in rows
+    ]
+
+
+def set_order_status_load_flag(code: str, value: bool) -> bool:
+    """
+    Отметить статус как нагрузку. reviewed=1 — человек это значение видел,
+    и оно больше не «угаданное из группы CRM».
+    """
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE order_statuses SET counts_as_load = ?, reviewed = 1, "
+            "updated_at = datetime('now') WHERE code = ?",
+            (1 if value else 0, code),
+        )
+    return cur.rowcount > 0
 
 
 def load_status_codes() -> List[str]:
@@ -970,6 +1136,53 @@ def list_unmapped_sites(date_from: str, date_to: str, known_sites: List[str]) ->
         for row in rows
         if row["site_code"] and row["site_code"] not in known
     ]
+
+
+def list_unmapped_stores(date_from: str, date_to: str, known_keys: List[str],
+                         load_statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """
+    Склады-исполнители за период, которых нет в справочнике салонов.
+
+    В отличие от сайтов, считаем по ВСЕМ статусам нагрузки, а не только по
+    выполненным: сетка нагрузки живёт на будущих заказах, и склад, который
+    забыли привязать, обязан всплыть сегодня, а не через месяц, когда заказы
+    станут выполненными.
+
+    Заказы с пустым складом отдаются отдельной строкой с key=None — это
+    «нераспределённые» из решения 5. Молча приписать их наиболее вероятному
+    салону нельзя: ошибка сопоставления тихо перекладывает нагрузку.
+    """
+    statuses = load_statuses if load_statuses is not None else load_status_codes()
+    if not statuses:
+        return []
+
+    placeholders = ",".join("?" * len(statuses))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT store_key,
+                   COUNT(*) AS orders,
+                   COALESCE(SUM(weight_units), 0) AS weight
+              FROM courier_orders
+             WHERE delivery_date >= ? AND delivery_date <= ?
+               AND status IN ({placeholders})
+             GROUP BY store_key
+            """,
+            (date_from, date_to, *statuses),
+        ).fetchall()
+
+    known = set(known_keys)
+    result = []
+    for row in rows:
+        key = row["store_key"]
+        if key and key in known:
+            continue
+        result.append({
+            "key": key or None,
+            "orders": row["orders"],
+            "weight": round(row["weight"] or 0, 2),
+        })
+    return result
 
 
 def list_unflagged_couriers(date_from: str, date_to: str) -> List[Dict[str, Any]]:

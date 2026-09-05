@@ -51,16 +51,16 @@ ROLE_SECTIONS = {
     # снятие права закрыло бы доступ к данным тем, кого забыли перевести.
     # Ручки счетов проверяют @section_required("invoices", "invoices_v2") —
     # пускает любая из двух секций (INVOICE_SECTIONS в src/invoices/server.py).
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "link_watch", "salon_kpi"},
-    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts", "salon_kpi"},
-    "florist": {"cash_shifts", "writeoffs"},
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "link_watch", "salon_kpi", "salon_load"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts", "salon_kpi", "salon_load"},
+    "florist": {"cash_shifts", "writeoffs", "salon_load"},
     "florist_analyst": {"quality"},
     # Пользователи, залогиненные через SSO из портала БАРХАТ Пульс (см. src/sso.py).
     # Роль в Пульсе (director/manager/...) на внутренние права намеренно не мапится:
     # все входящие через портал получают один и тот же набор — всё, КРОМЕ
     # управления пользователями. Админку через внешний JWT не открываем, иначе
     # пропуск Пульса позволял бы заводить и править учётки в нашем сервисе.
-    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "salon_kpi"},
+    "sso_viewer": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "salon_kpi", "salon_load"},
 }
 
 
@@ -484,6 +484,12 @@ def init_auth_tables():
     # заходят и своими логинами (manager), и через Пульс (sso_viewer) — право
     # нужно обеим ролям, иначе половина людей раздела просто не увидит.
     migrate_new_module_permissions("salon_kpi", ["admin", "manager", "sso_viewer"])
+
+    # Догрузка права на раздел salon_load («Загрузка салонов»). Флорист сюда
+    # тоже входит — это единственная роль, которой сетка нужна ежедневно: он и
+    # есть тот ресурс, который в ней считается. Видит при этом только свой
+    # салон, отбор делает бэкенд.
+    migrate_new_module_permissions("salon_load", ["admin", "manager", "sso_viewer", "florist"])
 
     # Догрузка прав SSO-пользователям: первые из них были заведены, когда
     # sso_viewer имел доступ только к "quality" (см. SSO_MODULES выше).

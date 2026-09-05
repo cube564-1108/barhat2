@@ -28,9 +28,16 @@ SOURCE_CRM = "crm_site"          # код сайта RetailCRM (nsk-voskhod-3)
 SOURCE_NOS = "pyrus_nos"         # значение поля «Салон» в форме негативной ОС
 SOURCE_QUALITY = "pyrus_quality"  # значение поля «Салон» в форме качества
 SOURCE_MS_STORE = "ms_store"     # id склада МойСклада (UUID)
+# Склад-исполнитель заказа (shipmentStore). Отдельный источник, а не тот же
+# crm_site: сайт говорит, откуда пришёл заказ, а собирает букет склад, и для
+# нагрузки салона важен именно он. Пространства ключей совпадают, но это
+# совпадение справочников CRM, а не правило — новый склад может появиться без
+# своего сайта.
+SOURCE_CRM_STORE = "crm_store"
 
 SOURCES = {
     SOURCE_CRM: "RetailCRM, сайт заказа",
+    SOURCE_CRM_STORE: "RetailCRM, склад-исполнитель",
     SOURCE_NOS: "Pyrus, негативная ОС",
     SOURCE_QUALITY: "Pyrus, качество сборки",
     SOURCE_MS_STORE: "МойСклад, склад",
@@ -156,6 +163,20 @@ def seed_links() -> int:
                     "INSERT OR IGNORE INTO salon_links (source, external_key, store_id) "
                     "VALUES (?, ?, ?)",
                     (source, key, store_id),
+                )
+                added += cur.rowcount or 0
+
+            # Склад-исполнитель: у всех девяти салонов код склада совпадает с
+            # кодом сайта — сверено со справочником stores RetailCRM 2026-09-05
+            # (18 записей, включая служебные «Крафт», «Склад NEW», «invisible»).
+            # Сидируем, чтобы человеку не пришлось делать вручную работу,
+            # которую видно из данных; расхождения всплывут в «несопоставленном».
+            site_key = links.get(SOURCE_CRM)
+            if site_key:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO salon_links (source, external_key, store_id) "
+                    "VALUES (?, ?, ?)",
+                    (SOURCE_CRM_STORE, site_key, store_id),
                 )
                 added += cur.rowcount or 0
 

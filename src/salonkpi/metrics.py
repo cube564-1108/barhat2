@@ -692,6 +692,7 @@ def unmapped(month: str) -> Dict[str, Any]:
     date_from, date_to = month_bounds(month)
     links = {
         "crm": storage.resolve_map(storage.SOURCE_CRM),
+        "crm_store": storage.resolve_map(storage.SOURCE_CRM_STORE),
         "nos": storage.resolve_map(storage.SOURCE_NOS),
         "quality": storage.resolve_map(storage.SOURCE_QUALITY),
         "ms": storage.resolve_map(storage.SOURCE_MS_STORE),
@@ -707,6 +708,23 @@ def unmapped(month: str) -> Dict[str, Any]:
                 "key": row["key"],
                 "meta": f"{row['orders']} заказов · {row['amount']:,.0f} ₽".replace(",", " "),
                 "weight": row["amount"],
+            })
+
+        # Склады-исполнители: непривязанный склад — это салон, чья нагрузка не
+        # попадёт в сетку. Заказы с пустым складом (key=None) показываем
+        # отдельной строкой «нераспределённые», а не молча приписываем салону.
+        for row in couriers_storage.list_unmapped_stores(
+                date_from, date_to, list(links["crm_store"])):
+            items.append({
+                "source": storage.SOURCE_CRM_STORE,
+                "source_name": storage.SOURCES[storage.SOURCE_CRM_STORE],
+                "key": row["key"],
+                "label": None if row["key"] else "Заказы без склада",
+                "meta": f"{row['orders']} заказов · {row['weight']:,.0f} ед. трудоёмкости".replace(",", " "),
+                "weight": row["orders"],
+                # Пустой склад привязать нельзя — это не ключ, а его отсутствие:
+                # разбирать такие заказы нужно в CRM, а не в справочнике.
+                "unlinkable": not row["key"],
             })
     except Exception as e:
         logger.warning(f"Несопоставленные сайты CRM недоступны: {e}")
@@ -753,7 +771,11 @@ def unmapped(month: str) -> Dict[str, Any]:
 
     items.sort(key=lambda x: -(x.get("weight") or 0))
     for item in items:
-        item["suggestion"] = _suggest_store(item.get("label") or item["key"])
+        # У строки «заказы без склада» ключа нет вовсе, подсказывать нечего:
+        # иначе её подпись ушла бы в поиск похожего салона и дала бы совет
+        # привязать то, чего не существует.
+        item["suggestion"] = None if item.get("unlinkable") else _suggest_store(
+            item.get("label") or item["key"])
 
     return {"month": month, "period": {"from": date_from, "to": date_to}, "items": items}
 

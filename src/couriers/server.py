@@ -19,12 +19,12 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, jsonify, request
-from flask_login import login_required
+from flask_login import current_user, login_required
 
 # Импортируем модуль авторизации (как в cashshifts/server.py)
 auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
-from auth import section_required, role_required, require_ajax_header  # noqa: E402
+from auth import log_action, section_required, role_required, require_ajax_header  # noqa: E402
 
 from . import retailcrm, storage  # noqa: E402
 
@@ -458,6 +458,145 @@ def set_delivery_type(code: str):
         return error_response("Тип доставки не найден", 404)
 
     return success_response({"code": code, "counts_as_courier": value})
+
+
+# ============================================================================
+# Справочник весов товаров (модуль «Загрузка салонов»)
+#
+# Живёт в этом модуле, а не в отдельном: веса лежат в одной базе с позициями
+# заказов, и пересчёт нагрузки после правки веса — один SQL. В отдельной базе
+# он превратился бы в выгрузку тысяч строк в Python.
+# ============================================================================
+
+# Окно, за которое собирается справочник: товар, не встречавшийся в заказах
+# два месяца, взвешивать незачем — ассортимент меняется.
+WEIGHTS_WINDOW_DAYS = 60
+
+# Потолок пачки: защита от «проставить вес всему справочнику одним запросом»,
+# который на медленном диске займёт воркер на минуты.
+MAX_WEIGHTS_BATCH = 500
+
+
+def _weights_window() -> tuple:
+    today = date.today()
+    return (today - timedelta(days=WEIGHTS_WINDOW_DAYS)).isoformat(), today.isoformat()
+
+
+@couriers_bp.route("/weights", methods=["GET"])
+@section_required("salon_load")
+def get_weights_catalog():
+    """
+    Справочник весов: товары из заказов за 60 дней с их трудоёмкостью.
+
+    only_missing=1 — вкладка «требуют веса»: сортировка по числу заказов, чтобы
+    человек начинал с того, что реально влияет на нагрузку.
+    """
+    only_missing = request.args.get("only_missing") in ("1", "true")
+    search = (request.args.get("q") or "").strip() or None
+    date_from, date_to = _weights_window()
+
+    return success_response(
+        storage.list_weight_catalog(date_from, date_to, only_missing=only_missing, search=search),
+        meta={
+            "period": {"from": date_from, "to": date_to},
+            "coverage": storage.weights_coverage(date_from, date_to),
+        },
+    )
+
+
+@couriers_bp.route("/weights", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def save_weights():
+    """
+    Проставить вес пачкой: {"weights": {"55648": 4.0, "55925": null}}.
+
+    null снимает вес — товар возвращается в «требуют веса» и считается по весу
+    по умолчанию. Ноль запрещён: «работы нет» и «вес не задан» это разные
+    вещи, и молчаливый ноль занижает нагрузку незаметно.
+    """
+    data = request.get_json(silent=True) or {}
+    raw = data.get("weights")
+    if not isinstance(raw, dict) or not raw:
+        return error_response("Не передан weights")
+    if len(raw) > MAX_WEIGHTS_BATCH:
+        return error_response(f"За раз можно проставить не больше {MAX_WEIGHTS_BATCH} товаров")
+
+    weights = {}
+    for key, value in raw.items():
+        try:
+            offer_id = int(key)
+        except (TypeError, ValueError):
+            return error_response(f"Некорректный идентификатор товара: {key}")
+        if value is None:
+            weights[offer_id] = None
+            continue
+        try:
+            weight = float(value)
+        except (TypeError, ValueError):
+            return error_response(f"Некорректный вес у товара {offer_id}: {value}")
+        if weight <= 0:
+            return error_response("Вес должен быть больше нуля: «работы нет» — это отсутствие товара, "
+                                  "а не нулевой вес")
+        weights[offer_id] = weight
+
+    username = getattr(current_user, "username", None)
+    storage.set_product_weights(weights, username)
+
+    # Вес меняет нагрузку задним числом — без пересчёта сетка показывала бы
+    # старые числа до следующего синка.
+    date_from, date_to = _weights_window()
+    storage.recalc_weights_range(date_from, date_to)
+
+    log_action(username, "salon_load_weights", f"товаров: {len(weights)}")
+    return success_response({"updated": len(weights),
+                             "coverage": storage.weights_coverage(date_from, date_to)})
+
+
+@couriers_bp.route("/weights/default", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def save_default_weight():
+    """Вес товара без проставленной трудоёмкости. Задаётся в интерфейсе."""
+    data = request.get_json(silent=True) or {}
+    try:
+        value = float(data.get("weight"))
+    except (TypeError, ValueError):
+        return error_response("Некорректный вес")
+    if value <= 0:
+        return error_response("Вес по умолчанию должен быть больше нуля")
+
+    storage.set_default_weight(value)
+    date_from, date_to = _weights_window()
+    storage.recalc_weights_range(date_from, date_to)
+
+    log_action(current_user.username, "salon_load_default_weight", f"вес: {value}")
+    return success_response({"default_weight": value,
+                             "coverage": storage.weights_coverage(date_from, date_to)})
+
+
+@couriers_bp.route("/order-statuses", methods=["GET"])
+@section_required("salon_load")
+def get_order_statuses():
+    """Статусы заказов с признаком «считается нагрузкой салона»."""
+    return success_response(storage.list_order_statuses())
+
+
+@couriers_bp.route("/order-statuses/<path:code>/flag", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def set_order_status_flag(code: str):
+    """Отметить статус как нагрузку (или снять отметку)."""
+    data = request.get_json(silent=True) or {}
+    if "counts_as_load" not in data:
+        return error_response("Не передан counts_as_load")
+
+    value = bool(data["counts_as_load"])
+    if not storage.set_order_status_load_flag(code, value):
+        return error_response("Статус не найден", 404)
+
+    log_action(current_user.username, "salon_load_status_flag", f"{code}: {value}")
+    return success_response({"code": code, "counts_as_load": value})
 
 
 # ============================================================================

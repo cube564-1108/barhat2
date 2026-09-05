@@ -219,12 +219,87 @@ def test_statuses():
     check("синхронизация не перетирает ручную правку", "complete" not in codes, f"получено {codes}")
 
 
+def test_unmapped_stores():
+    print("\n8. Нераспределённые склады (Фаза 2)")
+    site_cities = {"barkhat-ekb": "Екатеринбург"}
+    rows = [
+        retailcrm.parse_order(order(300, "2026-09-20", availability="10:00",
+                                    store="barkhat-ekb", items=[item(7, 1)]), site_cities),
+        retailcrm.parse_order(order(301, "2026-09-20", availability="11:00",
+                                    store="novyi-salon", items=[item(7, 2)]), site_cities),
+        retailcrm.parse_order(order(302, "2026-09-20", availability="12:00",
+                                    store=None, items=[item(7, 1)]), site_cities),
+        # Отменённый заказ нагрузкой не считается и в список попасть не должен
+        retailcrm.parse_order(order(303, "2026-09-20", availability="13:00", store="otmenennyi",
+                                    status="cancel-other", items=[item(7, 1)]), site_cities),
+    ]
+    storage.replace_orders_window("2026-09-20", "2026-09-20", rows)
+
+    unmapped = storage.list_unmapped_stores("2026-09-20", "2026-09-20", ["barkhat-ekb"])
+    keys = {row["key"] for row in unmapped}
+    check("привязанный склад не показывается", "barkhat-ekb" not in keys, f"получено {keys}")
+    check("новый склад всплыл", "novyi-salon" in keys, f"получено {keys}")
+    check("заказы без склада — отдельной строкой", None in keys, f"получено {keys}")
+    check("отменённый заказ в нагрузку не идёт", "otmenennyi" not in keys, f"получено {keys}")
+
+    empty_row = next(row for row in unmapped if row["key"] is None)
+    check("у строки без склада есть вес", empty_row["weight"] > 0, f"получено {empty_row}")
+
+
+def test_weights_catalog():
+    print("\n9. Справочник весов (Фаза 3)")
+    catalog = storage.list_weight_catalog("2026-09-20", "2026-09-20")
+    check("товар из заказов попал в справочник", any(p["offer_id"] == 7 for p in catalog),
+          f"получено {catalog}")
+
+    missing = storage.list_weight_catalog("2026-09-20", "2026-09-20", only_missing=True)
+    check("товар без веса виден в «требуют веса»", any(p["offer_id"] == 7 for p in missing),
+          f"получено {missing}")
+
+    found = storage.list_weight_catalog("2026-09-20", "2026-09-20", search="БУКЕТ")
+    check("поиск по русскому названию в другом регистре работает", len(found) > 0,
+          "SQLite не знает регистр кириллицы без py_lower")
+
+    storage.set_product_weights({7: 5.0}, "tester")
+    missing_after = storage.list_weight_catalog("2026-09-20", "2026-09-20", only_missing=True)
+    check("после проставления веса товар уходит из «требуют веса»",
+          not any(p["offer_id"] == 7 for p in missing_after), f"получено {missing_after}")
+
+    coverage = storage.weights_coverage("2026-09-20", "2026-09-20")
+    check("доля веса по умолчанию считается", coverage["default_share"] == 0.0,
+          f"получено {coverage}")
+    check("товары без веса посчитаны", coverage["products_missing"] == 0, f"получено {coverage}")
+
+    try:
+        storage.set_product_weights({2: 0})
+        check("нулевой вес отклоняется", False, "исключения не было")
+    except ValueError:
+        check("нулевой вес отклоняется", True)
+
+    storage.set_product_weights({7: None})
+    missing_back = storage.list_weight_catalog("2026-09-20", "2026-09-20", only_missing=True)
+    check("снятие веса возвращает товар в «требуют веса»",
+          any(p["offer_id"] == 7 for p in missing_back), f"получено {missing_back}")
+
+    print("\n10. Вес по умолчанию")
+    storage.set_default_weight(2.5)
+    storage.recalc_weights_range("2026-09-20", "2026-09-20")
+    with storage.get_db() as conn:
+        weight = conn.execute(
+            "SELECT weight_units FROM courier_orders WHERE retailcrm_order_id = 301"
+        ).fetchone()["weight_units"]
+    check("смена веса по умолчанию пересчитывает нагрузку (2 шт × 2.5)", weight == 5.0,
+          f"получено {weight}")
+
+
 def main():
     test_parse_time()
     test_ready_slot()
     test_parse_order()
     test_storage_round_trip()
     test_statuses()
+    test_unmapped_stores()
+    test_weights_catalog()
 
     print()
     if failures:
