@@ -168,10 +168,10 @@ def test_storage_round_trip():
     check("длительность заказа по умолчанию 1 слот", saved["duration_slots"] == 1,
           f"получено {saved['duration_slots']}")
     check("позиции записаны", items_count == 3, f"получено {items_count}")
-    check("вес по умолчанию: 3 единицы товара × 1.0", saved["weight_units"] == 3.0,
+    check("заказ без надбавок весит базу за сборку", saved["weight_units"] == storage.ORDER_BASE_UNITS,
           f"получено {saved['weight_units']}")
 
-    print("\n5. Вес из справочника")
+    print("\n5. Надбавка из справочника")
     with storage.get_db() as conn:
         conn.execute("INSERT INTO product_weights (offer_id, weight) VALUES (1, 4.0)")
     storage.recalc_weights_range("2026-09-10", "2026-09-10")
@@ -179,7 +179,8 @@ def test_storage_round_trip():
         weight = conn.execute(
             "SELECT weight_units FROM courier_orders WHERE retailcrm_order_id = 100"
         ).fetchone()["weight_units"]
-    check("вес считается по справочнику, остальное по умолчанию (2×4 + 1×1)", weight == 9.0,
+    check("надбавка только у товара из справочника (база 1 + 2×4, товар 2 без надбавки)",
+          weight == 9.0,
           f"получено {weight}")
 
     print("\n6. Пересборка окна чистит позиции")
@@ -247,14 +248,14 @@ def test_unmapped_stores():
 
 
 def test_weights_catalog():
-    print("\n9. Справочник весов (Фаза 3)")
+    print("\n9. Справочник надбавок (Фаза 3)")
     catalog = storage.list_weight_catalog("2026-09-20", "2026-09-20")
     check("товар из заказов попал в справочник", any(p["offer_id"] == 7 for p in catalog),
           f"получено {catalog}")
 
     missing = storage.list_weight_catalog("2026-09-20", "2026-09-20", only_missing=True)
-    check("товар без веса виден в «требуют веса»", any(p["offer_id"] == 7 for p in missing),
-          f"получено {missing}")
+    check("товар без надбавки виден на вкладке «без надбавки»",
+          any(p["offer_id"] == 7 for p in missing), f"получено {missing}")
 
     found = storage.list_weight_catalog("2026-09-20", "2026-09-20", search="БУКЕТ")
     check("поиск по русскому названию в другом регистре работает", len(found) > 0,
@@ -262,34 +263,63 @@ def test_weights_catalog():
 
     storage.set_product_weights({7: 5.0}, "tester")
     missing_after = storage.list_weight_catalog("2026-09-20", "2026-09-20", only_missing=True)
-    check("после проставления веса товар уходит из «требуют веса»",
+    check("после проставления надбавки товар уходит с вкладки «без надбавки»",
           not any(p["offer_id"] == 7 for p in missing_after), f"получено {missing_after}")
 
     coverage = storage.weights_coverage("2026-09-20", "2026-09-20")
-    check("доля веса по умолчанию считается", coverage["default_share"] == 0.0,
+    check("разбор нагрузки: база считается по заказам",
+          coverage["base_units"] == coverage["orders"] * storage.ORDER_BASE_UNITS,
           f"получено {coverage}")
-    check("товары без веса посчитаны", coverage["products_missing"] == 0, f"получено {coverage}")
+    check("товары с надбавкой посчитаны", coverage["products_weighted"] == 1, f"получено {coverage}")
 
     try:
         storage.set_product_weights({2: 0})
-        check("нулевой вес отклоняется", False, "исключения не было")
+        check("нулевая надбавка отклоняется", False, "исключения не было")
     except ValueError:
-        check("нулевой вес отклоняется", True)
+        check("нулевая надбавка отклоняется", True)
+
+    try:
+        storage.set_product_weights({2: {"weight": 1.0, "basis": "за граммы"}})
+        check("неизвестная база начисления отклоняется", False, "исключения не было")
+    except ValueError:
+        check("неизвестная база начисления отклоняется", True)
 
     storage.set_product_weights({7: None})
     missing_back = storage.list_weight_catalog("2026-09-20", "2026-09-20", only_missing=True)
-    check("снятие веса возвращает товар в «требуют веса»",
+    check("снятие надбавки возвращает товар на вкладку «без надбавки»",
           any(p["offer_id"] == 7 for p in missing_back), f"получено {missing_back}")
 
-    print("\n10. Вес по умолчанию")
-    storage.set_default_weight(2.5)
+    print("\n10. Нагрузка = база за заказ + надбавки")
     storage.recalc_weights_range("2026-09-20", "2026-09-20")
     with storage.get_db() as conn:
         weight = conn.execute(
             "SELECT weight_units FROM courier_orders WHERE retailcrm_order_id = 301"
         ).fetchone()["weight_units"]
-    check("смена веса по умолчанию пересчитывает нагрузку (2 шт × 2.5)", weight == 5.0,
-          f"получено {weight}")
+    check("товар без надбавки нагрузку не раздувает (2 шт → база 1)",
+          weight == storage.ORDER_BASE_UNITS, f"получено {weight}")
+
+    # Весовой товар: 600 «штук» — это граммы, и по старой формуле заказ весил
+    # 600 единиц. Здесь проверяется именно та ошибка, ради которой всё меняли.
+    storage.set_product_weights({7: {"weight": 0.2, "basis": storage.WEIGHT_BASIS_G100}}, "tester")
+    storage.recalc_weights_range("2026-09-20", "2026-09-20")
+    with storage.get_db() as conn:
+        weight = conn.execute(
+            "SELECT weight_units FROM courier_orders WHERE retailcrm_order_id = 301"
+        ).fetchone()["weight_units"]
+    check("надбавка «за 100 г»: 2 ед. количества → база 1 + 0.004",
+          abs(weight - (storage.ORDER_BASE_UNITS + 0.004)) < 1e-9, f"получено {weight}")
+
+    storage.set_product_weights({7: {"weight": 3.0, "basis": storage.WEIGHT_BASIS_LINE}}, "tester")
+    storage.recalc_weights_range("2026-09-20", "2026-09-20")
+    with storage.get_db() as conn:
+        weight = conn.execute(
+            "SELECT weight_units FROM courier_orders WHERE retailcrm_order_id = 301"
+        ).fetchone()["weight_units"]
+    check("надбавка «за позицию» не умножается на количество",
+          weight == storage.ORDER_BASE_UNITS + 3.0, f"получено {weight}")
+
+    storage.set_product_weights({7: None})
+    storage.recalc_weights_range("2026-09-20", "2026-09-20")
 
 
 def main():

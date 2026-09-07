@@ -338,7 +338,7 @@ def test_ui_contract():
         response = client.get(f"/api/salon-load/day?date={DAY}")
         payload = (response.get_json() or {}).get("data", {})
         check("/day отвечает", response.status_code == 200, f"получено {response.status_code}")
-        for field in ("hours", "stores", "thresholds", "coverage", "freshness", "can_edit"):
+        for field in ("hours", "stores", "thresholds", "freshness", "can_edit"):
             check(f"/day отдаёт {field}", field in payload, f"есть: {sorted(payload)}")
         if payload.get("stores"):
             cell = payload["stores"][0]["cells"][10]
@@ -355,12 +355,16 @@ def test_ui_contract():
               any(s.get("has_capacity") for s in payload.get("stores", [])),
               f"получено {response.status_code}, {payload.get('stores')}")
 
-        response = client.get("/api/couriers/weights?only_missing=1")
+        response = client.get("/api/couriers/weights")
         payload = response.get_json() or {}
-        check("справочник весов отвечает", response.status_code == 200,
+        check("справочник надбавок отвечает", response.status_code == 200,
               f"получено {response.status_code}")
-        check("в мета есть покрытие весами",
+        check("в мета есть разбор нагрузки",
               "coverage" in (payload.get("meta") or {}), f"получено {payload.get('meta')}")
+        for field in ("basis", "per_order", "weight", "orders"):
+            check(f"строка справочника отдаёт {field}",
+                  all(field in row for row in payload.get("data", [])),
+                  f"есть: {sorted((payload.get('data') or [{}])[0])}")
 
         response = client.get("/api/couriers/order-statuses")
         payload = response.get_json() or {}
@@ -384,15 +388,28 @@ def test_ui_contract():
         check("исключение сохраняется", response.status_code == 200,
               f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
 
+        # Тело запроса — то же, что шлёт экран: надбавка вместе с базой начисления.
         response = client.post("/api/couriers/weights", headers=headers,
-                               json={"weights": {"1": 3.5}})
-        check("вес товара сохраняется", response.status_code == 200,
+                               json={"weights": {"1": {"weight": 3.5, "basis": "line"}}})
+        check("надбавка с базой начисления сохраняется", response.status_code == 200,
               f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
 
         response = client.post("/api/couriers/weights", headers=headers,
                                json={"weights": {"1": 0}})
-        check("нулевой вес отклоняется ручкой", response.status_code == 400,
+        check("нулевая надбавка отклоняется ручкой", response.status_code == 400,
               f"получено {response.status_code}")
+
+        response = client.post("/api/couriers/weights", headers=headers,
+                               json={"weights": {"1": {"weight": 2, "basis": "кг"}}})
+        check("неизвестная база начисления отклоняется ручкой", response.status_code == 400,
+              f"получено {response.status_code}")
+
+        # Галочка «Круглосуточно» шлёт именно 0 и 24.
+        response = client.post("/api/salon-load/capacity/working-hours", headers=headers,
+                               json={"store_id": STORE_ID, "open_hour": 0, "close_hour": 24,
+                                     "capacity": 6, "pickup_capacity": None})
+        check("круглосуточный режим сохраняется ручкой", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
 
         response = client.post("/api/salon-load/capacity/working-hours",
                                json={"store_id": STORE_ID, "open_hour": 9, "close_hour": 21,
@@ -405,6 +422,102 @@ def test_ui_contract():
         cells = (response.get_json() or {})["data"]["stores"][0]["cells"]
         check("правка ёмкости сразу видна в сетке (кэш сброшен)", cells[10]["capacity"] == 12.0,
               f"получено {cells[10]['capacity']}")
+
+
+def test_weight_units_model():
+    """
+    Весовой товар не имеет права раздувать слот.
+
+    Это тот самый баг 2026-09-07: количество в CRM меряется в разных единицах,
+    и 600 г клубники считались шестьюстами заказами. Один сборный заказ съедал
+    ёмкость всего дня — 6.6% заказов давали 75.5% нагрузки.
+    """
+    print("\n14. Нагрузка = база за заказ + надбавки")
+    day = "2026-11-15"
+    items = [
+        {"quantity": 600, "offer": {"id": 42, "displayName": "Клубника"}},
+        {"quantity": 7, "offer": {"id": 43, "displayName": "Роза одноголовая"}},
+        {"quantity": 1, "offer": {"id": 44, "displayName": "Упаковка"}},
+    ]
+    couriers_storage.replace_orders_window(day, day, [
+        retailcrm.parse_order(dict(order(600, hour=12, items=items),
+                                   delivery={"date": day, "code": "dostavka-kurerom"}), {}),
+    ])
+    cells = {c["hour"]: c for c in metrics.day_grid(day, [STORE_ID])["stores"][0]["cells"]}
+    check("600 г клубники — это один заказ, а не 600 единиц",
+          cells[12]["units"] == couriers_storage.ORDER_BASE_UNITS,
+          f"получено {cells[12]['units']}")
+    check("заказ в ячейке посчитан", cells[12]["orders"] == 1, f"получено {cells[12]['orders']}")
+
+    # Надбавка «за 100 г»: клубника всё-таки тяжелее обычного, но в разумную
+    # сторону — 600 г дают +1.2 ед., а не +600.
+    couriers_storage.set_product_weights(
+        {42: {"weight": 0.2, "basis": couriers_storage.WEIGHT_BASIS_G100}}, "tester")
+    couriers_storage.recalc_weights_range(day, day)
+    cells = {c["hour"]: c for c in metrics.day_grid(day, [STORE_ID])["stores"][0]["cells"]}
+    check("надбавка «за 100 г» считается от массы, а не от штук",
+          cells[12]["units"] == couriers_storage.ORDER_BASE_UNITS + 1.2,
+          f"получено {cells[12]['units']}")
+
+    coverage = couriers_storage.weights_coverage(day, day)
+    check("разбор нагрузки различает базу и надбавки",
+          coverage["base_units"] == 1.0 and coverage["extra_units"] == 1.2,
+          f"получено {coverage}")
+
+    couriers_storage.set_product_weights({42: None})
+    couriers_storage.recalc_weights_range(day, day)
+
+
+def test_round_clock():
+    """
+    Круглосуточный и ночной режимы. Раньше `open < close` было жёстким
+    требованием: 22 → 6 не сохранялось вовсе, и ночная точка оставалась с
+    пустой сеткой, а «ближайшие 3 часа» не переходили через полночь.
+    """
+    print("\n15. Круглосуточный и ночной режим")
+    storage.apply_working_hours(OTHER_STORE_ID, 0, 24, capacity=3.0, username="tester")
+    grid = storage.weekly_grid(OTHER_STORE_ID)
+    check("круглосуточно: закрытых часов нет",
+          all(not grid[f"{WEEKDAY}:{h}"]["closed"] for h in range(24)),
+          "есть закрытые часы")
+    check("круглосуточно: ёмкость задана всем 24 часам",
+          all(grid[f"{WEEKDAY}:{h}"]["capacity"] == 3.0 for h in range(24)),
+          "не у всех часов есть ёмкость")
+
+    storage.apply_working_hours(OTHER_STORE_ID, 22, 6, capacity=2.0, username="tester")
+    grid = storage.weekly_grid(OTHER_STORE_ID)
+    working = {h for h in range(24) if not grid[f"{WEEKDAY}:{h}"]["closed"]}
+    check("ночной режим 22→6 сохраняется через полночь", working == {22, 23, 0, 1, 2, 3, 4, 5},
+          f"получено {sorted(working)}")
+
+    for bad in ((10, 10), (24, 6), (5, 25)):
+        try:
+            storage.apply_working_hours(OTHER_STORE_ID, bad[0], bad[1], capacity=2.0)
+            check(f"часы {bad} отклоняются", False, "исключения не было")
+        except ValueError:
+            check(f"часы {bad} отклоняются", True)
+
+    # Предупреждение «ближайшие часы» обязано перейти на следующие сутки:
+    # в 23:00 ближайший час круглосуточной точки — это 00:00 завтра.
+    from datetime import datetime, timedelta
+    offset = 7
+    storage.set_timezone(OTHER_STORE_ID, offset)
+    now_local = datetime.utcnow() + timedelta(hours=offset)
+    soon = now_local + timedelta(hours=2)
+    soon_day = soon.date().isoformat()
+    storage.apply_working_hours(OTHER_STORE_ID, 0, 24, capacity=1.0, username="tester")
+    couriers_storage.replace_orders_window(soon_day, soon_day, [
+        retailcrm.parse_order(dict(order(700, hour=soon.hour, store="tomsk-key"),
+                                   delivery={"date": soon_day, "code": "dostavka-kurerom"}), {}),
+        retailcrm.parse_order(dict(order(701, hour=soon.hour, store="tomsk-key"),
+                                   delivery={"date": soon_day, "code": "dostavka-kurerom"}), {}),
+    ])
+    metrics.scan_alerts()
+    horizons = {a["horizon"] for a in metrics.alerts([OTHER_STORE_ID])["items"]
+                if a["date"] == soon_day and a["hour"] == soon.hour}
+    check("перегруз через 2 часа виден как «ближайшие часы» даже за полночь",
+          metrics.HORIZON_SOON in horizons,
+          f"получено {horizons} (день {soon_day}, час {soon.hour})")
 
 
 def test_alerts():
@@ -593,9 +706,11 @@ def test_review_fixes():
         # моменту могли поменять предыдущие проверки, а суть здесь в другом —
         # позиция должна посчитаться ОДИН раз, а не два.
         row = conn.execute("SELECT weight FROM product_weights WHERE offer_id = 1").fetchone()
-    expected = row["weight"] if row else couriers_storage.get_default_weight()
+    extra = row["weight"] if row else 0.0
+    expected = couriers_storage.ORDER_BASE_UNITS + extra
     check("переезд заказа не задваивает вес", weight == expected,
-          f"получено {weight}, ожидалось {expected} (задвоение дало бы {expected * 2})")
+          f"получено {weight}, ожидалось {expected} "
+          f"(задвоение дало бы {couriers_storage.ORDER_BASE_UNITS + extra * 2})")
     check("старые позиции переехавшего заказа удалены", items == 1, f"получено {items}")
 
     # Нечисловое значение кастомного поля не роняет разбор
@@ -630,6 +745,8 @@ def main():
     test_slot_moved()
     test_capacity_suggestion()
     test_review_fixes()
+    test_weight_units_model()
+    test_round_clock()
 
     print()
     if failures:

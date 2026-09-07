@@ -183,7 +183,7 @@
             <div class="sload-header__actions">
                 ${state.isAdmin ? `
                     <button class="sload-btn sload-btn--onhead" data-open="capacity">Ёмкость салонов</button>
-                    <button class="sload-btn sload-btn--onhead" data-open="weights">Веса товаров</button>
+                    <button class="sload-btn sload-btn--onhead" data-open="weights">Надбавки</button>
                     <button class="sload-btn sload-btn--onhead" data-open="statuses">Статусы заказов</button>` : ''}
             </div>
         </header>`;
@@ -242,13 +242,12 @@
         </div>`;
     }
 
-    function coverageNote(coverage) {
-        if (!coverage || !coverage.products_missing) return '';
-        return note('warn',
-            `${coverage.products_missing} ${plural(coverage.products_missing, 'товар', 'товара', 'товаров')} без веса`,
-            `${num(coverage.default_share)}% нагрузки посчитано весом по умолчанию ` +
-            `(${num(coverage.default_weight)} ед.). Пока веса не проставлены, проценты приблизительные.`);
-    }
+    // Плашки «N товаров без веса, проценты приблизительные» здесь больше нет.
+    // Приблизительных процентов не осталось: заказ считается базой за сборку, а
+    // надбавку получает только тот товар, которому её проставили руками.
+    // Разбор нагрузки на базу и надбавки живёт в справочнике надбавок — там он
+    // отвечает на вопрос «почему столько», а на главном экране был бы упрёком
+    // за незаполненный справочник, который заполнять не обязательно.
 
     function capacityNote(data) {
         const withoutCapacity = (data.stores || []).filter(store =>
@@ -350,13 +349,13 @@
             </tr>`).join('');
 
         return header() + toolbar() + alertsCard() +
-            freshnessNote(data.freshness) + capacityNote(data) + coverageNote(data.coverage) + `
+            freshnessNote(data.freshness) + capacityNote(data) + `
             <div class="sload-card">
                 <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
                     <div>
                         <h2 class="sload-card__title">${esc(dateLabel(data.date))}</h2>
                         <p class="sload-card__caption">Часы — местное время салона. В ячейке:
-                            нагрузка из ёмкости и процент.</p>
+                            процент загрузки и число заказов. Трудоёмкость — в подсказке и по клику.</p>
                     </div>
                 </div>
                 <div class="sload-grid-wrap">
@@ -389,20 +388,23 @@
 
         const level = data.level === 'unknown' && !data.orders ? 'empty' : data.level;
         const title = [
+            `${data.orders} ${plural(data.orders, 'заказ', 'заказа', 'заказов')}`,
             `${num(data.units)} ед. трудоёмкости`,
             data.capacity === null ? 'ёмкость не задана' : `ёмкость ${num(data.capacity)} ед.`,
-            `${data.orders} ${plural(data.orders, 'заказ', 'заказа', 'заказов')}`,
             data.pickup_orders ? `самовывоз: ${data.pickup_orders}` : '',
             data.reason ? `причина: ${data.reason}` : ''
         ].filter(Boolean).join(' · ');
 
+        // В ячейке — процент и число заказов. Единицы трудоёмкости остаются в
+        // подсказке и в разборе слота: заказы человек считает глазами и может
+        // проверить, а «7.4 ед.» без раскрытия проверить нечем.
         return `<td><button class="sload-cell sload-cell--${esc(level)}" data-cell
             data-store="${store.store_id}" data-hour="${data.hour}" title="${esc(title)}">
             <span class="sload-cell__value">${data.percent === null
-                ? num(data.units) : pct(data.percent)}${data.level === 'over'
+                ? data.orders : pct(data.percent)}${data.level === 'over'
                     ? ` <span class="sload-cell__icon">${icon(ICON_ALERT, 11)}</span>` : ''}</span>
-            <span class="sload-cell__sub">${num(data.units)}${data.capacity === null
-                ? ' ед.' : '/' + num(data.capacity)}</span>
+            <span class="sload-cell__sub">${data.percent === null
+                ? 'зак.' : data.orders + ' зак.'}</span>
         </button></td>`;
     }
 
@@ -557,7 +559,7 @@
             <p class="sload-card__caption">Всего ${num(result.data.units)} ед. трудоёмкости
                 в ${orders.length} ${plural(orders.length, 'заказе', 'заказах', 'заказах')}.</p>
             <table class="sload-modal-table">
-                <thead><tr><th>Заказ</th><th>Готовность</th><th>Тип</th><th>Вес</th><th>Сумма</th></tr></thead>
+                <thead><tr><th>Заказ</th><th>Готовность</th><th>Тип</th><th>Трудоёмкость</th><th>Сумма</th></tr></thead>
                 <tbody>${orders.map(order => `
                     <tr>
                         <td>№${esc(order.number || order.order_id)}</td>
@@ -597,12 +599,16 @@
 
         const body = `
             <p class="sload-card__caption">Ёмкость — сколько единиц трудоёмкости салон успевает за час.
-                Сетка 7×24 на девять салонов — это 1512 полей, поэтому основной способ ввода здесь:
-                часы работы и норма в час, остальное закрывается автоматически.</p>
+                Одна единица — это примерно один обычный заказ. Сетка 7×24 на девять салонов — это
+                1512 полей, поэтому основной способ ввода здесь: часы работы и норма в час,
+                остальное закрывается автоматически.</p>
 
             <div style="display:grid;gap:10px;grid-template-columns:1fr;margin-bottom:16px">
                 <label class="sload-extra__label">Салон
                     <select class="sload-select" id="sloadCapStore" style="width:100%;margin-top:4px">${options}</select>
+                </label>
+                <label class="sload-extra__label" style="display:flex;align-items:center;gap:8px">
+                    <input type="checkbox" id="sloadAllDay"> Круглосуточно
                 </label>
                 <div style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
                     <label class="sload-extra__label">Открытие
@@ -618,6 +624,8 @@
                         <input type="number" min="0" step="0.5" class="sload-input"
                             id="sloadPickup" style="width:100%;margin-top:4px"></label>
                 </div>
+                <p class="sload-card__caption" style="margin:0">Ночная смена задаётся часами через
+                    полночь: открытие 22, закрытие 6.</p>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button class="sload-btn" data-apply-hours>Заполнить неделю</button>
                     <button class="sload-btn sload-btn--ghost" data-suggest>Сколько собирали на самом деле</button>
@@ -676,6 +684,15 @@
                 return;
             }
 
+            // Круглосуточно — это те же 0 и 24, но догадаться об этом по двум
+            // полям невозможно, а точки с таким режимом в сети есть.
+            const allDay = e.target.closest('#sloadAllDay');
+            if (allDay) {
+                overlay.querySelector('#sloadOpen').disabled = allDay.checked;
+                overlay.querySelector('#sloadClose').disabled = allDay.checked;
+                return;
+            }
+
             const applyHours = e.target.closest('[data-apply-hours]');
             const copyWeek = e.target.closest('[data-copy-week]');
             const setException = e.target.closest('[data-set-exception]');
@@ -686,10 +703,11 @@
             try {
                 if (applyHours) {
                     const pickupRaw = overlay.querySelector('#sloadPickup').value;
+                    const roundClock = overlay.querySelector('#sloadAllDay').checked;
                     await api('/api/salon-load/capacity/working-hours', postOptions({
                         store_id: Number(overlay.querySelector('#sloadCapStore').value),
-                        open_hour: Number(overlay.querySelector('#sloadOpen').value),
-                        close_hour: Number(overlay.querySelector('#sloadClose').value),
+                        open_hour: roundClock ? 0 : Number(overlay.querySelector('#sloadOpen').value),
+                        close_hour: roundClock ? 24 : Number(overlay.querySelector('#sloadClose').value),
                         capacity: Number(overlay.querySelector('#sloadUnits').value),
                         pickup_capacity: pickupRaw === '' ? null : Number(pickupRaw)
                     }));
@@ -749,33 +767,31 @@
         const coverage = (result.meta || {}).coverage || {};
 
         const body = `
-            <p class="sload-card__caption">Вес — сколько работы флориста стоит одна единица товара.
-                Заказ считается суммой «вес × количество». Товар без веса считается по весу
-                по умолчанию (${num(coverage.default_weight)} ед.) и виден здесь — нулём его
-                считать нельзя, иначе нагрузка занижается незаметно.</p>
+            <p class="sload-card__caption">Любой заказ — это ${num(coverage.order_base || 1)} ед. нагрузки:
+                базовая сборка. Надбавка нужна только тем товарам, которые заметно тяжелее обычного,
+                — остальные её не получают. Количество в CRM меряется по-разному (букет в штуках,
+                клубника в граммах, роза в стеблях), поэтому у надбавки указывается, за что она.</p>
 
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
                 <div class="sload-tabs">
                     <button class="sload-tab ${onlyMissing ? '' : 'sload-tab--active'}" data-weights-tab="all">Все товары</button>
-                    <button class="sload-tab ${onlyMissing ? 'sload-tab--active' : ''}" data-weights-tab="missing">Требуют веса</button>
+                    <button class="sload-tab ${onlyMissing ? 'sload-tab--active' : ''}" data-weights-tab="missing">Без надбавки</button>
                 </div>
                 <input type="search" class="sload-input" id="sloadWeightSearch" placeholder="Поиск по названию или артикулу"
                     style="flex:1;min-width:180px">
-                <label class="sload-extra__label" style="display:flex;align-items:center;gap:6px">
-                    Вес по умолчанию
-                    <input type="number" min="0.1" step="0.1" class="sload-weight-input"
-                        id="sloadDefaultWeight" value="${esc(coverage.default_weight)}">
-                    <button class="sload-btn sload-btn--ghost" data-save-default>Сохранить</button>
-                </label>
             </div>
 
-            ${coverage.default_share ? note('info', `${num(coverage.default_share)}% нагрузки — по весу по умолчанию`,
-                `Товаров без веса: ${coverage.products_missing} из ${coverage.products_total}.`) : ''}
+            ${coverage.orders ? note('info',
+                `За 60 дней: ${num(coverage.total_units)} ед. нагрузки`,
+                `${coverage.orders} ${plural(coverage.orders, 'заказ', 'заказа', 'заказов')} ` +
+                `= ${num(coverage.base_units)} ед. базы + ${num(coverage.extra_units)} ед. надбавок ` +
+                `(${num(coverage.extra_share)}%). Надбавка задана у ${coverage.products_weighted} ` +
+                `${plural(coverage.products_weighted, 'товара', 'товаров', 'товаров')} из ${coverage.products_total}.`) : ''}
 
             <div id="sloadWeightRows">${weightRows(items)}</div>`;
 
-        const overlay = modal('Веса товаров', body,
-            '<button class="sload-btn" data-save-weights>Сохранить веса</button>' +
+        const overlay = modal('Надбавки за трудоёмкость', body,
+            '<button class="sload-btn" data-save-weights>Сохранить надбавки</button>' +
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
 
         overlay.addEventListener('click', async e => {
@@ -786,32 +802,20 @@
                 return;
             }
 
-            const saveDefault = e.target.closest('[data-save-default]');
-            if (saveDefault) {
-                saveDefault.disabled = true;
-                try {
-                    await api('/api/couriers/weights/default', postOptions({
-                        weight: Number(overlay.querySelector('#sloadDefaultWeight').value)
-                    }));
-                    toast('Вес по умолчанию сохранён', 'success');
-                    state.data = null;
-                    load();
-                } catch (error) {
-                    toast('Не удалось сохранить: ' + error.message, 'error');
-                }
-                saveDefault.disabled = false;
-                return;
-            }
-
             const save = e.target.closest('[data-save-weights]');
             if (!save) return;
 
+            // Изменением считается и правка базы начисления: «0.2 за 100 г» и
+            // «0.2 за штуку» у клубники различаются в пятьсот раз.
             const weights = {};
             overlay.querySelectorAll('[data-weight-input]').forEach(input => {
-                const initial = input.dataset.initial;
+                const basisSelect = overlay.querySelector(
+                    `[data-basis-input][data-offer="${input.dataset.offer}"]`);
+                const basis = basisSelect ? basisSelect.value : 'unit';
                 const value = input.value.trim();
-                if (value === initial) return;
-                weights[input.dataset.offer] = value === '' ? null : Number(value);
+                if (value === input.dataset.initial && basis === input.dataset.initialBasis) return;
+                weights[input.dataset.offer] = value === ''
+                    ? null : { weight: Number(value), basis: basis };
             });
 
             if (!Object.keys(weights).length) {
@@ -849,24 +853,39 @@
         });
     }
 
+    // Базы начисления надбавки. Порядок — от самой частой к редкой.
+    const WEIGHT_BASES = [
+        ['unit', 'за штуку'],
+        ['line', 'за позицию'],
+        ['g100', 'за 100 г']
+    ];
+
     function weightRows(items) {
         if (!items.length) {
-            return '<div class="sload-empty"><p>Товаров нет — либо всё взвешено, либо за 60 дней их не заказывали.</p></div>';
+            return '<div class="sload-empty"><p>Товаров нет — либо надбавки расставлены, либо за 60 дней их не заказывали.</p></div>';
         }
         return `<table class="sload-modal-table">
-            <thead><tr><th>Товар</th><th>Артикул</th><th>Заказов</th><th>Штук</th><th>Вес</th></tr></thead>
-            <tbody>${items.map(item => `
+            <thead><tr><th>Товар</th><th>Артикул</th><th>Заказов</th><th>В среднем за заказ</th>
+                <th>Надбавка</th><th>За что</th></tr></thead>
+            <tbody>${items.map(item => {
+                const basis = item.basis || 'unit';
+                const value = item.weight === null || item.weight === undefined ? '' : esc(item.weight);
+                return `
                 <tr>
                     <td>${esc(item.product_name || ('Товар ' + item.offer_id))}</td>
                     <td>${esc(item.article || '—')}</td>
                     <td>${item.orders}</td>
-                    <td>${num(item.quantity)}</td>
-                    <td><input type="number" min="0.1" step="0.1" class="sload-weight-input"
+                    <td>${num(item.per_order)}</td>
+                    <td><input type="number" min="0.01" step="0.1" class="sload-weight-input"
                         data-weight-input data-offer="${item.offer_id}"
-                        data-initial="${item.weight === null ? '' : esc(item.weight)}"
-                        value="${item.weight === null ? '' : esc(item.weight)}"
-                        placeholder="по умолч."></td>
-                </tr>`).join('')}</tbody>
+                        data-initial="${value}" data-initial-basis="${esc(basis)}"
+                        value="${value}" placeholder="нет"></td>
+                    <td><select class="sload-select" data-basis-input data-offer="${item.offer_id}">
+                        ${WEIGHT_BASES.map(([code, label]) =>
+                            `<option value="${code}"${basis === code ? ' selected' : ''}>${label}</option>`).join('')}
+                    </select></td>
+                </tr>`;
+            }).join('')}</tbody>
         </table>`;
     }
 

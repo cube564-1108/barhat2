@@ -521,9 +521,9 @@ def _weights_window() -> tuple:
 @section_required("salon_load")
 def get_weights_catalog():
     """
-    Справочник весов: товары из заказов за 60 дней с их трудоёмкостью.
+    Справочник надбавок: товары из заказов за 60 дней с их трудоёмкостью.
 
-    only_missing=1 — вкладка «требуют веса»: сортировка по числу заказов, чтобы
+    only_missing=1 — вкладка «без надбавки»: сортировка по числу заказов, чтобы
     человек начинал с того, что реально влияет на нагрузку.
     """
     only_missing = request.args.get("only_missing") in ("1", "true")
@@ -544,11 +544,12 @@ def get_weights_catalog():
 @require_ajax_header
 def save_weights():
     """
-    Проставить вес пачкой: {"weights": {"55648": 4.0, "55925": null}}.
+    Проставить надбавки пачкой:
+    {"weights": {"55648": {"weight": 0.2, "basis": "g100"}, "55925": null}}.
 
-    null снимает вес — товар возвращается в «требуют веса» и считается по весу
-    по умолчанию. Ноль запрещён: «работы нет» и «вес не задан» это разные
-    вещи, и молчаливый ноль занижает нагрузку незаметно.
+    Число вместо объекта — база «за штуку» (совместимость со старым вызовом).
+    null снимает надбавку: товар перестаёт добавлять что-либо к базе за сборку.
+    Ноль запрещён — «надбавки нет» выражается отсутствием строки, а не нулём.
     """
     data = request.get_json(silent=True) or {}
     raw = data.get("weights")
@@ -566,47 +567,32 @@ def save_weights():
         if value is None:
             weights[offer_id] = None
             continue
+
+        basis = storage.WEIGHT_BASIS_UNIT
+        if isinstance(value, dict):
+            basis = value.get("basis") or storage.WEIGHT_BASIS_UNIT
+            value = value.get("weight")
         try:
             weight = float(value)
         except (TypeError, ValueError):
-            return error_response(f"Некорректный вес у товара {offer_id}: {value}")
+            return error_response(f"Некорректная надбавка у товара {offer_id}: {value}")
         if weight <= 0:
-            return error_response("Вес должен быть больше нуля: «работы нет» — это отсутствие товара, "
-                                  "а не нулевой вес")
-        weights[offer_id] = weight
+            return error_response("Надбавка должна быть больше нуля: «работы нет» — это пустая "
+                                  "строка справочника, а не нулевая надбавка")
+        if basis not in storage.WEIGHT_BASES:
+            return error_response(f"Неизвестная база начисления у товара {offer_id}: {basis}")
+        weights[offer_id] = {"weight": weight, "basis": basis}
 
     username = getattr(current_user, "username", None)
     storage.set_product_weights(weights, username)
 
-    # Вес меняет нагрузку задним числом — без пересчёта сетка показывала бы
+    # Надбавка меняет нагрузку задним числом — без пересчёта сетка показывала бы
     # старые числа до следующего синка.
     date_from, date_to = _weights_window()
     storage.recalc_weights_range(date_from, date_to)
 
     log_action(username, "salon_load_weights", f"товаров: {len(weights)}")
     return success_response({"updated": len(weights),
-                             "coverage": storage.weights_coverage(date_from, date_to)})
-
-
-@couriers_bp.route("/weights/default", methods=["POST"])
-@role_required("admin")
-@require_ajax_header
-def save_default_weight():
-    """Вес товара без проставленной трудоёмкости. Задаётся в интерфейсе."""
-    data = request.get_json(silent=True) or {}
-    try:
-        value = float(data.get("weight"))
-    except (TypeError, ValueError):
-        return error_response("Некорректный вес")
-    if value <= 0:
-        return error_response("Вес по умолчанию должен быть больше нуля")
-
-    storage.set_default_weight(value)
-    date_from, date_to = _weights_window()
-    storage.recalc_weights_range(date_from, date_to)
-
-    log_action(current_user.username, "salon_load_default_weight", f"вес: {value}")
-    return success_response({"default_weight": value,
                              "coverage": storage.weights_coverage(date_from, date_to)})
 
 

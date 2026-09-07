@@ -54,11 +54,43 @@ CANCEL_STATUS_GROUP = "cancel"
 # прочитает, а читать их с диска на каждый показ страницы — лишняя работа.
 DETAIL_LIST_LIMIT = 200
 
-# Вес трудоёмкости товара, у которого вес не задан. Хранится в настройках
-# (sync_state), здесь только запасное значение на случай пустой настройки:
-# считать неизвестный товар нулём нельзя — нагрузка занизится незаметно.
-DEFAULT_WEIGHT_KEY = "load_default_weight"
-DEFAULT_WEIGHT_FALLBACK = 1.0
+# ============================================================================
+# Трудоёмкость заказа = база за сборку + надбавки по позициям.
+#
+# Базовая единица — ЗАКАЗ, а не позиция и не штука. Считать «Σ количество ×
+# вес» нельзя: количество в CRM меряется в разных единицах. У букета это штуки,
+# у клубники — граммы, у розы — стебли, и один сборный заказ (500 г клубники +
+# 7 роз + упаковка) давал 509 единиц нагрузки вместо одной сборки. Замер на
+# зеркале заказов 2026-09-07: «Клубника» — 3.7% позиций и 71% всей нагрузки,
+# 6.6% заказов давали 75.5% нагрузки.
+#
+# Надбавка начисляется ТОЛЬКО товарам, которым вес проставлен руками
+# (решение владельца 2026-09-07). Товара нет в справочнике — надбавки нет, а не
+# «вес по умолчанию»: неизвестный товар не должен иметь возможности в одиночку
+# съесть ёмкость дня. Справочник от этого становится необязательным — пустой
+# справочник даёт честную нагрузку «в заказах».
+#
+# basis — за что начисляется надбавка. Отдельное поле, а не догадка по
+# названию: «Виноград» и «Бананы» тоже продаются в граммах, и разбор названия
+# сломался бы на них молча (CLAUDE.md, «параметр для внешней логики — данные»).
+# ============================================================================
+ORDER_BASE_UNITS = 1.0
+
+WEIGHT_BASIS_UNIT = "unit"    # вес × количество (штучный товар)
+WEIGHT_BASIS_LINE = "line"    # вес за позицию, сколько бы в ней ни было
+WEIGHT_BASIS_G100 = "g100"    # вес за каждые 100 единиц количества (граммы)
+WEIGHT_BASES = (WEIGHT_BASIS_UNIT, WEIGHT_BASIS_LINE, WEIGHT_BASIS_G100)
+
+# Как надбавка позиции считается в SQL. Одно место на все запросы: формула
+# нужна и пересчёту весов, и разбору нагрузки на составляющие, и разойтись они
+# не имеют права — иначе подпись под сеткой описывает не те числа, что в ней.
+_ITEM_UNITS_SQL = f"""
+    CASE w.basis
+        WHEN '{WEIGHT_BASIS_LINE}' THEN w.weight
+        WHEN '{WEIGHT_BASIS_G100}' THEN w.weight * i.quantity / 100.0
+        ELSE w.weight * i.quantity
+    END
+"""
 
 # Сколько заказов синк пропустил из-за отсутствия даты доставки. Живёт здесь,
 # а не в server.py: ключ читает и диагностика витрины.
@@ -244,11 +276,10 @@ def init_couriers_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_order_items_offer ON order_items(offer_id)"
         )
 
-        # Справочник весов товаров. Ключ — offer.id (внутренний идентификатор
-        # CRM): заполнен у 100% позиций и не меняется при переименовании товара.
-        # weight IS NULL невозможен — строка заводится только когда вес задан;
-        # товар без строки считается по весу по умолчанию и попадает в список
-        # «требуют веса». Экран справочника — Фаза 3.
+        # Справочник надбавок за трудоёмкость. Ключ — offer.id (внутренний
+        # идентификатор CRM): заполнен у 100% позиций и не меняется при
+        # переименовании товара. Строки нет — надбавки нет (заказ считается
+        # базой за сборку), поэтому справочник необязателен к заполнению.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS product_weights (
                 offer_id INTEGER PRIMARY KEY,
@@ -257,6 +288,11 @@ def init_couriers_tables() -> None:
                 set_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        # basis появился 2026-09-07 вместе с базой за заказ. Существующим
+        # строкам достаётся 'unit' — ровно та семантика, в которой их заводили
+        # («вес × количество»), а не «наиболее вероятная».
+        _add_column_if_missing(conn, "product_weights", "basis",
+                               f"TEXT NOT NULL DEFAULT '{WEIGHT_BASIS_UNIT}'")
 
         # Справочник статусов: counts_as_load решает, попадает ли заказ в
         # нагрузку. Сидируется из группы CRM (cancel → не нагрузка), дальше
@@ -361,6 +397,63 @@ def init_couriers_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_courier_sync_log_started ON sync_log(started_at DESC)"
         )
 
+    _backfill_weight_model()
+
+
+# Отметка о разовом пересчёте нагрузки под модель «база за заказ + надбавки».
+WEIGHT_MODEL_KEY = "load_weight_model"
+WEIGHT_MODEL_VERSION = "order_base_v1"
+
+
+def _backfill_weight_model() -> None:
+    """
+    Разово пересчитать нагрузку уже накопленных заказов под новую формулу.
+
+    Без этого старые числа («Σ количество × вес», где 500 г клубники давали
+    500 единиц) жили бы в витрине до следующего глубокого синка — то есть до
+    суток. За это время «Сколько собирали на самом деле» предложило бы норму
+    ёмкости, посчитанную по граммам, и её бы приняли.
+
+    Проверка отметки и запись идут одной транзакцией под `BEGIN IMMEDIATE`:
+    на проде воркеры стартуют одновременно, и без write-лока оба увидели бы
+    «не пересчитано» и запустили одинаковый тяжёлый UPDATE.
+
+    Падать здесь нельзя ни при каких обстоятельствах — это старт воркера.
+    """
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        done = conn.execute("SELECT value FROM sync_state WHERE key = ?",
+                            (WEIGHT_MODEL_KEY,)).fetchone()
+        if done and done["value"] == WEIGHT_MODEL_VERSION:
+            conn.execute("ROLLBACK")
+            return
+        conn.execute(
+            f"""
+            UPDATE courier_orders
+               SET weight_units = ? + COALESCE((
+                       SELECT SUM({_ITEM_UNITS_SQL})
+                         FROM order_items i
+                         JOIN product_weights w ON w.offer_id = i.offer_id
+                        WHERE i.retailcrm_order_id = courier_orders.retailcrm_order_id
+                          AND i.delivery_date = courier_orders.delivery_date
+                   ), 0)
+            """,
+            (ORDER_BASE_UNITS,),
+        )
+        conn.execute(
+            "INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+            (WEIGHT_MODEL_KEY, WEIGHT_MODEL_VERSION),
+        )
+        conn.execute("COMMIT")
+        logger.info("Нагрузка пересчитана под модель «база за заказ + надбавки»")
+    except Exception as e:
+        logger.warning(f"Пересчёт нагрузки под новую модель отложен: {e}")
+    finally:
+        conn.close()
+
 
 # ============================================================================
 # Запись данных синхронизации
@@ -376,10 +469,6 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
     при UPSERT такие записи навсегда остались бы в отчёте и раздули выплату.
     Всё в одной транзакции, чтобы отчёт никогда не читал полупустое окно.
     """
-    # Читаем настройку ДО открытия транзакции: внутри неё второе соединение —
-    # это тот самый вложенный коннект, который CLAUDE.md запрещает.
-    default_weight = get_default_weight()
-
     with get_db() as conn:
         # Часы готовности до пересборки: окно переписывается целиком, поэтому
         # «заказ переехал в другой слот» видно только так. Без этого нельзя
@@ -491,52 +580,30 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                 moved,
             )
 
-        _recalc_weights(conn, date_from, date_to, default_weight)
+        _recalc_weights(conn, date_from, date_to)
     return len(rows)
 
 
-def get_default_weight() -> float:
+def _recalc_weights(conn, date_from: str, date_to: str) -> None:
     """
-    Вес трудоёмкости для товара, которого нет в справочнике весов.
+    Пересчитать трудоёмкость заказов за окно одним запросом.
 
-    Не ноль: молча считать неизвестный товар нулём — значит занижать нагрузку
-    невидимо. Значение правится в интерфейсе (Фаза 3), поэтому лежит в
-    настройках, а не константой в коде.
+    Считается при синке и хранится числом: собирать её join'ом позиций и весов
+    на каждый показ сетки — лишняя работа на каждом открытии экрана, а диск
+    /data и без того медленный.
+
+    Формула: база за сборку + надбавки тех позиций, которым вес проставлен
+    руками. JOIN, а не LEFT JOIN, — это и есть «товара нет в справочнике,
+    надбавки нет». Заказ без позиций получает базу: это заказ, работа по нему
+    есть, просто она не разложена по номенклатуре.
     """
-    raw = get_sync_state(DEFAULT_WEIGHT_KEY)
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_WEIGHT_FALLBACK
-    return value if value > 0 else DEFAULT_WEIGHT_FALLBACK
-
-
-def _recalc_weights(conn, date_from: str, date_to: str,
-                    default_weight: Optional[float] = None) -> None:
-    """
-    Пересчитать вес заказов за окно одним запросом.
-
-    Вес считается при синке и хранится числом: собирать его join'ом позиций и
-    весов на каждый показ сетки — лишняя работа на каждом открытии экрана, а
-    диск /data и без того медленный.
-
-    Заказ без позиций получает 0, а не NULL: это не «неизвестно», это «работы
-    по позициям нет» (бывает у заказов, заведённых одной суммой).
-
-    Вес по умолчанию берётся ДО открытия транзакции и передаётся сюда: читать
-    его отсюда значило бы открыть второе соединение поверх незакрытой записи —
-    ровно тот вложенный коннект, которым уже вешали базу.
-    """
-    if default_weight is None:
-        # Вызов вне транзакции записи (пересчёт после правки справочника).
-        default_weight = get_default_weight()
     conn.execute(
-        """
+        f"""
         UPDATE courier_orders
-           SET weight_units = COALESCE((
-                   SELECT SUM(i.quantity * COALESCE(w.weight, ?))
+           SET weight_units = ? + COALESCE((
+                   SELECT SUM({_ITEM_UNITS_SQL})
                      FROM order_items i
-                LEFT JOIN product_weights w ON w.offer_id = i.offer_id
+                     JOIN product_weights w ON w.offer_id = i.offer_id
                     WHERE i.retailcrm_order_id = courier_orders.retailcrm_order_id
                       -- Сверяем и дату: заказ мог переехать на другой день, а
                       -- его старые позиции остаться в неперезалитом окне.
@@ -545,7 +612,7 @@ def _recalc_weights(conn, date_from: str, date_to: str,
                ), 0)
          WHERE delivery_date >= ? AND delivery_date <= ?
         """,
-        (default_weight, date_from, date_to),
+        (ORDER_BASE_UNITS, date_from, date_to),
     )
 
 
@@ -560,23 +627,21 @@ def recalc_weights_range(date_from: str, date_to: str) -> None:
         _recalc_weights(conn, date_from, date_to)
 
 
-def set_default_weight(value: float) -> None:
-    """Вес по умолчанию правится в интерфейсе, а не константой в коде."""
-    if value <= 0:
-        raise ValueError("Вес по умолчанию должен быть больше нуля")
-    set_sync_state(DEFAULT_WEIGHT_KEY, str(float(value)))
-
-
 def list_weight_catalog(date_from: str, date_to: str, only_missing: bool = False,
                         search: Optional[str] = None, limit: int = 300) -> List[Dict[str, Any]]:
     """
-    Товары, встреченные в заказах за период, с их весом трудоёмкости.
+    Товары, встреченные в заказах за период, с их надбавкой за трудоёмкость.
 
-    Сортировка по числу заказов, а не по алфавиту: заполнять веса нужно начиная
-    с того, что реально влияет на нагрузку, — иначе человек уходит в хвост
-    справочника и бросает на середине.
+    Сортировка по числу заказов, а не по алфавиту: надбавки нужно ставить
+    начиная с того, что реально влияет на нагрузку, — иначе человек уходит в
+    хвост справочника и бросает на середине.
 
-    only_missing=True — только те, у кого веса нет: это вкладка «требуют веса».
+    only_missing=True — только те, у кого надбавки нет.
+
+    per_order (среднее количество на заказ) отдаётся не для красоты: по нему
+    видно, в чём меряется количество. 480 «штук» на заказ — это граммы, и
+    надбавку такому товару надо ставить за 100 г, а не за штуку. Без этой
+    подсказки базу начисления выбирают наугад.
     """
     where = ["i.delivery_date >= ?", "i.delivery_date <= ?"]
     params: List[Any] = [date_from, date_to]
@@ -595,11 +660,12 @@ def list_weight_catalog(date_from: str, date_to: str, only_missing: bool = False
                    MAX(i.article)                   AS article,
                    COUNT(DISTINCT i.retailcrm_order_id) AS orders,
                    COALESCE(SUM(i.quantity), 0)     AS quantity,
-                   w.weight                         AS weight
+                   w.weight                         AS weight,
+                   w.basis                          AS basis
               FROM order_items i
          LEFT JOIN product_weights w ON w.offer_id = i.offer_id
              WHERE {' AND '.join(where)}
-          GROUP BY i.offer_id, w.weight
+          GROUP BY i.offer_id, w.weight, w.basis
           ORDER BY orders DESC, quantity DESC
              LIMIT ?
             """,
@@ -613,37 +679,54 @@ def list_weight_catalog(date_from: str, date_to: str, only_missing: bool = False
             "article": row["article"],
             "orders": row["orders"],
             "quantity": round(row["quantity"] or 0, 2),
+            "per_order": round((row["quantity"] or 0) / row["orders"], 1) if row["orders"] else 0,
             "weight": row["weight"],
+            "basis": row["basis"] or WEIGHT_BASIS_UNIT,
         }
         for row in rows
     ]
 
 
-def set_product_weights(weights: Dict[int, Optional[float]], username: Optional[str] = None) -> int:
+def set_product_weights(weights: Dict[int, Any], username: Optional[str] = None) -> int:
     """
-    Проставить вес пачкой. Значение None снимает вес (товар вернётся в
-    «требуют веса» и будет считаться по весу по умолчанию).
+    Проставить надбавки пачкой. Значение None снимает надбавку — товар
+    перестаёт добавлять что-либо к базе за сборку.
 
-    Пачкой, а не по одному: проставлять вес 300 товарам поштучно — тот самый
-    ручной труд, ради устранения которого модуль и делается.
+    Значение — либо число (база «за штуку», совместимость со старым вызовом),
+    либо `{"weight": 0.2, "basis": "g100"}`.
+
+    Пачкой, а не по одному: проставлять надбавку сотне товаров поштучно — тот
+    самый ручной труд, ради устранения которого модуль и делается.
     """
     if not weights:
         return 0
-    to_set = [(offer_id, float(w), username) for offer_id, w in weights.items() if w is not None]
-    to_clear = [(offer_id,) for offer_id, w in weights.items() if w is None]
 
-    for _, weight, _ in to_set:
+    to_set = []
+    to_clear = []
+    for offer_id, value in weights.items():
+        if value is None:
+            to_clear.append((offer_id,))
+            continue
+        if isinstance(value, dict):
+            weight = float(value.get("weight"))
+            basis = value.get("basis") or WEIGHT_BASIS_UNIT
+        else:
+            weight, basis = float(value), WEIGHT_BASIS_UNIT
         if weight <= 0:
-            raise ValueError("Вес должен быть больше нуля")
+            raise ValueError("Надбавка должна быть больше нуля")
+        if basis not in WEIGHT_BASES:
+            raise ValueError(f"Неизвестная база начисления: {basis}")
+        to_set.append((offer_id, weight, basis, username))
 
     with get_db() as conn:
         if to_set:
             conn.executemany(
                 """
-                INSERT INTO product_weights (offer_id, weight, set_by, set_at)
-                VALUES (?, ?, ?, datetime('now'))
+                INSERT INTO product_weights (offer_id, weight, basis, set_by, set_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(offer_id) DO UPDATE SET
-                    weight = excluded.weight, set_by = excluded.set_by, set_at = datetime('now')
+                    weight = excluded.weight, basis = excluded.basis,
+                    set_by = excluded.set_by, set_at = datetime('now')
                 """,
                 to_set,
             )
@@ -655,30 +738,40 @@ def set_product_weights(weights: Dict[int, Optional[float]], username: Optional[
 def weights_coverage(date_from: str, date_to: str,
                      load_statuses: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Какая доля нагрузки посчитана весом по умолчанию.
+    Из чего сложилась нагрузка: база за заказы и надбавки по позициям.
 
-    Это число обязано быть видно рядом с процентами загрузки: «140%» и «140%,
-    из них 60% веса — по умолчанию» — разные основания для того, чтобы звонить
-    клиенту и переносить заказ.
+    Это разбор, а не предупреждение: приблизительных процентов больше нет —
+    надбавка либо проставлена руками, либо её нет. Но вопрос «почему в этом
+    часе 12 единиц на 5 заказов» возникает сразу, и отвечать на него чтением
+    кода — потерянный час.
 
-    Считается по тем же заказам, что и сама сетка: витрина теперь хранит все
-    статусы, и без фильтра подпись описывала бы другую совокупность, чем
-    проценты, которые она поясняет.
+    Считается по тем же заказам, что и сама сетка: витрина хранит все статусы,
+    и без фильтра разбор описывал бы другую совокупность, чем проценты, которые
+    он поясняет.
     """
-    default_weight = get_default_weight()
     statuses = load_statuses if load_statuses is not None else load_status_codes()
+    empty = {"base_units": 0.0, "extra_units": 0.0, "total_units": 0.0, "extra_share": 0.0,
+             "orders": 0, "products_weighted": 0, "products_total": 0,
+             "order_base": ORDER_BASE_UNITS}
     if not statuses:
-        return {"default_weight": default_weight, "total_units": 0, "default_units": 0,
-                "default_share": 0.0, "products_missing": 0, "products_total": 0}
+        return empty
 
     placeholders = ",".join("?" * len(statuses))
     with get_db() as conn:
+        orders = conn.execute(
+            f"""
+            SELECT COUNT(*) AS orders
+              FROM courier_orders
+             WHERE delivery_date >= ? AND delivery_date <= ?
+               AND status IN ({placeholders})
+            """,
+            (date_from, date_to, *statuses),
+        ).fetchone()["orders"] or 0
+
         row = conn.execute(
             f"""
-            SELECT COALESCE(SUM(i.quantity * COALESCE(w.weight, ?)), 0) AS total_units,
-                   COALESCE(SUM(CASE WHEN w.offer_id IS NULL THEN i.quantity * ? ELSE 0 END), 0)
-                       AS default_units,
-                   COUNT(DISTINCT CASE WHEN w.offer_id IS NULL THEN i.offer_id END) AS products_missing,
+            SELECT COALESCE(SUM({_ITEM_UNITS_SQL}), 0) AS extra_units,
+                   COUNT(DISTINCT w.offer_id) AS products_weighted,
                    COUNT(DISTINCT i.offer_id) AS products_total
               FROM order_items i
               JOIN courier_orders o ON o.retailcrm_order_id = i.retailcrm_order_id
@@ -687,18 +780,21 @@ def weights_coverage(date_from: str, date_to: str,
              WHERE i.delivery_date >= ? AND i.delivery_date <= ?
                AND o.status IN ({placeholders})
             """,
-            (default_weight, default_weight, date_from, date_to, *statuses),
+            (date_from, date_to, *statuses),
         ).fetchone()
 
-    total = row["total_units"] or 0
-    default_units = row["default_units"] or 0
+    base = orders * ORDER_BASE_UNITS
+    extra = row["extra_units"] or 0
+    total = base + extra
     return {
-        "default_weight": default_weight,
+        "base_units": round(base, 2),
+        "extra_units": round(extra, 2),
         "total_units": round(total, 2),
-        "default_units": round(default_units, 2),
-        "default_share": round(100.0 * default_units / total, 1) if total else 0.0,
-        "products_missing": row["products_missing"] or 0,
+        "extra_share": round(100.0 * extra / total, 1) if total else 0.0,
+        "orders": orders,
+        "products_weighted": row["products_weighted"] or 0,
         "products_total": row["products_total"] or 0,
+        "order_base": ORDER_BASE_UNITS,
     }
 
 

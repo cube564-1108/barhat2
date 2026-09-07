@@ -10,9 +10,11 @@
   - заказы без часа готовности и заказы с непривязанным складом не
     выбрасываются и не размазываются по сетке: они отдаются отдельными
     строками, которые разбирает человек;
-  - цвет ячейки дублируется числом (это уже в интерфейсе), а сюда кладётся
-    доля веса, посчитанного «по умолчанию»: 140% и 140%-из-которых-60%-догадка
-    — разные основания для того, чтобы звонить клиенту.
+  - нагрузка меряется не количеством товара, а заказами: единица — это одна
+    сборка, а надбавку сверху получают только те позиции, которым её проставили
+    руками (см. couriers/storage.py, ORDER_BASE_UNITS). Количество в CRM живёт
+    в разных единицах — букет в штуках, клубника в граммах, роза в стеблях, — и
+    «Σ количество × вес» превращало один сборный заказ в 509 единиц.
 """
 
 import logging
@@ -125,11 +127,11 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
     """
     Сетка «часы × салоны» за один день.
 
-    with_context=False — не собирать свежесть данных и покрытие весами. Это не
-    украшательство: и свежесть, и покрытие весами — это отдельные обращения
-    к базе, а внутренние вызовы (подбор свободных слотов, расчёт
-    предупреждений) строят по несколько сеток на запрос. На диске `/data`, где
-    запрос стоит 90–700 мс, разница получается в десятки обращений.
+    with_context=False — не собирать свежесть данных. Это не украшательство:
+    свежесть — отдельное обращение к базе, а внутренние вызовы (подбор
+    свободных слотов, расчёт предупреждений) строят по несколько сеток на
+    запрос. На диске `/data`, где запрос стоит 90–700 мс, разница получается в
+    десятки обращений.
     """
     stores = _stores_for(store_ids)
     ids = [store["id"] for store in stores]
@@ -226,7 +228,10 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
         # флористу это чужие цифры, а разобрать их он всё равно не может.
         "unassigned": unassigned if (unassigned["orders"] and store_ids is None) else None,
         "thresholds": {"tight": THRESHOLD_TIGHT, "over": THRESHOLD_OVER},
-        "coverage": couriers_storage.weights_coverage(day, day, statuses) if with_context else None,
+        # Разбора нагрузки на базу и надбавки здесь больше нет: экран его не
+        # показывает, а стоил он двух обращений к общему медленному диску на
+        # каждый показ сетки. Разбор живёт в справочнике надбавок, где на него
+        # и смотрят, — /api/couriers/weights.
         "freshness": freshness(day, day) if with_context else None,
         "no_stores": not stores,
     }
@@ -429,10 +434,24 @@ def scan_alerts() -> Dict[str, Any]:
             continue
 
         now = salon_now(offset)
-        today = now.date().isoformat()
         tomorrow = (now.date() + timedelta(days=1)).isoformat()
 
-        for day, horizon in ((today, HORIZON_SOON), (tomorrow, HORIZON_DAY)):
+        # Ближайшие часы считаются временем, а не номером часа: у круглосуточной
+        # точки в 23:00 «ближайшие 3 часа» — это 00:00–02:00 СЛЕДУЮЩИХ суток.
+        # Арифметика по `now.hour + 3` в пределах одного дня их не видела вовсе,
+        # и ночная смена оставалась без предупреждения — а перенести заказ ночью
+        # некуда, там как раз и нужен сигнал заранее.
+        soon = {((now + timedelta(hours=shift)).date().isoformat(),
+                 (now + timedelta(hours=shift)).hour)
+                for shift in range(HORIZON_SOON_HOURS + 1)}
+
+        # Горизонт «за сутки» не повторяет то, что уже сказано «ближайшими
+        # часами»: одно и то же предупреждение дважды перестают читать.
+        targets = [(day, hour, HORIZON_SOON) for day, hour in sorted(soon)]
+        targets += [(tomorrow, hour, HORIZON_DAY) for hour in storage.HOURS
+                    if (tomorrow, hour) not in soon]
+
+        for day, hour, horizon in targets:
             grid = grids.get(day)
             if grid is None:
                 grid = day_grid(day, None, with_context=False)
@@ -441,19 +460,14 @@ def scan_alerts() -> Dict[str, Any]:
             if not row:
                 continue
 
-            for cell in row["cells"]:
-                if cell["closed"] or cell["percent"] is None:
-                    continue
-                if cell["percent"] < THRESHOLD_OVER:
-                    continue
-                if horizon == HORIZON_SOON:
-                    # Прошедший час не спасти, а дальше трёх часов — это уже
-                    # горизонт «за сутки», второе предупреждение о том же.
-                    if not (now.hour <= cell["hour"] <= now.hour + HORIZON_SOON_HOURS):
-                        continue
-                if storage.upsert_alert(store["id"], day, cell["hour"], horizon,
-                                        cell["percent"], cell["units"], cell["capacity"]):
-                    created += 1
+            cell = next((c for c in row["cells"] if c["hour"] == hour), None)
+            if cell is None or cell["closed"] or cell["percent"] is None:
+                continue
+            if cell["percent"] < THRESHOLD_OVER:
+                continue
+            if storage.upsert_alert(store["id"], day, hour, horizon,
+                                    cell["percent"], cell["units"], cell["capacity"]):
+                created += 1
 
     return {"created": created, "resolved": resolved, "no_timezone": skipped_no_tz}
 

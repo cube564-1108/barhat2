@@ -492,17 +492,35 @@ def apply_working_hours(store_id: int, open_hour: int, close_hour: int, capacity
     Без этого Фаза 4 — это 1512 полей руками на девять салонов, и она просто
     не будет заполнена, а модуль покажет пустоту. Часы вне окна помечаются
     закрытыми — это не нулевая загрузка, а отсутствие работы.
+
+    Три режима, и все три реальны:
+      - обычный: 9 → 21;
+      - круглосуточный: 0 → 24 (в сети есть такие точки);
+      - ночной, через полночь: 22 → 6. Здесь `close_hour <= open_hour`, и
+        раньше такой график просто нельзя было задать — окно считалось
+        «заданным неверно», а салон оставался с пустой сеткой.
     """
-    if not (0 <= open_hour <= 23 and 1 <= close_hour <= 24 and open_hour < close_hour):
-        raise ValueError("Часы работы заданы неверно")
+    if not 0 <= open_hour <= 23:
+        raise ValueError("Час открытия должен быть от 0 до 23")
+    if not 1 <= close_hour <= 24:
+        raise ValueError("Час закрытия должен быть от 1 до 24")
+    if open_hour == close_hour:
+        raise ValueError("Открытие и закрытие совпадают. "
+                         "Для круглосуточного режима задайте 0 и 24")
     if capacity <= 0:
         raise ValueError("Ёмкость должна быть больше нуля")
+
+    def is_working(hour: int) -> bool:
+        if open_hour < close_hour:
+            return open_hour <= hour < close_hour
+        # Через полночь: рабочие часы — хвост суток и начало следующих.
+        return hour >= open_hour or hour < close_hour
 
     days = weekdays if weekdays is not None else list(WEEKDAYS)
     slots = []
     for weekday in days:
         for hour in HOURS:
-            working = open_hour <= hour < close_hour
+            working = is_working(hour)
             slots.append({
                 "weekday": weekday,
                 "hour": hour,
