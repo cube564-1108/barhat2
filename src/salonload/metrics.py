@@ -126,11 +126,10 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
     Сетка «часы × салоны» за один день.
 
     with_context=False — не собирать свежесть данных и покрытие весами. Это не
-    украшательство: `freshness()` тянет `health_snapshot()`, а тот открывает
-    базу и обходит несколько таблиц. Внутренним вызовам (подбор свободных
-    слотов, расчёт предупреждений) этот контекст не нужен, а сеток они строят
-    по несколько штук на запрос — на диске `/data`, где запрос стоит 90–700 мс,
-    разница получается в сотни обращений.
+    украшательство: и свежесть, и покрытие весами — это отдельные обращения
+    к базе, а внутренние вызовы (подбор свободных слотов, расчёт
+    предупреждений) строят по несколько сеток на запрос. На диске `/data`, где
+    запрос стоит 90–700 мс, разница получается в десятки обращений.
     """
     stores = _stores_for(store_ids)
     ids = [store["id"] for store in stores]
@@ -228,7 +227,7 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
         "unassigned": unassigned if (unassigned["orders"] and store_ids is None) else None,
         "thresholds": {"tight": THRESHOLD_TIGHT, "over": THRESHOLD_OVER},
         "coverage": couriers_storage.weights_coverage(day, day, statuses) if with_context else None,
-        "freshness": freshness() if with_context else None,
+        "freshness": freshness(day, day) if with_context else None,
         "no_stores": not stores,
     }
 
@@ -297,7 +296,7 @@ def week_grid(date_from: str, days: int = 7, store_ids: Optional[List[int]] = No
         "dates": dates,
         "stores": result,
         "thresholds": {"tight": THRESHOLD_TIGHT, "over": THRESHOLD_OVER},
-        "freshness": freshness(),
+        "freshness": freshness(date_from, date_to),
         "no_stores": not stores,
     }
 
@@ -563,29 +562,33 @@ def _current_capacity(store_id: int) -> Optional[float]:
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
-def freshness() -> Dict[str, Any]:
+def freshness(date_from: Optional[str] = None, date_to: Optional[str] = None) -> Dict[str, Any]:
     """
     На какой момент данные. Пустая сетка одинаково выглядит и как «заказов
     нет», и как «синк упал два часа назад», — эти случаи обязаны различаться
     на экране, иначе модуль врёт молча.
+
+    Считается по показываемому периоду и дешёвым запросом. Раньше здесь
+    вызывался `health_snapshot()`, а он обходит всю витрину: замер на проде
+    2026-09-07 дал 6–9 секунд на /health, и столько же платил бы каждый показ
+    сетки.
     """
+    day = date_from or today_iso()
     try:
-        health = couriers_storage.health_snapshot()
+        info = couriers_storage.load_freshness(day, date_to or day)
     except Exception as e:
         logger.warning(f"Состояние витрины недоступно: {e}")
         return {"error": str(e)}
 
-    last_sync = health.get("last_sync") or {}
-    load = health.get("load") or {}
     return {
-        "last_sync_at": last_sync.get("finished_at") or last_sync.get("started_at"),
-        "last_sync_status": last_sync.get("status"),
+        "last_sync_at": info.get("last_sync_at"),
+        "last_sync_status": info.get("last_sync_status"),
         # Пустой справочник статусов = нагрузкой не считается ничего, и сетка
         # выглядит как честный ноль. Так будет сразу после первого деплоя, пока
         # синк не заполнил справочник, — экран обязан сказать об этом словами.
-        "statuses_as_load": load.get("statuses_as_load"),
-        "future_orders": load.get("future_orders"),
-        "until": load.get("until_future"),
-        "unparsed_ready": load.get("unparsed_ready"),
-        "orders_without_date": load.get("orders_without_date"),
+        "statuses_as_load": info.get("statuses_as_load"),
+        "until": info.get("until_future"),
+        "unparsed_ready": info.get("unparsed_ready"),
+        "without_store": info.get("without_store"),
+        "orders_without_date": info.get("orders_without_date"),
     }

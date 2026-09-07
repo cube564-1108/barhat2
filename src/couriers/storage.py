@@ -14,7 +14,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlite_conn import connect as sqlite_connect
@@ -52,6 +52,11 @@ DEFAULT_WEIGHT_FALLBACK = 1.0
 # Сколько заказов синк пропустил из-за отсутствия даты доставки. Живёт здесь,
 # а не в server.py: ключ читает и диагностика витрины.
 NO_DATE_ORDERS_KEY = "orders_without_delivery_date"
+
+# Глубина окна для диагностики и для подписи «на какой момент данные».
+# Считать по всей витрине нельзя: /data сетевой, и полный скан таблицы стоит
+# секунды (замер 2026-09-07 — 6–9 с на /health при 2 мс на статику).
+HEALTH_WINDOW_DAYS = 30
 
 # Такси-службы: Яндекс Доставка (2), Максим Такси (12), Драйв такси (169).
 # Сид для нового флага; дальше значение правится в интерфейсе.
@@ -1134,21 +1139,35 @@ def health_snapshot() -> Dict[str, Any]:
         # выглядит и как «заказов нет», и как «синк не дотянул будущее», и как
         # «время готовности не разобралось» — здесь эти случаи разделены.
         if "ready_hour" in columns:
+            # Окно, а не вся витрина. Замер на проде 2026-09-07: полный скан
+            # `courier_orders` (15 тыс. строк) плюс COUNT по `order_items`
+            # (25 тыс.) держали /health по 6–9 секунд при 2 мс на статику —
+            # диск /data сетевой, и цену определяет объём чтения. Диагностике
+            # нужна свежая картина, а не история за все времена.
+            window_from = (date.today() - timedelta(days=HEALTH_WINDOW_DAYS)).isoformat()
             load_row = conn.execute("""
                 SELECT SUM(CASE WHEN delivery_date > date('now') THEN 1 ELSE 0 END) AS future_orders,
                        SUM(CASE WHEN ready_hour IS NOT NULL THEN 1 ELSE 0 END)      AS with_ready_hour,
                        SUM(CASE WHEN ready_source = 'unparsed' THEN 1 ELSE 0 END)   AS unparsed_ready,
                        SUM(CASE WHEN store_key IS NULL OR store_key = '' THEN 1 ELSE 0 END) AS without_store,
-                       MAX(delivery_date) AS until_future
-                FROM courier_orders
-            """).fetchone()
+                       COUNT(*) AS rows_in_window
+                FROM courier_orders WHERE delivery_date >= ?
+            """, (window_from,)).fetchone()
             data["load"] = {
+                "window_from": window_from,
+                "rows_in_window": load_row["rows_in_window"] or 0,
                 "future_orders": load_row["future_orders"] or 0,
                 "with_ready_hour": load_row["with_ready_hour"] or 0,
                 "unparsed_ready": load_row["unparsed_ready"] or 0,
                 "without_store": load_row["without_store"] or 0,
-                "until_future": load_row["until_future"],
-                "items": conn.execute("SELECT COUNT(*) AS c FROM order_items").fetchone()["c"],
+                # MAX по индексированной колонке — чтение одной строки индекса,
+                # а не скан таблицы.
+                "until_future": conn.execute(
+                    "SELECT MAX(delivery_date) AS d FROM courier_orders").fetchone()["d"],
+                "items": conn.execute(
+                    "SELECT COUNT(*) AS c FROM order_items WHERE delivery_date >= ?",
+                    (window_from,),
+                ).fetchone()["c"],
                 "weights_set": conn.execute(
                     "SELECT COUNT(*) AS c FROM product_weights").fetchone()["c"],
                 "statuses_as_load": conn.execute(
@@ -1223,6 +1242,49 @@ def list_unmapped_sites(date_from: str, date_to: str, known_sites: List[str]) ->
         for row in rows
         if row["site_code"] and row["site_code"] not in known
     ]
+
+
+def load_freshness(date_from: str, date_to: str) -> Dict[str, Any]:
+    """
+    Свежесть данных для экрана нагрузки — дёшево.
+
+    Экран показывает эту подпись на каждом открытии, поэтому здесь нельзя
+    ходить в `health_snapshot`: та собирает диагностику по всей витрине, и на
+    сетевом диске это секунды. Берём только то, что реально нужно подписи, и
+    только по показываемому периоду (индекс по delivery_date).
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS orders,
+                   SUM(CASE WHEN ready_source = 'unparsed' THEN 1 ELSE 0 END) AS unparsed_ready,
+                   SUM(CASE WHEN store_key IS NULL OR store_key = '' THEN 1 ELSE 0 END)
+                       AS without_store
+              FROM courier_orders
+             WHERE delivery_date >= ? AND delivery_date <= ?
+            """,
+            (date_from, date_to),
+        ).fetchone()
+        until_future = conn.execute(
+            "SELECT MAX(delivery_date) AS d FROM courier_orders").fetchone()["d"]
+        statuses = conn.execute(
+            "SELECT COUNT(*) AS c FROM order_statuses WHERE counts_as_load = 1").fetchone()["c"]
+        no_date = conn.execute(
+            "SELECT value FROM sync_state WHERE key = ?", (NO_DATE_ORDERS_KEY,)).fetchone()
+        last = conn.execute(
+            "SELECT status, started_at, finished_at FROM sync_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    return {
+        "orders": row["orders"] or 0,
+        "unparsed_ready": row["unparsed_ready"] or 0,
+        "without_store": row["without_store"] or 0,
+        "until_future": until_future,
+        "statuses_as_load": statuses,
+        "orders_without_date": no_date["value"] if no_date else None,
+        "last_sync_at": (last["finished_at"] or last["started_at"]) if last else None,
+        "last_sync_status": last["status"] if last else None,
+    }
 
 
 def load_by_slot(date_from: str, date_to: str,
