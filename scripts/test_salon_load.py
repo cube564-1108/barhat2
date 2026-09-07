@@ -467,6 +467,26 @@ def test_weight_units_model():
     couriers_storage.set_product_weights({42: None})
     couriers_storage.recalc_weights_range(day, day)
 
+    # Разовый пересчёт накопленного: старые числа (Σ количество × вес) обязаны
+    # смениться на новые. Проверяется и возобновляемость — курсор идёт кусками
+    # по датам, и обрыв на середине не должен начинать всё заново.
+    with couriers_storage.get_db() as conn:
+        conn.execute("UPDATE courier_orders SET weight_units = 609 "
+                     "WHERE retailcrm_order_id = 600")
+        conn.execute("DELETE FROM sync_state WHERE key IN (?, ?)",
+                     (couriers_storage.WEIGHT_MODEL_KEY,
+                      couriers_storage.WEIGHT_MODEL_CURSOR_KEY))
+    couriers_storage._backfill_weight_model()
+    with couriers_storage.get_db() as conn:
+        weight = conn.execute("SELECT weight_units FROM courier_orders "
+                              "WHERE retailcrm_order_id = 600").fetchone()["weight_units"]
+        done = conn.execute("SELECT value FROM sync_state WHERE key = ?",
+                            (couriers_storage.WEIGHT_MODEL_KEY,)).fetchone()
+    check("разовый пересчёт переводит накопленное на новую формулу",
+          weight == couriers_storage.ORDER_BASE_UNITS, f"получено {weight}")
+    check("пересчёт отмечается как выполненный и не повторяется",
+          done and done["value"] == couriers_storage.WEIGHT_MODEL_VERSION, f"получено {done}")
+
 
 def test_round_clock():
     """

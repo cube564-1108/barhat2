@@ -400,9 +400,17 @@ def init_couriers_tables() -> None:
     _backfill_weight_model()
 
 
-# Отметка о разовом пересчёте нагрузки под модель «база за заказ + надбавки».
+# Разовый пересчёт нагрузки под модель «база за заказ + надбавки».
+#
+# Курсор, а не флаг «сделано»: пересчёт идёт кусками по датам, и каждый
+# завершённый кусок сохраняется. Одним `UPDATE` по всей таблице делать нельзя —
+# он держал бы write-лок общей базы на всё время работы прямо на старте
+# воркера, а на `/data` это секунды, в которые встают и логин, и любая запись
+# (тот же класс, что «фоновый синк кладёт весь сайт»).
 WEIGHT_MODEL_KEY = "load_weight_model"
 WEIGHT_MODEL_VERSION = "order_base_v1"
+WEIGHT_MODEL_CURSOR_KEY = "load_weight_model_cursor"
+WEIGHT_MODEL_CHUNK_DAYS = 30
 
 
 def _backfill_weight_model() -> None:
@@ -414,45 +422,90 @@ def _backfill_weight_model() -> None:
     суток. За это время «Сколько собирали на самом деле» предложило бы норму
     ёмкости, посчитанную по граммам, и её бы приняли.
 
-    Проверка отметки и запись идут одной транзакцией под `BEGIN IMMEDIATE`:
-    на проде воркеры стартуют одновременно, и без write-лока оба увидели бы
-    «не пересчитано» и запустили одинаковый тяжёлый UPDATE.
+    Три свойства, без которых это опасно запускать на старте воркера:
+
+      - **кусками по датам** — короткая транзакция вместо одной длинной, между
+        кусками лок отпускается, и соседние записи проходят;
+      - **возобновляемо** — курсор сохраняется после каждого куска, поэтому
+        обрыв на середине не заставляет начинать заново (а без курсора любой
+        таймаут означал бы повтор всей тяжёлой работы при каждом рестарте);
+      - **проверка курсора и запись — одна транзакция** под `BEGIN IMMEDIATE`:
+        воркеры стартуют одновременно, и без write-лока оба взяли бы один и
+        тот же кусок.
 
     Падать здесь нельзя ни при каких обстоятельствах — это старт воркера.
     """
-    conn = sqlite_connect(DB_PATH, timeout=30)
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        done = conn.execute("SELECT value FROM sync_state WHERE key = ?",
-                            (WEIGHT_MODEL_KEY,)).fetchone()
-        if done and done["value"] == WEIGHT_MODEL_VERSION:
-            conn.execute("ROLLBACK")
+    while True:
+        conn = sqlite_connect(DB_PATH, timeout=30)
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            state = {
+                row["key"]: row["value"]
+                for row in conn.execute(
+                    "SELECT key, value FROM sync_state WHERE key IN (?, ?)",
+                    (WEIGHT_MODEL_KEY, WEIGHT_MODEL_CURSOR_KEY),
+                )
+            }
+            if state.get(WEIGHT_MODEL_KEY) == WEIGHT_MODEL_VERSION:
+                conn.execute("ROLLBACK")
+                return
+
+            bounds = conn.execute(
+                "SELECT MIN(delivery_date) AS lo, MAX(delivery_date) AS hi FROM courier_orders"
+            ).fetchone()
+            start = state.get(WEIGHT_MODEL_CURSOR_KEY) or bounds["lo"]
+            if start is None or bounds["hi"] is None or start > bounds["hi"]:
+                # Витрина пуста или куски кончились — пересчитывать нечего.
+                _mark_weight_model_done(conn)
+                conn.execute("COMMIT")
+                logger.info("Нагрузка пересчитана под модель «база за заказ + надбавки»")
+                return
+
+            chunk_end = (datetime.strptime(start, "%Y-%m-%d").date()
+                         + timedelta(days=WEIGHT_MODEL_CHUNK_DAYS)).isoformat()
+            conn.execute(
+                f"""
+                UPDATE courier_orders
+                   SET weight_units = ? + COALESCE((
+                           SELECT SUM({_ITEM_UNITS_SQL})
+                             FROM order_items i
+                             JOIN product_weights w ON w.offer_id = i.offer_id
+                            WHERE i.retailcrm_order_id = courier_orders.retailcrm_order_id
+                              AND i.delivery_date = courier_orders.delivery_date
+                       ), 0)
+                 WHERE delivery_date >= ? AND delivery_date < ?
+                """,
+                (ORDER_BASE_UNITS, start, chunk_end),
+            )
+            if chunk_end > bounds["hi"]:
+                _mark_weight_model_done(conn)
+                conn.execute("COMMIT")
+                logger.info("Нагрузка пересчитана под модель «база за заказ + надбавки»")
+                return
+
+            _set_sync_state(conn, WEIGHT_MODEL_CURSOR_KEY, chunk_end)
+            conn.execute("COMMIT")
+            logger.info(f"Пересчёт нагрузки: {start}—{chunk_end} готов")
+        except Exception as e:
+            logger.warning(f"Пересчёт нагрузки под новую модель отложен: {e}")
             return
-        conn.execute(
-            f"""
-            UPDATE courier_orders
-               SET weight_units = ? + COALESCE((
-                       SELECT SUM({_ITEM_UNITS_SQL})
-                         FROM order_items i
-                         JOIN product_weights w ON w.offer_id = i.offer_id
-                        WHERE i.retailcrm_order_id = courier_orders.retailcrm_order_id
-                          AND i.delivery_date = courier_orders.delivery_date
-                   ), 0)
-            """,
-            (ORDER_BASE_UNITS,),
-        )
-        conn.execute(
-            "INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, datetime('now')) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-            (WEIGHT_MODEL_KEY, WEIGHT_MODEL_VERSION),
-        )
-        conn.execute("COMMIT")
-        logger.info("Нагрузка пересчитана под модель «база за заказ + надбавки»")
-    except Exception as e:
-        logger.warning(f"Пересчёт нагрузки под новую модель отложен: {e}")
-    finally:
-        conn.close()
+        finally:
+            conn.close()
+
+
+def _set_sync_state(conn, key: str, value: str) -> None:
+    """Запись служебного ключа ЧУЖИМ соединением — внутри уже открытой транзакции."""
+    conn.execute(
+        "INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+        (key, value),
+    )
+
+
+def _mark_weight_model_done(conn) -> None:
+    _set_sync_state(conn, WEIGHT_MODEL_KEY, WEIGHT_MODEL_VERSION)
+    conn.execute("DELETE FROM sync_state WHERE key = ?", (WEIGHT_MODEL_CURSOR_KEY,))
 
 
 # ============================================================================
