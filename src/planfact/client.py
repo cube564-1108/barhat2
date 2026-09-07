@@ -23,6 +23,8 @@ import requests
 
 from russian_ca import trust_russian_ca
 
+from . import quota
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -79,10 +81,21 @@ class PlanFactClient:
         2026-08-17) — для некритичных "справочных" вызовов таймаут короче и
         без ретраев, лучше быстро отказать, чем держать воркер занятым.
 
+        Лимит запросов у ПланФакта МЕСЯЧНЫЙ (2500 на тарифе), и когда он
+        кончается, каждый запрос возвращает 403. Ходить в этом состоянии
+        бессмысленно, поэтому проверка стоит здесь, до отправки: это
+        единственное место, через которое проходят все вызовы модуля.
+        Остаток квоты приходит в заголовках любого ответа — запоминаем его
+        тем же одним местом (см. planfact/quota.py).
+
         Возвращает содержимое поля "data" при isSuccess=true, иначе None
         (ошибка уже залогирована).
         """
         url = f"{self.api_url.rstrip('/')}/{path.lstrip('/')}"
+
+        if quota.is_blocked():
+            logger.warning("Запрос %s %s не отправлен: %s", method, path, quota.error_text())
+            return None
 
         for attempt in range(max_retries_429 + 1):
             try:
@@ -95,6 +108,19 @@ class PlanFactClient:
                     json=json_data,
                     timeout=timeout,
                 )
+
+                # До raise_for_status: заголовки квоты есть и на ошибочном
+                # ответе, а 403 «лимит исчерпан» виден только по ним и телу.
+                quota.record_response(
+                    response.headers,
+                    response.status_code,
+                    # Тело разбираем только у ошибок: на успешном ответе это
+                    # декодирование мегабайта операций впустую.
+                    response.text if response.status_code >= 400 else "",
+                )
+                if quota.is_blocked():
+                    logger.error("ПланФакт отказал по квоте на %s %s", method, path)
+                    return None
 
                 if response.status_code == 429 and attempt < max_retries_429:
                     wait = 2 + attempt

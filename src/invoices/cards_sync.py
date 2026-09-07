@@ -28,6 +28,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from planfact import quota as planfact_quota
+
 from .cards import (
     get_card_by_id,
     try_acquire_sync_lock,
@@ -54,8 +56,22 @@ LOCK_TTL_SECONDS = 10 * 60
 # Интервал и стартовая задержка. Задержка своя, не совпадающая с чужими
 # (курьеры — 120 с, МойСклад — 420 с): /data общий на все базы, и синки,
 # стартующие одной волной, кладут сайт вместе.
-SCHEDULER_INTERVAL_SECONDS = 15 * 60
+#
+# Час, а не четверть часа: лимит API ПланФакта МЕСЯЧНЫЙ — 2500 запросов, около
+# 83 в сутки на весь модуль. Каждый прогон с непустой очередью стоит минимум
+# два запроса на поиск маркеров, то есть при тике в 15 минут только этот
+# планировщик выбирал ~200 запросов в сутки и съедал месячную квоту за неделю
+# (07.09.2026 так и вышло). Заявка не срочная: она уедет в ближайший час, а
+# кнопка «Разнести сейчас» разносит немедленно.
+SCHEDULER_INTERVAL_SECONDS = 60 * 60
 SCHEDULER_START_DELAY_SECONDS = 300
+
+# Через сколько повторять попытку по заявке, которая уже падала. Причина у
+# таких заявок почти всегда ненастроенное сопоставление — само оно не
+# исправится, а очередь из одной такой заявки заставляла планировщик ходить
+# в ПланФакт каждый тик впустую. Поправил настройку — жми «Разнести сейчас»,
+# она игнорирует отсрочку.
+FAILED_RETRY_SECONDS = 6 * 3600
 
 # Окно поиска своих операций в ПланФакте. Больше окно — дороже запрос, меньше —
 # риск не увидеть свою операцию по старой заявке и завести её второй раз.
@@ -84,16 +100,23 @@ def _operation_date(value: Optional[str]) -> str:
 
 
 def set_invoice_planfact_error(invoice_id: int, error: Optional[str]) -> None:
-    """Записать (или снять) причину, по которой заявка не уехала в ПланФакт."""
+    """
+    Записать (или снять) причину, по которой заявка не уехала в ПланФакт, и
+    отметить время попытки — по нему planfact-очередь откладывает повтор.
+    """
     conn = get_db()
     try:
-        conn.execute("UPDATE invoices SET planfact_error = ? WHERE id = ?", (error, invoice_id))
+        conn.execute(
+            "UPDATE invoices SET planfact_error = ?, planfact_attempted_at = datetime('now') "
+            "WHERE id = ?",
+            (error, invoice_id),
+        )
         conn.commit()
     finally:
         conn.close()
 
 
-def collect_candidates() -> List[Dict[str, Any]]:
+def collect_candidates(force: bool = False) -> List[Dict[str, Any]]:
     """
     Заявки, готовые уехать в ПланФакт.
 
@@ -101,11 +124,17 @@ def collect_candidates() -> List[Dict[str, Any]]:
     неё не бывает, деньги ушли до создания заявки. Пополнение — только когда
     перевод действительно сделан (`paid`): согласованное, но не переведённое
     на карту ещё не легло, и перемещение в ПФ было бы неправдой.
+
+    Заявка, которая уже падала, до истечения FAILED_RETRY_SECONDS в очередь не
+    попадает: её причина (не настроено сопоставление, нет распределения) сама
+    не исчезает, а месячная квота API тратится на каждый прогон очереди.
+    force=True — ручная кнопка «Разнести сейчас»: человек только что поправил
+    настройку и ждёт результата сейчас, а не через шесть часов.
     """
     conn = get_db()
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT * FROM invoices
             WHERE planfact_synced_at IS NULL
               AND is_archived = 0
@@ -113,8 +142,15 @@ def collect_candidates() -> List[Dict[str, Any]]:
                     (kind = 'card_expense' AND status = 'approved')
                  OR (kind = 'card_topup'   AND status = 'paid')
               )
+              {"" if force else '''
+              AND (
+                    planfact_error IS NULL
+                 OR planfact_attempted_at IS NULL
+                 OR planfact_attempted_at < datetime('now', ?)
+              )'''}
             ORDER BY id
-            """
+            """,
+            () if force else (f"-{FAILED_RETRY_SECONDS} seconds",),
         ).fetchall()
         return [dict(row) for row in rows]
     finally:
@@ -281,16 +317,24 @@ def _push_invoice(invoice: Dict[str, Any], client, store_map, category_map,
     return {"status": "created", "invoice_id": invoice["id"], "operation_id": operation_id}
 
 
-def run_card_sync(dry_run: bool = False) -> Dict[str, Any]:
+def run_card_sync(dry_run: bool = False, force: bool = False) -> Dict[str, Any]:
     """
     Один прогон разноски. Возвращает сводку {created, exists, failed}.
 
     Если кандидатов нет — во внешний API не ходим вовсе: прогон стоит один
-    SELECT, и на медленном /data это важнее, чем кажется.
+    SELECT, и на медленном /data это важнее, чем кажется. Исчерпанная месячная
+    квота ПланФакта останавливает прогон там же: 403 придёт на каждый запрос,
+    а причина должна называться словами, а не «не удалось разнести».
     """
-    candidates = collect_candidates()
+    candidates = collect_candidates(force=force)
     if not candidates:
         return {"created": [], "exists": [], "failed": [], "candidates": 0}
+
+    quota_error = planfact_quota.error_text()
+    if quota_error:
+        logger.warning("Разноска карт отложена: %s", quota_error)
+        return {"created": [], "exists": [], "failed": [], "candidates": len(candidates),
+                "skipped": quota_error, "quota": planfact_quota.snapshot()}
 
     from planfact.client import get_client
     from datetime import datetime, timedelta
@@ -324,12 +368,12 @@ def run_card_sync(dry_run: bool = False) -> Dict[str, Any]:
     return {"created": created, "exists": exists, "failed": failed, "candidates": len(candidates)}
 
 
-def run_card_sync_locked(dry_run: bool = False) -> Dict[str, Any]:
+def run_card_sync_locked(dry_run: bool = False, force: bool = False) -> Dict[str, Any]:
     """Прогон под локом — чтобы два воркера не разносили одно и то же одновременно."""
     if not try_acquire_sync_lock(SYNC_LOCK, LOCK_TTL_SECONDS):
         return {"skipped": "Разноска уже идёт", "created": [], "exists": [], "failed": []}
     try:
-        return run_card_sync(dry_run=dry_run)
+        return run_card_sync(dry_run=dry_run, force=force)
     finally:
         release_sync_lock(SYNC_LOCK)
 

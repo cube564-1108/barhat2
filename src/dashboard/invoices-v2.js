@@ -248,7 +248,7 @@
 
         // Вкладка «Остатки на картах»: своя загрузка, к списку счетов
         // отношения не имеет
-        cards: { rows: [], loading: false, loaded: false, error: '', apiError: '' },
+        cards: { rows: [], loading: false, loaded: false, error: '', apiError: '', quota: null },
 
         // Инструменты раздела (справочники, контрагенты, ПланФакт) — одна
         // модалка за раз, поэтому одно поле `open` на все три.
@@ -285,7 +285,7 @@
                 // Счета ПланФакта для выпадающих списков. accountsError не
                 // блокирует работу: id счёта можно вписать руками, поэтому
                 // поле остаётся текстовым, а список — только подсказкой.
-                accounts: [], accountsError: '',
+                accounts: [], accountsError: '', quota: null,
                 editId: null, draft: null, saving: false,
             },
             cp: { list: [], loaded: false, loading: false, error: '', search: '', form: null, saving: false },
@@ -1735,6 +1735,45 @@
     // Остатки приходят из кэша сервера (TTL 10 минут); кнопка «Обновить»
     // ходит в ПланФакт, но не чаще раза в минуту — воркеров на проде два.
 
+    /**
+     * Остаток месячной квоты API ПланФакта строкой для человека.
+     *
+     * Лимит у ПланФакта не посекундный, а месячный: 2500 запросов, сброс
+     * первого числа. 07.09.2026 он кончился к седьмому числу, и об этом никто
+     * не знал — в интерфейсе было написано «ПланФакт не ответил», ровно как
+     * при обрыве сети. Поэтому остаток показывается ВСЕГДА, а не только когда
+     * кончился: смысл в том, чтобы увидеть заранее.
+     *
+     * Дату сброса печатает BarhatTime — время показывается по поясу
+     * устройства, сервер отдаёт UTC.
+     */
+    function planfactQuotaHtml(quota) {
+        if (!quota || !quota.known) return '';
+
+        const limit = Number(quota.limit || 0);
+        const used = Number(quota.used || 0);
+        const remaining = quota.remaining === null || quota.remaining === undefined
+            ? Math.max(0, limit - used)
+            : Number(quota.remaining);
+        const resetPart = quota.reset_at
+            ? ` Лимит обновится ${escapeHtml(fmtCreated(quota.reset_at))}.`
+            : '';
+
+        if (quota.blocked) {
+            return `<div class="iv2-locked">Исчерпан месячный лимит запросов к API ПланФакта
+                (${escapeHtml(String(used))} из ${escapeHtml(String(limit))}).${resetPart}
+                Показаны последние сохранённые данные: новых ПланФакт не отдаст, пока лимит
+                не обновится или его не расширят в тарифе.</div>`;
+        }
+
+        // Порог тревоги — десятая часть месячного лимита: этого хватает на
+        // несколько дней обычной работы, то есть ещё есть время расширить.
+        const low = limit > 0 && remaining <= Math.max(50, limit * 0.1);
+        return `<div class="${low ? 'iv2-locked' : 'iv2-hint'}">Квота API ПланФакта:
+            осталось ${escapeHtml(String(remaining))} из ${escapeHtml(String(limit))}
+            запросов.${resetPart}</div>`;
+    }
+
     async function loadCardBalances(refresh) {
         if (state.cards.loading) return;
         state.cards.loading = true;
@@ -1748,6 +1787,7 @@
             // Ошибка ПланФакта не отменяет показ: остатки из кэша полезнее
             // пустого экрана, но помечены как устаревшие
             state.cards.apiError = data.error || '';
+            state.cards.quota = data.quota || null;
             state.cards.loaded = true;
             if (refresh && !data.error) {
                 toast(data.refreshed ? 'Остатки обновлены' : 'Остатки уже актуальны');
@@ -1797,7 +1837,8 @@
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2CardsRefresh"
                             ${state.cards.loading ? 'disabled' : ''}>Обновить</button>
                 </div>
-                ${state.cards.apiError
+                ${planfactQuotaHtml(state.cards.quota)}
+                ${state.cards.apiError && !(state.cards.quota && state.cards.quota.blocked)
                     ? `<div class="iv2-locked">ПланФакт не ответил: ${escapeHtml(state.cards.apiError)}.
                            Показаны последние сохранённые остатки.</div>`
                     : ''}
@@ -6378,6 +6419,7 @@
             const data = await apiGet('/api/invoices/planfact/accounts');
             cards.accounts = data.accounts || [];
             cards.accountsError = data.error || '';
+            cards.quota = data.quota || null;
         } catch (error) {
             cards.accountsError = error.message;
         }
@@ -6398,10 +6440,12 @@
     }
 
     /**
-     * Разноска идёт фоновым потоком раз в 15 минут — кнопка только просит не
-     * ждать очередного тика. Живой вызов ПланФакта прямо из обработчика уже
-     * дважды забирал оба воркера и клал сайт, поэтому сервер отвечает сразу,
-     * а результат виден по бейджам в списке.
+     * Разноска идёт фоновым потоком раз в час — кнопка только просит не ждать
+     * очередного тика (и, в отличие от него, берёт даже заявки, падавшие
+     * только что: человек жмёт её сразу после правки сопоставления). Живой
+     * вызов ПланФакта прямо из обработчика уже дважды забирал оба воркера и
+     * клал сайт, поэтому сервер отвечает сразу, а результат виден по бейджам
+     * в списке.
      */
     async function runCardSync(preview) {
         const host = $('iv2CardSyncResult');
@@ -6437,10 +6481,13 @@
         if (cards.loading) return '<p class="iv2-tools-empty">Загрузка…</p>';
         if (cards.error) return `<p class="iv2-tools-empty">Не удалось загрузить: ${escapeHtml(cards.error)}</p>`;
 
+        // Остаток квоты API — здесь же, где справочник счетов ПланФакта:
+        // именно тут видно, что выпадающий список пуст не «просто так»
+        const quota = planfactQuotaHtml(cards.quota);
         const draftForNew = cards.editId === 'new' ? cardFormHtml(null) : '';
-        if (!cards.list.length && !draftForNew) return '<p class="iv2-tools-empty">Карт пока нет</p>';
+        if (!cards.list.length && !draftForNew) return quota + '<p class="iv2-tools-empty">Карт пока нет</p>';
 
-        return draftForNew + cards.list.map(card => {
+        return quota + draftForNew + cards.list.map(card => {
             const storeNames = (card.store_ids || [])
                 .map(storeId => refName('stores', storeId))
                 .filter(Boolean);
@@ -7152,6 +7199,9 @@
                 categories: categories.categories || [],
                 pfProjects: projects ? (projects.projects || []) : null,
                 pfCategories: pfCategories ? (pfCategories.categories || []) : null,
+                // Пустой выпадающий список чаще всего означает не сбой, а
+                // исчерпанный месячный лимит API — это должно быть написано
+                quota: (projects && projects.quota) || (pfCategories && pfCategories.quota) || null,
             };
         } catch (error) {
             pf.mapping = null;
@@ -7170,6 +7220,7 @@
 
         const { stores, categories, pfProjects, pfCategories } = pf.mapping;
         return `
+            ${planfactQuotaHtml(pf.mapping.quota)}
             <div class="iv2-pf-block">
                 <div class="iv2-tools-form__title">Салоны → проекты ПланФакт</div>
                 ${pfProjects === null

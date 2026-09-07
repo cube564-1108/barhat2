@@ -17,6 +17,8 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from planfact import quota as planfact_quota
+
 from .storage import get_db, _table_exists, _column_exists, get_user_stores
 
 logger = logging.getLogger(__name__)
@@ -403,6 +405,55 @@ def release_sync_lock(name: str) -> None:
         conn.close()
 
 
+def read_sync_state(key: str) -> Optional[str]:
+    """Значение по ключу из invoice_sync_state или None."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT value FROM invoice_sync_state WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+    except Exception:
+        logger.exception("Не удалось прочитать %s из invoice_sync_state", key)
+        return None
+    finally:
+        conn.close()
+
+
+def write_sync_state(key: str, value: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO invoice_sync_state (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, value),
+        )
+        conn.commit()
+    except Exception:
+        logger.exception("Не удалось записать %s в invoice_sync_state", key)
+    finally:
+        conn.close()
+
+
+# Состояние квоты API ПланФакта переживает перезапуск и общее для обоих
+# воркеров: держим его в той же таблице, что талоны расписания. Модуль
+# planfact/quota.py про нашу базу ничего не знает — хранилище подключается
+# отсюда, снизу вверх, чтобы клиент ПланФакта не зависел от модуля счетов.
+_QUOTA_STATE_KEY = "planfact_quota"
+
+
+def _load_planfact_quota() -> Optional[str]:
+    return read_sync_state(_QUOTA_STATE_KEY)
+
+
+def _save_planfact_quota(payload: str) -> None:
+    write_sync_state(_QUOTA_STATE_KEY, payload)
+
+
+planfact_quota.set_persistence(_load_planfact_quota, _save_planfact_quota)
+
+
 def is_valid_account_id(value: Any) -> bool:
     """
     accountId ПланФакта — целое число. Проверяем и здесь, а не только на вводе:
@@ -705,7 +756,10 @@ def fetch_planfact_balances(account_ids: List[str]) -> Dict[str, float]:
 
     items = get_client().get_account_balances([int(a) for a in account_ids])
     if items is None:
-        raise RuntimeError("ПланФакт не ответил на запрос остатков")
+        # Исчерпанная месячная квота и молчащий сервис требуют разных действий
+        # от человека, поэтому и текст разный: «расширьте лимит» против
+        # «попробуйте позже». Раньше и то и другое звалось «не ответил».
+        raise RuntimeError(planfact_quota.error_text() or "ПланФакт не ответил на запрос остатков")
 
     result: Dict[str, float] = {}
     for item in items:
@@ -725,7 +779,8 @@ def get_planfact_balances(cards: List[Dict[str, Any]], refresh: bool = False) ->
     Остатки по счетам переданных карт: из кэша, а при устаревании — из ПланФакта.
 
     Возвращает {"balances": {account_id: {"balance", "fetched_at", "stale"}},
-                "error": текст или None, "refreshed": bool}.
+                "error": текст или None, "refreshed": bool,
+                "quota": состояние квоты API ПланФакта}.
 
     Обновление идёт под локом: воркеров два, и без него оба уходят в ПланФакт
     на одном и том же открытии вкладки. Проигравший лок отдаёт кэш — пустой
@@ -734,10 +789,12 @@ def get_planfact_balances(cards: List[Dict[str, Any]], refresh: bool = False) ->
     account_ids = sorted({str(card.get("planfact_account_id") or "").strip()
                           for card in cards
                           if is_valid_account_id(card.get("planfact_account_id"))})
-    cache = _read_balance_cache(account_ids)
+    quota_state = planfact_quota.snapshot()
 
     if not account_ids:
-        return {"balances": {}, "error": None, "refreshed": False}
+        return {"balances": {}, "error": None, "refreshed": False, "quota": quota_state}
+
+    cache = _read_balance_cache(account_ids)
 
     # Кнопка «Обновить» не даёт ходить в ПланФакт чаще, чем раз в минуту:
     # частый клик по ней — тот же неограниченный внешний вызов из интерфейса.
@@ -745,20 +802,31 @@ def get_planfact_balances(cards: List[Dict[str, Any]], refresh: bool = False) ->
         refresh = False
 
     if not refresh and _cache_is_fresh(cache, account_ids, BALANCE_TTL_SECONDS):
-        return {"balances": _decorate(cache, account_ids), "error": None, "refreshed": False}
+        return {"balances": _decorate(cache, account_ids), "error": None,
+                "refreshed": False, "quota": quota_state}
+
+    # Квота месячная: пока она не сброшена, любой поход вернёт 403. Не берём
+    # даже лок — незачем, и человеку важно увидеть причину, а не «не ответил».
+    quota_error = planfact_quota.error_text()
+    if quota_error:
+        return {"balances": _decorate(cache, account_ids), "error": quota_error,
+                "refreshed": False, "quota": planfact_quota.snapshot()}
 
     if not try_acquire_sync_lock(_BALANCE_LOCK, ttl_seconds=60):
-        return {"balances": _decorate(cache, account_ids), "error": None, "refreshed": False}
+        return {"balances": _decorate(cache, account_ids), "error": None,
+                "refreshed": False, "quota": quota_state}
 
     try:
         fresh = fetch_planfact_balances(account_ids)
         _save_balance_cache(fresh)
         cache = _read_balance_cache(account_ids)
-        return {"balances": _decorate(cache, account_ids), "error": None, "refreshed": True}
+        return {"balances": _decorate(cache, account_ids), "error": None,
+                "refreshed": True, "quota": planfact_quota.snapshot()}
     except Exception as error:
         logger.exception("Не удалось получить остатки карт из ПланФакта")
         # Кэш всё равно отдаём: устаревший остаток с пометкой полезнее пустоты
-        return {"balances": _decorate(cache, account_ids), "error": str(error), "refreshed": False}
+        return {"balances": _decorate(cache, account_ids), "error": str(error),
+                "refreshed": False, "quota": planfact_quota.snapshot()}
     finally:
         release_sync_lock(_BALANCE_LOCK)
 

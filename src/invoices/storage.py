@@ -387,6 +387,20 @@ def init_invoices_tables():
     """)
 
     # ========================================================================
+    # 10.1. Кэш справочников ПланФакта (счета, проекты, статьи) — 07.09.2026.
+    # Лимит API у ПланФакта месячный (2500 запросов), а эти списки грузились
+    # при каждом открытии вкладки настроек. В базе, а не в памяти воркера:
+    # кэш общий для обоих воркеров и переживает деплой (см. planfact_refs.py).
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS planfact_reference_cache (
+            key TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    # ========================================================================
     # 11. Шаблоны счетов (план 2026-08-24, §3.2, Фаза 8)
     #
     # Суммы счёта и даты оплаты в шаблоне нет — это ровно то, что меняется от
@@ -878,6 +892,10 @@ def _ensure_card_invoice_columns(conn: sqlite3.Connection):
         "card_id": "INTEGER REFERENCES work_cards(id)",
         "spent_at": "TEXT",          # дата траты; у счёта роль даты играет due_date
         "planfact_error": "TEXT",    # почему заявка не уехала в ПланФакт
+        # Когда её пытались отправить в последний раз. Нужно, чтобы заявка,
+        # которая не уедет никогда (не настроено сопоставление), не заставляла
+        # планировщик ходить в ПланФакт каждый тик: лимит API месячный.
+        "planfact_attempted_at": "TEXT",
     }
     if all(_column_exists(conn, "invoices", column) for column in columns):
         return
@@ -1309,15 +1327,34 @@ def delete_vat_option(vat_id: int) -> bool:
     return _ref_deactivate("invoice_vat_options", vat_id)
 
 
+def _clear_planfact_retry_delay(conn: sqlite3.Connection) -> None:
+    """
+    Снять отсрочку повтора с заявок, которые не уехали в ПланФакт.
+
+    Заявка, упавшая на разноске, повторяется не сразу (см. FAILED_RETRY_SECONDS
+    в cards_sync.py): её причина — почти всегда ненастроенное сопоставление, а
+    лимит API месячный, и очередь из одной такой заявки заставляла планировщик
+    ходить наружу каждый тик впустую. Но как только сопоставление поправили,
+    ждать больше нечего — отсрочка снимается тем же соединением, что и правка.
+    """
+    conn.execute(
+        "UPDATE invoices SET planfact_attempted_at = NULL "
+        "WHERE planfact_synced_at IS NULL AND planfact_error IS NOT NULL"
+    )
+
+
 def update_expense_category_planfact_id(category_id: int, planfact_category_id: Optional[str]) -> bool:
     """Привязать статью расхода к id статьи в ПланФакт (для авторазноски, Фаза 6)."""
     conn = get_db()
-    conn.execute(
-        "UPDATE invoice_expense_categories SET planfact_category_id = ? WHERE id = ?",
-        (planfact_category_id or None, category_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE invoice_expense_categories SET planfact_category_id = ? WHERE id = ?",
+            (planfact_category_id or None, category_id)
+        )
+        _clear_planfact_retry_delay(conn)
+        conn.commit()
+    finally:
+        conn.close()
     return True
 
 
@@ -1335,26 +1372,31 @@ def get_all_store_planfact_mappings() -> Dict[int, str]:
 
 def set_store_planfact_project(store_id: int, planfact_project_id: str) -> bool:
     conn = get_db()
-    conn.execute(
-        """
-        INSERT INTO invoice_store_planfact_projects (store_id, planfact_project_id, updated_at)
-        VALUES (?, ?, datetime('now'))
-        ON CONFLICT(store_id) DO UPDATE SET
-            planfact_project_id = excluded.planfact_project_id,
-            updated_at = excluded.updated_at
-        """,
-        (store_id, planfact_project_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            """
+            INSERT INTO invoice_store_planfact_projects (store_id, planfact_project_id, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(store_id) DO UPDATE SET
+                planfact_project_id = excluded.planfact_project_id,
+                updated_at = excluded.updated_at
+            """,
+            (store_id, planfact_project_id)
+        )
+        _clear_planfact_retry_delay(conn)
+        conn.commit()
+    finally:
+        conn.close()
     return True
 
 
 def delete_store_planfact_project(store_id: int) -> bool:
     conn = get_db()
-    conn.execute("DELETE FROM invoice_store_planfact_projects WHERE store_id = ?", (store_id,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM invoice_store_planfact_projects WHERE store_id = ?", (store_id,))
+        conn.commit()
+    finally:
+        conn.close()
     return True
 
 

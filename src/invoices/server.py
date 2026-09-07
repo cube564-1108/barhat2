@@ -396,7 +396,12 @@ def get_work_card_balances():
                            else round(planfact_balance - accountable["balance"], 2)),
         })
 
-    return jsonify({"cards": rows, "error": result["error"], "refreshed": result["refreshed"]})
+    # quota — остаток месячного лимита API ПланФакта. Он отдаётся всегда, а не
+    # только при ошибке: увидеть «осталось 40 из 2500» надо ДО того, как лимит
+    # кончится, иначе об исчерпании узнаёшь от человека, у которого пропали
+    # цифры (07.09.2026).
+    return jsonify({"cards": rows, "error": result["error"],
+                    "refreshed": result["refreshed"], "quota": result.get("quota")})
 
 
 def _card_payload_error(data, *, require_all: bool):
@@ -526,12 +531,16 @@ def trigger_card_sync():
     Живой внешний вызов из обработчика уже дважды забирал оба воркера и клал
     сайт целиком. `?dry_run=true` — превью без записи, выполняется синхронно:
     оно ничего не меняет, а результат нужен здесь и сейчас.
+
+    force=True: в очередь берутся и заявки, падавшие меньше шести часов назад.
+    Фоновому прогону такие откладываются (месячная квота API), но человек жмёт
+    эту кнопку ровно после того, как поправил сопоставление.
     """
     from .cards_sync import run_card_sync, run_card_sync_locked
 
     if request.args.get("dry_run", "").lower() == "true":
         try:
-            result = run_card_sync(dry_run=True)
+            result = run_card_sync(dry_run=True, force=True)
         except Exception as error:
             logger.exception("Превью разноски карт упало")
             return jsonify({"error": f"Не удалось получить превью: {error}"}), 502
@@ -539,7 +548,7 @@ def trigger_card_sync():
 
     def worker():
         try:
-            run_card_sync_locked()
+            run_card_sync_locked(force=True)
         except Exception:
             logger.exception("Ручной прогон разноски карт упал")
 
@@ -614,32 +623,48 @@ def get_planfact_accounts():
     """
     Счета ПланФакта для выпадающих списков в справочнике карт.
 
-    Живой вызов без кэша, поэтому — короткий таймаут и без ретраев (см.
-    request() в planfact/client.py, инцидент 2026-08-17: справочные вызовы
-    из UI заняли обоих воркеров и подвесили сайт). Ошибка ПланФакта здесь не
-    фатальна: id счёта можно вписать руками.
+    Идёт через общий кэш справочников (planfact_refs, TTL 6 часов): раньше
+    список тянулся живым вызовом на каждое открытие вкладки, а лимит API у
+    ПланФакта месячный — 2500 запросов на всё. Ошибка здесь не фатальна:
+    id счёта можно вписать руками, а устаревший список лучше пустого.
     """
     from planfact.client import get_client
+    from .planfact_refs import get_reference
+
+    def fetch():
+        return get_client().get_accounts(active_only=True)
 
     try:
-        accounts = get_client().get_accounts(active_only=True)
+        result = get_reference("accounts", fetch,
+                               refresh=request.args.get("refresh", "").lower() in ("1", "true"))
     except Exception:
         logger.exception("get_planfact_accounts упал")
-        accounts = None
-
-    if accounts is None:
         return jsonify({"accounts": [], "error": "ПланФакт не ответил — впишите id счёта вручную"})
 
-    return jsonify({"accounts": [
-        {
-            "account_id": account.get("accountId"),
-            # Названия счетов в ПФ грязные (двойные и хвостовые пробелы),
-            # схлопываем для показа; id при этом остаётся ключом
-            "title": " ".join((account.get("title") or "").split()),
-            "company": (account.get("company") or {}).get("title"),
-        }
-        for account in accounts
-    ]})
+    accounts = result["items"]
+    if accounts is None:
+        return jsonify({
+            "accounts": [],
+            "error": (result["error"] or "ПланФакт не ответил") + " — впишите id счёта вручную",
+            "quota": result["quota"],
+        })
+
+    return jsonify({
+        "accounts": [
+            {
+                "account_id": account.get("accountId"),
+                # Названия счетов в ПФ грязные (двойные и хвостовые пробелы),
+                # схлопываем для показа; id при этом остаётся ключом
+                "title": " ".join((account.get("title") or "").split()),
+                "company": (account.get("company") or {}).get("title"),
+            }
+            for account in accounts
+        ],
+        "error": result["error"],
+        "fetched_at": result["fetched_at"],
+        "stale": result["stale"],
+        "quota": result["quota"],
+    })
 
 
 # =============================================================================
@@ -2918,55 +2943,55 @@ def set_category_planfact_mapping(category_id):
     return jsonify({"ok": True})
 
 
-# Инцидент 2026-08-17: вкладка "Сопоставление" дёргает эти два live-эндпоинта
-# при каждом открытии без кэша; на нескольких быстрых перезагрузках медленные/
-# рейтлимитящие ответы ПланФакт заняли собой обоих gunicorn-воркеров (их
-# всего 2, amvera.yml) и подвесили весь сайт. Короткий TTL-кэш в процессе —
-# самая простая защита от повторного залпа запросов при повторных открытиях
-# вкладки одним и тем же админом; данные тут не критичны к свежести (это
-# просто список для выпадающего списка настройки).
-_planfact_dropdown_cache: dict = {}
-_PLANFACT_DROPDOWN_CACHE_TTL_SECONDS = 120
-
-
-def _get_planfact_dropdown_cached(cache_key: str, fetch_fn):
-    cached = _planfact_dropdown_cache.get(cache_key)
-    if cached and (datetime.now() - cached["at"]).total_seconds() < _PLANFACT_DROPDOWN_CACHE_TTL_SECONDS:
-        return cached["value"]
-    value = fetch_fn()
-    if value is not None:
-        _planfact_dropdown_cache[cache_key] = {"value": value, "at": datetime.now()}
-    return value
+# Инцидент 2026-08-17: вкладка "Сопоставление" дёргает эти два эндпоинта при
+# каждом открытии; на нескольких быстрых перезагрузках медленные/рейтлимитящие
+# ответы ПланФакт заняли собой обоих gunicorn-воркеров (их всего 2, amvera.yml)
+# и подвесили весь сайт. Тогда защитой был TTL-кэш на две минуты в памяти
+# воркера — он спасал от залпа, но не от расхода квоты: у соседнего воркера
+# своего кэша не было, деплой обнулял оба, а лимит API месячный (2500). С
+# 07.09.2026 кэш общий и в базе, TTL 6 часов — см. planfact_refs.py.
 
 
 @invoices_bp.route("/planfact/projects", methods=["GET"])
 @role_required("admin")
 def get_planfact_projects():
-    """Живой список проектов ПланФакт — для выпадающего списка при настройке сопоставления."""
+    """Проекты ПланФакт (из кэша справочников) — для выпадающего списка при настройке сопоставления."""
     from planfact.client import get_client
+    from .planfact_refs import get_reference
     try:
         client = get_client()
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    projects = _get_planfact_dropdown_cached("projects", client.get_projects)
-    if projects is None:
-        return jsonify({"error": "Не удалось получить проекты из ПланФакт"}), 502
-    return jsonify({"projects": projects})
+
+    result = get_reference("projects", client.get_projects,
+                           refresh=request.args.get("refresh", "").lower() in ("1", "true"))
+    if result["items"] is None:
+        return jsonify({"error": result["error"] or "Не удалось получить проекты из ПланФакт",
+                        "quota": result["quota"]}), 502
+    return jsonify({"projects": result["items"], "error": result["error"],
+                    "fetched_at": result["fetched_at"], "stale": result["stale"],
+                    "quota": result["quota"]})
 
 
 @invoices_bp.route("/planfact/categories", methods=["GET"])
 @role_required("admin")
 def get_planfact_categories():
-    """Живой список статей расходов ПланФакт — для настройки сопоставления."""
+    """Статьи расходов ПланФакт (из кэша справочников) — для настройки сопоставления."""
     from planfact.client import get_client
+    from .planfact_refs import get_reference
     try:
         client = get_client()
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    categories = _get_planfact_dropdown_cached("categories", lambda: client.get_operation_categories("Outcome"))
-    if categories is None:
-        return jsonify({"error": "Не удалось получить статьи из ПланФакт"}), 502
-    return jsonify({"categories": categories})
+
+    result = get_reference("categories", lambda: client.get_operation_categories("Outcome"),
+                           refresh=request.args.get("refresh", "").lower() in ("1", "true"))
+    if result["items"] is None:
+        return jsonify({"error": result["error"] or "Не удалось получить статьи из ПланФакт",
+                        "quota": result["quota"]}), 502
+    return jsonify({"categories": result["items"], "error": result["error"],
+                    "fetched_at": result["fetched_at"], "stale": result["stale"],
+                    "quota": result["quota"]})
 
 
 @invoices_bp.route("/counterparties/data-report", methods=["GET"])

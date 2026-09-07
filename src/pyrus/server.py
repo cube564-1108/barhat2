@@ -602,6 +602,17 @@ def health_check():
     except Exception as e:
         pipelines = {'error': f'{type(e).__name__}: {e}'}
 
+    # Остаток месячной квоты API ПланФакта (2500 запросов, сброс первого
+    # числа). Читается из общего состояния в базе, наружу не ходит: 07.09.2026
+    # квота кончилась к седьмому числу, и узнали об этом от человека, у
+    # которого перестали показываться остатки карт.
+    try:
+        import invoices.cards  # noqa: F401 — импорт подключает хранилище состояния квоты
+        from planfact import quota as planfact_quota
+        planfact = planfact_quota.snapshot(reload=True)
+    except Exception as e:
+        planfact = {'error': f'{type(e).__name__}: {e}'}
+
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
@@ -611,6 +622,7 @@ def health_check():
         'disk': _disk_free_info(),
         'guarantees': guarantees,
         'pipelines': pipelines,
+        'planfact_quota': planfact,
         'write_test': _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
     })
 
