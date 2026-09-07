@@ -43,6 +43,17 @@ COMPLETED_STATUS = "complete"
 # переехал сюда, в чтение. Любой новый запрос модуля выплат обязан его добавлять.
 PAYOUT_FILTER = "(courier_id IS NOT NULL OR net_cost > 0)"
 
+# Группа статусов «Отменён» в RetailCRM. Именно группа, а не один код: статусов
+# отмены в справочнике несколько («Отменён», «Отменён клиентом», «Не дозвонились»),
+# и отбор по одному коду молча терял бы остальные — ровно тот случай, когда
+# поведение выводят из названия записи вместо данных (см. CLAUDE.md).
+CANCEL_STATUS_GROUP = "cancel"
+
+# Потолок строк в списках-исключениях отчёта («без курьера», «отменённые»).
+# Это списки для разбора, а не выгрузка: сотни строк человек всё равно не
+# прочитает, а читать их с диска на каждый показ страницы — лишняя работа.
+DETAIL_LIST_LIMIT = 200
+
 # Вес трудоёмкости товара, у которого вес не задан. Хранится в настройках
 # (sync_state), здесь только запасное значение на случай пустой настройки:
 # считать неизвестный товар нулём нельзя — нагрузка занизится незаметно.
@@ -843,17 +854,53 @@ def get_site_cities() -> Dict[str, Optional[str]]:
 # Чтение: отчёт и справочники
 # ============================================================================
 
-def _period_filter(date_from: Optional[str], date_to: Optional[str]):
+def _period_filter(date_from: Optional[str], date_to: Optional[str], alias: str = ""):
     """Кусок WHERE по дате доставки. delivery_date — календарная дата YYYY-MM-DD,
     поэтому сравнение строк и есть сравнение дат (без таймзон: RetailCRM отдаёт
-    delivery.date без времени)."""
+    delivery.date без времени).
+
+    alias — префикс таблицы для запросов с JOIN («o» → «o.delivery_date»).
+    Раньше префикс навешивался поверх готовой строки через .replace(), и это
+    ломалось бы на любом новом условии, где встретится то же слово."""
+    prefix = f"{alias}." if alias else ""
     where, params = [], []
     if date_from:
-        where.append("delivery_date >= ?")
+        where.append(f"{prefix}delivery_date >= ?")
         params.append(date_from)
     if date_to:
-        where.append("delivery_date <= ?")
+        where.append(f"{prefix}delivery_date <= ?")
         params.append(date_to)
+    return where, params
+
+
+def _payout_scope(
+    date_from: Optional[str],
+    date_to: Optional[str],
+    city: Optional[str],
+    site_code: Optional[str],
+    alias: str = "o",
+):
+    """
+    Общий отбор строк витрины для отчёта выплат: период, город, салон и
+    PAYOUT_FILTER.
+
+    Статус сюда НЕ входит намеренно: части отчёта смотрят на разные статусы —
+    выплата считает «Выполнен», отдельный блок — отменённые. Общим остаётся
+    только то, что действительно общее, иначе один из блоков молча считал бы
+    не ту совокупность, что подписан.
+    """
+    where, params = _period_filter(date_from, date_to, alias)
+    if city:
+        where.append(f"{alias}.city = ?")
+        params.append(city)
+    if site_code:
+        where.append(f"{alias}.site_code = ?")
+        params.append(site_code)
+    # Витрина хранит ВСЕ заказы (нужны показателям и загрузке салонов), поэтому
+    # отбор «за что вообще платим» ставится в чтении — см. PAYOUT_FILTER.
+    where.append(
+        f"({alias}.courier_id IS NOT NULL OR {alias}.net_cost > 0)"
+    )
     return where, params
 
 
@@ -861,29 +908,44 @@ def report_by_courier(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     city: Optional[str] = None,
+    site_code: Optional[str] = None,
     only_own: bool = True,
+    list_limit: int = DETAIL_LIST_LIMIT,
 ) -> Dict[str, Any]:
     """
-    Отчёт «сколько платить курьеру за период».
+    Отчёт «сколько платить курьеру за период» и три разреза к нему.
+
+      couriers        — строки выплаты по курьерам (статус «Выполнен»)
+      sites           — та же сумма в разрезе салонов: чей это расход
+      without_courier — заказы, где деньги на доставку потрачены, а курьер в
+                        CRM не проставлен. Список с номерами заказов, а не одно
+                        число: по числу нельзя пойти и починить данные в CRM
+      cancelled       — отменённые заказы с потраченной доставкой. В сумму
+                        выплаты они НЕ входят (за отменённое не платим по
+                        умолчанию), но исчезать из виду не должны: курьер мог
+                        съездить, и решение принимает человек
 
     only_own=True — исключить службы доставки (couriers.is_service = 1).
-    Заказы без курьера в строки не попадают, но считаются отдельно
-    (orders_without_courier) — их сумма иначе просто исчезала бы из виду.
+
+    Всё считается ОДНИМ соединением: на сетевом диске /data цену определяет
+    число открытых соединений и число обращений, а не размер одного запроса
+    (см. CLAUDE.md). Отдельная HTTP-ручка на каждый блок означала бы четыре
+    соединения вместо одного на каждый показ страницы.
     """
-    where, params = _period_filter(date_from, date_to)
-    where.append("o.status = ?")
-    params.append(COMPLETED_STATUS)
-    if city:
-        where.append("o.city = ?")
-        params.append(city)
+    base_where, base_params = _payout_scope(date_from, date_to, city, site_code)
+    base_sql = " AND ".join(base_where)
 
-    where_sql = " AND ".join(w.replace("delivery_date", "o.delivery_date") for w in where)
-    # Витрина хранит ВСЕ выполненные заказы (нужны показателям салонов), поэтому
-    # отбор «за что вообще платим» ставится здесь — см. PAYOUT_FILTER
-    where_sql += " AND " + PAYOUT_FILTER.replace("courier_id", "o.courier_id").replace(
-        "net_cost", "o.net_cost")
+    completed_sql = base_sql + " AND o.status = ?"
+    completed_params = [*base_params, COMPLETED_STATUS]
 
-    own_filter = " AND COALESCE(c.is_service, 0) = 0" if only_own else ""
+    # Для строк выплаты службы отсекаются целиком, а для разрезов, где есть
+    # заказы без курьера, — только там, где курьер указан: иначе фильтр
+    # «только свои» заодно прятал бы незаполненные заказы, которые как раз
+    # и надо чинить.
+    own_courier = " AND COALESCE(c.is_service, 0) = 0" if only_own else ""
+    own_mixed = (
+        " AND (o.courier_id IS NULL OR COALESCE(c.is_service, 0) = 0)" if only_own else ""
+    )
 
     with get_db() as conn:
         rows = conn.execute(
@@ -897,11 +959,42 @@ def report_by_courier(
                 GROUP_CONCAT(DISTINCT o.city)       AS cities
             FROM courier_orders o
             LEFT JOIN couriers c ON c.id = o.courier_id
-            WHERE {where_sql} AND o.courier_id IS NOT NULL{own_filter}
+            WHERE {completed_sql} AND o.courier_id IS NOT NULL{own_courier}
             GROUP BY o.courier_id, COALESCE(c.name, o.courier_name), COALESCE(c.is_service, 0)
             ORDER BY total_net_cost DESC
             """,
-            params,
+            completed_params,
+        ).fetchall()
+
+        # Распределение по салонам. Салон — site_code (сайт заказа): именно от
+        # него считается город в фильтре, поэтому суммы разрезов сходятся между
+        # собой. Склад-исполнитель (store_key) отвечает на другой вопрос — кто
+        # собирал букет, а не чей это расход на доставку.
+        site_rows = conn.execute(
+            f"""
+            SELECT
+                o.site_code                                 AS site_code,
+                COALESCE(MAX(s.name), o.site_code)          AS site_name,
+                MAX(o.city)                                 AS city,
+                COUNT(DISTINCT o.courier_id)                AS couriers_count,
+                SUM(CASE WHEN o.courier_id IS NOT NULL THEN 1 ELSE 0 END)
+                                                            AS orders_count,
+                COALESCE(SUM(CASE WHEN o.courier_id IS NOT NULL
+                                  THEN o.net_cost ELSE 0 END), 0)
+                                                            AS total_net_cost,
+                SUM(CASE WHEN o.courier_id IS NULL THEN 1 ELSE 0 END)
+                                                            AS orders_without_courier,
+                COALESCE(SUM(CASE WHEN o.courier_id IS NULL
+                                  THEN o.net_cost ELSE 0 END), 0)
+                                                            AS net_cost_without_courier
+            FROM courier_orders o
+            LEFT JOIN couriers c ON c.id = o.courier_id
+            LEFT JOIN courier_sites s ON s.code = o.site_code
+            WHERE {completed_sql}{own_mixed}
+            GROUP BY o.site_code
+            ORDER BY total_net_cost DESC
+            """,
+            completed_params,
         ).fetchall()
 
         # Заказы без курьера, но с потраченной себестоимостью доставки —
@@ -912,10 +1005,70 @@ def report_by_courier(
             f"""
             SELECT COUNT(*) AS cnt, COALESCE(SUM(o.net_cost), 0) AS total
             FROM courier_orders o
-            WHERE {where_sql} AND o.courier_id IS NULL AND o.net_cost > 0
+            WHERE {completed_sql} AND o.courier_id IS NULL AND o.net_cost > 0
             """,
-            params,
+            completed_params,
         ).fetchone()
+
+        missing_rows = conn.execute(
+            f"""
+            SELECT o.retailcrm_order_id, o.order_number, o.delivery_date,
+                   o.net_cost, o.site_code,
+                   COALESCE(s.name, o.site_code) AS site_name,
+                   o.city, o.delivery_city
+            FROM courier_orders o
+            LEFT JOIN courier_sites s ON s.code = o.site_code
+            WHERE {completed_sql} AND o.courier_id IS NULL AND o.net_cost > 0
+            ORDER BY o.delivery_date DESC, o.retailcrm_order_id DESC
+            LIMIT ?
+            """,
+            [*completed_params, list_limit],
+        ).fetchall()
+
+        # Отменённые. Отбор идёт по ГРУППЕ статуса из справочника, а не по коду
+        # и не по названию: статусов отмены в CRM несколько, а названия
+        # переименовывают.
+        cancel_join = (
+            "JOIN order_statuses st ON st.code = o.status "
+            f"AND st.group_code = '{CANCEL_STATUS_GROUP}'"
+        )
+        cancelled = conn.execute(
+            f"""
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(o.net_cost), 0) AS total
+            FROM courier_orders o
+            {cancel_join}
+            LEFT JOIN couriers c ON c.id = o.courier_id
+            WHERE {base_sql}{own_mixed}
+            """,
+            base_params,
+        ).fetchone()
+
+        cancelled_rows = conn.execute(
+            f"""
+            SELECT o.retailcrm_order_id, o.order_number, o.delivery_date,
+                   o.status, COALESCE(st.name, o.status) AS status_name,
+                   o.courier_id, COALESCE(c.name, o.courier_name) AS courier_name,
+                   o.net_cost, o.total_summ, o.site_code,
+                   COALESCE(s.name, o.site_code) AS site_name,
+                   o.city, o.delivery_city
+            FROM courier_orders o
+            {cancel_join}
+            LEFT JOIN couriers c ON c.id = o.courier_id
+            LEFT JOIN courier_sites s ON s.code = o.site_code
+            WHERE {base_sql}{own_mixed}
+            ORDER BY o.delivery_date DESC, o.retailcrm_order_id DESC
+            LIMIT ?
+            """,
+            [*base_params, list_limit],
+        ).fetchall()
+
+        # Сколько статусов отмены вообще известно справочнику. Без этого числа
+        # пустой блок «Отменённые» одинаково означает и «отмен не было», и
+        # «справочник статусов ещё не загружен» — а это разные поломки.
+        cancel_statuses_known = conn.execute(
+            "SELECT COUNT(*) AS c FROM order_statuses WHERE group_code = ?",
+            (CANCEL_STATUS_GROUP,),
+        ).fetchone()["c"]
 
     couriers = [
         {
@@ -929,14 +1082,48 @@ def report_by_courier(
         for row in rows
     ]
 
+    sites = [
+        {
+            "site_code": row["site_code"],
+            "site_name": row["site_name"] or row["site_code"],
+            "city": row["city"],
+            "couriers_count": row["couriers_count"] or 0,
+            "orders_count": row["orders_count"] or 0,
+            "total_net_cost": round(row["total_net_cost"] or 0, 2),
+            "orders_without_courier": row["orders_without_courier"] or 0,
+            "net_cost_without_courier": round(row["net_cost_without_courier"] or 0, 2),
+        }
+        for row in site_rows
+    ]
+
+    missing_count = missing["cnt"] if missing else 0
+    cancelled_count = cancelled["cnt"] if cancelled else 0
+
     return {
         "couriers": couriers,
+        "sites": sites,
+        "without_courier": {
+            "orders": [dict(row) for row in missing_rows],
+            "count": missing_count,
+            "total_net_cost": round((missing["total"] if missing else 0) or 0, 2),
+            "truncated": missing_count > len(missing_rows),
+        },
+        "cancelled": {
+            "orders": [dict(row) for row in cancelled_rows],
+            "count": cancelled_count,
+            "total_net_cost": round((cancelled["total"] if cancelled else 0) or 0, 2),
+            "truncated": cancelled_count > len(cancelled_rows),
+            "statuses_known": cancel_statuses_known,
+        },
         "totals": {
             "couriers_count": len(couriers),
             "orders_count": sum(c["orders_count"] for c in couriers),
             "total_net_cost": round(sum(c["total_net_cost"] for c in couriers), 2),
-            "orders_without_courier": missing["cnt"] if missing else 0,
+            "sites_count": len(sites),
+            "orders_without_courier": missing_count,
             "net_cost_without_courier": round((missing["total"] if missing else 0) or 0, 2),
+            "cancelled_orders": cancelled_count,
+            "cancelled_net_cost": round((cancelled["total"] if cancelled else 0) or 0, 2),
         },
     }
 
@@ -945,32 +1132,48 @@ def list_orders(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     city: Optional[str] = None,
+    site_code: Optional[str] = None,
     courier_id: Optional[int] = None,
     without_courier: bool = False,
+    cancelled: bool = False,
     limit: int = 1000,
 ) -> List[Dict[str, Any]]:
-    """Расшифровка отчёта по заказам — чтобы сумму можно было проверить, а не верить на слово."""
-    where, params = _period_filter(date_from, date_to)
-    where.append("status = ?")
-    params.append(COMPLETED_STATUS)
-    if city:
-        where.append("city = ?")
-        params.append(city)
-    where.append(PAYOUT_FILTER)  # витрина шире отчёта, см. PAYOUT_FILTER
+    """Расшифровка отчёта по заказам — чтобы сумму можно было проверить, а не верить на слово.
+
+    cancelled=True — вместо выполненных отдаются отменённые (группа статусов
+    `cancel` из справочника). Это тот же список тех же полей, поэтому отдельная
+    функция была бы копией с одной изменённой строкой."""
+    where, params = _payout_scope(date_from, date_to, city, site_code)
+    if cancelled:
+        status_join = (
+            "JOIN order_statuses st ON st.code = o.status "
+            f"AND st.group_code = '{CANCEL_STATUS_GROUP}'"
+        )
+    else:
+        status_join = ""
+        where.append("o.status = ?")
+        params.append(COMPLETED_STATUS)
+
     if without_courier:
-        where.append("courier_id IS NULL")
+        where.append("o.courier_id IS NULL")
     elif courier_id is not None:
-        where.append("courier_id = ?")
+        where.append("o.courier_id = ?")
         params.append(courier_id)
 
     with get_db() as conn:
         rows = conn.execute(
             f"""
-            SELECT retailcrm_order_id, order_number, delivery_date, courier_id, courier_name,
-                   net_cost, site_code, city, delivery_city
-            FROM courier_orders
+            SELECT o.retailcrm_order_id, o.order_number, o.delivery_date,
+                   o.courier_id, COALESCE(c.name, o.courier_name) AS courier_name,
+                   o.net_cost, o.status,
+                   o.site_code, COALESCE(s.name, o.site_code) AS site_name,
+                   o.city, o.delivery_city
+            FROM courier_orders o
+            {status_join}
+            LEFT JOIN couriers c ON c.id = o.courier_id
+            LEFT JOIN courier_sites s ON s.code = o.site_code
             WHERE {' AND '.join(where)}
-            ORDER BY delivery_date DESC, retailcrm_order_id DESC
+            ORDER BY o.delivery_date DESC, o.retailcrm_order_id DESC
             LIMIT ?
             """,
             [*params, limit],

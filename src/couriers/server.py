@@ -354,7 +354,12 @@ def get_report():
     Отчёт «сколько платить курьерам»: сумма себестоимости доставки по
     выполненным заказам за период, по курьерам.
 
-    Query: date_from, date_to (YYYY-MM-DD), city, only_own (1/0)
+    В том же ответе — распределение по салонам, список заказов без курьера и
+    список отменённых. Одной ручкой, а не тремя: каждая ручка это отдельное
+    соединение с базой, а на сетевом диске /data цену определяет именно их
+    число (см. CLAUDE.md).
+
+    Query: date_from, date_to (YYYY-MM-DD), city, site, only_own (1/0)
     """
     date_from = request.args.get("date_from")
     date_to = request.args.get("date_to")
@@ -364,10 +369,12 @@ def get_report():
             return error_response(f"{name} должен быть в формате YYYY-MM-DD")
 
     city = request.args.get("city") or None
+    site_code = request.args.get("site") or None
     only_own = request.args.get("only_own", "1") != "0"
 
     report = storage.report_by_courier(
-        date_from=date_from, date_to=date_to, city=city, only_own=only_own
+        date_from=date_from, date_to=date_to, city=city,
+        site_code=site_code, only_own=only_own,
     )
     return success_response(report, meta={"data_range": storage.get_orders_date_range()})
 
@@ -378,7 +385,8 @@ def get_report_orders():
     """
     Расшифровка суммы по заказам — чтобы выплату можно было проверить.
 
-    Query: date_from, date_to, city, courier_id | without_courier=1
+    Query: date_from, date_to, city, site, courier_id | without_courier=1
+           | cancelled=1
     """
     date_from = request.args.get("date_from")
     date_to = request.args.get("date_to")
@@ -400,8 +408,10 @@ def get_report_orders():
         date_from=date_from,
         date_to=date_to,
         city=request.args.get("city") or None,
+        site_code=request.args.get("site") or None,
         courier_id=courier_id,
         without_courier=request.args.get("without_courier") == "1",
+        cancelled=request.args.get("cancelled") == "1",
     )
     return success_response(orders)
 

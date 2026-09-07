@@ -956,6 +956,12 @@
                                 </select>
                             </div>
                             <div class="filter-group">
+                                <label class="form-label">Салон:</label>
+                                <select id="courierSite" class="form-select" style="width: 220px;">
+                                    <option value="">Все салоны</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
                                 <label class="module-checkbox" style="margin-bottom: 8px;">
                                     <input type="checkbox" id="courierOnlyOwn" checked>
                                     <span>Только свои курьеры</span>
@@ -1006,6 +1012,10 @@
                                 <div class="label">Без курьера в CRM</div>
                                 <div class="value" id="courierNoCourier">-</div>
                             </div>
+                            <div class="card">
+                                <div class="label">Отменённые</div>
+                                <div class="value" id="courierCancelled">-</div>
+                            </div>
                         </div>
 
                         <!-- Таблица курьеров -->
@@ -1026,6 +1036,98 @@
                                     <tbody id="courierTableBody">
                                         <tr>
                                             <td colspan="6" class="abc-empty">Загрузка данных...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Распределение по салонам: чей это расход на доставку -->
+                        <div class="card calculator-card" style="margin-top: 24px;">
+                            <h3 class="card-title">Распределение по салонам</h3>
+                            <p class="section-description" style="margin-top: 0;">
+                                Салон определяется сайтом заказа в RetailCRM. Сумма по салонам
+                                совпадает с суммой к выплате за период.
+                            </p>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th class="num">#</th>
+                                            <th>Салон</th>
+                                            <th>Город</th>
+                                            <th class="num">Курьеров</th>
+                                            <th class="num">Доставок</th>
+                                            <th class="num">Сумма к оплате</th>
+                                            <th class="num">Доля</th>
+                                            <th class="num">Без курьера</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="courierSitesBody">
+                                        <tr>
+                                            <td colspan="9" class="abc-empty">Загрузка данных...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Заказы без курьера: деньги потрачены, платить некому -->
+                        <div class="card calculator-card" style="margin-top: 24px;">
+                            <h3 class="card-title">Заказы без курьера</h3>
+                            <p class="section-description" style="margin-top: 0;">
+                                Себестоимость доставки потрачена, а курьер в CRM не проставлен —
+                                эти суммы не попали ни в одну строку выплаты. Исправляются в заказе
+                                RetailCRM, после чего нажмите «Обновить данные».
+                            </p>
+                            <div id="courierNoCourierNote" class="abc-freshness hidden"></div>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Заказ</th>
+                                            <th>Дата доставки</th>
+                                            <th>Салон</th>
+                                            <th>Город</th>
+                                            <th>Адрес доставки</th>
+                                            <th class="num">Себестоимость</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="courierNoCourierBody">
+                                        <tr>
+                                            <td colspan="6" class="abc-empty">Загрузка данных...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Отменённые заказы: в выплату не входят, но видеть их надо -->
+                        <div class="card calculator-card" style="margin-top: 24px;">
+                            <h3 class="card-title">Отменённые заказы</h3>
+                            <p class="section-description" style="margin-top: 0;">
+                                Заказы в статусах группы «Отменён», по которым назначен курьер или
+                                потрачена себестоимость доставки. В сумму к выплате не входят —
+                                решение по каждому принимает человек.
+                            </p>
+                            <div id="courierCancelledNote" class="abc-freshness hidden"></div>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%;">
+                                    <thead>
+                                        <tr>
+                                            <th>Заказ</th>
+                                            <th>Дата доставки</th>
+                                            <th>Статус</th>
+                                            <th>Курьер</th>
+                                            <th>Салон</th>
+                                            <th>Город</th>
+                                            <th class="num">Себестоимость</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="courierCancelledBody">
+                                        <tr>
+                                            <td colspan="7" class="abc-empty">Загрузка данных...</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -1055,13 +1157,14 @@
                                         <tr>
                                             <th>Заказ</th>
                                             <th>Дата доставки</th>
+                                            <th>Салон</th>
                                             <th>Город</th>
                                             <th>Адрес доставки</th>
                                             <th class="num">Себестоимость</th>
                                         </tr>
                                     </thead>
                                     <tbody id="courierOrdersBody">
-                                        <tr><td colspan="5" class="abc-empty">Загрузка...</td></tr>
+                                        <tr><td colspan="6" class="abc-empty">Загрузка...</td></tr>
                                     </tbody>
                                 </table>
                             </div>
