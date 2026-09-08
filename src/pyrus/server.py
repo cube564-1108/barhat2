@@ -1052,6 +1052,32 @@ def salon_load_page():
         return f"Ошибка загрузки страницы: {e}", 500
 
 
+@app.route('/courier-app')
+def courier_app_page():
+    """Доставка заказов: рабочий раздел курьера"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return _serve_dashboard_shell()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /courier-app: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
+@app.route('/courier-dispatch')
+def courier_dispatch_page():
+    """Контроль доставки: взгляд управляющего на весь город"""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return _serve_dashboard_shell()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /courier-dispatch: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
 @app.route('/link-watch')
 def link_watch_page():
     """Страница сторожа ссылок на товары"""

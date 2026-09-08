@@ -135,6 +135,23 @@
                         </svg>
                         <span>Загрузка салонов</span>
                     </a>
+                    <a href="/courier-app" class="nav-item" data-page="courier_app">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M5 18a2 2 0 1 0 4 0 2 2 0 1 0-4 0"/>
+                            <path d="M15 18a2 2 0 1 0 4 0 2 2 0 1 0-4 0"/>
+                            <path d="M3 6h11v10M14 9h4l3 4v5h-2"/>
+                        </svg>
+                        <span>Доставка</span>
+                    </a>
+                    <a href="/courier-dispatch" class="nav-item" data-page="courier_dispatch">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 21s7-5.5 7-11a7 7 0 1 0-14 0c0 5.5 7 11 7 11Z"/>
+                            <circle cx="12" cy="10" r="2.5"/>
+                        </svg>
+                        <span>Контроль доставки</span>
+                    </a>
                     <a href="/courier-payouts" class="nav-item" data-page="courier_payouts">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
                              stroke-linecap="round" stroke-linejoin="round">
@@ -931,6 +948,26 @@
                      поэтому в разметке только контейнер -->
                 <div class="page" data-page="salon_load">
                     <div id="salonLoadContent"></div>
+                </div>
+
+                <!-- Доставка заказов курьером. Разметка появится в Фазе 3
+                     (план plans/2026-09-08-курьеры-доставка.md): рабочий экран
+                     курьера — отдельная лёгкая PWA-страница, здесь останется
+                     вход в неё для тех, кто зашёл с компьютера -->
+                <div class="page" data-page="courier_app">
+                    <section class="section">
+                        <h2 class="section-title">ДОСТАВКА</h2>
+                        <p class="section-description">Заказы своего города: бронь, отметки «забрал» и «доставил». Раздел готовится — рабочий экран будет на телефоне</p>
+                    </section>
+                </div>
+
+                <!-- Контроль доставки (управляющий): весь город, чужие брони,
+                     заказы, которые никто не взял. Фаза 8 -->
+                <div class="page" data-page="courier_dispatch">
+                    <section class="section">
+                        <h2 class="section-title">КОНТРОЛЬ ДОСТАВКИ</h2>
+                        <p class="section-description">Где сейчас каждый заказ: свободен, забронирован, в пути, доставлен. Раздел готовится</p>
+                    </section>
                 </div>
 
                 <!-- Оплата курьерам -->

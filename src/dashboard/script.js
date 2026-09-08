@@ -270,6 +270,8 @@ document.addEventListener('DOMContentLoaded', async function() {
             'salon_kpi': 'ПОКАЗАТЕЛИ САЛОНОВ',
             'salon_load': 'ЗАГРУЗКА САЛОНОВ',
             'link_watch': 'ССЫЛКИ НА ТОВАРЫ',
+            'courier_app': 'ДОСТАВКА',
+            'courier_dispatch': 'КОНТРОЛЬ ДОСТАВКИ',
             'regulations': 'РЕГЛАМЕНТЫ',
             'roles': 'УПРАВЛЕНИЕ РОЛЯМИ'
         };
