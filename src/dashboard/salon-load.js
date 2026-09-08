@@ -884,10 +884,12 @@
 
     async function openTimeNorms(tab) {
         const active = tab || 'groups';
-        let groups, offers;
+        let groups, offers, tariffs;
         try {
             if (active === 'groups') {
                 groups = await api('/api/couriers/time-norms/groups');
+            } else if (active === 'tariffs') {
+                tariffs = await api('/api/couriers/time-norms/tariffs');
             } else {
                 offers = await api('/api/couriers/time-norms/offers' +
                     (active === 'missing' ? '?only_missing=1' : ''));
@@ -913,6 +915,8 @@
                     data-norm-tab="offers">Товары</button>
                 <button class="sload-tab ${active === 'missing' ? 'sload-tab--active' : ''}"
                     data-norm-tab="missing">Без нормы</button>
+                <button class="sload-tab ${active === 'tariffs' ? 'sload-tab--active' : ''}"
+                    data-norm-tab="tariffs">Тарифы</button>
             </div>
 
             ${catalog && !catalog.offers ? note('bad', 'Каталог номенклатуры пуст',
@@ -928,7 +932,8 @@
 
             <div id="sloadNormRows">${
                 active === 'groups' ? groupNormRows(groups.data || [])
-                                    : offerNormRows(offers.data || [])}</div>`;
+                : active === 'tariffs' ? tariffRows(tariffs.data || {})
+                : offerNormRows(offers.data || [])}</div>`;
 
         const overlay = modal('Нормы времени сборки', body,
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
@@ -938,6 +943,34 @@
             if (tabButton) {
                 overlay.remove();
                 openTimeNorms(tabButton.dataset.normTab);
+                return;
+            }
+
+            const saveTariff = e.target.closest('[data-save-tariff]');
+            if (saveTariff) {
+                const row = saveTariff.closest('[data-tariff-row]');
+                const value = name => {
+                    const field = row.querySelector(`[data-tariff="${name}"]`);
+                    return field && field.value !== '' ? Number(field.value) : null;
+                };
+                const payload = row.dataset.kind === 'berries'
+                    ? { kind: 'berries', mode: row.dataset.mode,
+                        minutes_per_100g: value('per100'), package_minutes: value('package') }
+                    : { kind: 'flowers',
+                        range_from: Number(row.dataset.from), range_to: Number(row.dataset.to),
+                        mono_minutes: value('mono'), mix_minutes: value('mix'),
+                        ribbon_minutes: value('ribbon'), package_minutes: value('package') };
+
+                saveTariff.disabled = true;
+                try {
+                    await api('/api/couriers/time-norms/tariffs', postOptions(payload));
+                    toast('Тариф сохранён, нагрузка пересчитана', 'success');
+                    overlay.remove();
+                    openTimeNorms('tariffs');
+                } catch (error) {
+                    toast('Не удалось сохранить: ' + error.message, 'error');
+                    saveTariff.disabled = false;
+                }
                 return;
             }
 
@@ -998,6 +1031,56 @@
                     `<option value="${code}"${(own && own.berry_mode || '') === code ? ' selected' : ''}>${label}</option>`).join('')}
             </select></td>
             <td><button class="sload-btn sload-btn--ghost" data-save-norm>Сохранить</button></td>`;
+    }
+
+    function tariffField(name, value) {
+        return `<td><input type="number" min="0" step="0.1" class="sload-weight-input"
+            data-tariff="${name}" value="${value === null || value === undefined ? '' : esc(value)}"></td>`;
+    }
+
+    function tariffRows(data) {
+        const flowers = data.flowers || [];
+        const berries = data.berries || {};
+        const berryRow = (mode, label) => {
+            const row = berries[mode] || {};
+            return `<tr data-tariff-row data-kind="berries" data-mode="${mode}">
+                <td>${label}</td>
+                ${tariffField('per100', row.minutes_per_100g)}
+                ${tariffField('package', row.package_minutes)}
+                <td><button class="sload-btn sload-btn--ghost" data-save-tariff>Сохранить</button></td>
+            </tr>`;
+        };
+
+        return `
+            <p class="sload-card__caption">Время сборки от количества. Диапазоны должны идти
+                подряд, без дыр и пересечений — иначе заказ на «выпавшее» количество посчитался бы
+                нулём молча, поэтому такая правка отклоняется. Любое изменение сразу
+                пересчитывает нагрузку за 60 дней.</p>
+
+            <h4 style="font-family:'Vollkorn',Georgia,serif;color:#411330;margin:12px 0 6px">Цветы</h4>
+            <table class="sload-modal-table">
+                <thead><tr><th>Количество</th><th>Монобукет,<br>мин/шт</th><th>Из разного<br>цветка</th>
+                    <th>Только<br>лента</th><th>Упаковка</th><th></th></tr></thead>
+                <tbody>${flowers.map(row => `
+                    <tr data-tariff-row data-kind="flowers"
+                        data-from="${row.range_from}" data-to="${row.range_to}">
+                        <td>${row.range_from}–${row.range_to}</td>
+                        ${tariffField('mono', row.mono_minutes)}
+                        ${tariffField('mix', row.mix_minutes)}
+                        ${tariffField('ribbon', row.ribbon_minutes)}
+                        ${tariffField('package', row.package_minutes)}
+                        <td><button class="sload-btn sload-btn--ghost" data-save-tariff>Сохранить</button></td>
+                    </tr>`).join('')}</tbody>
+            </table>
+            <p class="sload-card__caption">Количество больше последнего диапазона считается по
+                последней строке: 500 цветов — это ошибка ввода, а не букет, и выдуманный тариф
+                был бы хуже крайнего известного.</p>
+
+            <h4 style="font-family:'Vollkorn',Georgia,serif;color:#411330;margin:16px 0 6px">Клубника</h4>
+            <table class="sload-modal-table">
+                <thead><tr><th></th><th>Минут<br>на 100 г</th><th>Упаковка<br>на весь букет</th><th></th></tr></thead>
+                <tbody>${berryRow('bouquet', 'Букет')}${berryRow('box', 'Коробочка')}</tbody>
+            </table>`;
     }
 
     function groupNormRows(groups) {

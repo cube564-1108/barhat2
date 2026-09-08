@@ -704,8 +704,68 @@ def save_time_norm():
 
     log_action(username, "salon_load_time_norm",
                f"{scope} {scope_id}: {data.get('role')} {minutes}")
+
+    # Норма меняет время задним числом: без пересчёта экран показывал бы
+    # старые минуты до следующего синка, и разметка выглядела бы бесполезной.
     date_from, date_to = _weights_window()
+    try:
+        storage.recalc_minutes_range(date_from, date_to)
+    except Exception as e:
+        logger.error(f"Пересчёт минут после правки нормы не удался: {e}")
+
     return success_response({"coverage": storage.norms_coverage(date_from, date_to)})
+
+
+@couriers_bp.route("/time-norms/tariffs", methods=["GET"])
+@section_required("salon_load")
+def get_tariffs():
+    """Тарифная сетка: время сборки от количества."""
+    flowers, berries = storage.load_tariffs()
+    return success_response({"flowers": flowers, "berries": berries})
+
+
+@couriers_bp.route("/time-norms/tariffs", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def save_tariff():
+    """
+    Правка тарифа:
+    {"kind": "flowers", "range_from": 3, "range_to": 17, "mono_minutes": 0.5,
+     "mix_minutes": 0.6, "ribbon_minutes": 5, "package_minutes": 10}
+    {"kind": "berries", "mode": "bouquet", "minutes_per_100g": 5, "package_minutes": 10}
+
+    Сетка лежит в базе именно ради этой ручки: в первой же присланной таблице
+    была опечатка, и правка тарифа не должна стоить деплоя.
+    """
+    data = request.get_json(silent=True) or {}
+    username = getattr(current_user, "username", None)
+
+    try:
+        if data.get("kind") == "berries":
+            storage.set_berry_tariff(data.get("mode"),
+                                     float(data.get("minutes_per_100g")),
+                                     float(data.get("package_minutes")), username)
+        elif data.get("kind") == "flowers":
+            mix = data.get("mix_minutes")
+            storage.set_flower_tariff(int(data.get("range_from")), int(data.get("range_to")),
+                                      float(data.get("mono_minutes")),
+                                      None if mix in (None, "") else float(mix),
+                                      float(data.get("ribbon_minutes")),
+                                      float(data.get("package_minutes")), username)
+        else:
+            return error_response("Неизвестный вид тарифа")
+    except (TypeError, ValueError) as e:
+        return error_response(str(e))
+
+    log_action(username, "salon_load_tariff", str(data)[:200])
+    date_from, date_to = _weights_window()
+    try:
+        storage.recalc_minutes_range(date_from, date_to)
+    except Exception as e:
+        logger.error(f"Пересчёт минут после правки тарифа не удался: {e}")
+
+    flowers, berries = storage.load_tariffs()
+    return success_response({"flowers": flowers, "berries": berries})
 
 
 @couriers_bp.route("/order-statuses", methods=["GET"])

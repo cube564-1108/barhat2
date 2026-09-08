@@ -447,6 +447,28 @@ def test_ui_contract():
         check("норма без заголовка AJAX отклоняется", response.status_code == 403,
               f"получено {response.status_code}")
 
+        # Тарифная сетка (Ф3): читается экраном и правится без деплоя
+        response = client.get("/api/couriers/time-norms/tariffs")
+        payload = (response.get_json() or {}).get("data", {})
+        check("тарифы отвечают", response.status_code == 200, f"получено {response.status_code}")
+        check("сетка по цветам отдана", len(payload.get("flowers") or []) == 5,
+              f"получено {payload.get('flowers')}")
+        check("тарифы по клубнике отданы", set(payload.get("berries") or {}) == {"bouquet", "box"},
+              f"получено {payload.get('berries')}")
+
+        response = client.post("/api/couriers/time-norms/tariffs", headers=headers,
+                               json={"kind": "berries", "mode": "bouquet",
+                                     "minutes_per_100g": 5, "package_minutes": 10})
+        check("тариф по клубнике сохраняется", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+
+        response = client.post("/api/couriers/time-norms/tariffs", headers=headers,
+                               json={"kind": "flowers", "range_from": 3, "range_to": 40,
+                                     "mono_minutes": 0.5, "mix_minutes": 0.6,
+                                     "ribbon_minutes": 5, "package_minutes": 10})
+        check("правка, ломающая сетку, отклоняется ручкой", response.status_code == 400,
+              f"получено {response.status_code}")
+
         # Галочка «Круглосуточно» шлёт именно 0 и 24.
         response = client.post("/api/salon-load/capacity/working-hours", headers=headers,
                                json={"store_id": STORE_ID, "open_hour": 0, "close_hour": 24,

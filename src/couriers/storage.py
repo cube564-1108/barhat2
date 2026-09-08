@@ -76,6 +76,21 @@ DETAIL_LIST_LIMIT = 200
 # ============================================================================
 ORDER_BASE_UNITS = 1.0
 
+# Тарифная сетка по умолчанию — таблица владельца от 2026-09-07.
+# (от, до, монобукет мин/шт, микс мин/шт, только лента, упаковка)
+DEFAULT_FLOWER_TARIFFS = [
+    (1, 2, 1.0, None, 5.0, 10.0),
+    (3, 17, 0.5, 0.6, 5.0, 10.0),
+    (18, 35, 0.4, 0.6, 5.0, 12.0),
+    (36, 51, 0.4, 0.6, 7.0, 15.0),
+    (52, 101, 0.4, 0.6, 7.0, 20.0),
+]
+# (режим, минут на 100 г, упаковка на весь букет)
+DEFAULT_BERRY_TARIFFS = [
+    ("bouquet", 5.0, 10.0),
+    ("box", 5.0, 2.0),
+]
+
 WEIGHT_BASIS_UNIT = "unit"    # вес × количество (штучный товар)
 WEIGHT_BASIS_LINE = "line"    # вес за позицию, сколько бы в ней ни было
 WEIGHT_BASIS_G100 = "g100"    # вес за каждые 100 единиц количества (граммы)
@@ -135,7 +150,6 @@ CITY_UTC_OFFSETS = {
 # такие салоны видны отдельным списком в настройках, а расчёт по ним не врёт —
 # он честно отказывается считать (см. salon_time.deadline_utc).
 DEFAULT_UTC_OFFSET = None
-
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -268,6 +282,17 @@ def init_couriers_tables() -> None:
         # нельзя ответить, помогло ли предупреждение о перегрузе: перенос заказа
         # виден только сравнением слота между прогонами синка.
         _add_column_if_missing(conn, "courier_orders", "slot_changed_at", "TEXT")
+
+        # Минуты сборки и их разбор (Ф3). Разбор хранится колонками, а не
+        # считается на показ: «почему здесь 48 минут» спрашивают у ячейки, а
+        # пересчитывать состав заказа на каждый клик по слоту — лишняя работа
+        # на медленном диске. items_without_norm > 0 означает, что заказ
+        # посчитан не полностью, и это должно быть видно на экране.
+        for column in ("minutes_total", "minutes_flowers", "minutes_packaging",
+                       "minutes_berries", "minutes_catalog"):
+            _add_column_if_missing(conn, "courier_orders", column, "REAL")
+        _add_column_if_missing(conn, "courier_orders", "items_without_norm",
+                               "INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_courier_orders_slot "
             "ON courier_orders(delivery_date, store_key, ready_hour)"
@@ -385,6 +410,54 @@ def init_couriers_tables() -> None:
         # каталог приходит извне, а решение «сколько это стоит по времени» —
         # наше, и перетереть его обновлением справочника нельзя.
         # ====================================================================
+        # ====================================================================
+        # Тарифная сетка: время сборки от количества (Ф3).
+        #
+        # В БАЗЕ, а не константами в коде: в первой же редакции таблицы,
+        # присланной владельцем, была опечатка (15 минут на 100 г клубники
+        # вместо 5), и правка тарифа не должна стоить деплоя.
+        #
+        # mix_minutes = NULL у диапазона 1–2: из одного-двух цветков «букета из
+        # разного цветка» не бывает, и выдумывать для него тариф нельзя.
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS load_tariff_flowers (
+                range_from INTEGER PRIMARY KEY,
+                range_to INTEGER NOT NULL,
+                mono_minutes REAL NOT NULL,
+                mix_minutes REAL,
+                ribbon_minutes REAL NOT NULL,
+                package_minutes REAL NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS load_tariff_berries (
+                mode TEXT PRIMARY KEY,
+                minutes_per_100g REAL NOT NULL,
+                package_minutes REAL NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        # Сидирование значениями владельца (таблица от 2026-09-07 с учётом
+        # исправления по клубнике). INSERT OR IGNORE: правку человека
+        # перезапуск воркера перетирать не должен.
+        for row in DEFAULT_FLOWER_TARIFFS:
+            conn.execute(
+                "INSERT OR IGNORE INTO load_tariff_flowers "
+                "(range_from, range_to, mono_minutes, mix_minutes, ribbon_minutes, package_minutes) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                row,
+            )
+        for row in DEFAULT_BERRY_TARIFFS:
+            conn.execute(
+                "INSERT OR IGNORE INTO load_tariff_berries "
+                "(mode, minutes_per_100g, package_minutes) VALUES (?, ?, ?)",
+                row,
+            )
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS load_time_norms (
                 scope TEXT NOT NULL,
@@ -766,6 +839,18 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
             )
 
         _recalc_weights(conn, date_from, date_to)
+
+    # Минуты считаются ПОСЛЕ закрытия транзакции записи: расчёт читает нормы и
+    # тарифы, то есть открывает своё соединение. Сделать это внутри — тот самый
+    # вложенный коннект поверх незакрытой записи, которым уже вешали базу.
+    #
+    # Ошибка расчёта не должна отменять уже записанные заказы: витрина важнее
+    # производной от неё величины, а минуты досчитаются следующим прогоном.
+    try:
+        recalc_minutes_range(date_from, date_to)
+    except Exception as e:
+        logger.error(f"Пересчёт минут за {date_from}—{date_to} не удался: {e}")
+
     return len(rows)
 
 
@@ -1400,6 +1485,172 @@ def norms_coverage(date_from: str, date_to: str,
     }
 
 
+# ============================================================================
+# Тарифы и расчёт минут
+# ============================================================================
+
+def load_tariffs() -> tuple:
+    """Тарифная сетка из базы: (цветы списком, клубника по режимам)."""
+    with get_db() as conn:
+        flowers = [dict(row) for row in conn.execute(
+            "SELECT range_from, range_to, mono_minutes, mix_minutes, "
+            "       ribbon_minutes, package_minutes "
+            "  FROM load_tariff_flowers ORDER BY range_from")]
+        berries = {row["mode"]: dict(row) for row in conn.execute(
+            "SELECT mode, minutes_per_100g, package_minutes FROM load_tariff_berries")}
+    return flowers, berries
+
+
+def set_flower_tariff(range_from: int, range_to: int, mono_minutes: float,
+                      mix_minutes: Optional[float], ribbon_minutes: float,
+                      package_minutes: float, username: Optional[str] = None) -> None:
+    """
+    Правка строки тарифа. Полнота сетки проверяется ДО записи.
+
+    Иначе дыра между диапазонами не выглядит ошибкой: заказ на 20 цветов
+    просто получит ноль минут, и загрузка окажется занижена молча.
+    """
+    from . import timing
+
+    candidate = {"range_from": int(range_from), "range_to": int(range_to),
+                 "mono_minutes": float(mono_minutes),
+                 "mix_minutes": None if mix_minutes is None else float(mix_minutes),
+                 "ribbon_minutes": float(ribbon_minutes),
+                 "package_minutes": float(package_minutes)}
+    for value in ("mono_minutes", "ribbon_minutes", "package_minutes"):
+        if candidate[value] < 0:
+            raise ValueError("Время не может быть отрицательным")
+
+    current, _ = load_tariffs()
+    merged = [row for row in current if row["range_from"] != candidate["range_from"]]
+    merged.append(candidate)
+    timing.validate_flower_tariffs(merged)
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO load_tariff_flowers (range_from, range_to, mono_minutes, mix_minutes,
+                                             ribbon_minutes, package_minutes, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(range_from) DO UPDATE SET
+                range_to = excluded.range_to, mono_minutes = excluded.mono_minutes,
+                mix_minutes = excluded.mix_minutes, ribbon_minutes = excluded.ribbon_minutes,
+                package_minutes = excluded.package_minutes,
+                updated_by = excluded.updated_by, updated_at = datetime('now')
+            """,
+            (candidate["range_from"], candidate["range_to"], candidate["mono_minutes"],
+             candidate["mix_minutes"], candidate["ribbon_minutes"],
+             candidate["package_minutes"], username),
+        )
+
+
+def set_berry_tariff(mode: str, minutes_per_100g: float, package_minutes: float,
+                     username: Optional[str] = None) -> None:
+    """Правка тарифа по клубнике: время на 100 г и упаковка."""
+    if mode not in BERRY_MODES:
+        raise ValueError(f"Неизвестный режим клубники: {mode}")
+    if minutes_per_100g < 0 or package_minutes < 0:
+        raise ValueError("Время не может быть отрицательным")
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO load_tariff_berries (mode, minutes_per_100g, package_minutes,
+                                             updated_by, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(mode) DO UPDATE SET
+                minutes_per_100g = excluded.minutes_per_100g,
+                package_minutes = excluded.package_minutes,
+                updated_by = excluded.updated_by, updated_at = datetime('now')
+            """,
+            (mode, float(minutes_per_100g), float(package_minutes), username),
+        )
+
+
+# Шаг пересчёта минут. Пачками по датам, а не одним проходом по всей витрине:
+# расчёт читает позиции окна в память, и один длинный проход держал бы
+# write-лок общей базы на всё время работы — тем же способом уже роняли сайт.
+MINUTES_CHUNK_DAYS = 30
+
+
+def recalc_minutes_range(date_from: str, date_to: str) -> Dict[str, int]:
+    """
+    Пересчитать минуты сборки за период.
+
+    Считается на Python, а не в SQL: диапазоны тарифа, моно/микс и две
+    упаковки в SQL нечитаемы, а этот код читают при каждом споре о цифре.
+
+    Тарифы и нормы читаются ОДИН раз на весь период: они одинаковы для всех
+    заказов, а перечитывать их на каждую пачку — лишние обращения к диску.
+    """
+    from . import timing
+
+    flowers, berries = load_tariffs()
+    timing.validate_flower_tariffs(flowers)   # битая сетка не должна обнулить витрину
+    norms = resolve_offer_norms()
+
+    start = datetime.strptime(date_from, "%Y-%m-%d").date()
+    end = datetime.strptime(date_to, "%Y-%m-%d").date()
+    orders_done = 0
+    incomplete = 0
+
+    while start <= end:
+        chunk_to = min(start + timedelta(days=MINUTES_CHUNK_DAYS - 1), end)
+        chunk = _recalc_minutes_chunk(start.isoformat(), chunk_to.isoformat(),
+                                      norms, flowers, berries)
+        orders_done += chunk["orders"]
+        incomplete += chunk["incomplete"]
+        start = chunk_to + timedelta(days=1)
+
+    return {"orders": orders_done, "incomplete": incomplete}
+
+
+def _recalc_minutes_chunk(date_from: str, date_to: str, norms, flowers, berries) -> Dict[str, int]:
+    """Одна пачка: чтение позиций, расчёт в памяти, одна запись."""
+    from . import timing
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT o.retailcrm_order_id AS order_id, i.offer_id, i.quantity
+              FROM courier_orders o
+         LEFT JOIN order_items i ON i.retailcrm_order_id = o.retailcrm_order_id
+                                AND i.delivery_date = o.delivery_date
+             WHERE o.delivery_date >= ? AND o.delivery_date <= ?
+            """,
+            (date_from, date_to),
+        ).fetchall()
+
+        by_order: Dict[int, List[Dict[str, Any]]] = {}
+        for row in rows:
+            items = by_order.setdefault(row["order_id"], [])
+            # LEFT JOIN даёт строку с пустой позицией у заказа без состава:
+            # это не ошибка, а заказ, заведённый одной суммой.
+            if row["offer_id"] is not None:
+                items.append({"offer_id": row["offer_id"], "quantity": row["quantity"]})
+
+        updates = []
+        incomplete = 0
+        for order_id, items in by_order.items():
+            result = timing.order_minutes(items, norms, flowers, berries)
+            if result["without_norm"]:
+                incomplete += 1
+            updates.append((result["total"], result["flowers"], result["packaging"],
+                            result["berries"], result["catalog"], result["without_norm"],
+                            order_id))
+
+        if updates:
+            conn.executemany(
+                "UPDATE courier_orders SET minutes_total = ?, minutes_flowers = ?, "
+                "       minutes_packaging = ?, minutes_berries = ?, minutes_catalog = ?, "
+                "       items_without_norm = ? "
+                " WHERE retailcrm_order_id = ?",
+                updates,
+            )
+
+    return {"orders": len(by_order), "incomplete": incomplete}
+
+
 def upsert_order_statuses(statuses: List[Dict[str, Any]]) -> None:
     """
     Обновить справочник статусов.
@@ -1608,7 +1859,6 @@ def set_site_timezone(code: str, utc_offset: Optional[int]) -> bool:
             (int(utc_offset) if utc_offset is not None else None, code),
         )
     return cursor.rowcount > 0
-
 
 
 # ============================================================================
