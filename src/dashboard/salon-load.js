@@ -873,7 +873,10 @@
 
     function roleLabel(role) {
         const found = NORM_ROLES.find(([code]) => code === (role || ''));
-        return found ? found[1] : role;
+        // Значение из базы экранируется даже здесь: роль пишется только после
+        // проверки по белому списку, но подпись уходит прямо в разметку, и
+        // полагаться на дальнюю проверку в другом файле не стоит.
+        return found ? found[1] : esc(role);
     }
 
     function normSource(norm) {

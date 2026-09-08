@@ -283,6 +283,32 @@ def init_couriers_tables() -> None:
         # виден только сравнением слота между прогонами синка.
         _add_column_if_missing(conn, "courier_orders", "slot_changed_at", "TEXT")
 
+        # ====================================================================
+        # Поля карточки курьера (модуль «Курьеры: доставка заказов», Фаза 2).
+        #
+        # Живут здесь, а не во второй витрине: это тот же самый заказ, и второй
+        # набор строк означал бы два расходящихся ответа на вопрос «что везём».
+        #
+        # ВНИМАНИЕ: тут персональные данные клиента (имя, телефон, адрес).
+        # Наружу они отдаются только курьеру, взявшему заказ, и только по его
+        # городу — отбор делает бэкенд, не фронт.
+        # ====================================================================
+        _add_column_if_missing(conn, "courier_orders", "address_text", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "delivery_time_from", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "delivery_time_to", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "recipient_name", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "recipient_phone", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "recipient_is_customer",
+                               "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "courier_orders", "do_not_contact_recipient",
+                               "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "courier_orders", "customer_name", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "customer_phone", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "manager_comment", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "customer_comment", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "note_text", "TEXT")
+        _add_column_if_missing(conn, "courier_orders", "ready_planned_at", "TEXT")
+
         # Минуты сборки и их разбор (Ф3). Разбор хранится колонками, а не
         # считается на показ: «почему здесь 48 минут» спрашивают у ячейки, а
         # пересчитывать состав заказа на каждый клик по слоту — лишняя работа
@@ -770,8 +796,14 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                 retailcrm_order_id, order_number, delivery_date, courier_id, courier_name,
                 net_cost, site_code, city, delivery_city, status,
                 total_summ, order_method, delivery_code,
-                store_key, ready_time, ready_hour, ready_source, synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                store_key, ready_time, ready_hour, ready_source,
+                address_text, delivery_time_from, delivery_time_to,
+                recipient_name, recipient_phone, recipient_is_customer,
+                do_not_contact_recipient, customer_name, customer_phone,
+                manager_comment, customer_comment, note_text, ready_planned_at,
+                synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             """,
             [
                 (
@@ -1155,16 +1187,22 @@ def _group_depths(groups: List[Dict[str, Any]]) -> Dict[int, int]:
     return depths
 
 
-def catalog_snapshot() -> Dict[str, Any]:
-    """Состояние каталога для /health: пустой каталог обнуляет нагрузку молча."""
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT (SELECT COUNT(*) FROM crm_product_groups)              AS groups,
-                   (SELECT COUNT(*) FROM crm_offers)                      AS offers,
-                   (SELECT COUNT(*) FROM crm_offers WHERE unit_code = 'g') AS offers_weighted,
-                   (SELECT COUNT(*) FROM crm_offer_groups)                AS links,
-                   (SELECT MAX(synced_at) FROM crm_offers)                AS synced_at
-        """).fetchone()
+def catalog_counts(conn) -> Dict[str, Any]:
+    """
+    Счётчики каталога ЧУЖИМ соединением.
+
+    Отдельная функция ради `health_snapshot`: он собирает диагностику одним
+    соединением, и вызвать оттуда `catalog_snapshot()` значило бы открыть
+    второе поверх первого — тот самый вложенный коннект, которым уже вешали
+    базу. Копия того же SQL разошлась бы с оригиналом при первой же правке.
+    """
+    row = conn.execute("""
+        SELECT (SELECT COUNT(*) FROM crm_product_groups)               AS groups,
+               (SELECT COUNT(*) FROM crm_offers)                       AS offers,
+               (SELECT COUNT(*) FROM crm_offers WHERE unit_code = 'g') AS offers_weighted,
+               (SELECT COUNT(*) FROM crm_offer_groups)                 AS links,
+               (SELECT MAX(synced_at) FROM crm_offers)                 AS synced_at
+    """).fetchone()
     return {
         "groups": row["groups"],
         "offers": row["offers"],
@@ -1172,6 +1210,12 @@ def catalog_snapshot() -> Dict[str, Any]:
         "links": row["links"],
         "synced_at": row["synced_at"],
     }
+
+
+def catalog_snapshot() -> Dict[str, Any]:
+    """Состояние каталога: пустой каталог обнуляет нагрузку молча."""
+    with get_db() as conn:
+        return catalog_counts(conn)
 
 
 def offer_units(offer_ids: Optional[List[int]] = None) -> Dict[int, str]:
@@ -1384,10 +1428,17 @@ def norm_catalog(date_from: str, date_to: str, only_missing: bool = False,
              WHERE {' AND '.join(where)}
           GROUP BY i.offer_id, o.unit_code
           ORDER BY orders DESC
-             LIMIT ?
             """,
-            (*params, limit),
+            params,
         ).fetchall()
+
+        # LIMIT в SQL нет намеренно. Норма товара определяется наследованием от
+        # групп, а его считает Python (resolve_offer_norms) — значит фильтр
+        # «без нормы» применяется ПОСЛЕ выборки. Обрежь мы список до фильтра —
+        # вкладка «Без нормы» пустела бы по мере разметки верхушки, хотя
+        # неразмеченные товары остались бы ниже отсечки, и человек считал бы
+        # работу законченной. Товаров за 60 дней порядка пятисот, читать их
+        # целиком дешевле, чем врать.
 
         offer_ids = [row["offer_id"] for row in rows]
         medians = _quantity_medians(conn, offer_ids, date_from, date_to) if offer_ids else {}
@@ -1411,6 +1462,8 @@ def norm_catalog(date_from: str, date_to: str, only_missing: bool = False,
             "in_catalog": row["unit_code"] is not None,
             "norm": norm,
         })
+        if len(result) >= limit:
+            break
     return result
 
 
@@ -2389,17 +2442,9 @@ def health_snapshot() -> Dict[str, Any]:
                 # обязано быть в диагностике. `offers_weighted` — сколько
                 # товаров меряется НЕ штуками: если это ноль, синк каталога
                 # либо не прошёл, либо пришёл без единиц измерения.
-                "catalog": {
-                    "groups": conn.execute(
-                        "SELECT COUNT(*) AS c FROM crm_product_groups").fetchone()["c"],
-                    "offers": conn.execute(
-                        "SELECT COUNT(*) AS c FROM crm_offers").fetchone()["c"],
-                    "offers_weighted": conn.execute(
-                        "SELECT COUNT(*) AS c FROM crm_offers WHERE unit_code = 'g'"
-                    ).fetchone()["c"],
-                    "synced_at": conn.execute(
-                        "SELECT MAX(synced_at) AS d FROM crm_offers").fetchone()["d"],
-                },
+                # Тем же соединением: второе поверх незакрытого — вложенный
+                # коннект, которым уже вешали базу.
+                "catalog": catalog_counts(conn),
                 "statuses_as_load": conn.execute(
                     "SELECT COUNT(*) AS c FROM order_statuses WHERE counts_as_load = 1"
                 ).fetchone()["c"],
