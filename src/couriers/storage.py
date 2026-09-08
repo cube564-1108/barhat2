@@ -119,6 +119,24 @@ PICKUP_DELIVERY_CODES = ("self-delivery", "3")
 # Код, а не название: названия в справочнике переименовывают.
 STREET_ORDER_METHOD = "offline"
 
+# Сид часового пояса салона по городу — только для новых записей справочника
+# (см. init_couriers_tables). Города берутся из CITY_ALIASES в retailcrm.py;
+# смещения постоянные, летнего времени в России нет с 2014 года.
+CITY_UTC_OFFSETS = {
+    "Новосибирск": 7,
+    "Томск": 7,
+    "Барнаул": 7,
+    "Екатеринбург": 5,
+    "Челябинск": 5,
+}
+
+# Пояс салона, для которого его не задали. Ставить «по умолчанию Москву» нельзя:
+# это тихо сдвинет сроки брони на 4 часа. Поэтому None означает «неизвестно», и
+# такие салоны видны отдельным списком в настройках, а расчёт по ним не врёт —
+# он честно отказывается считать (см. salon_time.deadline_utc).
+DEFAULT_UTC_OFFSET = None
+
+
 
 def _ensure_parent_dir(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
@@ -457,6 +475,33 @@ def init_couriers_tables() -> None:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+
+        # ====================================================================
+        # Часовой пояс салона — смещение от UTC в часах.
+        #
+        # Зачем: время в CRM (доставка, готовность) — это стенные часы салона,
+        # а в наших базах всё в UTC. Любое правило вида «за 60 минут до окна
+        # доставки» без пояса едет на два часа у половины сети: салоны живут
+        # в UTC+5 (Екатеринбург, Челябинск) и UTC+7 (Новосибирск, Томск,
+        # Барнаул). Замер 2026-09-08 это подтвердил на дисциплине статуса
+        # «Заказ готов»: без поправки цифры по двум поясам расходились вдвое.
+        #
+        # Почему число, а не идентификатор зоны: Россия не переходит на летнее
+        # время с 2014 года, смещения постоянные, а zoneinfo на Windows требует
+        # отдельного пакета tzdata — лишняя зависимость ради константы.
+        #
+        # Почему поле, а не словарь городов в коде: пояс уходит в расчёт срока
+        # брони, то есть ведёт себя как параметр внешнего мира (см. CLAUDE.md
+        # про НДС). Город здесь только СИДИРУЕТ значение при первом появлении
+        # салона; дальше правится руками и синком не перетирается.
+        # ====================================================================
+        _add_column_if_missing(conn, "courier_sites", "utc_offset", "INTEGER")
+        for city, offset in CITY_UTC_OFFSETS.items():
+            conn.execute(
+                "UPDATE courier_sites SET utc_offset = ? "
+                "WHERE city = ? AND utc_offset IS NULL",
+                (offset, city),
+            )
 
         # ====================================================================
         # Служебные ключи и лок синхронизации (паттерн moysklad/storage.py):
@@ -1501,6 +1546,69 @@ def get_site_cities() -> Dict[str, Optional[str]]:
     with get_db() as conn:
         rows = conn.execute("SELECT code, city FROM courier_sites").fetchall()
     return {row["code"]: row["city"] for row in rows}
+
+
+def get_site_offsets() -> Dict[str, Optional[int]]:
+    """
+    {код салона: смещение от UTC в часах}. None — пояс не задан.
+
+    Читается один раз на расчёт (сроки брони по пачке заказов), а не на каждый
+    заказ: /data сетевой, и запрос на строку стоит дороже самого расчёта.
+    """
+    with get_db() as conn:
+        rows = conn.execute("SELECT code, utc_offset FROM courier_sites").fetchall()
+    return {row["code"]: row["utc_offset"] for row in rows}
+
+
+def list_sites_timezones(only_missing: bool = False) -> List[Dict[str, Any]]:
+    """
+    Справочник салонов с поясом — для экрана настроек.
+
+    only_missing=True отдаёт те, где пояс не задан: именно они ломают сроки
+    брони, и человек должен видеть их отдельным коротким списком, а не искать
+    глазами по всему справочнику.
+    """
+    sql = """
+        SELECT code, name, city, utc_offset, updated_at
+        FROM courier_sites
+    """
+    if only_missing:
+        sql += " WHERE utc_offset IS NULL"
+    sql += " ORDER BY city IS NULL, city, name"
+
+    with get_db() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [
+        {
+            "code": row["code"],
+            "name": row["name"],
+            "city": row["city"],
+            "utc_offset": row["utc_offset"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+def set_site_timezone(code: str, utc_offset: Optional[int]) -> bool:
+    """
+    Задать пояс салона руками. None — снять значение («пояс неизвестен»).
+
+    Диапазон ограничен реальными поясами: опечатка «77» вместо «7» сдвинула бы
+    сроки брони на трое суток, и заметили бы это по сгоревшим броням, а не по
+    справочнику.
+    """
+    if utc_offset is not None and not (-12 <= int(utc_offset) <= 14):
+        raise ValueError(f"Недопустимое смещение UTC: {utc_offset}")
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE courier_sites SET utc_offset = ?, updated_at = datetime('now') "
+            "WHERE code = ?",
+            (int(utc_offset) if utc_offset is not None else None, code),
+        )
+    return cursor.rowcount > 0
+
 
 
 # ============================================================================
