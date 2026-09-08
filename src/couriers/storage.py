@@ -294,6 +294,64 @@ def init_couriers_tables() -> None:
         _add_column_if_missing(conn, "product_weights", "basis",
                                f"TEXT NOT NULL DEFAULT '{WEIGHT_BASIS_UNIT}'")
 
+        # ====================================================================
+        # Каталог номенклатуры RetailCRM (Ф1 плана «нагрузка в минутах»).
+        #
+        # Зачем он здесь, если модуль и так знает offer_id из позиций заказа:
+        #   - `unit_code` отвечает на вопрос «в чём меряется количество»
+        #     (`pc` у букета, `g` у клубники) — данными, а не разбором названия;
+        #   - группы дают способ задать норму времени пачкой, а не 456 полями
+        #     руками.
+        #
+        # Всё наполняется синком и руками не правится: норма времени лежит
+        # отдельно (Ф2), чтобы синк никогда не затирал решения человека.
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_product_groups (
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER,
+                name TEXT NOT NULL,
+                -- Глубина в дереве. Считается при синке вторым проходом и
+                -- хранится числом: правило «глубже значит точнее» иначе
+                -- превращалось бы в обход дерева на каждый расчёт.
+                depth INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # Торговое предложение — то, чем заказ ссылается на товар (offer.id).
+        # Ключ именно оффер, а не товар: в позиции заказа приходит он.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_offers (
+                offer_id INTEGER PRIMARY KEY,
+                product_id INTEGER,
+                article TEXT,
+                name TEXT,
+                unit_code TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crm_offers_unit ON crm_offers(unit_code)"
+        )
+
+        # Связь «оффер → группы». Товар состоит в среднем в 20 группах
+        # (витринные вперемешку с товарными), поэтому это именно многие-ко-многим,
+        # а не колонка group_id у оффера.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_offer_groups (
+                offer_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                PRIMARY KEY (offer_id, group_id)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crm_offer_groups_group "
+            "ON crm_offer_groups(group_id)"
+        )
+
         # Справочник статусов: counts_as_load решает, попадает ли заказ в
         # нагрузку. Сидируется из группы CRM (cancel → не нагрузка), дальше
         # правится руками и синком НЕ перетирается — какой статус считать
@@ -849,6 +907,129 @@ def weights_coverage(date_from: str, date_to: str,
         "products_total": row["products_total"] or 0,
         "order_base": ORDER_BASE_UNITS,
     }
+
+
+# ============================================================================
+# Каталог номенклатуры
+# ============================================================================
+
+class EmptyCatalogError(Exception):
+    """CRM вернула пустой каталог. Это ошибка синка, а не «товаров нет»."""
+
+
+def replace_catalog(groups: List[Dict[str, Any]], offers: List[Dict[str, Any]],
+                    offer_groups: List[tuple]) -> Dict[str, int]:
+    """
+    Переписать каталог целиком: группы, офферы и связи между ними.
+
+    Пересборка, а не UPSERT: товар мог сменить группы или уйти в архив, и при
+    UPSERT старые связи остались бы навсегда — норма времени бралась бы от
+    группы, в которой товара уже нет.
+
+    **Пустой ответ CRM ничего не перезаписывает.** Одна неудачная
+    синхронизация (сеть, тайм-аут, смена ключа) иначе обнулила бы каталог, а
+    следом — и нагрузку по всей сети: без единиц измерения и групп каждая
+    позиция уходит в «без нормы». Пустота — это исключение, а не ноль.
+
+    Всё в одной транзакции: между `DELETE` и `INSERT` не должно быть момента,
+    когда расчёт видит половину каталога.
+    """
+    if not groups or not offers:
+        raise EmptyCatalogError(
+            f"CRM вернула пустой каталог (групп: {len(groups)}, офферов: {len(offers)}) — "
+            f"каталог не тронут"
+        )
+
+    depths = _group_depths(groups)
+
+    with get_db() as conn:
+        conn.execute("DELETE FROM crm_offer_groups")
+        conn.execute("DELETE FROM crm_offers")
+        conn.execute("DELETE FROM crm_product_groups")
+
+        conn.executemany(
+            "INSERT INTO crm_product_groups (id, parent_id, name, depth, active, synced_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+            [(g["id"], g.get("parent_id"), g["name"], depths.get(g["id"], 0),
+              1 if g.get("active", True) else 0)
+             for g in groups],
+        )
+        conn.executemany(
+            "INSERT INTO crm_offers (offer_id, product_id, article, name, unit_code, active, synced_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+            [(o["offer_id"], o.get("product_id"), o.get("article"), o.get("name"),
+              o.get("unit_code"), 1 if o.get("active", True) else 0)
+             for o in offers],
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO crm_offer_groups (offer_id, group_id) VALUES (?, ?)",
+            offer_groups,
+        )
+
+    return {"groups": len(groups), "offers": len(offers), "links": len(offer_groups)}
+
+
+def _group_depths(groups: List[Dict[str, Any]]) -> Dict[int, int]:
+    """
+    Глубина каждой группы в дереве.
+
+    Вторым проходом, а не по ходу вставки: родитель может прийти в ответе
+    ПОСЛЕ ребёнка, и наивный расчёт «глубина родителя + 1» дал бы ноль у
+    половины дерева — а от глубины зависит, чья норма выиграет.
+
+    Битая ссылка на несуществующего родителя и цикл не роняют синк: такая
+    группа считается корневой. Уронить синк из-за кривого справочника — значит
+    остаться вообще без каталога.
+    """
+    parents = {g["id"]: g.get("parent_id") for g in groups}
+    depths: Dict[int, int] = {}
+
+    for group_id in parents:
+        depth = 0
+        seen = {group_id}
+        current = parents.get(group_id)
+        while current is not None and current in parents and current not in seen:
+            seen.add(current)
+            depth += 1
+            current = parents.get(current)
+        depths[group_id] = depth
+    return depths
+
+
+def catalog_snapshot() -> Dict[str, Any]:
+    """Состояние каталога для /health: пустой каталог обнуляет нагрузку молча."""
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT (SELECT COUNT(*) FROM crm_product_groups)              AS groups,
+                   (SELECT COUNT(*) FROM crm_offers)                      AS offers,
+                   (SELECT COUNT(*) FROM crm_offers WHERE unit_code = 'g') AS offers_weighted,
+                   (SELECT COUNT(*) FROM crm_offer_groups)                AS links,
+                   (SELECT MAX(synced_at) FROM crm_offers)                AS synced_at
+        """).fetchone()
+    return {
+        "groups": row["groups"],
+        "offers": row["offers"],
+        "offers_weighted": row["offers_weighted"],
+        "links": row["links"],
+        "synced_at": row["synced_at"],
+    }
+
+
+def offer_units(offer_ids: Optional[List[int]] = None) -> Dict[int, str]:
+    """Единица измерения по офферам. Пусто — каталог ещё не синкали."""
+    with get_db() as conn:
+        if offer_ids:
+            placeholders = ",".join("?" * len(offer_ids))
+            rows = conn.execute(
+                f"SELECT offer_id, unit_code FROM crm_offers "
+                f"WHERE unit_code IS NOT NULL AND offer_id IN ({placeholders})",
+                offer_ids,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT offer_id, unit_code FROM crm_offers WHERE unit_code IS NOT NULL"
+            ).fetchall()
+    return {row["offer_id"]: row["unit_code"] for row in rows}
 
 
 def upsert_order_statuses(statuses: List[Dict[str, Any]]) -> None:
@@ -1522,6 +1703,22 @@ def health_snapshot() -> Dict[str, Any]:
                 ).fetchone()["c"],
                 "weights_set": conn.execute(
                     "SELECT COUNT(*) AS c FROM product_weights").fetchone()["c"],
+                # Каталог номенклатуры. Пустой каталог не виден по нагрузке
+                # никак — она просто станет ниже, — поэтому его состояние
+                # обязано быть в диагностике. `offers_weighted` — сколько
+                # товаров меряется НЕ штуками: если это ноль, синк каталога
+                # либо не прошёл, либо пришёл без единиц измерения.
+                "catalog": {
+                    "groups": conn.execute(
+                        "SELECT COUNT(*) AS c FROM crm_product_groups").fetchone()["c"],
+                    "offers": conn.execute(
+                        "SELECT COUNT(*) AS c FROM crm_offers").fetchone()["c"],
+                    "offers_weighted": conn.execute(
+                        "SELECT COUNT(*) AS c FROM crm_offers WHERE unit_code = 'g'"
+                    ).fetchone()["c"],
+                    "synced_at": conn.execute(
+                        "SELECT MAX(synced_at) AS d FROM crm_offers").fetchone()["d"],
+                },
                 "statuses_as_load": conn.execute(
                     "SELECT COUNT(*) AS c FROM order_statuses WHERE counts_as_load = 1"
                 ).fetchone()["c"],

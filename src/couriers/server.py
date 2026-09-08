@@ -143,7 +143,35 @@ def _sync_chunks(date_from: str, date_to: str) -> List[tuple]:
     )
 
 
-def _sync_range(date_from: str, date_to: str) -> int:
+def _sync_catalog(client, deadline: float) -> None:
+    """
+    Каталог номенклатуры: группы, офферы, единицы измерения.
+
+    Только в глубоком прогоне (раз в сутки): каталог меняется медленно, а
+    6 запросов на каждый получасовой тик — это лишние обращения к CRM и лишнее
+    время воркера.
+
+    Ошибка здесь НЕ роняет синк заказов: заказы важнее каталога, а без свежего
+    каталога расчёт отработает по вчерашнему. Пустой ответ каталог не
+    перезаписывает — это проверяет `replace_catalog`.
+    """
+    try:
+        groups = client.get_product_groups()
+        offers = []
+        links = []
+        for page in client.iter_products(deadline=deadline):
+            page_offers, page_links = retailcrm.parse_catalog_page(page)
+            offers.extend(page_offers)
+            links.extend(page_links)
+
+        result = storage.replace_catalog(groups, offers, links)
+        logger.info(f"Каталог RetailCRM: групп {result['groups']}, "
+                    f"офферов {result['offers']}, связей {result['links']}")
+    except Exception as e:
+        logger.error(f"Синхронизация каталога не удалась (заказы это не затрагивает): {e}")
+
+
+def _sync_range(date_from: str, date_to: str, deep: bool = False) -> int:
     """
     Пересобрать данные за период. Возвращает число записанных заказов.
 
@@ -157,6 +185,8 @@ def _sync_range(date_from: str, date_to: str) -> int:
     storage.upsert_sites(client.get_sites())
     storage.upsert_delivery_types(client.get_delivery_types())
     storage.upsert_order_statuses(client.get_statuses())
+    if deep:
+        _sync_catalog(client, deadline)
     site_cities = storage.get_site_cities()
 
     total = 0
@@ -251,7 +281,7 @@ def _run_sync(date_from: str, date_to: str, deep: bool = False) -> bool:
         return False
 
     try:
-        _sync_range(date_from, date_to)
+        _sync_range(date_from, date_to, deep=deep)
         if deep:
             storage.set_sync_state(DEEP_SYNC_AT_KEY, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
     except Exception:

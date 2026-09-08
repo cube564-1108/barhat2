@@ -192,6 +192,74 @@ class CourierOrdersClient:
             for code, item in (data.get("statuses") or {}).items()
         ]
 
+    # ------------------------------------------------------------------
+    # Каталог номенклатуры (модель нагрузки в минутах, план 2026-09-07)
+    # ------------------------------------------------------------------
+
+    def get_product_groups(self) -> List[Dict[str, Any]]:
+        """
+        Дерево групп товаров: по нему задаётся норма времени сборки.
+
+        Групп 98 (разведка 2026-09-07), помещаются в одну страницу. Дерево
+        нужно целиком, включая витринные группы («Женщине», «Акции»): у товара
+        их в среднем 20, и отличить товарную от витринной можно только тем, что
+        человек разметил первую, а вторую — нет.
+        """
+        data = self._get("api/v5/store/product-groups", {"limit": PAGE_LIMIT})
+        if not data.get("success", False):
+            raise RetailCRMError(f"RetailCRM отклонил запрос групп: {data.get('errorMsg')}")
+        return [
+            {
+                "id": item.get("id"),
+                "parent_id": item.get("parentId"),
+                "name": item.get("name") or f"Группа {item.get('id')}",
+                "active": bool(item.get("active", True)),
+            }
+            for item in (data.get("productGroup") or [])
+            if item.get("id") is not None
+        ]
+
+    def iter_products(self, deadline: Optional[float] = None) -> Iterator[List[Dict[str, Any]]]:
+        """
+        Страницы каталога: торговые предложения с единицей измерения и группами.
+
+        `offer.unit` — то, ради чего это всё: количество в позиции заказа
+        меряется штуками у букета и граммами у клубники, и это приходит
+        данными, а не выводится из названия (CLAUDE.md, «количество из внешней
+        системы — не безразмерное число»).
+
+        Архивные товары НЕ отфильтровываются: позиция старого заказа ссылается
+        на offer, которого уже нет в активных, и без него заказ ушёл бы в
+        «без нормы» по причине, которую человек не может исправить (К1).
+
+        `limit` принимает только 20, 50 или 100 — на других значениях CRM
+        отвечает 400 (проверено разведкой 2026-09-07).
+        """
+        page = 1
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RetailCRMError(
+                    f"Истёк бюджет времени на выгрузку каталога "
+                    f"(страниц получено: {page - 1})"
+                )
+
+            data = self._get("api/v5/store/products",
+                             {"limit": PAGE_LIMIT, "page": page})
+            if not data.get("success", False):
+                raise RetailCRMError(f"RetailCRM отклонил запрос товаров: {data.get('errorMsg')}")
+
+            products = data.get("products") or []
+            if not products:
+                return
+
+            yield products
+
+            if len(products) < PAGE_LIMIT:
+                return
+
+            page += 1
+            time.sleep(PAGE_PAUSE_SECONDS)
+
     def iter_orders_by_delivery_date(
         self,
         date_from: str,
@@ -250,6 +318,42 @@ class CourierOrdersClient:
 
             page += 1
             time.sleep(PAGE_PAUSE_SECONDS)
+
+
+def parse_catalog_page(products: List[Dict[str, Any]]) -> tuple:
+    """
+    Страница каталога → (офферы, связи с группами).
+
+    Ключ — `offer.id`: именно им ссылается позиция заказа. У товара офферов
+    может быть несколько, и группы у них общие — товарные, а не оферные.
+
+    `unit` берётся с оффера: единица измерения — свойство предложения, и
+    именно она отвечает, штуки в позиции или граммы.
+    """
+    offers = []
+    links = []
+    for product in products:
+        product_id = product.get("id")
+        group_ids = [g.get("id") for g in (product.get("groups") or [])
+                     if isinstance(g, dict) and g.get("id") is not None]
+
+        for offer in (product.get("offers") or []):
+            offer_id = offer.get("id")
+            if offer_id is None:
+                continue
+            unit = offer.get("unit") or {}
+            offers.append({
+                "offer_id": int(offer_id),
+                "product_id": product_id,
+                # Артикул оффера, а при его отсутствии — товара: у части
+                # позиций он заполнен только на одном из уровней.
+                "article": offer.get("article") or product.get("article"),
+                "name": offer.get("name") or product.get("name"),
+                "unit_code": unit.get("code"),
+                "active": bool(offer.get("active", True)),
+            })
+            links.extend((int(offer_id), gid) for gid in group_ids)
+    return offers, links
 
 
 def parse_time_value(value: Any) -> Optional[str]:
