@@ -183,6 +183,7 @@
             <div class="sload-header__actions">
                 ${state.isAdmin ? `
                     <button class="sload-btn sload-btn--onhead" data-open="capacity">Ёмкость салонов</button>
+                    <button class="sload-btn sload-btn--onhead" data-open="norms">Нормы времени</button>
                     <button class="sload-btn sload-btn--onhead" data-open="weights">Надбавки</button>
                     <button class="sload-btn sload-btn--onhead" data-open="statuses">Статусы заказов</button>` : ''}
             </div>
@@ -853,6 +854,196 @@
         });
     }
 
+    // ------------------------------------------------------------------
+    // Нормы времени сборки (Ф2 плана «нагрузка в минутах»)
+    // ------------------------------------------------------------------
+
+    // Роль позиции в расчёте. Подписи — не жаргон: человек размечает по ним
+    // сотни товаров, и «catalog» ему ни о чём не говорит.
+    const NORM_ROLES = [
+        ['', 'не задана'],
+        ['catalog', 'готовый товар'],
+        ['flower', 'цветок (компонент)'],
+        ['berry', 'клубника на вес'],
+        ['packaging', 'упаковка'],
+        ['none', 'не создаёт нагрузки']
+    ];
+    const NORM_BASES = [['unit', 'за штуку'], ['line', 'за позицию']];
+    const BERRY_MODES = [['', '—'], ['bouquet', 'букет'], ['box', 'коробочка']];
+
+    function roleLabel(role) {
+        const found = NORM_ROLES.find(([code]) => code === (role || ''));
+        return found ? found[1] : role;
+    }
+
+    function normSource(norm) {
+        if (!norm) return '<span class="sload-badge sload-badge--warn">нет нормы</span>';
+        if (norm.source === 'offer') return 'задано вручную';
+        return `группа «${esc(norm.source_name || norm.source_id)}»`;
+    }
+
+    async function openTimeNorms(tab) {
+        const active = tab || 'groups';
+        let groups, offers;
+        try {
+            if (active === 'groups') {
+                groups = await api('/api/couriers/time-norms/groups');
+            } else {
+                offers = await api('/api/couriers/time-norms/offers' +
+                    (active === 'missing' ? '?only_missing=1' : ''));
+            }
+        } catch (error) {
+            toast('Не удалось загрузить нормы: ' + error.message, 'error');
+            return;
+        }
+
+        const coverage = offers ? (offers.meta || {}).coverage : null;
+        const catalog = groups ? (groups.meta || {}).catalog : null;
+
+        const body = `
+            <p class="sload-card__caption">Норма — сколько минут занимает сборка. Задавайте её
+                группе номенклатуры: одна запись закрывает десятки товаров. Время у отдельного
+                товара перебивает групповое. Компонентам («цветок», «клубника на вес») минуты
+                не нужны — их время считается по тарифам от количества.</p>
+
+            <div class="sload-tabs" style="margin-bottom:12px">
+                <button class="sload-tab ${active === 'groups' ? 'sload-tab--active' : ''}"
+                    data-norm-tab="groups">Группы</button>
+                <button class="sload-tab ${active === 'offers' ? 'sload-tab--active' : ''}"
+                    data-norm-tab="offers">Товары</button>
+                <button class="sload-tab ${active === 'missing' ? 'sload-tab--active' : ''}"
+                    data-norm-tab="missing">Без нормы</button>
+            </div>
+
+            ${catalog && !catalog.offers ? note('bad', 'Каталог номенклатуры пуст',
+                'Группы и единицы измерения ещё не загружены из CRM — размечать нечего. ' +
+                'Каталог обновляется ночным прогоном синхронизации.') : ''}
+
+            ${coverage && coverage.orders_incomplete ? note('warn',
+                `${coverage.orders_incomplete} из ${coverage.orders} ` +
+                `${plural(coverage.orders, 'заказа', 'заказов', 'заказов')} посчитаны не полностью`,
+                `Это ${num(coverage.share)}% заказов за 60 дней: в них есть позиции без нормы, ` +
+                `и загрузка по ним занижена. Товаров без нормы: ${coverage.offers_without_norm} ` +
+                `из ${coverage.offers_total}.`) : ''}
+
+            <div id="sloadNormRows">${
+                active === 'groups' ? groupNormRows(groups.data || [])
+                                    : offerNormRows(offers.data || [])}</div>`;
+
+        const overlay = modal('Нормы времени сборки', body,
+            '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
+
+        overlay.addEventListener('click', async e => {
+            const tabButton = e.target.closest('[data-norm-tab]');
+            if (tabButton) {
+                overlay.remove();
+                openTimeNorms(tabButton.dataset.normTab);
+                return;
+            }
+
+            const save = e.target.closest('[data-save-norm]');
+            if (!save) return;
+
+            const row = save.closest('[data-norm-row]');
+            const role = row.querySelector('[data-norm-role]').value;
+            const minutesRaw = row.querySelector('[data-norm-minutes]');
+            const basisSelect = row.querySelector('[data-norm-basis]');
+            const berrySelect = row.querySelector('[data-norm-berry]');
+
+            const payload = {
+                scope: row.dataset.scope,
+                scope_id: Number(row.dataset.scopeId),
+                role: role || null,
+                minutes: minutesRaw && minutesRaw.value !== '' ? Number(minutesRaw.value) : null,
+                basis: basisSelect ? basisSelect.value : null,
+                berry_mode: berrySelect && berrySelect.value ? berrySelect.value : null
+            };
+
+            save.disabled = true;
+            try {
+                await api('/api/couriers/time-norms', postOptions(payload));
+                toast('Норма сохранена', 'success');
+                overlay.remove();
+                openTimeNorms(active);
+            } catch (error) {
+                toast('Не удалось сохранить: ' + error.message, 'error');
+                save.disabled = false;
+            }
+        });
+    }
+
+    // Каждый контрол — своя колонка таблицы: иначе строки разъезжаются и
+    // сравнить нормы соседних групп глазами невозможно.
+    //
+    // `own` — норма, заданная именно этой записи (у товара это его
+    // собственная строка, а не унаследованная от группы): подставлять в поля
+    // групповое значение нельзя, иначе первое же «Сохранить» превратит
+    // наследование в жёстко прописанное исключение.
+    function normCells(own) {
+        const minutes = own && own.minutes !== null && own.minutes !== undefined
+            ? esc(own.minutes) : '';
+        return `
+            <td><select class="sload-select" data-norm-role>
+                ${NORM_ROLES.map(([code, label]) =>
+                    `<option value="${code}"${(own && own.role) === code ? ' selected' : ''}>${label}</option>`).join('')}
+            </select></td>
+            <td><input type="number" min="0" step="0.5" class="sload-weight-input"
+                data-norm-minutes value="${minutes}" placeholder="мин"></td>
+            <td><select class="sload-select" data-norm-basis>
+                ${NORM_BASES.map(([code, label]) =>
+                    `<option value="${code}"${(own && own.basis) === code ? ' selected' : ''}>${label}</option>`).join('')}
+            </select></td>
+            <td><select class="sload-select" data-norm-berry>
+                ${BERRY_MODES.map(([code, label]) =>
+                    `<option value="${code}"${(own && own.berry_mode || '') === code ? ' selected' : ''}>${label}</option>`).join('')}
+            </select></td>
+            <td><button class="sload-btn sload-btn--ghost" data-save-norm>Сохранить</button></td>`;
+    }
+
+    function groupNormRows(groups) {
+        if (!groups.length) {
+            return '<div class="sload-empty"><p>Групп номенклатуры нет — каталог ещё не загружен из CRM.</p></div>';
+        }
+        return `<table class="sload-modal-table">
+            <thead><tr><th>Группа</th><th>Товаров</th><th>Роль</th><th>Минут</th>
+                <th>За что</th><th>Клубника</th><th></th></tr></thead>
+            <tbody>${groups.map(group => `
+                <tr data-norm-row data-scope="group" data-scope-id="${group.id}">
+                    <td style="padding-left:${group.depth * 16}px">${esc(group.name)}</td>
+                    <td>${group.offers}</td>
+                    ${normCells(group)}
+                </tr>`).join('')}</tbody>
+        </table>`;
+    }
+
+    function offerNormRows(offers) {
+        if (!offers.length) {
+            return '<div class="sload-empty"><p>Товаров нет — либо всё размечено, либо за 60 дней их не заказывали.</p></div>';
+        }
+        return `<table class="sload-modal-table">
+            <thead><tr><th>Товар</th><th>Заказов</th><th>Кол-во<br>в позиции</th><th>Ед.</th>
+                <th>Норма</th><th>Роль</th><th>Минут</th><th>За что</th><th>Клубника</th><th></th></tr></thead>
+            <tbody>${offers.map(item => {
+                // В полях — только собственная норма товара. Унаследованная от
+                // группы показана словами в колонке «Норма».
+                const own = item.norm && item.norm.source === 'offer' ? item.norm : null;
+                return `
+                <tr data-norm-row data-scope="offer" data-scope-id="${item.offer_id}">
+                    <td>${esc(item.product_name || ('Товар ' + item.offer_id))}
+                        ${item.in_catalog ? '' :
+                            '<br><span class="sload-badge sload-badge--warn">нет в каталоге</span>'}</td>
+                    <td>${item.orders}</td>
+                    <td>${item.median_quantity === null || item.median_quantity === undefined
+                        ? '—' : num(item.median_quantity)}</td>
+                    <td>${esc(item.unit_code || '—')}</td>
+                    <td>${normSource(item.norm)}${item.norm && item.norm.role
+                        ? `<br><span class="sload-extra__label">${roleLabel(item.norm.role)}</span>` : ''}</td>
+                    ${normCells(own)}
+                </tr>`;
+            }).join('')}</tbody>
+        </table>`;
+    }
+
     // Базы начисления надбавки. Порядок — от самой частой к редкой.
     const WEIGHT_BASES = [
         ['unit', 'за штуку'],
@@ -972,6 +1163,7 @@
         const open = e.target.closest('[data-open]');
         if (open) {
             if (open.dataset.open === 'capacity') openCapacity();
+            if (open.dataset.open === 'norms') openTimeNorms('groups');
             if (open.dataset.open === 'weights') openWeights(true);
             if (open.dataset.open === 'statuses') openStatuses();
             return;

@@ -626,6 +626,88 @@ def save_weights():
                              "coverage": storage.weights_coverage(date_from, date_to)})
 
 
+# ============================================================================
+# Нормы времени сборки (Ф2 плана «нагрузка в минутах»)
+# ============================================================================
+
+@couriers_bp.route("/time-norms/groups", methods=["GET"])
+@section_required("salon_load")
+def get_group_norms():
+    """Дерево групп номенклатуры с нормами: основной экран разметки."""
+    return success_response(storage.list_group_norms(), meta={
+        "roles": list(storage.ROLES),
+        "bases": list(storage.BASES),
+        "berry_modes": list(storage.BERRY_MODES),
+        "catalog": storage.catalog_snapshot(),
+    })
+
+
+@couriers_bp.route("/time-norms/offers", methods=["GET"])
+@section_required("salon_load")
+def get_offer_norms():
+    """
+    Товары из заказов за 60 дней: норма, её источник и факты о товаре.
+
+    only_missing=1 — вкладка «без нормы», отсортированная по числу заказов:
+    размечать нужно начиная с того, что реально влияет на нагрузку.
+    """
+    only_missing = request.args.get("only_missing") in ("1", "true")
+    search = (request.args.get("q") or "").strip() or None
+    date_from, date_to = _weights_window()
+
+    return success_response(
+        storage.norm_catalog(date_from, date_to, only_missing=only_missing, search=search),
+        meta={
+            "period": {"from": date_from, "to": date_to},
+            "coverage": storage.norms_coverage(date_from, date_to),
+        },
+    )
+
+
+@couriers_bp.route("/time-norms", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def save_time_norm():
+    """
+    Задать норму группе или товару:
+    {"scope": "group", "scope_id": 5876, "role": "catalog", "minutes": 12,
+     "basis": "unit", "berry_mode": null}
+
+    role=null снимает норму — запись удаляется целиком, и товар возвращается
+    в «без нормы». Ноль минут снятием НЕ считается: «не размечено» и
+    «размечено как бесплатное» — разные вещи, и счётчик занижения обязан их
+    различать.
+    """
+    data = request.get_json(silent=True) or {}
+    scope = data.get("scope")
+    if scope not in storage.SCOPES:
+        return error_response(f"Неизвестная область нормы: {scope}")
+    try:
+        scope_id = int(data.get("scope_id"))
+    except (TypeError, ValueError):
+        return error_response("Не передан scope_id")
+
+    minutes = data.get("minutes")
+    if minutes is not None:
+        try:
+            minutes = float(minutes)
+        except (TypeError, ValueError):
+            return error_response(f"Некорректное время: {data.get('minutes')}")
+
+    username = getattr(current_user, "username", None)
+    try:
+        storage.set_time_norm(scope, scope_id, role=data.get("role"), minutes=minutes,
+                              basis=data.get("basis"), berry_mode=data.get("berry_mode"),
+                              username=username)
+    except ValueError as e:
+        return error_response(str(e))
+
+    log_action(username, "salon_load_time_norm",
+               f"{scope} {scope_id}: {data.get('role')} {minutes}")
+    date_from, date_to = _weights_window()
+    return success_response({"coverage": storage.norms_coverage(date_from, date_to)})
+
+
 @couriers_bp.route("/order-statuses", methods=["GET"])
 @section_required("salon_load")
 def get_order_statuses():

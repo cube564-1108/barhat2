@@ -366,6 +366,26 @@ def test_ui_contract():
                   all(field in row for row in payload.get("data", [])),
                   f"есть: {sorted((payload.get('data') or [{}])[0])}")
 
+        # Нормы времени (Ф2). Экран читает дерево групп и товары с фактами.
+        response = client.get("/api/couriers/time-norms/groups")
+        payload = response.get_json() or {}
+        check("дерево групп отвечает", response.status_code == 200,
+              f"получено {response.status_code}")
+        for field in ("roles", "bases", "berry_modes", "catalog"):
+            check(f"мета групп отдаёт {field}", field in (payload.get("meta") or {}),
+                  f"есть: {sorted((payload.get('meta') or {}))}")
+
+        response = client.get("/api/couriers/time-norms/offers?only_missing=1")
+        payload = response.get_json() or {}
+        check("товары с нормами отвечают", response.status_code == 200,
+              f"получено {response.status_code}")
+        check("в мета есть покрытие разметки",
+              "coverage" in (payload.get("meta") or {}), f"получено {payload.get('meta')}")
+        for field in ("offer_id", "orders", "median_quantity", "unit_code", "norm", "in_catalog"):
+            check(f"строка товара отдаёт {field}",
+                  all(field in row for row in payload.get("data", [])),
+                  f"есть: {sorted((payload.get('data') or [{}])[0])}")
+
         response = client.get("/api/couriers/order-statuses")
         payload = response.get_json() or {}
         check("справочник статусов отвечает", response.status_code == 200,
@@ -402,6 +422,29 @@ def test_ui_contract():
         response = client.post("/api/couriers/weights", headers=headers,
                                json={"weights": {"1": {"weight": 2, "basis": "кг"}}})
         check("неизвестная база начисления отклоняется ручкой", response.status_code == 400,
+              f"получено {response.status_code}")
+
+        # Нормы времени: запись (Ф2)
+        response = client.post("/api/couriers/time-norms", headers=headers,
+                               json={"scope": "group", "scope_id": 1,
+                                     "role": "catalog", "minutes": 12, "basis": "unit"})
+        check("норма группы сохраняется", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+
+        response = client.post("/api/couriers/time-norms", headers=headers,
+                               json={"scope": "group", "scope_id": 1,
+                                     "role": "catalog", "minutes": None})
+        check("готовый товар без времени отклоняется ручкой", response.status_code == 400,
+              f"получено {response.status_code}")
+
+        response = client.post("/api/couriers/time-norms", headers=headers,
+                               json={"scope": "выдумка", "scope_id": 1, "role": "catalog"})
+        check("неизвестная область нормы отклоняется ручкой", response.status_code == 400,
+              f"получено {response.status_code}")
+
+        response = client.post("/api/couriers/time-norms",
+                               json={"scope": "group", "scope_id": 1, "role": None})
+        check("норма без заголовка AJAX отклоняется", response.status_code == 403,
               f"получено {response.status_code}")
 
         # Галочка «Круглосуточно» шлёт именно 0 и 24.

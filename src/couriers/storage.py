@@ -352,6 +352,35 @@ def init_couriers_tables() -> None:
             "ON crm_offer_groups(group_id)"
         )
 
+        # ====================================================================
+        # Нормы времени сборки (Ф2 плана «нагрузка в минутах»).
+        #
+        # Ключ составной: `scope` = 'group' или 'offer'. Норма на группу
+        # закрывает пачку товаров (26 записей вместо 456), норма на товар —
+        # точечное исключение, и она перебивает групповую.
+        #
+        # Роль и минуты — РАЗНЫЕ поля. У компонента-цветка своих минут нет:
+        # его время даёт тарифная сетка по количеству, а роль лишь говорит,
+        # в какой счётчик его класть.
+        #
+        # Таблица правится только человеком. Синк её не трогает никогда:
+        # каталог приходит извне, а решение «сколько это стоит по времени» —
+        # наше, и перетереть его обновлением справочника нельзя.
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS load_time_norms (
+                scope TEXT NOT NULL,
+                scope_id INTEGER NOT NULL,
+                role TEXT,
+                minutes REAL,
+                basis TEXT,
+                berry_mode TEXT,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (scope, scope_id)
+            )
+        """)
+
         # Справочник статусов: counts_as_load решает, попадает ли заказ в
         # нагрузку. Сидируется из группы CRM (cancel → не нагрузка), дальше
         # правится руками и синком НЕ перетирается — какой статус считать
@@ -1030,6 +1059,300 @@ def offer_units(offer_ids: Optional[List[int]] = None) -> Dict[int, str]:
                 "SELECT offer_id, unit_code FROM crm_offers WHERE unit_code IS NOT NULL"
             ).fetchall()
     return {row["offer_id"]: row["unit_code"] for row in rows}
+
+
+# ============================================================================
+# Нормы времени сборки
+# ============================================================================
+
+# Роль позиции в расчёте. Не «тип товара вообще», а именно роль в формуле:
+# один и тот же цветок бывает и компонентом сборного букета, и готовым
+# монобукетом — решает разметка, а не природа вещи.
+ROLE_CATALOG = "catalog"      # готовый товар: время из нормы
+ROLE_FLOWER = "flower"        # компонент-цветок: в счётчик цветов, время даёт тариф
+ROLE_BERRY = "berry"          # весовой компонент: время по тарифу за 100 г
+ROLE_PACKAGING = "packaging"  # упаковка: включает режим «Упаковка» вместо «Лента»
+ROLE_NONE = "none"            # не создаёт нагрузки (открытки, топперы, шапки)
+ROLES = (ROLE_CATALOG, ROLE_FLOWER, ROLE_BERRY, ROLE_PACKAGING, ROLE_NONE)
+
+# База начисления для готового товара. Нужна и здесь, а не только у надбавок:
+# «Секрет Бархата» заведён в граммах и заказывается штуками (267 заказов,
+# медиана количества — 1). Умножение его времени на количество даёт ошибку в
+# сотни раз — ровно ту, ради которой модель и переделывается.
+BASIS_UNIT = "unit"   # время × количество
+BASIS_LINE = "line"   # время один раз за позицию, сколько бы в ней ни было
+BASES = (BASIS_UNIT, BASIS_LINE)
+
+# Режим клубники: от него зависит только упаковка (10 мин против 2).
+BERRY_BOUQUET = "bouquet"
+BERRY_BOX = "box"
+BERRY_MODES = (BERRY_BOUQUET, BERRY_BOX)
+
+SCOPE_GROUP = "group"
+SCOPE_OFFER = "offer"
+SCOPES = (SCOPE_GROUP, SCOPE_OFFER)
+
+
+def set_time_norm(scope: str, scope_id: int, role: Optional[str] = None,
+                  minutes: Optional[float] = None, basis: Optional[str] = None,
+                  berry_mode: Optional[str] = None,
+                  username: Optional[str] = None) -> None:
+    """
+    Задать норму группе или товару. role=None удаляет запись целиком.
+
+    Ноль минут — законное значение (`role='none'` у открытки), поэтому «нормы
+    нет» выражается ОТСУТСТВИЕМ строки, а не нулём: иначе «не размечено» и
+    «размечено как бесплатное» станут одним и тем же, и счётчик занижения
+    замолчит.
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"Неизвестная область нормы: {scope}")
+
+    if role is None:
+        with get_db() as conn:
+            conn.execute("DELETE FROM load_time_norms WHERE scope = ? AND scope_id = ?",
+                         (scope, int(scope_id)))
+        return
+
+    if role not in ROLES:
+        raise ValueError(f"Неизвестная роль: {role}")
+    if minutes is not None and minutes < 0:
+        raise ValueError("Время не может быть отрицательным")
+    if role == ROLE_CATALOG and minutes is None:
+        raise ValueError("У готового товара должно быть задано время")
+    if basis is not None and basis not in BASES:
+        raise ValueError(f"Неизвестная база начисления: {basis}")
+    if berry_mode is not None and berry_mode not in BERRY_MODES:
+        raise ValueError(f"Неизвестный режим клубники: {berry_mode}")
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO load_time_norms
+                   (scope, scope_id, role, minutes, basis, berry_mode, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(scope, scope_id) DO UPDATE SET
+                role = excluded.role, minutes = excluded.minutes,
+                basis = excluded.basis, berry_mode = excluded.berry_mode,
+                updated_by = excluded.updated_by, updated_at = datetime('now')
+            """,
+            (scope, int(scope_id), role,
+             None if minutes is None else float(minutes),
+             basis or (BASIS_UNIT if role == ROLE_CATALOG else None),
+             berry_mode, username),
+        )
+
+
+def resolve_offer_norms() -> Dict[int, Dict[str, Any]]:
+    """
+    Эффективная норма каждого оффера: своя, иначе от самой точной его группы.
+
+    Правило разрешения конфликта (товар состоит в среднем в 25 группах, и
+    размеченных среди них бывает несколько):
+
+      1. норма самого товара — если есть, спор окончен;
+      2. иначе среди размеченных групп товара побеждает бóльшая глубина
+         («Клубничные букеты» точнее родительской «Клубника в шоколаде»);
+      3. при равной глубине — меньший идентификатор группы.
+
+    Третий пункт не про смысл, а про определённость: без него результат
+    зависел бы от порядка строк, и одно и то же число объяснялось бы
+    по-разному в разные дни.
+
+    В ответе есть `source` — откуда взялось время. Без него цифру в ячейке
+    нечем объяснить, а объяснять придётся при каждом споре.
+    """
+    resolved: Dict[int, Dict[str, Any]] = {}
+
+    with get_db() as conn:
+        group_rows = conn.execute(
+            """
+            SELECT og.offer_id, g.id AS group_id, g.name AS group_name, g.depth,
+                   n.role, n.minutes, n.basis, n.berry_mode
+              FROM crm_offer_groups og
+              JOIN crm_product_groups g ON g.id = og.group_id
+              JOIN load_time_norms n ON n.scope = ? AND n.scope_id = og.group_id
+             ORDER BY og.offer_id, g.depth DESC, g.id ASC
+            """,
+            (SCOPE_GROUP,),
+        ).fetchall()
+
+        offer_rows = conn.execute(
+            "SELECT scope_id AS offer_id, role, minutes, basis, berry_mode "
+            "FROM load_time_norms WHERE scope = ?",
+            (SCOPE_OFFER,),
+        ).fetchall()
+
+    # ORDER BY уже поставил победителя первым — берём первую строку на оффер.
+    for row in group_rows:
+        if row["offer_id"] in resolved:
+            continue
+        resolved[row["offer_id"]] = {
+            "role": row["role"], "minutes": row["minutes"], "basis": row["basis"],
+            "berry_mode": row["berry_mode"],
+            "source": "group", "source_id": row["group_id"], "source_name": row["group_name"],
+        }
+
+    for row in offer_rows:
+        resolved[row["offer_id"]] = {
+            "role": row["role"], "minutes": row["minutes"], "basis": row["basis"],
+            "berry_mode": row["berry_mode"],
+            "source": "offer", "source_id": row["offer_id"], "source_name": None,
+        }
+
+    return resolved
+
+
+def list_group_norms() -> List[Dict[str, Any]]:
+    """Дерево групп с нормами и числом товаров — экран разметки."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT g.id, g.parent_id, g.name, g.depth,
+                   n.role, n.minutes, n.basis, n.berry_mode, n.updated_by, n.updated_at,
+                   (SELECT COUNT(*) FROM crm_offer_groups og WHERE og.group_id = g.id) AS offers
+              FROM crm_product_groups g
+         LEFT JOIN load_time_norms n ON n.scope = ? AND n.scope_id = g.id
+             ORDER BY g.depth, g.name
+            """,
+            (SCOPE_GROUP,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def norm_catalog(date_from: str, date_to: str, only_missing: bool = False,
+                 search: Optional[str] = None, limit: int = 300) -> List[Dict[str, Any]]:
+    """
+    Товары из заказов за период с их нормой и — главное — с фактами о них.
+
+    Рядом с ролью показывается **медиана количества за позицию** и единица
+    измерения из CRM. Это не украшение: единица измерения врёт. У девяти
+    товаров из четырнадцати с `unit = g` количество в заказе равно единице —
+    это готовые наборы, а не весовые компоненты. Отличает их только факт.
+
+    Медиана, а не среднее: у клубники разброс 26…2000, и среднее уводит
+    в сторону ровно там, где решение важнее всего.
+    """
+    where = ["i.delivery_date >= ?", "i.delivery_date <= ?"]
+    params: List[Any] = [date_from, date_to]
+    if search:
+        where.append("(py_lower(i.product_name) LIKE ? OR py_lower(COALESCE(i.article, '')) LIKE ?)")
+        pattern = f"%{search.lower()}%"
+        params.extend([pattern, pattern])
+
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT i.offer_id,
+                   MAX(i.product_name)                  AS product_name,
+                   MAX(i.article)                       AS article,
+                   COUNT(DISTINCT i.retailcrm_order_id) AS orders,
+                   COUNT(*)                             AS positions,
+                   o.unit_code                          AS unit_code
+              FROM order_items i
+         LEFT JOIN crm_offers o ON o.offer_id = i.offer_id
+             WHERE {' AND '.join(where)}
+          GROUP BY i.offer_id, o.unit_code
+          ORDER BY orders DESC
+             LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+
+        offer_ids = [row["offer_id"] for row in rows]
+        medians = _quantity_medians(conn, offer_ids, date_from, date_to) if offer_ids else {}
+
+    norms = resolve_offer_norms()
+    result = []
+    for row in rows:
+        norm = norms.get(row["offer_id"])
+        if only_missing and norm is not None:
+            continue
+        result.append({
+            "offer_id": row["offer_id"],
+            "product_name": row["product_name"],
+            "article": row["article"],
+            "orders": row["orders"],
+            "positions": row["positions"],
+            "unit_code": row["unit_code"],
+            "median_quantity": medians.get(row["offer_id"]),
+            # Товара нет в каталоге CRM — его удалили, а заказ остался.
+            # Размечать такое всё равно можно: ключ у нас есть.
+            "in_catalog": row["unit_code"] is not None,
+            "norm": norm,
+        })
+    return result
+
+
+def _quantity_medians(conn, offer_ids: List[int], date_from: str, date_to: str) -> Dict[int, float]:
+    """Медиана количества по каждому офферу — одним запросом, оконными функциями."""
+    placeholders = ",".join("?" * len(offer_ids))
+    rows = conn.execute(
+        f"""
+        SELECT offer_id, AVG(quantity) AS median FROM (
+            SELECT offer_id, quantity,
+                   ROW_NUMBER() OVER (PARTITION BY offer_id ORDER BY quantity) AS rn,
+                   COUNT(*)   OVER (PARTITION BY offer_id)                     AS cnt
+              FROM order_items
+             WHERE delivery_date >= ? AND delivery_date <= ?
+               AND offer_id IN ({placeholders})
+        ) WHERE rn IN ((cnt + 1) / 2, (cnt + 2) / 2)
+        GROUP BY offer_id
+        """,
+        (date_from, date_to, *offer_ids),
+    ).fetchall()
+    return {row["offer_id"]: round(row["median"], 1) for row in rows}
+
+
+def norms_coverage(date_from: str, date_to: str,
+                   load_statuses: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Насколько разметка покрывает реальный поток.
+
+    Считается в ЗАКАЗАХ, а не в товарах: «14 товаров без нормы» ничего не
+    говорит о занижении, а «в 12 заказах этого дня есть позиции без нормы» —
+    говорит. Ровно этим счётчик отличается от прошлого «N товаров без веса»,
+    который превратился в фон и перестал читаться.
+    """
+    statuses = load_statuses if load_statuses is not None else load_status_codes()
+    empty = {"orders": 0, "orders_incomplete": 0, "share": 0.0,
+             "offers_total": 0, "offers_without_norm": 0}
+    if not statuses:
+        return empty
+
+    norms = resolve_offer_norms()
+    placeholders = ",".join("?" * len(statuses))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT i.retailcrm_order_id AS order_id, i.offer_id
+              FROM order_items i
+              JOIN courier_orders o ON o.retailcrm_order_id = i.retailcrm_order_id
+                                   AND o.delivery_date = i.delivery_date
+             WHERE i.delivery_date >= ? AND i.delivery_date <= ?
+               AND o.status IN ({placeholders})
+            """,
+            (date_from, date_to, *statuses),
+        ).fetchall()
+
+    orders = set()
+    incomplete = set()
+    offers = set()
+    without = set()
+    for row in rows:
+        orders.add(row["order_id"])
+        offers.add(row["offer_id"])
+        if norms.get(row["offer_id"]) is None:
+            incomplete.add(row["order_id"])
+            without.add(row["offer_id"])
+
+    return {
+        "orders": len(orders),
+        "orders_incomplete": len(incomplete),
+        "share": round(100.0 * len(incomplete) / len(orders), 1) if orders else 0.0,
+        "offers_total": len(offers),
+        "offers_without_norm": len(without),
+    }
 
 
 def upsert_order_statuses(statuses: List[Dict[str, Any]]) -> None:
