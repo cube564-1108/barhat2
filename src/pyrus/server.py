@@ -296,12 +296,16 @@ except Exception as e:
 # Стартовая задержка своя (45 с против 120 с), чтобы контуры не писали на общий
 # диск /data одной волной.
 try:
+    from couriers.delivery_server import delivery_bp
+    app.register_blueprint(delivery_bp)
+    logger.info("Blueprint доставки заказов зарегистрирован")
+
     from couriers.delivery_feed import start_feed_scheduler
     start_feed_scheduler()
 except ImportError as e:
-    logger.warning(f"Не удалось импортировать ленту изменений заказов: {e}")
+    logger.warning(f"Не удалось импортировать модуль доставки заказов: {e}")
 except Exception as e:
-    logger.error(f"Ошибка запуска ленты изменений заказов: {e}")
+    logger.error(f"Ошибка регистрации модуля доставки заказов: {e}")
 
 # Регистрируем blueprint сторожа ссылок на товары
 try:
