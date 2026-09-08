@@ -203,6 +203,135 @@ def set_city_settings(city: str, values: Dict[str, Any],
 
 
 # ---------------------------------------------------------------------------
+# Точечное обновление витрины (лента изменений)
+# ---------------------------------------------------------------------------
+
+# Поля, которые лента пишет в courier_orders. Тот же набор, что кладёт глубокий
+# синк в replace_orders_window, — расхождение проверяется тестом
+# scripts/test_courier_feed.py: если один путь начнёт писать поле, а другой нет,
+# карточка будет то полной, то пустой в зависимости от того, кто обновил заказ
+# последним, и поймать это глазами невозможно.
+FEED_ORDER_FIELDS = (
+    "order_number", "delivery_date", "courier_id", "courier_name", "net_cost",
+    "site_code", "city", "delivery_city", "status", "total_summ", "order_method",
+    "delivery_code", "store_key", "ready_time", "ready_hour", "ready_source",
+    "address_text", "delivery_time_from", "delivery_time_to",
+    "recipient_name", "recipient_phone", "recipient_is_customer",
+    "do_not_contact_recipient", "customer_name", "customer_phone",
+    "manager_comment", "customer_comment", "note_text", "ready_planned_at",
+)
+
+# Поля, которые лента НЕ трогает: их считает глубокий синк, и затирать их
+# точечным обновлением значило бы обнулять вес слота при каждой правке заказа
+# в CRM.
+FEED_PRESERVED_FIELDS = ("weight_units", "duration_slots", "slot_changed_at",
+                         "minutes_total", "minutes_without_norm")
+
+
+def _order_values(row: Dict[str, Any]) -> tuple:
+    numeric = {"net_cost", "total_summ"}
+    flags = {"recipient_is_customer", "do_not_contact_recipient"}
+    values = []
+    for field in FEED_ORDER_FIELDS:
+        value = row.get(field)
+        if field in numeric:
+            values.append(float(value or 0))
+        elif field in flags:
+            values.append(int(value or 0))
+        else:
+            values.append(value)
+    return tuple(values)
+
+
+def upsert_orders_from_crm(rows: List[Dict[str, Any]]) -> int:
+    """
+    Обновить отдельные заказы в витрине (то, что принесла лента изменений).
+
+    Не INSERT OR REPLACE: он стёр бы поля, которых лента не знает, — вес слота
+    и отметку смены часа готовности считает глубокий синк, и обнулять их при
+    каждой правке заказа в CRM нельзя. Поэтому ON CONFLICT DO UPDATE ровно по
+    своим полям.
+
+    Позиции заказа переписываются целиком: состав меняют, и «добавить новые, а
+    старые оставить» означало бы вечно растущий букет.
+    """
+    if not rows:
+        return 0
+
+    columns = ("retailcrm_order_id",) + FEED_ORDER_FIELDS
+    placeholders = ", ".join("?" * len(columns))
+    updates = ", ".join(f"{field} = excluded.{field}" for field in FEED_ORDER_FIELDS)
+
+    with get_db() as conn:
+        conn.executemany(
+            f"""
+            INSERT INTO courier_orders ({", ".join(columns)}, synced_at)
+            VALUES ({placeholders}, datetime('now'))
+            ON CONFLICT(retailcrm_order_id) DO UPDATE SET
+                {updates},
+                synced_at = datetime('now')
+            """,
+            [(row["retailcrm_order_id"],) + _order_values(row) for row in rows],
+        )
+
+        for row in rows:
+            order_id = row["retailcrm_order_id"]
+            conn.execute("DELETE FROM order_items WHERE retailcrm_order_id = ?",
+                         (order_id,))
+            items = row.get("items") or []
+            if items:
+                conn.executemany(
+                    """
+                    INSERT INTO order_items
+                        (retailcrm_order_id, offer_id, delivery_date,
+                         product_name, article, quantity)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [(order_id, item["offer_id"], row["delivery_date"],
+                      item.get("product_name"), item.get("article"),
+                      float(item.get("quantity") or 0)) for item in items],
+                )
+    return len(rows)
+
+
+def apply_orders_from_crm(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Записать заказы из CRM и пересчитать по ним нагрузку салона.
+
+    Единая точка входа для всех, кто обновляет витрину точечно. Отдельно
+    `upsert_orders_from_crm` вызывать не надо: витрину читает не только модуль
+    доставки, но и «Загрузка салонов», а она смотрит на трудоёмкость заказа.
+    Запись без пересчёта означала бы, что пришедший лентой заказ висит в сетке
+    невесомым до следующего глубокого синка — то есть до получаса, ровно в тот
+    момент, когда в сетку и смотрят.
+
+    Пересчёт идёт по датам доставки (их у пачки одна-две), а не по заказам:
+    такой интерфейс у функций пересчёта, и тарифы читаются один раз на период.
+    Падение пересчёта не роняет запись: свежий заказ у курьера важнее цифры в
+    сетке, а глубокий синк всё равно пересчитает всё окно.
+    """
+    written = upsert_orders_from_crm(rows)
+    result = {"written": written, "recalc_dates": 0, "recalc_errors": 0}
+    if not written:
+        return result
+
+    from . import storage as courier_storage
+
+    for date in sorted({row["delivery_date"] for row in rows if row.get("delivery_date")}):
+        try:
+            courier_storage.recalc_weights_range(date, date)
+            # Минуты сборки появились позже весов (модуль «нагрузка в минутах»),
+            # и на старой версии кода функции может не быть.
+            if hasattr(courier_storage, "recalc_minutes_range"):
+                courier_storage.recalc_minutes_range(date, date)
+            result["recalc_dates"] += 1
+        except Exception as e:
+            result["recalc_errors"] += 1
+            logger.warning(f"Пересчёт нагрузки за {date} не удался: {e}")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Профили курьеров
 # ---------------------------------------------------------------------------
 

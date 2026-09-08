@@ -290,6 +290,19 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Ошибка регистрации blueprint оплаты курьерам: {e}")
 
+# Лента изменений заказов (модуль доставки): раз в минуту один дешёвый запрос
+# в CRM по курсору истории. Отдельно от получасового синка выше — у них разные
+# задачи: тот держит витрину за период, эта показывает курьеру заказ сразу.
+# Стартовая задержка своя (45 с против 120 с), чтобы контуры не писали на общий
+# диск /data одной волной.
+try:
+    from couriers.delivery_feed import start_feed_scheduler
+    start_feed_scheduler()
+except ImportError as e:
+    logger.warning(f"Не удалось импортировать ленту изменений заказов: {e}")
+except Exception as e:
+    logger.error(f"Ошибка запуска ленты изменений заказов: {e}")
+
 # Регистрируем blueprint сторожа ссылок на товары
 try:
     from linkwatch.server import linkwatch_bp, start_scheduler as start_linkwatch_scheduler

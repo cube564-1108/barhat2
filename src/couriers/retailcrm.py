@@ -19,7 +19,13 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional
+
+# Пояс аккаунта RetailCRM: в нём приходят createdAt и записи истории, и с ним
+# же сравнивается фильтр startDate (замер 2026-09-08). Держим здесь ссылку на
+# единственное определение, чтобы значение не разъехалось по файлам.
+from .salon_time import CRM_ACCOUNT_UTC_OFFSET
 
 import requests
 
@@ -338,6 +344,82 @@ class CourierOrdersClient:
 
             page += 1
             time.sleep(PAGE_PAUSE_SECONDS)
+
+    # ------------------------------------------------------------------
+    # Лента изменений (модуль «Курьеры: доставка заказов», Фаза 2)
+    # ------------------------------------------------------------------
+
+    def latest_history_id(self, minutes_back: int = 30) -> int:
+        """
+        Максимальный id записи истории «сейчас» — стартовое значение курсора.
+
+        Нужен потому, что первый вызов истории БЕЗ курсора отдаёт записи
+        с 2021 года (проверено 2026-09-08: 41 708 записей только за неделю).
+        Начав с нуля, лента вычитывала бы четыре года чужой истории вместо
+        того, чтобы показать курьеру сегодняшний заказ.
+
+        Окно берётся по времени в поясе аккаунта CRM: фильтр startDate
+        сравнивается именно с ним, а не с UTC.
+        """
+        start = (datetime.utcnow()
+                 + timedelta(hours=CRM_ACCOUNT_UTC_OFFSET)
+                 - timedelta(minutes=minutes_back))
+        data = self._get("api/v5/orders/history", {
+            "filter[startDate]": start.strftime("%Y-%m-%d %H:%M:%S"),
+            "limit": PAGE_LIMIT,
+            "page": 1,
+        })
+        ids = [record.get("id") or 0 for record in data.get("history", [])]
+        return max(ids) if ids else 0
+
+    def iter_history_since(self, since_id: int, max_pages: int = 20
+                           ) -> Iterator[List[Dict[str, Any]]]:
+        """
+        Страницы истории изменений заказов, начиная с записи since_id.
+
+        Листаем ТОЛЬКО курсором: на глубине CRM отвечает «Use the shift of the
+        `filter[sinceId]` instead of `page` parameter» — параметр page для
+        истории неприменим. Следующая страница — это новый запрос с курсором,
+        сдвинутым на максимальный полученный id.
+
+        max_pages — потолок на один тик. Лента ходит раз в минуту, и разгребать
+        накопившееся лучше несколькими тиками, чем одним долгим прогоном,
+        который держит воркер (их всего два на весь сайт).
+        """
+        cursor = since_id
+        for _ in range(max_pages):
+            data = self._get("api/v5/orders/history", {
+                "filter[sinceId]": cursor,
+                "limit": PAGE_LIMIT,
+            })
+            records = data.get("history", [])
+            if not records:
+                return
+
+            yield records
+
+            cursor = max(record.get("id") or 0 for record in records)
+            if len(records) < PAGE_LIMIT:
+                return
+            time.sleep(PAGE_PAUSE_SECONDS)
+
+    def get_orders_by_ids(self, order_ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Карточки заказов по идентификаторам: в истории лежит только изменённое
+        поле, а курьеру нужен весь заказ.
+        """
+        orders: List[Dict[str, Any]] = []
+        for start in range(0, len(order_ids), PAGE_LIMIT):
+            chunk = order_ids[start:start + PAGE_LIMIT]
+            data = self._get("api/v5/orders", {
+                "filter[ids][]": chunk,
+                "limit": PAGE_LIMIT,
+                "page": 1,
+            })
+            orders.extend(data.get("orders", []))
+            if len(order_ids) > PAGE_LIMIT:
+                time.sleep(PAGE_PAUSE_SECONDS)
+        return orders
 
 
 def parse_catalog_page(products: List[Dict[str, Any]]) -> tuple:
