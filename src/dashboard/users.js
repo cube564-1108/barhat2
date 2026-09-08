@@ -12,6 +12,7 @@
         'manager': 'Доступ к дашборду, качеству и калькулятору',
         'florist': 'Работает только со своей точкой продаж (кассовые смены)',
         'florist_analyst': 'Только раздел качества сборки',
+        'courier': 'Курьер: приложение доставки на телефоне — заказы своего города, бронь, отметки «забрал» и «доставил». Больше ничего не видит',
         'sso_viewer': 'Учётка, автоматически созданная входом из БАРХАТ Пульс: просмотр всего, кроме управления пользователями, без права согласования'
     };
 
@@ -29,6 +30,8 @@
         'salon_kpi': 'Показатели салонов',
         'salon_load': 'Загрузка салонов',
         'link_watch': 'Ссылки на товары',
+        'courier_app': 'Доставка: приложение курьера',
+        'courier_dispatch': 'Доставка: контроль (весь город)',
         'users_manage': 'Управление пользователями'
     };
 
@@ -36,10 +39,13 @@
     const ROLE_PERMISSIONS = {
         // invoices_v2 — основной раздел счетов; invoices (старый) остаётся в
         // пресетах, но пункт меню виден только админу (см. ROLE_SECTIONS в src/auth.py)
-        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'abc_analysis', 'courier_payouts', 'salon_kpi', 'salon_load', 'link_watch', 'users_manage'],
-        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'courier_payouts', 'salon_kpi', 'salon_load'],
+        'admin': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'abc_analysis', 'courier_payouts', 'salon_kpi', 'salon_load', 'link_watch', 'courier_app', 'courier_dispatch', 'users_manage'],
+        'manager': ['dashboard', 'calculator', 'quality', 'cash_shifts', 'invoices', 'invoices_v2', 'writeoffs', 'courier_payouts', 'salon_kpi', 'salon_load', 'courier_dispatch'],
         'florist': ['cash_shifts', 'writeoffs', 'salon_load'],
-        'florist_analyst': ['quality']
+        'florist_analyst': ['quality'],
+        // Курьеру — только его приложение. courier_dispatch сюда не входит:
+        // это весь город и чужие брони.
+        'courier': ['courier_app']
     };
 
     // Линейная иконка конверта (lucide, stroke-width 1.75 по DESIGN-SPEC)
@@ -379,6 +385,7 @@
             'manager': 'Менеджер',
             'florist': 'Флорист',
             'florist_analyst': 'Аналитик качества',
+            'courier': 'Курьер',
             // Автосозданная учётка из портала (src/sso.py). Вручную такую роль
             // не выдают — но в списке она встречается, и без подписи выглядела
             // как непонятное «sso_viewer».

@@ -51,10 +51,14 @@ ROLE_SECTIONS = {
     # снятие права закрыло бы доступ к данным тем, кого забыли перевести.
     # Ручки счетов проверяют @section_required("invoices", "invoices_v2") —
     # пускает любая из двух секций (INVOICE_SECTIONS в src/invoices/server.py).
-    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "link_watch", "salon_kpi", "salon_load"},
-    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts", "salon_kpi", "salon_load"},
+    "admin": {"dashboard", "quality", "calculator", "price_edit", "users_manage", "cash_shifts", "invoices", "invoices_v2", "abc_analysis", "writeoffs", "courier_payouts", "link_watch", "salon_kpi", "salon_load", "courier_app", "courier_dispatch"},
+    "manager": {"dashboard", "quality", "calculator", "cash_shifts", "invoices", "invoices_v2", "writeoffs", "courier_payouts", "salon_kpi", "salon_load", "courier_dispatch"},
     "florist": {"cash_shifts", "writeoffs", "salon_load"},
     "florist_analyst": {"quality"},
+    # Курьер: только своё приложение доставки и ничего больше. Раздел
+    # управляющего — отдельная секция courier_dispatch: там видны заказы всего
+    # города, чужие брони и снятие броней, и выдавать это курьеру нельзя.
+    "courier": {"courier_app"},
     # Пользователи, залогиненные через SSO из портала БАРХАТ Пульс (см. src/sso.py).
     # Роль в Пульсе (director/manager/...) на внутренние права намеренно не мапится:
     # все входящие через портал получают один и тот же набор — всё, КРОМЕ
@@ -325,6 +329,15 @@ ALL_MODULES = [
     'writeoffs',      # Списания товара
     'courier_payouts',  # Оплата курьерам
     'link_watch',     # Ссылки на товары (сторож)
+    # salon_kpi и salon_load были в ROLE_SECTIONS и в users.js, но сюда их
+    # добавить забыли — а этот список ещё и валидирует выдачу прав
+    # (invalid_modules ниже). Из-за этого админ не мог выдать их через UI:
+    # приходило 400 «Неизвестные модули». Роли получали право только фоновой
+    # догрузкой, поштучно выдать было нельзя.
+    'salon_kpi',      # Показатели салонов
+    'salon_load',     # Загрузка салонов
+    'courier_app',    # Курьер: доставка заказов (приложение курьера)
+    'courier_dispatch',  # Доставка: взгляд управляющего (весь город, чужие брони)
 ]
 
 # Модули, доступные пользователям, вошедшим через SSO из портала БАРХАТ Пульс.
@@ -490,6 +503,12 @@ def init_auth_tables():
     # есть тот ресурс, который в ней считается. Видит при этом только свой
     # салон, отбор делает бэкенд.
     migrate_new_module_permissions("salon_load", ["admin", "manager", "sso_viewer", "florist"])
+
+    # Догрузка права на раздел courier_dispatch («Доставка сегодня» — взгляд
+    # управляющего). Курьерам его НЕ выдаём: там весь город и чужие брони.
+    # Само приложение курьера (courier_app) через догрузку не раздаётся —
+    # только явной выдачей при заведении учётки курьера.
+    migrate_new_module_permissions("courier_dispatch", ["admin", "manager"])
 
     # Догрузка прав SSO-пользователям: первые из них были заведены, когда
     # sso_viewer имел доступ только к "quality" (см. SSO_MODULES выше).

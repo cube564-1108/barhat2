@@ -416,6 +416,18 @@ with app.app_context():
     except Exception as e:
         logger.error(f"Ошибка инициализации таблиц оплаты курьерам: {e}")
 
+    # Инициализация таблиц модуля доставки (бронь, профили курьеров, настройки
+    # городов). Отдельно от init_couriers_tables: там витрина заказов и отчёт
+    # по выплатам, здесь — состояние работы курьера.
+    try:
+        from couriers.delivery_storage import init_delivery_tables
+        init_delivery_tables()
+        logger.info("Таблицы доставки курьерами инициализированы")
+    except ImportError as e:
+        logger.warning(f"Не удалось импортировать модуль доставки: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации таблиц доставки: {e}")
+
     # Инициализация таблиц списаний товара
     try:
         from writeoffs.storage import init_writeoffs_tables
