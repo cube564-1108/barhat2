@@ -824,6 +824,24 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                     row.get("ready_time"),
                     row.get("ready_hour"),
                     row.get("ready_source"),
+                    # Карточка курьера. Глубокий синк переписывает окно
+                    # целиком, поэтому эти поля обязаны быть и здесь: иначе
+                    # адрес и телефон обнулялись бы каждые полчаса, а лента
+                    # изменений возвращала бы их только при следующей правке
+                    # заказа в CRM.
+                    row.get("address_text"),
+                    row.get("delivery_time_from"),
+                    row.get("delivery_time_to"),
+                    row.get("recipient_name"),
+                    row.get("recipient_phone"),
+                    int(row.get("recipient_is_customer") or 0),
+                    int(row.get("do_not_contact_recipient") or 0),
+                    row.get("customer_name"),
+                    row.get("customer_phone"),
+                    row.get("manager_comment"),
+                    row.get("customer_comment"),
+                    row.get("note_text"),
+                    row.get("ready_planned_at"),
                 )
                 for row in rows
             ],

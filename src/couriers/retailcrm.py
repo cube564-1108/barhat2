@@ -67,6 +67,26 @@ class RetailCRMError(Exception):
     """Ошибка обращения к RetailCRM."""
 
 
+# Кастомные поля карточки курьера. Имена найдены разведкой 2026-09-08
+# (scripts/probe_crm_courier_fields.py), в скобках — доля заполненности среди
+# доставочных заказов дня.
+#
+# Получателя заводят не всегда (36%), поэтому курьеру показывается либо он,
+# либо заказчик — но подписью «клиент», чтобы курьер понимал, кому звонит:
+# сюрприз-доставка у цветов обычное дело.
+RECIPIENT_NAME_FIELD = "recipient_name"            # 36%
+RECIPIENT_PHONE_FIELD = "recipient_phone"          # 33%
+RECIPIENT_IS_CUSTOMER_FIELD = "recipient_customer"  # 8% = True
+# «Не связываться с получателем» (5%) — сюрприз. Для курьера это важнее
+# половины карточки: звонок ломает подарок.
+DO_NOT_CONTACT_FIELD = "ne_sviazyvatsia_s_poluchatelem"
+# Ещё один комментарий оператора, отдельный от managerComment (24%).
+NOTE_TEXT_FIELD = "note_text"
+# Плановые дата и время готовности одной отметкой (100%) — главный ориентир
+# курьера: статус «Заказ готов» ставят в момент начала окна доставки, а у трети
+# заказов уже после него.
+READY_PLANNED_FIELD = "data_i_vremia_gotovnosti"
+
 # Кастомное поле «время готовности заказа». Разведка 2026-09-05 (4000 заказов):
 # заполнено у 100% заказов и расходится с delivery.time.from у 70% — у доставки
 # готовность раньше выезда на 10–60 минут, у самовывоза бывает и позже. Выводить
@@ -502,6 +522,68 @@ def parse_order(order: Dict[str, Any], site_cities: Dict[str, Optional[str]]) ->
         "ready_hour": slot["ready_hour"],
         "ready_source": slot["ready_source"],
         "items": parse_items(order),
+        # Поля карточки курьера (модуль «Курьеры: доставка заказов»).
+        **delivery_card_fields(order),
+    }
+
+
+def _first_phone(node: Dict[str, Any]) -> Optional[str]:
+    """Первый телефон клиента. Список бывает пустым — это не ошибка."""
+    for phone in (node.get("phones") or []):
+        number = (phone or {}).get("number")
+        if number:
+            return str(number).strip()
+    return None
+
+
+def _flag(value: Any) -> bool:
+    """
+    Кастомное поле-галочка → bool.
+
+    Из CRM приходит и `True`, и `"true"`, и `"1"`: поле правят в интерфейсе, и
+    его тип зависит от того, как заведено. Проверка `value is True` молча
+    потеряла бы половину значений — а это флаг «не связываться с получателем»,
+    цена ошибки здесь испорченный сюрприз.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "да", "yes")
+
+
+def delivery_card_fields(order: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Поля, которые курьер видит в карточке заказа.
+
+    Отдельной функцией, а не строчками внутри parse_order: набор проверяется
+    тестом на реальной форме ответа CRM, и его читают, когда в карточке чего-то
+    не хватает.
+    """
+    delivery = order.get("delivery") or {}
+    address = delivery.get("address") or {}
+    time_block = delivery.get("time") or {}
+    custom = order.get("customFields") or {}
+    customer = order.get("customer") or {}
+
+    return {
+        # Адрес одной строкой: отдельные street/building заполнены у единиц,
+        # а text — у 99% заказов своей доставки (у Яндекс.Доставки его нет
+        # вовсе, но такие заказы курьеру и не показываются).
+        "address_text": address.get("text"),
+        "delivery_time_from": parse_time_value(time_block.get("from")),
+        "delivery_time_to": parse_time_value(time_block.get("to")),
+        "recipient_name": (custom.get(RECIPIENT_NAME_FIELD) or None),
+        "recipient_phone": (custom.get(RECIPIENT_PHONE_FIELD) or None),
+        "recipient_is_customer": 1 if _flag(custom.get(RECIPIENT_IS_CUSTOMER_FIELD)) else 0,
+        "do_not_contact_recipient": 1 if _flag(custom.get(DO_NOT_CONTACT_FIELD)) else 0,
+        "customer_name": customer.get("firstName") or None,
+        "customer_phone": _first_phone(customer),
+        "manager_comment": order.get("managerComment") or None,
+        "customer_comment": order.get("customerComment") or None,
+        "note_text": custom.get(NOTE_TEXT_FIELD) or None,
+        # Плановая готовность приходит как «2026-09-08 14:00:00» в стенных
+        # часах салона. Не преобразуем: это то же время, что вводит менеджер,
+        # и любая конвертация здесь сдвинет его для половины городов.
+        "ready_planned_at": (custom.get(READY_PLANNED_FIELD) or None),
     }
 
 
