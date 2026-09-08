@@ -716,6 +716,45 @@ def save_time_norm():
     return success_response({"coverage": storage.norms_coverage(date_from, date_to)})
 
 
+@couriers_bp.route("/catalog/sync", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def sync_catalog_now():
+    """
+    Обновить каталог номенклатуры прямо сейчас.
+
+    Штатно каталог тянется ночным глубоким прогоном — он меняется медленно, и
+    6 запросов на каждый получасовой тик не нужны. Но в двух случаях ждать до
+    ночи нельзя: сразу после первого деплоя (каталог пуст, размечать нечего) и
+    когда в CRM завели новую группу, а норму нужно поставить сегодня.
+
+    Синхронно, а не в фоне: 6 запросов и ~8 секунд на живых данных (замер
+    2026-09-08), и человеку важно увидеть результат, а не «запущено».
+    Консоли у контейнера на этом тарифе нет, поэтому разовая операция — ручка.
+    """
+    if not retailcrm.is_configured():
+        return error_response("RetailCRM не настроен: задайте RETAILCRM_URL и RETAILCRM_API_KEY", 503)
+
+    client = retailcrm.get_client()
+    try:
+        groups = client.get_product_groups()
+        offers, links = [], []
+        for page in client.iter_products(deadline=time.monotonic() + SYNC_BUDGET_SECONDS):
+            page_offers, page_links = retailcrm.parse_catalog_page(page)
+            offers.extend(page_offers)
+            links.extend(page_links)
+        result = storage.replace_catalog(groups, offers, links)
+    except storage.EmptyCatalogError as e:
+        # Пустой ответ каталог не перезаписывает — это ошибка, а не «товаров нет».
+        return error_response(str(e), 502)
+    except retailcrm.RetailCRMError as e:
+        return error_response(f"CRM не ответила: {e}", 502)
+
+    log_action(getattr(current_user, "username", None), "salon_load_catalog_sync",
+               f"групп {result['groups']}, офферов {result['offers']}")
+    return success_response({**result, "catalog": storage.catalog_snapshot()})
+
+
 @couriers_bp.route("/time-norms/tariffs", methods=["GET"])
 @section_required("salon_load")
 def get_tariffs():

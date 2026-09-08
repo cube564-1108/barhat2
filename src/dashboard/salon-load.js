@@ -924,7 +924,17 @@
 
             ${catalog && !catalog.offers ? note('bad', 'Каталог номенклатуры пуст',
                 'Группы и единицы измерения ещё не загружены из CRM — размечать нечего. ' +
-                'Каталог обновляется ночным прогоном синхронизации.') : ''}
+                'Штатно каталог обновляется ночью; кнопка ниже загрузит его сейчас.') : ''}
+
+            ${active === 'groups' && state.isAdmin ? `
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+                    <button class="sload-btn sload-btn--ghost" data-sync-catalog>Обновить каталог из CRM</button>
+                    <span class="sload-extra__label">${catalog && catalog.offers
+                        ? `${catalog.groups} ${plural(catalog.groups, 'группа', 'группы', 'групп')}, ` +
+                          `${catalog.offers} ${plural(catalog.offers, 'товар', 'товара', 'товаров')}` +
+                          (catalog.synced_at ? ` · обновлён ${esc(catalog.synced_at)}` : '')
+                        : 'каталог не загружен'}</span>
+                </div>` : ''}
 
             ${coverage && coverage.orders_incomplete ? note('warn',
                 `${coverage.orders_incomplete} из ${coverage.orders} ` +
@@ -946,6 +956,24 @@
             if (tabButton) {
                 overlay.remove();
                 openTimeNorms(tabButton.dataset.normTab);
+                return;
+            }
+
+            const syncCatalog = e.target.closest('[data-sync-catalog]');
+            if (syncCatalog) {
+                syncCatalog.disabled = true;
+                syncCatalog.textContent = 'Загружаю…';
+                try {
+                    const res = await api('/api/couriers/catalog/sync', postOptions({}));
+                    toast(`Каталог обновлён: ${res.data.groups} групп, ${res.data.offers} товаров`,
+                        'success');
+                    overlay.remove();
+                    openTimeNorms('groups');
+                } catch (error) {
+                    toast('Не удалось обновить каталог: ' + error.message, 'error');
+                    syncCatalog.disabled = false;
+                    syncCatalog.textContent = 'Обновить каталог из CRM';
+                }
                 return;
             }
 

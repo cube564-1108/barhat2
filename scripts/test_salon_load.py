@@ -447,6 +447,17 @@ def test_ui_contract():
         check("норма без заголовка AJAX отклоняется", response.status_code == 403,
               f"получено {response.status_code}")
 
+        # Ручное обновление каталога: без него после деплоя размечать нечего
+        # до ночного прогона, а консоли у контейнера нет.
+        response = client.post("/api/couriers/catalog/sync", headers=headers, json={})
+        check("ручка обновления каталога есть и не 404/403",
+              response.status_code in (200, 502, 503),
+              f"получено {response.status_code} {response.get_data(as_text=True)[:120]}")
+
+        response = client.post("/api/couriers/catalog/sync", json={})
+        check("обновление каталога без заголовка AJAX отклоняется",
+              response.status_code == 403, f"получено {response.status_code}")
+
         # Тарифная сетка (Ф3): читается экраном и правится без деплоя
         response = client.get("/api/couriers/time-norms/tariffs")
         payload = (response.get_json() or {}).get("data", {})
