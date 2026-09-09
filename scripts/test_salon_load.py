@@ -23,6 +23,7 @@ import sqlite3
 import ssl  # noqa: F401  — импортировать до патча сокета
 import sys
 import tempfile
+from datetime import date, timedelta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "src"))
@@ -54,8 +55,23 @@ from salonload import metrics, storage  # noqa: E402
 assert storage.DB_PATH.endswith(os.path.join(TMP, "barhat.db")) or storage.DB_PATH == os.path.join(
     TMP, "barhat.db"), f"тест пишет не в свою базу: {storage.DB_PATH}"
 
-DAY = "2026-09-10"          # четверг
-WEEKDAY = 3
+# Даты прогона считаются от сегодняшней, а не задаются константами.
+#
+# Раньше здесь стояло «2026-09-10 (четверг)», и 09.09.2026 прогон развалился:
+# test_alerts пишет заказы на ЗАВТРА, завтра совпало с этой датой, и окно
+# витрины затёрлось вместе с данными setup_data. Проверки при этом падали в
+# совсем другом месте — в разделе «нераспределённые», — и выглядело это как
+# сломанный код, а не как календарь.
+#
+# Все вспомогательные дни отсчитываются от DAY, чтобы ни один тест не мог
+# наехать окном на чужие данные ни сегодня, ни в любой другой день.
+_TODAY = date.today()
+DAY = (_TODAY + timedelta(days=30)).isoformat()
+WEEKDAY = (_TODAY + timedelta(days=30)).weekday()
+DAY_SLOT_MOVED = (_TODAY + timedelta(days=45)).isoformat()
+DAY_REVIEW_A = (_TODAY + timedelta(days=51)).isoformat()
+DAY_REVIEW_B = (_TODAY + timedelta(days=52)).isoformat()
+DAY_MINUTES = (_TODAY + timedelta(days=66)).isoformat()
 STORE_ID = 1
 STORE_KEY = "test-salon"
 OTHER_STORE_ID = 2
@@ -366,14 +382,37 @@ def test_ui_contract():
                   all(field in row for row in payload.get("data", [])),
                   f"есть: {sorted((payload.get('data') or [{}])[0])}")
 
-        # Нормы времени (Ф2). Экран читает дерево групп и товары с фактами.
-        response = client.get("/api/couriers/time-norms/groups")
+        # Нормы времени (Ф2). Групповых норм больше нет — только товары.
+        check("ручки групповых норм больше нет",
+              client.get("/api/couriers/time-norms/groups").status_code == 404,
+              "ручка отвечает, хотя групповые нормы отменены")
+
+        response = client.get("/api/couriers/time-norms/offers")
         payload = response.get_json() or {}
-        check("дерево групп отвечает", response.status_code == 200,
-              f"получено {response.status_code}")
         for field in ("roles", "bases", "berry_modes", "catalog"):
-            check(f"мета групп отдаёт {field}", field in (payload.get("meta") or {}),
+            check(f"мета товаров отдаёт {field}", field in (payload.get("meta") or {}),
                   f"есть: {sorted((payload.get('meta') or {}))}")
+
+        # Фильтры: экран шлёт их все, и ни один не должен ронять ручку
+        response = client.get("/api/couriers/time-norms/offers?q=роза&role=catalog&unit=pc"
+                              "&in_catalog=1&min_orders=1&max_orders=99"
+                              "&min_median=0&max_median=100")
+        check("список товаров принимает все фильтры", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+
+        response = client.get("/api/couriers/time-norms/export")
+        check("выгрузка отдаёт файл", response.status_code == 200,
+              f"получено {response.status_code}")
+        check("выгрузка приходит как CSV-вложение",
+              "attachment" in response.headers.get("Content-Disposition", "") and
+              "csv" in response.headers.get("Content-Type", ""),
+              f"получено {dict(response.headers)}")
+        text = response.get_data(as_text=True)
+        check("в файле есть BOM — иначе Excel ломает кириллицу",
+              text.startswith("﻿"), f"получено {text[:20]!r}")
+        check("в заголовке есть ключевая колонка offer_id и артикул",
+              "offer_id" in text.split("\r\n")[0] and "Артикул" in text.split("\r\n")[0],
+              f"получено {text.split(chr(13))[0][:120]}")
 
         response = client.get("/api/couriers/time-norms/offers?only_missing=1")
         payload = response.get_json() or {}
@@ -447,6 +486,25 @@ def test_ui_contract():
         check("норма без заголовка AJAX отклоняется", response.status_code == 403,
               f"получено {response.status_code}")
 
+        # Импорт: то же тело, что шлёт разбор файла в браузере
+        response = client.post("/api/couriers/time-norms/import", headers=headers,
+                               json={"rows": [{"offer_id": 1, "role": "catalog", "minutes": "12,5"}]})
+        payload = (response.get_json() or {}).get("data", {})
+        check("импорт норм принимается", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+        check("импорт отчитывается о применённых строках", payload.get("applied") == 1,
+              f"получено {payload}")
+
+        response = client.post("/api/couriers/time-norms/import", headers=headers,
+                               json={"rows": []})
+        check("пустой импорт отклоняется", response.status_code == 400,
+              f"получено {response.status_code}")
+
+        response = client.post("/api/couriers/time-norms/import",
+                               json={"rows": [{"offer_id": 1, "role": "none"}]})
+        check("импорт без заголовка AJAX отклоняется", response.status_code == 403,
+              f"получено {response.status_code}")
+
         # Ручное обновление каталога: без него после деплоя размечать нечего
         # до ночного прогона, а консоли у контейнера нет.
         response = client.post("/api/couriers/catalog/sync", headers=headers, json={})
@@ -509,7 +567,7 @@ def test_weight_units_model():
     ёмкость всего дня — 6.6% заказов давали 75.5% нагрузки.
     """
     print("\n14. Нагрузка = база за заказ + надбавки")
-    day = "2026-11-15"
+    day = DAY_MINUTES
     items = [
         {"quantity": 600, "offer": {"id": 42, "displayName": "Клубника"}},
         {"quantity": 7, "offer": {"id": 43, "displayName": "Роза одноголовая"}},
@@ -684,7 +742,7 @@ def test_alerts():
 
 def test_slot_moved():
     print("\n11. Перенос заказа виден")
-    day = "2026-09-25"
+    day = DAY_SLOT_MOVED
     couriers_storage.replace_orders_window(day, day, [
         retailcrm.parse_order(dict(order(300, hour=10),
                                    delivery={"date": day, "code": "dostavka-kurerom"}), {}),
@@ -784,7 +842,7 @@ def test_review_fixes():
           f"получено {coverage_all['total_units']} и {coverage_none['total_units']}")
 
     # Заказ переехал на другую дату — старые позиции не задваивают вес
-    day_a, day_b = "2026-10-01", "2026-10-02"
+    day_a, day_b = DAY_REVIEW_A, DAY_REVIEW_B
     couriers_storage.replace_orders_window(day_a, day_a, [
         retailcrm.parse_order(dict(order(500, hour=10),
                                    delivery={"date": day_a, "code": "dostavka-kurerom"}), {}),

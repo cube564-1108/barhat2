@@ -629,6 +629,7 @@ def init_couriers_tables() -> None:
         )
 
     _backfill_weight_model()
+    _expand_group_norms()
 
 
 # Разовый пересчёт нагрузки под модель «база за заказ + надбавки».
@@ -723,6 +724,77 @@ def _backfill_weight_model() -> None:
             return
         finally:
             conn.close()
+
+
+GROUP_NORMS_EXPANDED_KEY = "load_group_norms_expanded"
+
+
+def _expand_group_norms() -> None:
+    """
+    Развернуть групповые нормы в товарные и убрать групповые.
+
+    Групповые нормы отменены владельцем 2026-09-09: в одной группе CRM лежат
+    товары с сильно разным временем сборки. Но то, что уже размечено, — это
+    проделанная человеком работа, и стирать её нельзя: разворачиваем каждую
+    групповую норму в нормы её товаров.
+
+    Товар, у которого уже есть собственная норма, не трогаем: она точнее
+    групповой, ради неё исключения и заводили.
+
+    Порядок разворачивания важен: товар состоит в нескольких группах, и
+    выигрывает та, что выигрывала раньше, — бóльшая глубина, при равной
+    меньший id. Иначе после миграции числа поехали бы, а человек считал бы,
+    что просто «убрали группы».
+
+    Падать нельзя — это старт воркера.
+    """
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        done = conn.execute("SELECT value FROM sync_state WHERE key = ?",
+                            (GROUP_NORMS_EXPANDED_KEY,)).fetchone()
+        if done and done["value"] == "1":
+            conn.execute("ROLLBACK")
+            return
+
+        rows = conn.execute(
+            """
+            SELECT og.offer_id, n.role, n.minutes, n.basis, n.berry_mode
+              FROM crm_offer_groups og
+              JOIN crm_product_groups g ON g.id = og.group_id
+              JOIN load_time_norms n ON n.scope = 'group' AND n.scope_id = og.group_id
+         LEFT JOIN load_time_norms own ON own.scope = 'offer' AND own.scope_id = og.offer_id
+             WHERE own.scope_id IS NULL
+             ORDER BY og.offer_id, g.depth DESC, g.id ASC
+            """
+        ).fetchall()
+
+        seen = set()
+        expanded = []
+        for row in rows:
+            if row["offer_id"] in seen:
+                continue
+            seen.add(row["offer_id"])
+            expanded.append((SCOPE_OFFER, row["offer_id"], row["role"], row["minutes"],
+                             row["basis"], row["berry_mode"], "перенос с группы"))
+
+        if expanded:
+            conn.executemany(
+                "INSERT OR IGNORE INTO load_time_norms "
+                "(scope, scope_id, role, minutes, basis, berry_mode, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                expanded,
+            )
+        conn.execute("DELETE FROM load_time_norms WHERE scope = 'group'")
+        _set_sync_state(conn, GROUP_NORMS_EXPANDED_KEY, "1")
+        conn.execute("COMMIT")
+        if expanded:
+            logger.info(f"Групповые нормы развёрнуты в товарные: {len(expanded)} товаров")
+    except Exception as e:
+        logger.warning(f"Перенос групповых норм отложен: {e}")
+    finally:
+        conn.close()
 
 
 def _set_sync_state(conn, key: str, value: str) -> None:
@@ -1337,83 +1409,128 @@ def set_time_norm(scope: str, scope_id: int, role: Optional[str] = None,
 
 def resolve_offer_norms() -> Dict[int, Dict[str, Any]]:
     """
-    Эффективная норма каждого оффера: своя, иначе от самой точной его группы.
+    Норма каждого товара. Только собственная — наследования от групп нет.
 
-    Правило разрешения конфликта (товар состоит в среднем в 25 группах, и
-    размеченных среди них бывает несколько):
+    Групповые нормы были отменены владельцем 2026-09-09 по опыту работы: в
+    одной группе CRM лежат товары с сильно разным временем сборки, и норма на
+    группу давала правдоподобное, но неверное число. А неверное правдоподобное
+    хуже пустого: пустое видно счётчиком, ошибочное — нет.
 
-      1. норма самого товара — если есть, спор окончен;
-      2. иначе среди размеченных групп товара побеждает бóльшая глубина
-         («Клубничные букеты» точнее родительской «Клубника в шоколаде»);
-      3. при равной глубине — меньший идентификатор группы.
-
-    Третий пункт не про смысл, а про определённость: без него результат
-    зависел бы от порядка строк, и одно и то же число объяснялось бы
-    по-разному в разные дни.
-
-    В ответе есть `source` — откуда взялось время. Без него цифру в ячейке
-    нечем объяснить, а объяснять придётся при каждом споре.
+    `source` в ответе сохранён: он нужен интерфейсу и станет осмысленным
+    снова, если появится другой способ задавать норму пачкой (импорт файла —
+    как раз такой способ).
     """
-    resolved: Dict[int, Dict[str, Any]] = {}
-
     with get_db() as conn:
-        group_rows = conn.execute(
-            """
-            SELECT og.offer_id, g.id AS group_id, g.name AS group_name, g.depth,
-                   n.role, n.minutes, n.basis, n.berry_mode
-              FROM crm_offer_groups og
-              JOIN crm_product_groups g ON g.id = og.group_id
-              JOIN load_time_norms n ON n.scope = ? AND n.scope_id = og.group_id
-             ORDER BY og.offer_id, g.depth DESC, g.id ASC
-            """,
-            (SCOPE_GROUP,),
-        ).fetchall()
-
-        offer_rows = conn.execute(
+        rows = conn.execute(
             "SELECT scope_id AS offer_id, role, minutes, basis, berry_mode "
             "FROM load_time_norms WHERE scope = ?",
             (SCOPE_OFFER,),
         ).fetchall()
 
-    # ORDER BY уже поставил победителя первым — берём первую строку на оффер.
-    for row in group_rows:
-        if row["offer_id"] in resolved:
-            continue
-        resolved[row["offer_id"]] = {
-            "role": row["role"], "minutes": row["minutes"], "basis": row["basis"],
-            "berry_mode": row["berry_mode"],
-            "source": "group", "source_id": row["group_id"], "source_name": row["group_name"],
-        }
-
-    for row in offer_rows:
-        resolved[row["offer_id"]] = {
+    return {
+        row["offer_id"]: {
             "role": row["role"], "minutes": row["minutes"], "basis": row["basis"],
             "berry_mode": row["berry_mode"],
             "source": "offer", "source_id": row["offer_id"], "source_name": None,
         }
+        for row in rows
+    }
 
-    return resolved
 
+def set_time_norms_bulk(rows: List[Dict[str, Any]], username: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Проставить нормы пачкой — импорт файла.
 
-def list_group_norms() -> List[Dict[str, Any]]:
-    """Дерево групп с нормами и числом товаров — экран разметки."""
+    Валидация та же, что у одиночной записи, и это обязательно: иначе через
+    файл в базу заезжает то, что руками ввести нельзя.
+
+    Ошибочные строки не отменяют весь импорт, а возвращаются человеку списком.
+    В файле 456 строк, и падение целиком из-за одной опечатки означало бы
+    «начни сначала» — на практике это значит «не пользуйся импортом».
+
+    Пустая роль в строке снимает норму: так в файле выражается «этот товар
+    больше не размечен», и отдельная колонка «удалить» не нужна.
+    """
+    applied, cleared = [], []
+    errors: List[str] = []
+
+    for row in rows:
+        try:
+            offer_id = int(row["offer_id"])
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"строка без идентификатора товара: {str(row)[:80]}")
+            continue
+
+        role = (row.get("role") or "").strip() or None
+        if role is None:
+            cleared.append((offer_id,))
+            continue
+        if role not in ROLES:
+            errors.append(f"товар {offer_id}: неизвестная роль «{role}»")
+            continue
+
+        minutes = row.get("minutes")
+        if minutes in ("", None):
+            minutes = None
+        else:
+            try:
+                # Запятая как разделитель: Excel в русской локали пишет «0,5».
+                minutes = float(str(minutes).replace(",", "."))
+            except (TypeError, ValueError):
+                errors.append(f"товар {offer_id}: некорректное время «{row.get('minutes')}»")
+                continue
+            if minutes < 0:
+                errors.append(f"товар {offer_id}: отрицательное время")
+                continue
+
+        if role == ROLE_CATALOG and minutes is None:
+            errors.append(f"товар {offer_id}: у готового товара должно быть время")
+            continue
+
+        basis = (row.get("basis") or "").strip() or None
+        if basis is not None and basis not in BASES:
+            errors.append(f"товар {offer_id}: неизвестная база начисления «{basis}»")
+            continue
+
+        berry_mode = (row.get("berry_mode") or "").strip() or None
+        if berry_mode is not None and berry_mode not in BERRY_MODES:
+            errors.append(f"товар {offer_id}: неизвестный режим клубники «{berry_mode}»")
+            continue
+
+        applied.append((SCOPE_OFFER, offer_id, role, minutes,
+                        basis or (BASIS_UNIT if role == ROLE_CATALOG else None),
+                        berry_mode, username))
+
     with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT g.id, g.parent_id, g.name, g.depth,
-                   n.role, n.minutes, n.basis, n.berry_mode, n.updated_by, n.updated_at,
-                   (SELECT COUNT(*) FROM crm_offer_groups og WHERE og.group_id = g.id) AS offers
-              FROM crm_product_groups g
-         LEFT JOIN load_time_norms n ON n.scope = ? AND n.scope_id = g.id
-             ORDER BY g.depth, g.name
-            """,
-            (SCOPE_GROUP,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+        if applied:
+            conn.executemany(
+                """
+                INSERT INTO load_time_norms
+                       (scope, scope_id, role, minutes, basis, berry_mode, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(scope, scope_id) DO UPDATE SET
+                    role = excluded.role, minutes = excluded.minutes,
+                    basis = excluded.basis, berry_mode = excluded.berry_mode,
+                    updated_by = excluded.updated_by, updated_at = datetime('now')
+                """,
+                applied,
+            )
+        if cleared:
+            conn.executemany(
+                "DELETE FROM load_time_norms WHERE scope = 'offer' AND scope_id = ?", cleared)
+
+    return {"applied": len(applied), "cleared": len(cleared), "errors": errors}
 
 
 def norm_catalog(date_from: str, date_to: str, only_missing: bool = False,
-                 search: Optional[str] = None, limit: int = 300) -> List[Dict[str, Any]]:
+                 search: Optional[str] = None, limit: int = 300,
+                 role: Optional[str] = None, unit_code: Optional[str] = None,
+                 in_catalog: Optional[bool] = None,
+                 min_orders: Optional[int] = None,
+                 max_orders: Optional[int] = None,
+                 min_median: Optional[float] = None,
+                 max_median: Optional[float] = None,
+                 all_rows: bool = False) -> List[Dict[str, Any]]:
     """
     Товары из заказов за период с их нормой и — главное — с фактами о них.
 
@@ -1428,23 +1545,30 @@ def norm_catalog(date_from: str, date_to: str, only_missing: bool = False,
     where = ["i.delivery_date >= ?", "i.delivery_date <= ?"]
     params: List[Any] = [date_from, date_to]
     if search:
-        where.append("(py_lower(i.product_name) LIKE ? OR py_lower(COALESCE(i.article, '')) LIKE ?)")
+        # Ищем и по артикулу каталога, и по артикулу из позиции заказа: у
+        # позиции он бывает пустым, а у товара в каталоге заполнен — и наоборот
+        # у товара, которого в каталоге уже нет.
+        where.append(
+            "(py_lower(i.product_name) LIKE ? OR py_lower(COALESCE(i.article, '')) LIKE ? "
+            " OR py_lower(COALESCE(o.article, '')) LIKE ?)")
         pattern = f"%{search.lower()}%"
-        params.extend([pattern, pattern])
+        params.extend([pattern, pattern, pattern])
 
     with get_db() as conn:
         rows = conn.execute(
             f"""
             SELECT i.offer_id,
                    MAX(i.product_name)                  AS product_name,
-                   MAX(i.article)                       AS article,
+                   -- Артикул из каталога надёжнее: в позиции заказа он
+                   -- заполнен не всегда, а человек ищет именно по нему.
+                   COALESCE(o.article, MAX(i.article))  AS article,
                    COUNT(DISTINCT i.retailcrm_order_id) AS orders,
                    COUNT(*)                             AS positions,
                    o.unit_code                          AS unit_code
               FROM order_items i
          LEFT JOIN crm_offers o ON o.offer_id = i.offer_id
              WHERE {' AND '.join(where)}
-          GROUP BY i.offer_id, o.unit_code
+          GROUP BY i.offer_id, o.unit_code, o.article
           ORDER BY orders DESC
             """,
             params,
@@ -1465,8 +1589,29 @@ def norm_catalog(date_from: str, date_to: str, only_missing: bool = False,
     result = []
     for row in rows:
         norm = norms.get(row["offer_id"])
+        median = medians.get(row["offer_id"])
+        row_in_catalog = row["unit_code"] is not None
+
+        # Фильтры применяются здесь, а не в SQL: роль и наличие нормы живут в
+        # другой таблице и резолвятся в Python, а разносить условия по двум
+        # местам — верный способ получить фильтр, который врёт в одном из них.
         if only_missing and norm is not None:
             continue
+        if role is not None and (norm or {}).get("role") != role:
+            continue
+        if unit_code is not None and (row["unit_code"] or "") != unit_code:
+            continue
+        if in_catalog is not None and row_in_catalog != in_catalog:
+            continue
+        if min_orders is not None and row["orders"] < min_orders:
+            continue
+        if max_orders is not None and row["orders"] > max_orders:
+            continue
+        if min_median is not None and (median is None or median < min_median):
+            continue
+        if max_median is not None and (median is None or median > max_median):
+            continue
+
         result.append({
             "offer_id": row["offer_id"],
             "product_name": row["product_name"],
@@ -1474,13 +1619,15 @@ def norm_catalog(date_from: str, date_to: str, only_missing: bool = False,
             "orders": row["orders"],
             "positions": row["positions"],
             "unit_code": row["unit_code"],
-            "median_quantity": medians.get(row["offer_id"]),
+            "median_quantity": median,
             # Товара нет в каталоге CRM — его удалили, а заказ остался.
             # Размечать такое всё равно можно: ключ у нас есть.
-            "in_catalog": row["unit_code"] is not None,
+            "in_catalog": row_in_catalog,
             "norm": norm,
         })
-        if len(result) >= limit:
+        # all_rows=True — выгрузка в файл: там отсечка не нужна, иначе человек
+        # выгрузит 300 строк из пятисот и не заметит.
+        if not all_rows and len(result) >= limit:
             break
     return result
 

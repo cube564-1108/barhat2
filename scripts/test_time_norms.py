@@ -124,32 +124,53 @@ def setup():
 
 
 def test_resolution():
-    print("\n1. Чья норма выигрывает")
-    storage.set_time_norm("group", 5802, role="catalog", minutes=20, username="tester")
-    storage.set_time_norm("group", 5821, role="catalog", minutes=12, username="tester")
-    storage.set_time_norm("group", 5876, role="catalog", minutes=8, username="tester")
-
-    norms = storage.resolve_offer_norms()
-    check("дочерняя группа точнее родительской",
-          norms[100]["minutes"] == 12 and norms[100]["source_id"] == 5821,
-          f"получено {norms.get(100)}")
-    check("при равной глубине побеждает меньший id",
-          norms[200]["source_id"] == 5821, f"получено {norms.get(200)}")
-    check("видно, откуда взялось время",
-          norms[100]["source"] == "group" and norms[100]["source_name"] == "Клубничные букеты",
-          f"получено {norms.get(100)}")
-
+    print("\n1. Норма задаётся по товару")
+    # Групповые нормы отменены владельцем 2026-09-09: в одной группе CRM лежат
+    # товары с сильно разным временем сборки, и общая норма давала
+    # правдоподобное, но неверное число.
     storage.set_time_norm("offer", 100, role="catalog", minutes=30, username="tester")
     norms = storage.resolve_offer_norms()
-    check("норма товара перебивает групповую",
+    check("норма товара сохранена",
           norms[100]["minutes"] == 30 and norms[100]["source"] == "offer",
           f"получено {norms.get(100)}")
+    check("соседний товар норму не унаследовал", 200 not in norms,
+          f"получено {sorted(norms)}")
 
     storage.set_time_norm("offer", 100, role=None)
     norms = storage.resolve_offer_norms()
-    check("снятие товарной нормы возвращает групповую",
-          norms[100]["minutes"] == 12 and norms[100]["source"] == "group",
-          f"получено {norms.get(100)}")
+    check("снятие нормы убирает товар из размеченных", 100 not in norms,
+          f"получено {sorted(norms)}")
+
+
+def test_group_norms_expanded():
+    print("\n1-бис. Старые групповые нормы разворачиваются в товарные")
+    # Ставим норму группе напрямую (интерфейса для этого больше нет) и
+    # проверяем, что миграция переносит её на товары, а не теряет.
+    with storage.get_db() as conn:
+        conn.execute("INSERT OR REPLACE INTO load_time_norms "
+                     "(scope, scope_id, role, minutes, basis) VALUES ('group', 5821, 'catalog', 12, 'unit')")
+        conn.execute("INSERT OR REPLACE INTO load_time_norms "
+                     "(scope, scope_id, role, minutes, basis) VALUES ('group', 5802, 'catalog', 20, 'unit')")
+        conn.execute("DELETE FROM sync_state WHERE key = ?", (storage.GROUP_NORMS_EXPANDED_KEY,))
+    # У товара 400 есть своя норма — миграция не должна её перебить
+    storage.set_time_norm("offer", 400, role="catalog", minutes=7, username="tester")
+
+    storage._expand_group_norms()
+    norms = storage.resolve_offer_norms()
+    check("товар получил норму своей группы (глубокая важнее родительской)",
+          norms.get(100, {}).get("minutes") == 12, f"получено {norms.get(100)}")
+    check("собственная норма товара не перебита",
+          norms[400]["minutes"] == 7, f"получено {norms.get(400)}")
+    with storage.get_db() as conn:
+        left = conn.execute("SELECT COUNT(*) c FROM load_time_norms WHERE scope='group'").fetchone()["c"]
+    check("групповых норм в базе не осталось", left == 0, f"получено {left}")
+
+    storage._expand_group_norms()
+    check("повторный запуск ничего не ломает",
+          storage.resolve_offer_norms()[400]["minutes"] == 7)
+
+    for offer_id in (100, 200, 400):
+        storage.set_time_norm("offer", offer_id, role=None)
 
 
 def test_zero_is_not_missing():
@@ -204,7 +225,10 @@ def test_facts():
 
 def test_coverage():
     print("\n5. Покрытие считается в заказах")
-    # Норма есть у 100 (группа), 200 (товар), 400 (группа 5821). Нет у 300.
+    # Нормы задаются по товарам. Размечаем всё, кроме 300 (клубника):
+    # заказы 1, 4 и 5 содержат её и должны считаться неполными.
+    storage.set_time_norm("offer", 100, role="catalog", minutes=12, username="tester")
+    storage.set_time_norm("offer", 400, role="catalog", minutes=7, username="tester")
     coverage = storage.norms_coverage(DAY, DAY)
     check("заказы с неразмеченными позициями посчитаны",
           coverage["orders_incomplete"] == 3, f"получено {coverage}")
@@ -220,13 +244,65 @@ def test_coverage():
           after["orders_incomplete"] == 0 and after["share"] == 0.0, f"получено {after}")
 
 
+def test_filters():
+    print("\n6. Фильтры по полям списка")
+    rows = lambda **kw: {r["offer_id"] for r in storage.norm_catalog(DAY, DAY, **kw)}
+
+    check("фильтр по единице измерения", rows(unit_code="g") == {300, 400},
+          f"получено {rows(unit_code='g')}")
+    check("фильтр по роли", rows(role="berry") == {300}, f"получено {rows(role='berry')}")
+    check("фильтр по числу заказов", rows(min_orders=3) == {300},
+          f"получено {rows(min_orders=3)}")
+    check("фильтр по медиане количества", rows(min_median=10) == {300},
+          f"получено {rows(min_median=10)}")
+    check("фильтр по верхней границе количества", 300 not in rows(max_median=5),
+          f"получено {rows(max_median=5)}")
+    check("поиск по артикулу работает", rows(search="k1") == {300},
+          f"получено {rows(search='k1')}")
+    check("фильтры складываются", rows(unit_code="g", max_median=5) == {400},
+          f"получено {rows(unit_code='g', max_median=5)}")
+
+    check("выгрузка не режется отсечкой",
+          len(storage.norm_catalog(DAY, DAY, all_rows=True, limit=1)) == 4,
+          "all_rows не отменил limit")
+
+
+def test_bulk_import():
+    print("\n7. Импорт норм пачкой")
+    result = storage.set_time_norms_bulk([
+        {"offer_id": 100, "role": "catalog", "minutes": "15,5", "basis": "line"},
+        {"offer_id": 300, "role": "berry"},
+        {"offer_id": 400, "role": ""},                       # пустая роль снимает норму
+        {"offer_id": 200, "role": "выдумка"},                # ошибка, но не рушит импорт
+        {"offer_id": 999, "role": "catalog"},                # готовый товар без времени
+        {"role": "catalog", "minutes": 5},                   # строка без ключа
+    ], "tester")
+
+    check("применённые строки посчитаны", result["applied"] == 2, f"получено {result}")
+    check("снятые нормы посчитаны", result["cleared"] == 1, f"получено {result}")
+    check("ошибочные строки собраны списком", len(result["errors"]) == 3,
+          f"получено {result['errors']}")
+
+    norms = storage.resolve_offer_norms()
+    check("запятая как разделитель разобрана (Excel в русской локали)",
+          norms[100]["minutes"] == 15.5, f"получено {norms.get(100)}")
+    check("база начисления применена", norms[100]["basis"] == "line",
+          f"получено {norms.get(100)}")
+    check("пустая роль сняла норму", 400 not in norms, f"получено {sorted(norms)}")
+    check("строка с неизвестной ролью не применилась",
+          norms.get(200, {}).get("role") != "выдумка", f"получено {norms.get(200)}")
+
+
 def main():
     setup()
     test_resolution()
+    test_group_norms_expanded()
     test_zero_is_not_missing()
     test_validation()
     test_facts()
     test_coverage()
+    test_filters()
+    test_bulk_import()
 
     print()
     if failures:

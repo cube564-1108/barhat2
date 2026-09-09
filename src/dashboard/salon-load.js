@@ -881,39 +881,90 @@
 
     function normSource(norm) {
         if (!norm) return '<span class="sload-badge sload-badge--warn">нет нормы</span>';
-        if (norm.source === 'offer') return 'задано вручную';
-        return `группа «${esc(norm.source_name || norm.source_id)}»`;
+        return roleLabel(norm.role);
+    }
+
+    // Фильтры по всем полям списка. Нормы задаются по каждому товару отдельно
+    // (групповые отменены 2026-09-09: в группе CRM лежат товары с сильно
+    // разным временем сборки), поэтому список длинный — без фильтров до нужной
+    // строки не дойти.
+    function normFiltersBar() {
+        const option = (value, label, current) =>
+            `<option value="${value}"${current === value ? ' selected' : ''}>${label}</option>`;
+        return `
+            <div style="display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+                    margin-bottom:12px">
+                <input type="search" class="sload-input" data-filter="q" placeholder="Название или артикул"
+                    value="${esc(normFilters.q)}">
+                <select class="sload-select" data-filter="role">
+                    ${option('', 'Роль: любая', normFilters.role)}
+                    ${NORM_ROLES.filter(([code]) => code)
+                        .map(([code, label]) => option(code, 'Роль: ' + label, normFilters.role)).join('')}
+                </select>
+                <select class="sload-select" data-filter="unit">
+                    ${option('', 'Единица: любая', normFilters.unit)}
+                    ${option('pc', 'Единица: штуки', normFilters.unit)}
+                    ${option('g', 'Единица: граммы', normFilters.unit)}
+                </select>
+                <select class="sload-select" data-filter="in_catalog">
+                    ${option('', 'Каталог: все', normFilters.in_catalog)}
+                    ${option('1', 'Каталог: есть в CRM', normFilters.in_catalog)}
+                    ${option('0', 'Каталог: нет в CRM', normFilters.in_catalog)}
+                </select>
+                <input type="number" min="0" class="sload-input" data-filter="min_orders"
+                    placeholder="Заказов от" value="${esc(normFilters.min_orders)}">
+                <input type="number" min="0" class="sload-input" data-filter="max_orders"
+                    placeholder="Заказов до" value="${esc(normFilters.max_orders)}">
+                <input type="number" min="0" step="0.1" class="sload-input" data-filter="min_median"
+                    placeholder="Кол-во от" value="${esc(normFilters.min_median)}">
+                <input type="number" min="0" step="0.1" class="sload-input" data-filter="max_median"
+                    placeholder="Кол-во до" value="${esc(normFilters.max_median)}">
+            </div>`;
+    }
+
+    // Фильтры списка товаров. Живут в состоянии модуля, а не в замыкании
+    // модалки: экран перерисовывается на каждое действие, и фильтр,
+    // сбрасывающийся после сохранения одной строки, бесполезен.
+    const normFilters = { q: '', role: '', unit: '', in_catalog: '',
+                          min_orders: '', max_orders: '', min_median: '', max_median: '' };
+
+    function normQuery(extra) {
+        const params = new URLSearchParams();
+        Object.keys(normFilters).forEach(key => {
+            if (normFilters[key] !== '') params.set(key, normFilters[key]);
+        });
+        Object.keys(extra || {}).forEach(key => params.set(key, extra[key]));
+        const query = params.toString();
+        return query ? '?' + query : '';
     }
 
     async function openTimeNorms(tab) {
-        const active = tab || 'groups';
-        let groups, offers, tariffs;
+        const active = tab || 'offers';
+        let offers, tariffs;
         try {
-            if (active === 'groups') {
-                groups = await api('/api/couriers/time-norms/groups');
-            } else if (active === 'tariffs') {
+            if (active === 'tariffs') {
                 tariffs = await api('/api/couriers/time-norms/tariffs');
             } else {
                 offers = await api('/api/couriers/time-norms/offers' +
-                    (active === 'missing' ? '?only_missing=1' : ''));
+                    normQuery(active === 'missing' ? { only_missing: 1 } : null));
             }
         } catch (error) {
             toast('Не удалось загрузить нормы: ' + error.message, 'error');
             return;
         }
 
-        const coverage = offers ? (offers.meta || {}).coverage : null;
-        const catalog = groups ? (groups.meta || {}).catalog : null;
+        const meta = offers ? (offers.meta || {}) : {};
+        const coverage = meta.coverage || null;
+        const catalog = meta.catalog || null;
 
         const body = `
-            <p class="sload-card__caption">Норма — сколько минут занимает сборка. Задавайте её
-                группе номенклатуры: одна запись закрывает десятки товаров. Время у отдельного
-                товара перебивает групповое. Компонентам («цветок», «клубника на вес») минуты
-                не нужны — их время считается по тарифам от количества.</p>
+            <p class="sload-card__caption">Норма — сколько минут занимает сборка. Задаётся каждому
+                товару отдельно: в одной группе номенклатуры лежат товары с сильно разным временем,
+                и общая норма давала бы правдоподобное, но неверное число. Компонентам («цветок»,
+                «клубника на вес») минуты не нужны — их время считается по тарифам от количества.
+                Для массовой работы — выгрузка и загрузка файла.</p>
 
             <div class="sload-tabs" style="margin-bottom:12px">
-                <button class="sload-tab ${active === 'groups' ? 'sload-tab--active' : ''}"
-                    data-norm-tab="groups">Группы</button>
                 <button class="sload-tab ${active === 'offers' ? 'sload-tab--active' : ''}"
                     data-norm-tab="offers">Товары</button>
                 <button class="sload-tab ${active === 'missing' ? 'sload-tab--active' : ''}"
@@ -923,18 +974,22 @@
             </div>
 
             ${catalog && !catalog.offers ? note('bad', 'Каталог номенклатуры пуст',
-                'Группы и единицы измерения ещё не загружены из CRM — размечать нечего. ' +
-                'Штатно каталог обновляется ночью; кнопка ниже загрузит его сейчас.') : ''}
+                'Единицы измерения ещё не загружены из CRM. Штатно каталог обновляется ночью; ' +
+                'кнопка ниже загрузит его сейчас.') : ''}
 
-            ${active === 'groups' && state.isAdmin ? `
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-                    <button class="sload-btn sload-btn--ghost" data-sync-catalog>Обновить каталог из CRM</button>
+            ${active !== 'tariffs' ? `
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                    <button class="sload-btn sload-btn--ghost" data-export-norms>Выгрузить в файл</button>
+                    ${state.isAdmin ? `
+                        <button class="sload-btn sload-btn--ghost" data-import-norms>Загрузить из файла</button>
+                        <input type="file" accept=".csv,text/csv" id="sloadNormFile" style="display:none">
+                        <button class="sload-btn sload-btn--ghost" data-sync-catalog>Обновить каталог</button>` : ''}
                     <span class="sload-extra__label">${catalog && catalog.offers
-                        ? `${catalog.groups} ${plural(catalog.groups, 'группа', 'группы', 'групп')}, ` +
-                          `${catalog.offers} ${plural(catalog.offers, 'товар', 'товара', 'товаров')}` +
+                        ? `${catalog.offers} ${plural(catalog.offers, 'товар', 'товара', 'товаров')} в каталоге` +
                           (catalog.synced_at ? ` · обновлён ${esc(catalog.synced_at)}` : '')
                         : 'каталог не загружен'}</span>
-                </div>` : ''}
+                </div>
+                ${normFiltersBar()}` : ''}
 
             ${coverage && coverage.orders_incomplete ? note('warn',
                 `${coverage.orders_incomplete} из ${coverage.orders} ` +
@@ -944,8 +999,7 @@
                 `из ${coverage.offers_total}.`) : ''}
 
             <div id="sloadNormRows">${
-                active === 'groups' ? groupNormRows(groups.data || [])
-                : active === 'tariffs' ? tariffRows(tariffs.data || {})
+                active === 'tariffs' ? tariffRows(tariffs.data || {})
                 : offerNormRows(offers.data || [])}</div>`;
 
         const overlay = modal('Нормы времени сборки', body,
@@ -965,15 +1019,27 @@
                 syncCatalog.textContent = 'Загружаю…';
                 try {
                     const res = await api('/api/couriers/catalog/sync', postOptions({}));
-                    toast(`Каталог обновлён: ${res.data.groups} групп, ${res.data.offers} товаров`,
-                        'success');
+                    toast(`Каталог обновлён: ${res.data.offers} товаров`, 'success');
                     overlay.remove();
-                    openTimeNorms('groups');
+                    openTimeNorms(active);
                 } catch (error) {
                     toast('Не удалось обновить каталог: ' + error.message, 'error');
                     syncCatalog.disabled = false;
-                    syncCatalog.textContent = 'Обновить каталог из CRM';
+                    syncCatalog.textContent = 'Обновить каталог';
                 }
+                return;
+            }
+
+            // Выгрузка идёт обычной ссылкой, а не fetch: файл должен сохраниться
+            // браузером, а не осесть в памяти вкладки.
+            if (e.target.closest('[data-export-norms]')) {
+                window.location.href = '/api/couriers/time-norms/export' +
+                    normQuery(active === 'missing' ? { only_missing: 1 } : null);
+                return;
+            }
+
+            if (e.target.closest('[data-import-norms]')) {
+                overlay.querySelector('#sloadNormFile').click();
                 return;
             }
 
@@ -1034,15 +1100,103 @@
                 save.disabled = false;
             }
         });
+
+        // Фильтры: текстовые с задержкой, списки — сразу. Перерисовываем весь
+        // экран, поэтому фокус возвращается на то поле, где его оставили, —
+        // иначе набор в поиске обрывается на первом символе.
+        let filterTimer = null;
+        const applyFilters = (focusName, delay) => {
+            clearTimeout(filterTimer);
+            filterTimer = setTimeout(async () => {
+                overlay.remove();
+                await openTimeNorms(active);
+                const field = document.querySelector(`[data-filter="${focusName}"]`);
+                if (field) {
+                    field.focus();
+                    if (field.setSelectionRange && field.type !== 'number') {
+                        field.setSelectionRange(field.value.length, field.value.length);
+                    }
+                }
+            }, delay);
+        };
+
+        overlay.querySelectorAll('[data-filter]').forEach(field => {
+            const name = field.dataset.filter;
+            const isSelect = field.tagName === 'SELECT';
+            field.addEventListener(isSelect ? 'change' : 'input', () => {
+                normFilters[name] = field.value.trim();
+                applyFilters(name, isSelect ? 0 : 400);
+            });
+        });
+
+        const fileInput = overlay.querySelector('#sloadNormFile');
+        if (fileInput) {
+            fileInput.addEventListener('change', async () => {
+                const file = fileInput.files && fileInput.files[0];
+                if (!file) return;
+                try {
+                    const rows = parseNormsCsv(await file.text());
+                    if (!rows.length) {
+                        toast('В файле нет строк с товарами', 'error');
+                        return;
+                    }
+                    const res = await api('/api/couriers/time-norms/import',
+                        postOptions({ rows: rows }));
+                    const errors = res.data.errors || [];
+                    toast(`Загружено: ${res.data.applied}, снято: ${res.data.cleared}` +
+                        (errors.length ? `, с ошибками: ${errors.length}` : ''),
+                        errors.length ? 'error' : 'success');
+                    if (errors.length) {
+                        BarhatUI.alert('Строки, которые не удалось применить',
+                            errors.slice(0, 20).join('\n') +
+                            (errors.length > 20 ? `\n…и ещё ${errors.length - 20}` : ''));
+                    }
+                    state.data = null;
+                    state.week = null;
+                    overlay.remove();
+                    openTimeNorms(active);
+                } catch (error) {
+                    toast('Не удалось загрузить файл: ' + error.message, 'error');
+                }
+            });
+        }
+    }
+
+    // Разбор выгруженного файла. Читаем по ЗАГОЛОВКАМ, а не по номерам
+    // колонок: в Excel столбцы переставляют и вставляют свои, и разбор по
+    // номеру начал бы писать время в поле роли.
+    function parseNormsCsv(text) {
+        const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(line => line.trim());
+        if (!lines.length) return [];
+
+        const delimiter = lines[0].includes(';') ? ';' : ',';
+        const split = line => line.split(delimiter).map(cell => cell.trim().replace(/^"|"$/g, ''));
+        const headers = split(lines[0]);
+        const index = name => headers.indexOf(name);
+        const columns = {
+            offer_id: index('offer_id'), role: index('Роль'), minutes: index('Минут'),
+            basis: index('За что'), berry_mode: index('Клубника')
+        };
+        if (columns.offer_id < 0) {
+            throw new Error('в файле нет колонки offer_id — по ней находится товар');
+        }
+
+        const rows = [];
+        for (const line of lines.slice(1)) {
+            const cells = split(line);
+            const id = Number(cells[columns.offer_id]);
+            if (!id) continue;
+            const cell = name => columns[name] >= 0 ? (cells[columns[name]] || '') : '';
+            rows.push({
+                offer_id: id, role: cell('role'), minutes: cell('minutes'),
+                basis: cell('basis'), berry_mode: cell('berry_mode')
+            });
+        }
+        return rows;
     }
 
     // Каждый контрол — своя колонка таблицы: иначе строки разъезжаются и
-    // сравнить нормы соседних групп глазами невозможно.
-    //
-    // `own` — норма, заданная именно этой записи (у товара это его
-    // собственная строка, а не унаследованная от группы): подставлять в поля
-    // групповое значение нельзя, иначе первое же «Сохранить» превратит
-    // наследование в жёстко прописанное исключение.
+    // сравнить нормы соседних товаров глазами невозможно.
     function normCells(own) {
         const minutes = own && own.minutes !== null && own.minutes !== undefined
             ? esc(own.minutes) : '';
@@ -1114,35 +1268,18 @@
             </table>`;
     }
 
-    function groupNormRows(groups) {
-        if (!groups.length) {
-            return '<div class="sload-empty"><p>Групп номенклатуры нет — каталог ещё не загружен из CRM.</p></div>';
-        }
-        return `<table class="sload-modal-table">
-            <thead><tr><th>Группа</th><th>Товаров</th><th>Роль</th><th>Минут</th>
-                <th>За что</th><th>Клубника</th><th></th></tr></thead>
-            <tbody>${groups.map(group => `
-                <tr data-norm-row data-scope="group" data-scope-id="${group.id}">
-                    <td style="padding-left:${group.depth * 16}px">${esc(group.name)}</td>
-                    <td>${group.offers}</td>
-                    ${normCells(group)}
-                </tr>`).join('')}</tbody>
-        </table>`;
-    }
-
     function offerNormRows(offers) {
         if (!offers.length) {
-            return '<div class="sload-empty"><p>Товаров нет — либо всё размечено, либо за 60 дней их не заказывали.</p></div>';
+            return '<div class="sload-empty"><p>Ничего не найдено — либо всё размечено, ' +
+                   'либо фильтры слишком узкие.</p></div>';
         }
         return `<table class="sload-modal-table">
-            <thead><tr><th>Товар</th><th>Заказов</th><th>Кол-во<br>в позиции</th><th>Ед.</th>
-                <th>Норма</th><th>Роль</th><th>Минут</th><th>За что</th><th>Клубника</th><th></th></tr></thead>
-            <tbody>${offers.map(item => {
-                // В полях — только собственная норма товара. Унаследованная от
-                // группы показана словами в колонке «Норма».
-                const own = item.norm && item.norm.source === 'offer' ? item.norm : null;
-                return `
+            <thead><tr><th>Артикул</th><th>Товар</th><th>Заказов</th><th>Кол-во<br>в позиции</th>
+                <th>Ед.</th><th>Норма</th><th>Роль</th><th>Минут</th><th>За что</th>
+                <th>Клубника</th><th></th></tr></thead>
+            <tbody>${offers.map(item => `
                 <tr data-norm-row data-scope="offer" data-scope-id="${item.offer_id}">
+                    <td>${esc(item.article || '—')}</td>
                     <td>${esc(item.product_name || ('Товар ' + item.offer_id))}
                         ${item.in_catalog ? '' :
                             '<br><span class="sload-badge sload-badge--warn">нет в каталоге</span>'}</td>
@@ -1150,11 +1287,9 @@
                     <td>${item.median_quantity === null || item.median_quantity === undefined
                         ? '—' : num(item.median_quantity)}</td>
                     <td>${esc(item.unit_code || '—')}</td>
-                    <td>${normSource(item.norm)}${item.norm && item.norm.role
-                        ? `<br><span class="sload-extra__label">${roleLabel(item.norm.role)}</span>` : ''}</td>
-                    ${normCells(own)}
-                </tr>`;
-            }).join('')}</tbody>
+                    <td>${normSource(item.norm)}</td>
+                    ${normCells(item.norm)}
+                </tr>`).join('')}</tbody>
         </table>`;
     }
 

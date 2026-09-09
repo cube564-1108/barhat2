@@ -9,6 +9,8 @@ Blueprint регистрируется в src/pyrus/server.py (мастер-пр
 только фоновый синк под локом.
 """
 
+import csv
+import io
 import logging
 import os
 import re
@@ -18,7 +20,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 from flask_login import current_user, login_required
 
 # Импортируем модуль авторизации (как в cashshifts/server.py)
@@ -630,38 +632,150 @@ def save_weights():
 # Нормы времени сборки (Ф2 плана «нагрузка в минутах»)
 # ============================================================================
 
-@couriers_bp.route("/time-norms/groups", methods=["GET"])
-@section_required("salon_load")
-def get_group_norms():
-    """Дерево групп номенклатуры с нормами: основной экран разметки."""
-    return success_response(storage.list_group_norms(), meta={
-        "roles": list(storage.ROLES),
-        "bases": list(storage.BASES),
-        "berry_modes": list(storage.BERRY_MODES),
-        "catalog": storage.catalog_snapshot(),
-    })
+def _norm_filters() -> dict:
+    """
+    Фильтры списка товаров из query-параметров.
+
+    Нормы задаются только по товарам (групповые отменены владельцем
+    2026-09-09: в одной группе CRM лежат товары с сильно разным временем
+    сборки). Значит список длинный, и фильтры — не удобство, а единственный
+    способ дойти до нужной строки.
+    """
+    def number(name, cast):
+        raw = request.args.get(name)
+        if raw in (None, ""):
+            return None
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return None
+
+    in_catalog = request.args.get("in_catalog")
+    return {
+        "only_missing": request.args.get("only_missing") in ("1", "true"),
+        "search": (request.args.get("q") or "").strip() or None,
+        "role": (request.args.get("role") or "").strip() or None,
+        "unit_code": (request.args.get("unit") or "").strip() or None,
+        "in_catalog": None if in_catalog in (None, "") else in_catalog in ("1", "true"),
+        "min_orders": number("min_orders", int),
+        "max_orders": number("max_orders", int),
+        "min_median": number("min_median", float),
+        "max_median": number("max_median", float),
+    }
 
 
 @couriers_bp.route("/time-norms/offers", methods=["GET"])
 @section_required("salon_load")
 def get_offer_norms():
     """
-    Товары из заказов за 60 дней: норма, её источник и факты о товаре.
+    Товары из заказов за 60 дней: норма и факты о товаре.
 
     only_missing=1 — вкладка «без нормы», отсортированная по числу заказов:
     размечать нужно начиная с того, что реально влияет на нагрузку.
     """
-    only_missing = request.args.get("only_missing") in ("1", "true")
-    search = (request.args.get("q") or "").strip() or None
     date_from, date_to = _weights_window()
-
     return success_response(
-        storage.norm_catalog(date_from, date_to, only_missing=only_missing, search=search),
+        storage.norm_catalog(date_from, date_to, **_norm_filters()),
         meta={
             "period": {"from": date_from, "to": date_to},
             "coverage": storage.norms_coverage(date_from, date_to),
+            "roles": list(storage.ROLES),
+            "bases": list(storage.BASES),
+            "berry_modes": list(storage.BERRY_MODES),
+            "catalog": storage.catalog_snapshot(),
         },
     )
+
+
+# Заголовки выгрузки. Первая колонка — ключ: по ней импорт находит товар, и
+# без неё файл бесполезен. Остальные справочные, импорт их не читает.
+NORMS_CSV_HEADERS = [
+    "offer_id", "Артикул", "Товар", "Заказов", "Кол-во в позиции", "Ед.",
+    "Роль", "Минут", "За что", "Клубника",
+]
+# Колонки, которые импорт читает по заголовку, а не по номеру: человек в Excel
+# переставит столбцы или вставит свой — и импорт по номеру начнёт писать время
+# в поле роли.
+NORMS_IMPORT_COLUMNS = {"offer_id": "offer_id", "Роль": "role", "Минут": "minutes",
+                        "За что": "basis", "Клубника": "berry_mode"}
+
+
+@couriers_bp.route("/time-norms/export", methods=["GET"])
+@section_required("salon_load")
+def export_norms():
+    """
+    Выгрузка норм в файл для Excel.
+
+    CSV с разделителем «;» и BOM, а не xlsx: Excel открывает такой файл
+    двойным кликом и сохраняет обратно в том же виде, а openpyxl ради двух
+    кнопок на прод тащить не нужно (тот же приём, что в модуле «Ссылки
+    товаров»).
+
+    Выгружается ВСЁ, что попало под фильтры, без отсечки в 300 строк: человек
+    иначе выгрузит верхушку, разметит её и решит, что закончил.
+    """
+    date_from, date_to = _weights_window()
+    rows = storage.norm_catalog(date_from, date_to, all_rows=True, **_norm_filters())
+
+    buffer = io.StringIO()
+    buffer.write("﻿")   # BOM: без него Excel читает кириллицу как «РўРѕРІР°СЂ»
+    writer = csv.writer(buffer, delimiter=";", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
+    writer.writerow(NORMS_CSV_HEADERS)
+    for row in rows:
+        norm = row.get("norm") or {}
+        writer.writerow([
+            row["offer_id"], row.get("article") or "", row.get("product_name") or "",
+            row["orders"],
+            "" if row.get("median_quantity") is None else str(row["median_quantity"]).replace(".", ","),
+            row.get("unit_code") or "",
+            norm.get("role") or "",
+            "" if norm.get("minutes") is None else str(norm["minutes"]).replace(".", ","),
+            norm.get("basis") or "", norm.get("berry_mode") or "",
+        ])
+
+    stamp = date.today().isoformat()
+    return Response(
+        buffer.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="normy-vremeni-{stamp}.csv"'},
+    )
+
+
+@couriers_bp.route("/time-norms/import", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def import_norms():
+    """
+    Загрузка норм из файла: {"rows": [{"offer_id": 55648, "role": "catalog", ...}]}
+
+    Файл разбирает браузер, сюда приходят уже строки. Так сделано намеренно:
+    иначе пришлось бы принимать multipart и гадать о кодировке файла на
+    сервере, а Excel сохраняет CSV то в UTF-8, то в cp1251.
+
+    Ошибочные строки возвращаются списком и не отменяют остальные.
+    """
+    data = request.get_json(silent=True) or {}
+    rows = data.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return error_response("Не передан список строк")
+    if len(rows) > MAX_WEIGHTS_BATCH:
+        return error_response(f"За раз можно загрузить не больше {MAX_WEIGHTS_BATCH} строк")
+
+    username = getattr(current_user, "username", None)
+    result = storage.set_time_norms_bulk(rows, username)
+
+    log_action(username, "salon_load_norms_import",
+               f"применено {result['applied']}, снято {result['cleared']}, "
+               f"ошибок {len(result['errors'])}")
+
+    date_from, date_to = _weights_window()
+    try:
+        storage.recalc_minutes_range(date_from, date_to)
+    except Exception as e:
+        logger.error(f"Пересчёт минут после импорта норм не удался: {e}")
+
+    return success_response({**result,
+                             "coverage": storage.norms_coverage(date_from, date_to)})
 
 
 @couriers_bp.route("/time-norms", methods=["POST"])
