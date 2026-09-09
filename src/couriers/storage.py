@@ -1356,6 +1356,47 @@ SCOPE_GROUP = "group"
 SCOPE_OFFER = "offer"
 SCOPES = (SCOPE_GROUP, SCOPE_OFFER)
 
+# Человеческие подписи для выгрузки и загрузки файла.
+#
+# В файл пишутся именно они, а не коды: файл открывает человек в Excel, и
+# «catalog» ему ничего не говорит — пустую ячейку он заполнит тем, что видел на
+# экране («готовый товар»). Загрузка принимает и подпись, и код, и в любом
+# регистре: заставлять человека помнить внутренние коды — значит получить файл,
+# который не грузится, и вывод «выгрузка бесполезна».
+ROLE_LABELS = {
+    ROLE_CATALOG: "готовый товар",
+    ROLE_FLOWER: "цветок",
+    ROLE_BERRY: "клубника на вес",
+    ROLE_PACKAGING: "упаковка",
+    ROLE_NONE: "не создаёт нагрузки",
+}
+BASIS_LABELS = {BASIS_UNIT: "за штуку", BASIS_LINE: "за позицию"}
+BERRY_LABELS = {BERRY_BOUQUET: "букет", BERRY_BOX: "коробочка"}
+
+
+def _from_label(value: Optional[str], labels: Dict[str, str],
+                extra: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """Подпись или код из файла → код. Регистр и лишние пробелы не важны."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    for code, label in labels.items():
+        if text in (code.lower(), label.lower()):
+            return code
+    for alias, code in (extra or {}).items():
+        if text == alias.lower():
+            return code
+    return value.strip()   # вернём как есть — валидация ниже даст внятную ошибку
+
+
+# Синонимы, которые человек напишет с большей вероятностью, чем нашу подпись.
+ROLE_ALIASES = {"компонент": ROLE_FLOWER, "цветок (компонент)": ROLE_FLOWER,
+                "клубника": ROLE_BERRY, "нет": ROLE_NONE, "ноль": ROLE_NONE,
+                "не создает нагрузки": ROLE_NONE}
+BERRY_ALIASES = {"бокс": BERRY_BOX, "коробка": BERRY_BOX}
+
 
 def set_time_norm(scope: str, scope_id: int, role: Optional[str] = None,
                   minutes: Optional[float] = None, basis: Optional[str] = None,
@@ -1461,12 +1502,16 @@ def set_time_norms_bulk(rows: List[Dict[str, Any]], username: Optional[str] = No
             errors.append(f"строка без идентификатора товара: {str(row)[:80]}")
             continue
 
-        role = (row.get("role") or "").strip() or None
+        # Из файла приходят подписи («готовый товар»), из формы — коды.
+        # Принимаем и то и другое: человек правит файл глазами, а не по
+        # справочнику внутренних кодов.
+        role = _from_label(row.get("role"), ROLE_LABELS, ROLE_ALIASES)
         if role is None:
             cleared.append((offer_id,))
             continue
         if role not in ROLES:
-            errors.append(f"товар {offer_id}: неизвестная роль «{role}»")
+            errors.append(f"товар {offer_id}: неизвестная роль «{role}». "
+                          f"Допустимо: {', '.join(ROLE_LABELS.values())}")
             continue
 
         minutes = row.get("minutes")
@@ -1487,14 +1532,16 @@ def set_time_norms_bulk(rows: List[Dict[str, Any]], username: Optional[str] = No
             errors.append(f"товар {offer_id}: у готового товара должно быть время")
             continue
 
-        basis = (row.get("basis") or "").strip() or None
+        basis = _from_label(row.get("basis"), BASIS_LABELS)
         if basis is not None and basis not in BASES:
-            errors.append(f"товар {offer_id}: неизвестная база начисления «{basis}»")
+            errors.append(f"товар {offer_id}: неизвестная база начисления «{basis}». "
+                          f"Допустимо: {', '.join(BASIS_LABELS.values())}")
             continue
 
-        berry_mode = (row.get("berry_mode") or "").strip() or None
+        berry_mode = _from_label(row.get("berry_mode"), BERRY_LABELS, BERRY_ALIASES)
         if berry_mode is not None and berry_mode not in BERRY_MODES:
-            errors.append(f"товар {offer_id}: неизвестный режим клубники «{berry_mode}»")
+            errors.append(f"товар {offer_id}: неизвестный режим клубники «{berry_mode}». "
+                          f"Допустимо: {', '.join(BERRY_LABELS.values())}")
             continue
 
         applied.append((SCOPE_OFFER, offer_id, role, minutes,

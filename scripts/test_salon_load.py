@@ -350,6 +350,8 @@ def test_ui_contract():
 
     with app.test_client() as client:
         login_as(client, "test-load-admin")
+        # Заголовок AJAX нужен всем записям, а они идут вперемешку с чтениями.
+        headers = {"X-Requested-With": "barhat-dashboard"}
 
         response = client.get(f"/api/salon-load/day?date={DAY}")
         payload = (response.get_json() or {}).get("data", {})
@@ -400,6 +402,18 @@ def test_ui_contract():
         check("список товаров принимает все фильтры", response.status_code == 200,
               f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
 
+        # Выгрузка считается по окну «последние 60 дней», а заказы прогона лежат
+        # в будущем — без заказа во вчерашнем дне файл вышел бы с одним
+        # заголовком, и это ровно то, на что жаловался владелец.
+        yesterday = (_TODAY - timedelta(days=1)).isoformat()
+        couriers_storage.replace_orders_window(yesterday, yesterday, [
+            retailcrm.parse_order(dict(order(900, hour=12),
+                                       delivery={"date": yesterday, "code": "dostavka-kurerom"}), {}),
+        ])
+        client.post("/api/couriers/time-norms", headers=headers,
+                    json={"scope": "offer", "scope_id": 1, "role": "catalog",
+                          "minutes": 12, "basis": "unit"})
+
         response = client.get("/api/couriers/time-norms/export")
         check("выгрузка отдаёт файл", response.status_code == 200,
               f"получено {response.status_code}")
@@ -408,11 +422,19 @@ def test_ui_contract():
               "csv" in response.headers.get("Content-Type", ""),
               f"получено {dict(response.headers)}")
         text = response.get_data(as_text=True)
+        lines = text.split("\r\n")
         check("в файле есть BOM — иначе Excel ломает кириллицу",
               text.startswith("﻿"), f"получено {text[:20]!r}")
-        check("в заголовке есть ключевая колонка offer_id и артикул",
-              "offer_id" in text.split("\r\n")[0] and "Артикул" in text.split("\r\n")[0],
-              f"получено {text.split(chr(13))[0][:120]}")
+        check("в заголовке есть все правимые колонки",
+              all(col in lines[0] for col in
+                  ("offer_id", "Артикул", "Роль", "Минут", "За что", "Клубника")),
+              f"получено {lines[0][:150]}")
+        check("в файле есть строки товаров, а не только заголовок",
+              len([line for line in lines if line.strip()]) > 1,
+              f"строк: {len([l for l in lines if l.strip()])} — выгрузка пуста")
+        check("роль пишется словами, а не кодом",
+              "готовый товар" in text and "catalog" not in text,
+              f"получено {text[:300]}")
 
         response = client.get("/api/couriers/time-norms/offers?only_missing=1")
         payload = response.get_json() or {}
@@ -434,7 +456,6 @@ def test_ui_contract():
               f"получено {payload.get('data')}")
 
         # Запись: те же тела запроса, что шлёт экран
-        headers = {"X-Requested-With": "barhat-dashboard"}
         response = client.post("/api/salon-load/capacity/working-hours", headers=headers,
                                json={"store_id": STORE_ID, "open_hour": 9, "close_hour": 21,
                                      "capacity": 6, "pickup_capacity": None})
@@ -486,7 +507,17 @@ def test_ui_contract():
         check("норма без заголовка AJAX отклоняется", response.status_code == 403,
               f"получено {response.status_code}")
 
-        # Импорт: то же тело, что шлёт разбор файла в браузере
+        # Импорт: то же тело, что шлёт разбор файла в браузере. Роль подписью —
+        # именно так она выглядит в выгруженном файле, и именно так её впишет
+        # человек.
+        response = client.post("/api/couriers/time-norms/import", headers=headers,
+                               json={"rows": [{"offer_id": 1, "role": "готовый товар",
+                                               "minutes": "12,5", "basis": "за штуку"}]})
+        check("роль подписью из файла принимается",
+              response.status_code == 200 and
+              (response.get_json() or {}).get("data", {}).get("applied") == 1,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:160]}")
+
         response = client.post("/api/couriers/time-norms/import", headers=headers,
                                json={"rows": [{"offer_id": 1, "role": "catalog", "minutes": "12,5"}]})
         payload = (response.get_json() or {}).get("data", {})

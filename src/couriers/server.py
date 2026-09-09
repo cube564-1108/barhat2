@@ -729,6 +729,12 @@ def export_norms():
     """
     date_from, date_to = _weights_window()
     rows = storage.norm_catalog(date_from, date_to, all_rows=True, **_norm_filters())
+    if not rows:
+        # Пустой файл с одним заголовком выглядит как «выгрузка сломалась».
+        # Говорим словами, что заказов в окне нет или фильтры слишком узкие.
+        return error_response(
+            f"За период {date_from} — {date_to} товаров не нашлось: "
+            f"либо заказов ещё нет, либо фильтры слишком узкие", 404)
 
     buffer = io.StringIO()
     buffer.write("﻿")   # BOM: без него Excel читает кириллицу как «РўРѕРІР°СЂ»
@@ -741,9 +747,13 @@ def export_norms():
             row["orders"],
             "" if row.get("median_quantity") is None else str(row["median_quantity"]).replace(".", ","),
             row.get("unit_code") or "",
-            norm.get("role") or "",
+            # Подписи, а не коды: файл открывает человек, и «catalog» ему
+            # ничего не говорит — пустую ячейку он заполнит тем, что видел на
+            # экране. Загрузка принимает и подпись, и код.
+            storage.ROLE_LABELS.get(norm.get("role"), ""),
             "" if norm.get("minutes") is None else str(norm["minutes"]).replace(".", ","),
-            norm.get("basis") or "", norm.get("berry_mode") or "",
+            storage.BASIS_LABELS.get(norm.get("basis"), ""),
+            storage.BERRY_LABELS.get(norm.get("berry_mode"), ""),
         ])
 
     stamp = date.today().isoformat()

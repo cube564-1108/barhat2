@@ -962,7 +962,10 @@
                 товару отдельно: в одной группе номенклатуры лежат товары с сильно разным временем,
                 и общая норма давала бы правдоподобное, но неверное число. Компонентам («цветок»,
                 «клубника на вес») минуты не нужны — их время считается по тарифам от количества.
-                Для массовой работы — выгрузка и загрузка файла.</p>
+                Меняйте сколько угодно строк и жмите «Сохранить изменения» внизу — уйдёт всё
+                изменённое сразу. Для работы вне экрана — выгрузка и загрузка файла: правятся
+                колонки «Роль», «Минут», «За что», «Клубника», значения в них те же, что в
+                списках на экране.</p>
 
             <div class="sload-tabs" style="margin-bottom:12px">
                 <button class="sload-tab ${active === 'offers' ? 'sload-tab--active' : ''}"
@@ -1003,6 +1006,8 @@
                 : offerNormRows(offers.data || [])}</div>`;
 
         const overlay = modal('Нормы времени сборки', body,
+            (active !== 'tariffs' && state.isAdmin
+                ? '<button class="sload-btn" data-save-norms>Сохранить изменения</button>' : '') +
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
 
         overlay.addEventListener('click', async e => {
@@ -1071,33 +1076,36 @@
                 return;
             }
 
-            const save = e.target.closest('[data-save-norm]');
+            const save = e.target.closest('[data-save-norms]');
             if (!save) return;
 
-            const row = save.closest('[data-norm-row]');
-            const role = row.querySelector('[data-norm-role]').value;
-            const minutesRaw = row.querySelector('[data-norm-minutes]');
-            const basisSelect = row.querySelector('[data-norm-basis]');
-            const berrySelect = row.querySelector('[data-norm-berry]');
-
-            const payload = {
-                scope: row.dataset.scope,
-                scope_id: Number(row.dataset.scopeId),
-                role: role || null,
-                minutes: minutesRaw && minutesRaw.value !== '' ? Number(minutesRaw.value) : null,
-                basis: basisSelect ? basisSelect.value : null,
-                berry_mode: berrySelect && berrySelect.value ? berrySelect.value : null
-            };
+            const changed = changedNormRows(overlay);
+            if (!changed.length) {
+                toast('Ничего не изменилось', 'info');
+                return;
+            }
 
             save.disabled = true;
+            save.textContent = 'Сохраняю…';
             try {
-                await api('/api/couriers/time-norms', postOptions(payload));
-                toast('Норма сохранена', 'success');
+                const res = await api('/api/couriers/time-norms/import',
+                    postOptions({ rows: changed }));
+                const errors = res.data.errors || [];
+                toast(`Сохранено: ${res.data.applied}, снято: ${res.data.cleared}` +
+                    (errors.length ? `, с ошибками: ${errors.length}` : ''),
+                    errors.length ? 'error' : 'success');
+                if (errors.length) {
+                    BarhatUI.alert('Строки, которые не удалось применить:\n' +
+                        errors.slice(0, 15).join('\n'), 'error');
+                }
+                state.data = null;
+                state.week = null;
                 overlay.remove();
                 openTimeNorms(active);
             } catch (error) {
                 toast('Не удалось сохранить: ' + error.message, 'error');
                 save.disabled = false;
+                save.textContent = 'Сохранить изменения';
             }
         });
 
@@ -1229,25 +1237,55 @@
 
     // Каждый контрол — своя колонка таблицы: иначе строки разъезжаются и
     // сравнить нормы соседних товаров глазами невозможно.
+    // Кнопки в каждой строке нет намеренно: разметка — работа массовая, и
+    // сохранять по одному товару из четырёхсот невозможно. Поля запоминают
+    // исходное значение в data-initial, а одна кнопка внизу отправляет пачкой
+    // всё, что человек изменил.
     function normCells(own) {
         const minutes = own && own.minutes !== null && own.minutes !== undefined
             ? esc(own.minutes) : '';
+        const role = (own && own.role) || '';
+        const basis = (own && own.basis) || 'unit';
+        const berry = (own && own.berry_mode) || '';
         return `
-            <td><select class="sload-select" data-norm-role>
+            <td><select class="sload-select" data-norm-role data-initial="${esc(role)}">
                 ${NORM_ROLES.map(([code, label]) =>
-                    `<option value="${code}"${(own && own.role) === code ? ' selected' : ''}>${label}</option>`).join('')}
+                    `<option value="${code}"${role === code ? ' selected' : ''}>${label}</option>`).join('')}
             </select></td>
             <td><input type="number" min="0" step="0.5" class="sload-weight-input"
-                data-norm-minutes value="${minutes}" placeholder="мин"></td>
-            <td><select class="sload-select" data-norm-basis>
+                data-norm-minutes data-initial="${minutes}" value="${minutes}" placeholder="мин"></td>
+            <td><select class="sload-select" data-norm-basis data-initial="${esc(basis)}">
                 ${NORM_BASES.map(([code, label]) =>
-                    `<option value="${code}"${(own && own.basis) === code ? ' selected' : ''}>${label}</option>`).join('')}
+                    `<option value="${code}"${basis === code ? ' selected' : ''}>${label}</option>`).join('')}
             </select></td>
-            <td><select class="sload-select" data-norm-berry>
+            <td><select class="sload-select" data-norm-berry data-initial="${esc(berry)}">
                 ${BERRY_MODES.map(([code, label]) =>
-                    `<option value="${code}"${(own && own.berry_mode || '') === code ? ' selected' : ''}>${label}</option>`).join('')}
-            </select></td>
-            <td><button class="sload-btn sload-btn--ghost" data-save-norm>Сохранить</button></td>`;
+                    `<option value="${code}"${berry === code ? ' selected' : ''}>${label}</option>`).join('')}
+            </select></td>`;
+    }
+
+    // Строки, где человек что-то поменял. Сравниваем с data-initial, а не
+    // отправляем всё подряд: иначе один клик переписал бы все 400 норм и
+    // затёр бы отметки «кто и когда правил».
+    function changedNormRows(overlay) {
+        const changed = [];
+        overlay.querySelectorAll('[data-norm-row]').forEach(row => {
+            const field = name => row.querySelector(`[data-norm-${name}]`);
+            const moved = ['role', 'minutes', 'basis', 'berry']
+                .some(name => field(name) && field(name).value !== field(name).dataset.initial);
+            if (!moved) return;
+
+            const role = field('role').value;
+            const minutes = field('minutes').value.trim();
+            changed.push({
+                offer_id: Number(row.dataset.scopeId),
+                role: role,
+                minutes: minutes === '' ? null : Number(minutes.replace(',', '.')),
+                basis: field('basis').value,
+                berry_mode: field('berry').value || null
+            });
+        });
+        return changed;
     }
 
     function tariffField(name, value) {
@@ -1307,10 +1345,10 @@
         }
         return `<table class="sload-modal-table">
             <thead><tr><th>Артикул</th><th>Товар</th><th>Заказов</th><th>Кол-во<br>в позиции</th>
-                <th>Ед.</th><th>Норма</th><th>Роль</th><th>Минут</th><th>За что</th>
-                <th>Клубника</th><th></th></tr></thead>
+                <th>Ед.</th><th>Сейчас</th><th>Роль</th><th>Минут</th><th>За что</th>
+                <th>Клубника</th></tr></thead>
             <tbody>${offers.map(item => `
-                <tr data-norm-row data-scope="offer" data-scope-id="${item.offer_id}">
+                <tr data-norm-row data-scope-id="${item.offer_id}">
                     <td>${esc(item.article || '—')}</td>
                     <td>${esc(item.product_name || ('Товар ' + item.offer_id))}
                         ${item.in_catalog ? '' :
