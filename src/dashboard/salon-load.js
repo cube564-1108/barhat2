@@ -1035,11 +1035,32 @@
                 return;
             }
 
-            // Выгрузка идёт обычной ссылкой, а не fetch: файл должен сохраниться
-            // браузером, а не осесть в памяти вкладки.
-            if (e.target.closest('[data-export-norms]')) {
-                window.location.href = '/api/couriers/time-norms/export' +
-                    normQuery(active === 'missing' ? { only_missing: 1 } : null);
+            // Выгрузка идёт через fetch, а не переходом по ссылке: ручка
+            // отвечает ошибкой, когда за период нечего выгружать, и переход
+            // показал бы вместо тоста страницу с JSON.
+            const exportButton = e.target.closest('[data-export-norms]');
+            if (exportButton) {
+                exportButton.disabled = true;
+                try {
+                    const url = '/api/couriers/time-norms/export' +
+                        normQuery(active === 'missing' ? { only_missing: 1 } : null);
+                    const response = await fetch(url, { credentials: 'same-origin' });
+                    if (!response.ok) {
+                        const payload = await response.json().catch(() => ({}));
+                        throw new Error(payload.error || `сервер ответил ${response.status}`);
+                    }
+                    const blob = await response.blob();
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = `normy-vremeni-${new Date().toISOString().slice(0, 10)}.csv`;
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    URL.revokeObjectURL(link.href);
+                } catch (error) {
+                    toast('Не удалось выгрузить: ' + error.message, 'error');
+                }
+                exportButton.disabled = false;
                 return;
             }
 
@@ -1079,7 +1100,12 @@
             const save = e.target.closest('[data-save-norms]');
             if (!save) return;
 
-            const changed = changedNormRows(overlay);
+            const { changed, problems } = changedNormRows(overlay);
+            if (problems.length) {
+                BarhatUI.alert('Эти строки не сохранены — поправьте и нажмите снова:\n' +
+                    problems.slice(0, 10).join('\n'), 'error');
+                return;
+            }
             if (!changed.length) {
                 toast('Ничего не изменилось', 'info');
                 return;
@@ -1269,23 +1295,49 @@
     // затёр бы отметки «кто и когда правил».
     function changedNormRows(overlay) {
         const changed = [];
+        const problems = [];
+
         overlay.querySelectorAll('[data-norm-row]').forEach(row => {
             const field = name => row.querySelector(`[data-norm-${name}]`);
             const moved = ['role', 'minutes', 'basis', 'berry']
                 .some(name => field(name) && field(name).value !== field(name).dataset.initial);
             if (!moved) return;
 
+            const name = row.querySelector('td:nth-child(2)').textContent.trim().slice(0, 40);
             const role = field('role').value;
-            const minutes = field('minutes').value.trim();
+            const raw = field('minutes').value.trim();
+
+            // Пустая роль означает СНЯТИЕ нормы. Но если человек заполнил
+            // минуты и не выбрал роль, он снимал не норму, а просто не дошёл
+            // до первой колонки: отправить это как снятие значит показать
+            // «сохранено: 0, снято: 1» и потерять его работу молча.
+            if (!role && raw !== '') {
+                problems.push(`${name}: заполнены минуты, но не выбрана роль`);
+                return;
+            }
+
+            // Поле <input type="number"> отдаёт пустую строку на всё, что не
+            // число, — значит «12,5» приходит сюда как пустое, а не как текст
+            // с запятой. Отдельная проверка нужна, чтобы такое не уехало
+            // на сервер как null и не сняло норму вместо ошибки.
+            let minutes = null;
+            if (raw !== '') {
+                minutes = Number(raw.replace(',', '.'));
+                if (!Number.isFinite(minutes)) {
+                    problems.push(`${name}: «${raw}» — это не число минут`);
+                    return;
+                }
+            }
+
             changed.push({
                 offer_id: Number(row.dataset.scopeId),
                 role: role,
-                minutes: minutes === '' ? null : Number(minutes.replace(',', '.')),
+                minutes: minutes,
                 basis: field('basis').value,
                 berry_mode: field('berry').value || null
             });
         });
-        return changed;
+        return { changed: changed, problems: problems };
     }
 
     function tariffField(name, value) {
