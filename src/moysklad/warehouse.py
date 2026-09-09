@@ -352,20 +352,37 @@ def list_stores_with_flows(storage, date_from: str, date_to: str) -> List[Dict[s
     ]
 
 
-def health_snapshot(storage) -> Dict[str, Any]:
-    """Техническое состояние витрины движения товара для /health."""
+def health_snapshot(storage, window_days: int = 30) -> Dict[str, Any]:
+    """
+    Техническое состояние витрины движения товара для /health — **по окну**.
+
+    `moysklad.db` весит 1,13 ГБ и лежит на сетевом `/data`. Прежняя версия
+    считала `COUNT(*)`, `COUNT(DISTINCT doc_id)` и «строки вне групп»
+    LEFT JOIN-сканом по всей витрине — то есть диагностика читала витрину
+    целиком (правило CLAUDE.md «экран не зависит от диагностики, а диагностика
+    не сканирует витрину»).
+
+    Границы дат берутся **отдельными** запросами `MIN()` и `MAX()`: SQLite
+    сводит к чтению крайней строки индекса только запрос с единственным
+    агрегатом, а `SELECT MIN(x), MAX(x)` уже сканирует таблицу.
+    """
+    since_moment = (datetime.now() - timedelta(days=window_days)).strftime("%Y-%m-%d 00:00:00")
+
     with storage._get_connection() as conn:
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         if "warehouse_flows" not in tables:
-            return {"table": False, "rows": 0}
+            return {"table": False, "rows_in_window": 0}
 
         row = conn.execute("""
             SELECT COUNT(*) AS rows, COUNT(DISTINCT doc_id) AS docs,
-                   COUNT(DISTINCT store_id) AS stores,
-                   MIN(moment) AS since, MAX(moment) AS until
-            FROM warehouse_flows
-        """).fetchone()
+                   COUNT(DISTINCT store_id) AS stores
+            FROM warehouse_flows WHERE moment >= ?
+        """, (since_moment,)).fetchone()
+        since = conn.execute(
+            "SELECT MIN(moment) AS v FROM warehouse_flows").fetchone()["v"]
+        until = conn.execute(
+            "SELECT MAX(moment) AS v FROM warehouse_flows").fetchone()["v"]
         groups = conn.execute(
             "SELECT kind, COUNT(*) AS cnt FROM warehouse_groups GROUP BY kind"
         ).fetchall() if "warehouse_groups" in tables else []
@@ -374,18 +391,20 @@ def health_snapshot(storage) -> Dict[str, Any]:
         unknown = conn.execute("""
             SELECT COUNT(*) AS cnt FROM warehouse_flows f
             LEFT JOIN warehouse_groups g ON g.folder_id = f.folder_id
-            WHERE g.folder_id IS NULL
-        """).fetchone() if "warehouse_groups" in tables else None
+            WHERE g.folder_id IS NULL AND f.moment >= ?
+        """, (since_moment,)).fetchone() if "warehouse_groups" in tables else None
 
     return {
         "table": True,
-        "rows": row["rows"],
-        "documents": row["docs"],
-        "stores": row["stores"],
-        "since": row["since"],
-        "until": row["until"],
+        "window_days": window_days,
+        "window_from": since_moment[:10],
+        "rows_in_window": row["rows"],
+        "documents_in_window": row["docs"],
+        "stores_in_window": row["stores"],
+        "since": since,
+        "until": until,
         "groups": {r["kind"]: r["cnt"] for r in groups},
-        "rows_outside_groups": unknown["cnt"] if unknown else None,
+        "rows_outside_groups_in_window": unknown["cnt"] if unknown else None,
     }
 
 

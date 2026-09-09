@@ -558,7 +558,38 @@ def health_check():
     единственный способ заметить, что база уехала с постоянного диска /data
     на эфемерный /app (см. комментарий про пути в app.py), — посмотреть их
     отсюда. Пустой размер у боевой базы = данные потерялись при сборке.
+
+    **Дешёвая по умолчанию, подробная по запросу.** Замер 2026-09-08: ручка
+    отвечала 3,4–13,5 секунды при 2–3 мс на вход в дашборд. Причина не в одном
+    тяжёлом запросе, а в том, что за один вызов она обходила четыре базы на
+    общем сетевом `/data` (`barhat.db`, `couriers.db`, `pyrus.db` 196 МБ,
+    `moysklad.db` 1,13 ГБ) и считала счётчики по всей истории. Воркеров два —
+    два одновременных таких запроса не оставляют сайту ни одного, и любой
+    внешний мониторинг превращает этот риск в аварию.
+
+        GET /health         — жив ли процесс, на месте ли данные, пишется ли
+                              база. Файловая система плюс одна короткая проба
+                              записи: это то, что имеет смысл опрашивать часто.
+        GET /health?full=1  — вся диагностика: состояние витрин, инварианты
+                              схемы, полные счётчики. Зовёт человек, когда
+                              разбирается.
+
+    `timings_ms` отдаётся всегда: следующий разбор «почему медленно» обязан
+    начинаться с числа, а не с гадания, какой из блоков дорогой.
     """
+    full = request.args.get('full', '').strip().lower() in ('1', 'true', 'yes')
+    timings = {}
+
+    def timed(name, fn):
+        """Посчитать блок, поймать его ошибку и запомнить цену в миллисекундах."""
+        started = time.monotonic()
+        try:
+            value = fn()
+        except Exception as e:
+            value = {'error': f'{type(e).__name__}: {e}'}
+        timings[name] = round((time.monotonic() - started) * 1000, 1)
+        return value
+
     db_targets = [
         ('pyrus', db_path),
         ('barhat', os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
@@ -574,86 +605,113 @@ def health_check():
     except Exception as e:
         logger.warning(f"Не удалось получить путь базы курьеров для /health: {e}")
 
-    databases = {}
-    for name, path in db_targets:
-        exists = os.path.exists(path)
-        wal = path + '-wal'
-        databases[name] = {
-            'path': path,
-            'exists': exists,
-            'size_mb': round(os.path.getsize(path) / 1024 / 1024, 2) if exists else 0,
-            'persistent': os.path.abspath(path).startswith('/data'),
-            # Раздутый WAL = чекпоинт не проходит, обычно из-за зависшего
-            # читателя или кончившегося места; тогда запись встаёт колом
-            'wal_mb': round(os.path.getsize(wal) / 1024 / 1024, 2) if os.path.exists(wal) else 0,
-        }
+    def collect_databases():
+        result = {}
+        for name, path in db_targets:
+            exists = os.path.exists(path)
+            wal = path + '-wal'
+            result[name] = {
+                'path': path,
+                'exists': exists,
+                'size_mb': round(os.path.getsize(path) / 1024 / 1024, 2) if exists else 0,
+                'persistent': os.path.abspath(path).startswith('/data'),
+                # Раздутый WAL = чекпоинт не проходит, обычно из-за зависшего
+                # читателя или кончившегося места; тогда запись встаёт колом
+                'wal_mb': round(os.path.getsize(wal) / 1024 / 1024, 2) if os.path.exists(wal) else 0,
+            }
+        return result
+
+    databases = timed('databases', collect_databases)
 
     # Папки вложений живут по тем же правилам, что и базы: если путь не на
     # /data, файлы стираются каждой сборкой, а записи о них остаются в БД —
     # и счёт открывается, а вложение к нему «не находится». Пути спрашиваем
     # у самих модулей, а не собираем заново: показывать надо ровно ту папку,
     # в которую они пишут.
-    attachments = {}
-    for name, module_path in (
-        ('invoices', 'invoices.storage'),
-        ('writeoffs', 'writeoffs.storage'),
-    ):
-        try:
-            module = importlib.import_module(module_path)
-            full = os.path.abspath(module.ATTACHMENTS_DIR)
-        except Exception as e:
-            attachments[name] = {'error': f'{type(e).__name__}: {e}'}
-            continue
-        attachments[name] = {
-            'path': full,
-            'exists': os.path.isdir(full),
-            'persistent': full.startswith('/data'),
-            'files': len(os.listdir(full)) if os.path.isdir(full) else 0,
-        }
+    def collect_attachments():
+        result = {}
+        for name, module_path in (
+            ('invoices', 'invoices.storage'),
+            ('writeoffs', 'writeoffs.storage'),
+        ):
+            try:
+                module = importlib.import_module(module_path)
+                directory = os.path.abspath(module.ATTACHMENTS_DIR)
+            except Exception as e:
+                result[name] = {'error': f'{type(e).__name__}: {e}'}
+                continue
+            is_dir = os.path.isdir(directory)
+            info = {
+                'path': directory,
+                'exists': is_dir,
+                'persistent': directory.startswith('/data'),
+            }
+            # Число файлов — перечисление каталога целиком. На сетевом /data
+            # это тем дороже, чем больше вложений накопилось, а вопрос
+            # «сколько их» — диагностический, а не признак жизни.
+            if full:
+                info['files'] = len(os.listdir(directory)) if is_dir else 0
+            result[name] = info
+        return result
 
-    # Инварианты, которые держит не код, а схема БД. Индекс мог не построиться
-    # (например, поверх уже накопленных дублей), и снаружи это ничем не видно:
-    # запись продолжает работать, просто последней преграды нет.
-    guarantees = {}
-    try:
-        from cashshifts.storage import one_open_shift_guarantee_status
-        guarantees['one_open_shift_per_store'] = one_open_shift_guarantee_status()
-    except Exception as e:
-        guarantees['one_open_shift_per_store'] = {'error': f'{type(e).__name__}: {e}'}
+    attachments = timed('attachments', collect_attachments)
 
-    # Состояние витрин раздела «Показатели салонов». Нулевые показатели снаружи
-    # выглядят одинаково и когда синк не отработал, и когда миграция не прошла,
-    # и когда данные ещё грузятся — а консоли у контейнера нет. Здесь только
-    # счётчики, даты и статусы синков: сумм и названий салонов нет.
-    try:
-        from salonkpi.metrics import pipeline_health
-        pipelines = pipeline_health()
-    except Exception as e:
-        pipelines = {'error': f'{type(e).__name__}: {e}'}
-
-    # Остаток месячной квоты API ПланФакта (2500 запросов, сброс первого
-    # числа). Читается из общего состояния в базе, наружу не ходит: 07.09.2026
-    # квота кончилась к седьмому числу, и узнали об этом от человека, у
-    # которого перестали показываться остатки карт.
-    try:
+    def collect_quota():
+        # Остаток месячной квоты API ПланФакта (2500 запросов, сброс первого
+        # числа). Читается из общего состояния в базе, наружу не ходит:
+        # 07.09.2026 квота кончилась к седьмому числу, и узнали об этом от
+        # человека, у которого перестали показываться остатки карт. Смысл
+        # цифры — в предупреждении, поэтому она остаётся в дешёвом ответе.
         import invoices.cards  # noqa: F401 — импорт подключает хранилище состояния квоты
         from planfact import quota as planfact_quota
-        planfact = planfact_quota.snapshot(reload=True)
-    except Exception as e:
-        planfact = {'error': f'{type(e).__name__}: {e}'}
+        return planfact_quota.snapshot(reload=True)
 
-    return jsonify({
+    def collect_guarantees():
+        # Инварианты, которые держит не код, а схема БД. Индекс мог не
+        # построиться (например, поверх уже накопленных дублей), и снаружи это
+        # ничем не видно: запись продолжает работать, просто последней преграды
+        # нет. Состояние схемы меняется только деплоем — опрашивать его каждым
+        # вызовом незачем.
+        from cashshifts.storage import one_open_shift_guarantee_status
+        return {'one_open_shift_per_store': one_open_shift_guarantee_status()}
+
+    def collect_pipelines():
+        # Состояние витрин раздела «Показатели салонов». Нулевые показатели
+        # снаружи выглядят одинаково и когда синк не отработал, и когда
+        # миграция не прошла, и когда данные ещё грузятся — а консоли у
+        # контейнера нет. Здесь только счётчики, даты и статусы синков: сумм и
+        # названий салонов нет. Пять снимков в четыре базы — самый дорогой
+        # блок ручки, поэтому он за ?full=1.
+        from salonkpi.metrics import pipeline_health
+        return pipeline_health(full=True)
+
+    body = {
         'status': 'ok',
         'timestamp': datetime.now().isoformat(),
+        'full': full,
         'database': db_path,
         'databases': databases,
         'attachments': attachments,
-        'disk': _disk_free_info(),
-        'guarantees': guarantees,
-        'pipelines': pipelines,
-        'planfact_quota': planfact,
-        'write_test': _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
-    })
+        'disk': timed('disk', _disk_free_info),
+        'planfact_quota': timed('planfact_quota', collect_quota),
+        # Проба записи остаётся в дешёвом ответе: это единственный признак
+        # «база ещё принимает запись», и именно он отличает живой сайт от
+        # сайта с зависшим входом. Своим таймаутом она ограничена 2 секундами.
+        'write_test': timed(
+            'write_test',
+            lambda: _sqlite_write_probe(os.environ.get('BARHAT_DB_PATH', 'barhat.db')),
+        ),
+    }
+
+    if full:
+        body['guarantees'] = timed('guarantees', collect_guarantees)
+        body['pipelines'] = timed('pipelines', collect_pipelines)
+    else:
+        body['hint'] = 'подробная диагностика витрин и инвариантов — /health?full=1'
+
+    body['timings_ms'] = timings
+    body['total_ms'] = round(sum(timings.values()), 1)
+    return jsonify(body)
 
 
 # Больше этого одним файлом не отдаём. Смысл границы не в диске, а в том,

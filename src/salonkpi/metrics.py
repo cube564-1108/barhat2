@@ -16,7 +16,7 @@ import logging
 import re
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import storage
@@ -580,7 +580,14 @@ def salon_details(store_id: int, month: str) -> Dict[str, Any]:
     }
 
 
-def pipeline_health() -> Dict[str, Any]:
+# Окно диагностики. Ровно то же правило, что у `couriers.storage`: снимок
+# состояния считается по последним неделям, а не по всей истории — иначе
+# диагностика читает витрины целиком.
+HEALTH_WINDOW_DAYS = 30
+
+
+def pipeline_health(window_days: int = HEALTH_WINDOW_DAYS,
+                    full: bool = False) -> Dict[str, Any]:
     """
     Состояние всех четырёх витрин раздела — для публичного /health.
 
@@ -591,29 +598,50 @@ def pipeline_health() -> Dict[str, Any]:
 
     Только счётчики, даты и статусы: сумм, выручки и названий салонов здесь нет,
     ручка публичная.
+
+    **Считается по окну и с замером каждого блока.** Замер 2026-09-08: `/health`
+    отвечал 3,4–13,5 секунды при 2–3 мс на вход в дашборд. Воркеров два, и два
+    одновременных таких запроса не оставляют сайту ни одного. Блоков пять, они
+    ходят в четыре разные базы (`couriers.db`, `pyrus.db` 196 МБ, `moysklad.db`
+    1,13 ГБ, `barhat.db`) на общий сетевой `/data` — поэтому:
+
+    - каждый блок считается по окну (`window_days`), окно отдаётся в ответе;
+    - `timings_ms` показывает, сколько стоил каждый блок, — чтобы следующий
+      разбор начинался с числа, а не с гадания;
+    - тяжёлое (полные счётчики сырья) живёт за `full=True`, то есть за
+      `/health?full=1`.
     """
-    result: Dict[str, Any] = {}
+    result: Dict[str, Any] = {"window_days": window_days, "full": full}
+    timings: Dict[str, float] = {}
 
-    try:
+    def block(name: str, fn) -> None:
+        """Один снимок: считает, ловит свою ошибку и запоминает цену."""
+        started = time.monotonic()
+        try:
+            result[name] = fn()
+        except Exception as e:
+            result[name] = {"error": f"{type(e).__name__}: {e}"}
+        timings[name] = round((time.monotonic() - started) * 1000, 1)
+
+    def crm_orders() -> Dict[str, Any]:
         from couriers import storage as couriers_storage
-        result["crm_orders"] = couriers_storage.health_snapshot()
-    except Exception as e:
-        result["crm_orders"] = {"error": f"{type(e).__name__}: {e}"}
+        return couriers_storage.health_snapshot()
 
-    try:
+    def nos_block() -> Dict[str, Any]:
         from pyrus import nos
-        result["nos"] = nos.health_snapshot()
-    except Exception as e:
-        result["nos"] = {"error": f"{type(e).__name__}: {e}"}
+        data = nos.health_snapshot(window_days)
+        if full:
+            # Счёт сырых задач читает latest_tasks целиком (индекса по form_id
+            # там нет) — только по явному запросу
+            data["raw_tasks"] = nos.raw_tasks_count()
+        return data
 
-    try:
+    def warehouse_block() -> Dict[str, Any]:
         from moysklad import warehouse
         from moysklad.server import get_db as get_ms_db
-        result["warehouse"] = warehouse.health_snapshot(get_ms_db())
-    except Exception as e:
-        result["warehouse"] = {"error": f"{type(e).__name__}: {e}"}
+        return warehouse.health_snapshot(get_ms_db(), window_days)
 
-    try:
+    def directory() -> Dict[str, Any]:
         conn = storage.get_db()
         try:
             links = conn.execute(
@@ -625,28 +653,44 @@ def pipeline_health() -> Dict[str, Any]:
             ).fetchall()
         finally:
             conn.close()
-        result["directory"] = {
+        return {
             "links": {r["source"]: r["cnt"] for r in links},
             "plans": {r["month"]: r["cnt"] for r in plans},
         }
-    except Exception as e:
-        result["directory"] = {"error": f"{type(e).__name__}: {e}"}
 
-    # Витрина качества своя, её наполняет синк формы 1327961
-    try:
+    def quality_block() -> Dict[str, Any]:
+        # Витрина качества своя, её наполняет синк формы 1327961.
+        # Счётчик — по окну, границы дат — отдельными MIN/MAX по idx_quality_date:
+        # SQLite читает крайнюю строку индекса только когда агрегат в запросе один.
         from pyrus import quality
+        window_from = (date.today() - timedelta(days=window_days)).isoformat()
         conn = quality._connect()
         try:
-            row = conn.execute(
-                "SELECT COUNT(*) AS rows, MIN(task_date) AS since, MAX(task_date) AS until "
-                "FROM quality_scores WHERE form_id = ?", (quality.QUALITY_FORM_ID,)
-            ).fetchone()
+            rows = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM quality_scores "
+                "WHERE form_id = ? AND task_date >= ?",
+                (quality.QUALITY_FORM_ID, window_from)
+            ).fetchone()["cnt"]
+            since = conn.execute(
+                "SELECT MIN(task_date) AS v FROM quality_scores").fetchone()["v"]
+            until = conn.execute(
+                "SELECT MAX(task_date) AS v FROM quality_scores").fetchone()["v"]
         finally:
             conn.close()
-        result["quality"] = {"rows": row["rows"], "since": row["since"], "until": row["until"]}
-    except Exception as e:
-        result["quality"] = {"error": f"{type(e).__name__}: {e}"}
+        return {
+            "window_from": window_from,
+            "rows_in_window": rows,
+            "since": since,
+            "until": until,
+        }
 
+    block("crm_orders", crm_orders)
+    block("nos", nos_block)
+    block("warehouse", warehouse_block)
+    block("directory", directory)
+    block("quality", quality_block)
+
+    result["timings_ms"] = timings
     return result
 
 

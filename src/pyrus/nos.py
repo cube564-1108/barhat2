@@ -17,7 +17,7 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from sqlite_conn import connect as sqlite_connect
@@ -346,36 +346,68 @@ def list_salons(date_from: str, date_to: str) -> List[Dict]:
     return [{"key": r["salon"], "count": r["cnt"]} for r in rows if r["salon"]]
 
 
-def health_snapshot() -> Dict:
-    """Техническое состояние витрины для /health: счётчики и границы дат."""
+def raw_tasks_count() -> int:
+    """
+    Сколько сырых задач формы лежит в `latest_tasks`.
+
+    Вынесено из `health_snapshot` и зовётся только из `/health?full=1`: в
+    `latest_tasks` нет индекса по `form_id`, поэтому счёт читает всю таблицу
+    вместе с JSON задач — на сетевом `/data` это самый дорогой запрос всей
+    диагностики. Смысл цифры один: «сырьё есть, а витрина пустая» = разбор
+    не отработал, и на этот вопрос отвечают осознанно, а не каждым опросом.
+    """
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM latest_tasks WHERE form_id = ?", (NOS_FORM_ID,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["cnt"] if row else 0
+
+
+def health_snapshot(window_days: int = 30) -> Dict:
+    """
+    Техническое состояние витрины для /health — **по окну**, а не по всей таблице.
+
+    `pyrus.db` на проде весит 196 МБ и лежит на сетевом `/data`: счётчики по
+    всей витрине читают её целиком, и диагностика начинает стоить секунды при
+    3 мс на статику (правило CLAUDE.md «диагностика не сканирует витрину»).
+    Диагностике нужна свежая картина, а не история за все времена.
+
+    Границы дат — **отдельными** `MIN()`/`MAX()` по `idx_nos_date`: SQLite
+    сводит запрос к чтению крайней строки индекса только когда агрегат один.
+    """
+    window_from = (date.today() - timedelta(days=window_days)).isoformat()
     conn = _connect()
     try:
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         if "nos_feedback" not in tables:
-            return {"table": False, "rows": 0}
+            return {"table": False, "rows_in_window": 0}
 
         row = conn.execute("""
             SELECT COUNT(*) AS rows,
                    SUM(CASE WHEN objectivity = ? THEN 1 ELSE 0 END) AS confirmed,
-                   SUM(CASE WHEN salon IS NULL OR salon = '' THEN 1 ELSE 0 END) AS no_salon,
-                   MIN(feedback_date) AS since, MAX(feedback_date) AS until
-            FROM nos_feedback WHERE form_id = ?
-        """, (OBJECTIVITY_CONFIRMED, NOS_FORM_ID)).fetchone()
-        raw = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM latest_tasks WHERE form_id = ?", (NOS_FORM_ID,)
-        ).fetchone()
+                   SUM(CASE WHEN salon IS NULL OR salon = '' THEN 1 ELSE 0 END) AS no_salon
+            FROM nos_feedback WHERE form_id = ? AND feedback_date >= ?
+        """, (OBJECTIVITY_CONFIRMED, NOS_FORM_ID, window_from)).fetchone()
+        since = conn.execute(
+            "SELECT MIN(feedback_date) AS v FROM nos_feedback").fetchone()["v"]
+        until = conn.execute(
+            "SELECT MAX(feedback_date) AS v FROM nos_feedback").fetchone()["v"]
     finally:
         conn.close()
 
     return {
         "table": True,
-        "rows": row["rows"],
-        "confirmed": row["confirmed"] or 0,
-        "without_salon": row["no_salon"] or 0,
-        "since": row["since"],
-        "until": row["until"],
-        "raw_tasks": raw["cnt"] if raw else 0,
+        "window_days": window_days,
+        "window_from": window_from,
+        "rows_in_window": row["rows"],
+        "confirmed_in_window": row["confirmed"] or 0,
+        "without_salon_in_window": row["no_salon"] or 0,
+        "since": since,
+        "until": until,
     }
 
 
