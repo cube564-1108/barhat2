@@ -190,7 +190,39 @@ def run_once(deadline: Optional[float] = None) -> Dict[str, Any]:
             logger.info("Лента изменений: истёк бюджет тика, продолжим со следующего")
             break
 
+    stats["images"] = fetch_missing_images(client, deadline=deadline)
     return stats
+
+
+def fetch_missing_images(client, deadline: Optional[float] = None) -> int:
+    """
+    Дотянуть ссылки на фото для позиций свежих заказов. Возвращает число
+    записей (в том числе «фото нет» — это тоже ответ).
+
+    Почему здесь, а не при открытии карточки: курьер открывает её на ходу, а
+    внешний вызов из обработчика уже дважды укладывал прод — воркеров два, и
+    один зависший запрос занимает половину мощности сайта.
+
+    Почему одна пачка за тик: лента обязана оставаться дешёвым тиком в один
+    запрос. После первого прогона очередь почти всегда пуста — новые офферы
+    появляются десятками в день, а не тысячами.
+
+    Ошибка здесь не должна ронять тик: фото — украшение карточки, а перенос
+    курсора истории — нет.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        return 0
+
+    from .delivery_storage import pending_image_offer_ids, save_product_images
+
+    try:
+        offer_ids = pending_image_offer_ids()
+        if not offer_ids:
+            return 0
+        return save_product_images(client.get_product_images(offer_ids))
+    except Exception as e:
+        logger.warning(f"Лента изменений: не удалось получить фото товаров — {e}")
+        return 0
 
 
 def _feed_loop() -> None:

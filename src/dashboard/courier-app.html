@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <!--
+      viewport-fit=cover + safe-area в CSS: приложение ставится на рабочий стол
+      и открывается без адресной строки, поэтому нижняя кнопка действия иначе
+      уезжает под системную полоску жестов.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#411330">
+    <title>Доставка — Бархат</title>
+
+    <link rel="manifest" href="/app/courier-manifest.json">
+    <link rel="icon" href="/app/courier-icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/app/courier-icon.svg">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Доставка">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Vollkorn:wght@600;700&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="/app/courier-app.css">
+</head>
+<body>
+
+<!-- Пока не ответил /api/auth/me, экрана нет: показывать ленту до проверки
+     входа означает мигнуть чужими данными из кэша браузера. -->
+<div class="cd-boot" id="cdBoot">
+    <div class="cd-boot__text">Загрузка…</div>
+</div>
+
+<div class="cd-app" id="cdApp" hidden>
+    <header class="cd-header">
+        <div class="cd-header__row">
+            <span class="cd-header__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                     stroke-linecap="round" stroke-linejoin="round" width="24" height="24">
+                    <path d="M10 17h4V5H2v12h3"></path>
+                    <path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"></path>
+                    <circle cx="7.5" cy="17.5" r="2.5"></circle>
+                    <circle cx="17.5" cy="17.5" r="2.5"></circle>
+                </svg>
+            </span>
+            <div class="cd-header__text">
+                <h1 class="cd-header__title">Доставка</h1>
+                <p class="cd-header__subtitle" id="cdSubtitle">Заказы вашего города</p>
+            </div>
+            <button type="button" class="cd-header__refresh" id="cdRefresh" title="Обновить">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                     stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+                    <path d="M21 3v6h-6"></path>
+                </svg>
+            </button>
+        </div>
+        <p class="cd-header__warning" id="cdWarning" hidden></p>
+    </header>
+
+    <div class="cd-stale" id="cdStale" hidden></div>
+
+    <nav class="cd-tabs" id="cdFilters" aria-label="Фильтр заказов">
+        <button type="button" class="cd-tab" data-filter="free">Свободные</button>
+        <button type="button" class="cd-tab" data-filter="ready">Готовые</button>
+        <button type="button" class="cd-tab" data-filter="mine">Мои</button>
+        <button type="button" class="cd-tab" data-filter="all">Все</button>
+    </nav>
+
+    <main class="cd-feed" id="cdFeed"></main>
+</div>
+
+<!-- Карточка заказа: отдельный слой во весь экран, а не модалка по центру.
+     На телефоне это единственный способ дать крупные цели и не заставлять
+     курьера целиться в мелочь на ходу. -->
+<div class="cd-sheet" id="cdCard" hidden></div>
+
+<!-- Фото позиции. Оригиналы с сайта весят 211 КБ в медиане, поэтому грузятся
+     только по тапу и только по одному. -->
+<div class="cd-photo" id="cdPhoto" hidden></div>
+
+<script src="/ui-dialog.js"></script>
+<script src="/datetime.js"></script>
+<script src="/app/courier-app.js"></script>
+</body>
+</html>

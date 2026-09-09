@@ -8,6 +8,7 @@ import re
 import sys
 import glob
 import time
+import hashlib
 import importlib
 import shutil
 import sqlite3
@@ -1151,6 +1152,93 @@ def courier_dispatch_page():
     except Exception as e:
         logger.error(f"Ошибка загрузки /courier-dispatch: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
+
+
+# === Приложение курьера (PWA) ===
+#
+# Отдельная лёгкая страница, а не раздел дашборда: её открывают с телефона на
+# мобильном интернете, и тащить туда разметку и скрипты всех модулей незачем.
+# Раздел `/courier-app` внутри дашборда остаётся — это два входа в одни данные.
+
+# Файлы приложения, которые отдаём из /app/. Список закрытый: каталог
+# `src/dashboard` целиком наружу по маске отдавать нельзя — там лежит вся
+# разметка дашборда.
+COURIER_APP_FILES = {
+    'courier-app.css',
+    'courier-app.js',
+    'courier-icon.svg',
+    'courier-manifest.json',
+}
+
+_courier_shell_version = None
+
+
+def _courier_build_version():
+    """
+    Отпечаток оболочки приложения курьера — ключ кэша service worker'а.
+
+    Считается из размеров и времени правки самих файлов, а не задаётся числом
+    в коде: версию, которую надо помнить бампать руками, однажды забудут, и
+    курьер после деплоя увидит вчерашний экран (находка К5 критики плана).
+
+    Считается один раз на воркер: файлы приложения внутри одного процесса не
+    меняются, а `/app` пересоздаётся каждой сборкой вместе с процессом.
+    """
+    global _courier_shell_version
+    if _courier_shell_version:
+        return _courier_shell_version
+
+    parts = []
+    for name in sorted(COURIER_APP_FILES | {'courier-app.html', 'courier-sw.js'}):
+        try:
+            stat = os.stat(os.path.join(DASHBOARD_DIR, name))
+            parts.append(f'{name}:{int(stat.st_mtime)}:{stat.st_size}')
+        except OSError:
+            parts.append(f'{name}:missing')
+    _courier_shell_version = hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:12]
+    return _courier_shell_version
+
+
+@app.route('/app/courier')
+def courier_pwa_page():
+    """Экран курьера: лента заказов и карточка, без остального дашборда."""
+    try:
+        from flask_login import current_user
+        if not current_user.is_authenticated:
+            return redirect('/login')
+        return send_from_directory(DASHBOARD_DIR, 'courier-app.html')
+    except Exception as e:
+        logger.error(f"Ошибка загрузки /app/courier: {e}")
+        return f"Ошибка загрузки страницы: {e}", 500
+
+
+@app.route('/app/courier-sw.js')
+def courier_pwa_service_worker():
+    """
+    Service worker приложения курьера с подставленной версией сборки.
+
+    Без входа тоже отдаётся: браузер обновляет service worker собственным
+    запросом, у которого своей сессии может не быть, а редирект на /login в
+    ответ на этот запрос ломает регистрацию. Ничего приватного в файле нет.
+    """
+    with open(os.path.join(DASHBOARD_DIR, 'courier-sw.js'), encoding='utf-8') as f:
+        source = f.read()
+    source = source.replace('__CACHE_VERSION__', _courier_build_version())
+
+    response = app.make_response(source)
+    response.headers['Content-Type'] = 'application/javascript; charset=utf-8'
+    # Сам файл воркера кэшировать нельзя: именно по нему браузер узнаёт, что
+    # вышла новая версия оболочки.
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
+
+
+@app.route('/app/<path:filename>')
+def courier_pwa_asset(filename):
+    """Статика приложения курьера: стили, скрипт, иконка, манифест."""
+    if filename not in COURIER_APP_FILES:
+        return jsonify({'error': 'Not found'}), 404
+    return send_from_directory(DASHBOARD_DIR, filename)
 
 
 @app.route('/link-watch')

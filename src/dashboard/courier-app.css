@@ -1,0 +1,341 @@
+/*
+ * Экран курьера (PWA). Токены и компоненты — по DESIGN-SPEC.md, без эмодзи,
+ * иконки только линейные.
+ *
+ * Отдельный файл, а не styles.css дашборда: это другой носитель. Здесь дешёвый
+ * Android, солнце, дождь и одна рука — отсюда крупные цели (минимум 48px),
+ * подписи словами вместо пиктограмм и повышенный контраст. Тащить сюда стили
+ * всех модулей дашборда ради этого незачем: страницу открывают с мобильного
+ * интернета.
+ */
+
+:root {
+    /* Тёмные (винный «бархат») */
+    --bx-dark:         #1e0d1b;
+    --bx-wine:         #411330;
+    --bx-primary:      #4a1942;
+    --bx-accent:       #8b3a7d;
+
+    /* Розовые */
+    --bx-pink-deep:    #B26FA1;
+    --bx-pink:         #D19CC2;
+    --bx-pink-light:   #E4C2DD;
+    --bx-pink-wash:    #F3E3EE;
+
+    /* Светлые фоны */
+    --bx-bg:           #faf4f9;
+    --bx-white:        #ffffff;
+
+    /* Текст и линии */
+    --bx-text:         #3C3C3C;
+    --bx-text-2:       #6F6F6F;
+    --bx-muted:        #9b8f97;
+    --bx-border:       #eee2ea;
+    --bx-scroll:       #d1b8ce;
+
+    /* Семантика */
+    --bx-up:           #0a7d3f;
+    --bx-down:         #c0322f;
+
+    /* Градиенты */
+    --bx-grad-header:  linear-gradient(135deg, #411330 0%, #B26FA1 100%);
+    --bx-grad-accent:  linear-gradient(135deg, #E1A4C9 0%, #B26FA1 100%);
+
+    /* Скругления */
+    --bx-r-sm: 4px;  --bx-r-md: 6px;  --bx-r-lg: 8px;  --bx-r-xl: 12px;  --bx-r-2xl: 16px;
+
+    /* Шрифты */
+    --bx-font-head: 'Vollkorn', Georgia, serif;
+    --bx-font-body: 'Inter', 'PT Sans', system-ui, -apple-system, sans-serif;
+
+    /* Минимальная высота цели нажатия. Курьер целится на ходу. */
+    --cd-touch: 48px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bx-bg);
+    color: var(--bx-text);
+    font-family: var(--bx-font-body);
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+    /* Двойной тап на телефоне не должен зумить экран действия */
+    touch-action: manipulation;
+}
+
+h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weight: 700; margin: 0; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bx-scroll); border-radius: 4px; }
+
+/* ===== Загрузка ========================================================== */
+
+.cd-boot {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bx-bg);
+    z-index: 50;
+}
+.cd-boot__text { color: var(--bx-muted); font-size: 14px; }
+
+/* ===== Оболочка ========================================================== */
+
+.cd-app {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 0 calc(24px + env(safe-area-inset-bottom));
+}
+
+/* ===== Шапка ============================================================= */
+
+.cd-header {
+    background: var(--bx-grad-header);
+    color: #fff;
+    padding: calc(18px + env(safe-area-inset-top)) 20px 18px;
+    border-radius: 0 0 var(--bx-r-2xl) var(--bx-r-2xl);
+}
+.cd-header__row { display: flex; align-items: center; gap: 14px; }
+.cd-header__icon {
+    flex: 0 0 auto; width: 44px; height: 44px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--bx-r-xl);
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+}
+.cd-header__text { min-width: 0; flex: 1 1 auto; }
+.cd-header__title {
+    font-family: var(--bx-font-head); font-weight: 700; font-size: 26px;
+    line-height: 1.1; letter-spacing: -0.01em; color: #fff;
+}
+.cd-header__subtitle {
+    color: rgba(255, 255, 255, 0.72); font-size: 13px; margin: 3px 0 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cd-header__refresh {
+    flex: 0 0 auto;
+    width: var(--cd-touch); height: var(--cd-touch);
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255, 255, 255, 0.15);
+    border: none; border-radius: var(--bx-r-xl);
+    color: #fff; cursor: pointer;
+}
+.cd-header__refresh[data-busy="1"] { opacity: .5; }
+.cd-header__warning {
+    margin: 14px 0 0; padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: var(--bx-r-lg);
+    font-size: 13px; line-height: 1.4; color: #fff;
+}
+
+/* Плашка «данные могут быть устаревшими»: цифра вчерашней свежести полезнее
+   прочерка, но врать про актуальность нельзя. */
+.cd-stale {
+    margin: 12px 16px 0; padding: 10px 12px;
+    background: #fffbeb; border: 1px solid #fde68a; color: #b45309;
+    border-radius: var(--bx-r-lg); font-size: 13px; line-height: 1.4;
+}
+
+/* ===== Фильтры =========================================================== */
+
+.cd-tabs {
+    display: flex; gap: 4px; padding: 4px;
+    margin: 16px 16px 0;
+    border-radius: var(--bx-r-xl);
+    background: rgba(228, 194, 221, 0.25);
+    overflow-x: auto;
+}
+.cd-tab {
+    flex: 1 1 auto;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: none; background: transparent;
+    border-radius: var(--bx-r-lg);
+    color: var(--bx-wine); font-size: 14px; font-family: inherit;
+    white-space: nowrap; cursor: pointer;
+}
+.cd-tab--active { background: var(--bx-wine); color: #fff; font-weight: 500; }
+.cd-tab__count { opacity: .65; margin-left: 4px; font-variant-numeric: tabular-nums; }
+
+/* ===== Лента ============================================================= */
+
+.cd-feed { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+
+.cd-empty {
+    padding: 32px 16px; text-align: center;
+    color: var(--bx-muted); font-size: 14px; line-height: 1.5;
+}
+
+.cd-card {
+    background: var(--bx-white);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 16px;
+    cursor: pointer;
+}
+/* Готовый заказ подсвечивается: это то, что можно забирать прямо сейчас */
+.cd-card--ready { border-color: #a7f3d0; box-shadow: inset 3px 0 0 0 #047857; }
+.cd-card--mine { border-color: var(--bx-pink-deep); box-shadow: inset 3px 0 0 0 var(--bx-pink-deep); }
+
+.cd-card__top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cd-card__number {
+    font-family: var(--bx-font-head); font-weight: 700; font-size: 17px;
+    color: var(--bx-wine); margin-right: auto;
+    font-variant-numeric: tabular-nums;
+}
+.cd-card__route { margin: 10px 0 0; font-size: 15px; line-height: 1.45; color: var(--bx-text); }
+.cd-card__site { color: var(--bx-text-2); }
+.cd-card__arrow { color: var(--bx-muted); margin: 0 4px; }
+.cd-card__time {
+    margin: 8px 0 0; font-size: 14px; color: var(--bx-text-2);
+    font-variant-numeric: tabular-nums;
+}
+.cd-card__countdown { color: var(--bx-wine); font-weight: 600; }
+.cd-card__countdown--late { color: var(--bx-down); }
+.cd-card__flag {
+    margin: 12px 0 0; padding: 10px 12px;
+    /* Свой красный не вводим: семантика «плохо» в спеке одна — --bx-down,
+       подложка и рамка получаются из неё прозрачностью */
+    background: rgba(192, 50, 47, 0.07);
+    border: 1px solid rgba(192, 50, 47, 0.30);
+    color: var(--bx-down);
+    border-radius: var(--bx-r-lg); font-size: 13.5px; font-weight: 600; line-height: 1.35;
+}
+.cd-card__actions { margin: 14px 0 0; }
+
+/* ===== Бейджи ============================================================ */
+
+.cd-badge {
+    display: inline-block; border-radius: 9999px; padding: 3px 10px;
+    font-size: 11.5px; font-weight: 500; white-space: nowrap; border: 1px solid transparent;
+}
+.cd-badge--free    { background: rgba(228, 194, 221, 0.4); color: var(--bx-wine); }
+.cd-badge--taken   { background: rgba(0, 0, 0, 0.05); color: var(--bx-text-2); }
+.cd-badge--mine    { background: var(--bx-wine); color: #fff; }
+.cd-badge--ready   { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.cd-badge--cooking { background: #fffbeb; color: #b45309; border-color: #fde68a; }
+
+/* ===== Кнопки ============================================================ */
+
+.cd-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; min-height: var(--cd-touch);
+    padding: 12px 16px;
+    border: none; border-radius: var(--bx-r-xl);
+    background: var(--bx-wine); color: #fff;
+    font-family: inherit; font-size: 15px; font-weight: 600;
+    cursor: pointer;
+}
+.cd-btn:disabled { opacity: .45; cursor: default; }
+.cd-btn--ghost {
+    background: transparent; color: var(--bx-wine);
+    border: 1px solid var(--bx-border);
+}
+.cd-btn--accent { background: var(--bx-accent); }
+.cd-btn-row { display: flex; gap: 8px; }
+.cd-btn-row .cd-btn { flex: 1 1 0; }
+
+/* ===== Карточка заказа (слой во весь экран) ============================== */
+
+.cd-sheet {
+    position: fixed; inset: 0; z-index: 60;
+    background: var(--bx-bg);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.cd-sheet__head {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--bx-grad-header); color: #fff;
+    padding: calc(12px + env(safe-area-inset-top)) 16px 14px;
+    display: flex; align-items: center; gap: 12px;
+}
+.cd-sheet__back {
+    width: var(--cd-touch); height: var(--cd-touch); flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255, 255, 255, 0.15); border: none;
+    border-radius: var(--bx-r-xl); color: #fff; cursor: pointer;
+}
+.cd-sheet__title {
+    font-family: var(--bx-font-head); font-weight: 700; font-size: 22px; color: #fff;
+    font-variant-numeric: tabular-nums;
+}
+.cd-sheet__body {
+    padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; gap: 12px;
+}
+
+/* Флаг «не связываться с получателем» — первым и крупно. Это сюрприз-доставка:
+   звонок ломает подарок, и увидеть это надо раньше телефона. */
+.cd-alert {
+    padding: 16px;
+    background: rgba(192, 50, 47, 0.07);
+    border: 2px solid rgba(192, 50, 47, 0.45);
+    color: var(--bx-down);
+    border-radius: var(--bx-r-2xl);
+    display: flex; gap: 12px; align-items: flex-start;
+}
+.cd-alert__icon { flex: 0 0 auto; margin-top: 1px; }
+.cd-alert__title { font-size: 17px; font-weight: 700; line-height: 1.25; }
+.cd-alert__text { font-size: 13.5px; margin-top: 4px; line-height: 1.4; color: var(--bx-text); }
+
+.cd-block {
+    background: var(--bx-white);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 16px;
+}
+.cd-block__label {
+    font-size: 11.5px; color: var(--bx-muted);
+    text-transform: uppercase; letter-spacing: .03em; line-height: 1.2;
+    margin-bottom: 6px;
+}
+.cd-block__value { font-size: 15.5px; line-height: 1.45; color: var(--bx-text); }
+.cd-block__value--big {
+    font-size: 19px; font-weight: 600; color: var(--bx-wine);
+    font-variant-numeric: tabular-nums;
+}
+.cd-block__note { font-size: 13px; color: var(--bx-text-2); margin-top: 6px; line-height: 1.45; }
+.cd-block + .cd-block { margin-top: 0; }
+.cd-block__row + .cd-block__row { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--bx-border); }
+
+.cd-person__who { font-size: 12px; color: var(--bx-muted); }
+
+/* Состав заказа */
+.cd-item {
+    display: flex; align-items: center; gap: 12px;
+    min-height: var(--cd-touch);
+    padding: 10px 0;
+}
+.cd-item + .cd-item { border-top: 1px solid var(--bx-border); }
+.cd-item__name { flex: 1 1 auto; font-size: 15px; line-height: 1.35; }
+.cd-item__qty {
+    flex: 0 0 auto; font-size: 15px; font-weight: 600; color: var(--bx-wine);
+    font-variant-numeric: tabular-nums;
+}
+.cd-item__photo {
+    flex: 0 0 auto; width: 44px; height: 44px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bx-pink-wash); border: none;
+    border-radius: var(--bx-r-lg); color: var(--bx-wine); cursor: pointer;
+}
+
+/* ===== Полноэкранное фото =============================================== */
+
+.cd-photo {
+    position: fixed; inset: 0; z-index: 70;
+    background: rgba(19, 8, 16, 0.96);
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+}
+.cd-photo__img { max-width: 100%; max-height: 100%; border-radius: var(--bx-r-lg); }
+.cd-photo__close {
+    position: absolute; top: calc(12px + env(safe-area-inset-top)); right: 12px;
+    width: var(--cd-touch); height: var(--cd-touch);
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255, 255, 255, 0.15); border: none;
+    border-radius: var(--bx-r-xl); color: #fff; cursor: pointer;
+}
+.cd-photo__status { color: rgba(255, 255, 255, 0.75); font-size: 14px; text-align: center; }

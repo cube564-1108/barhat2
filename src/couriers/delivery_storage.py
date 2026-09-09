@@ -194,6 +194,26 @@ def init_delivery_tables() -> None:
             )
         """)
 
+        # ====================================================================
+        # Ссылки на фото товаров. Заполняются фоном (лента изменений), а не при
+        # открытии карточки: внешний вызов из обработчика уже дважды укладывал
+        # прод, а карточку курьер открывает на ходу.
+        #
+        # image_url = NULL означает «у товара фото нет» — и это ЗАПИСЬ, а не
+        # её отсутствие. Без такой записи товар без фото становится вечным
+        # кандидатом в очереди и заставляет ходить в CRM каждый тик; ровно так
+        # выжигалась месячная квота ПланФакта (CLAUDE.md, раздел про квоты).
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS product_images (
+                -- INTEGER, как offer_id в order_items и crm_offers: SQLite не
+                -- приравнивает 1 к '1', и текстовый ключ молча не соединился бы
+                offer_id INTEGER PRIMARY KEY,
+                image_url TEXT,
+                checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
 
 def city_settings(city: Optional[str]) -> Dict[str, Any]:
     """
@@ -480,9 +500,13 @@ def order_for_courier(order_id: int, city: Optional[str],
         if not row:
             return None
         row = dict(row)
+        # Фото приезжает готовой ссылкой из своей таблицы: карточку открывают
+        # с телефона на ходу, и ходить за ней в CRM в этот момент нельзя.
         items = [dict(item) for item in conn.execute(
-            "SELECT offer_id, product_name, article, quantity FROM order_items "
-            "WHERE retailcrm_order_id = ? ORDER BY product_name",
+            "SELECT i.offer_id, i.product_name, i.article, i.quantity, p.image_url "
+            "  FROM order_items i "
+            "  LEFT JOIN product_images p ON p.offer_id = i.offer_id "
+            " WHERE i.retailcrm_order_id = ? ORDER BY i.product_name",
             (order_id,)).fetchall()]
 
     if city and row.get("city") != city:
@@ -508,6 +532,65 @@ def order_for_courier(order_id: int, city: Optional[str],
     else:
         card["address_text"] = _short_address(row.get("address_text"))
     return card
+
+
+# ---------------------------------------------------------------------------
+# Фото товаров
+# ---------------------------------------------------------------------------
+
+# Через сколько дней перепроверять товар, у которого фото не было. Фото
+# заводят задним числом, но редко: сутки — компромисс между «карточка пустая
+# навсегда» и «ходим в CRM за одним и тем же каждый тик».
+IMAGE_RECHECK_DAYS = 1
+
+# Сколько офферов спрашиваем за один тик ленты. Это ровно одна страница CRM:
+# лента обязана оставаться дешёвым тиком, а не превращаться во второй синк.
+IMAGE_BATCH_SIZE = 100
+
+
+def pending_image_offer_ids(limit: int = IMAGE_BATCH_SIZE) -> List[int]:
+    """
+    Офферы из заказов курьеров, для которых ссылку на фото ещё не спрашивали.
+
+    Берём только позиции заказов, которые курьер реально может увидеть
+    (доставка сегодня и позже): каталог целиком тянуть незачем — в нём тысячи
+    позиций, а курьеру нужны десятки.
+
+    Товар без фото сюда возвращается не раньше, чем через `IMAGE_RECHECK_DAYS`:
+    иначе он становится вечным кандидатом и заставляет ходить наружу каждый
+    тик — та самая ошибка, которой выжгли месячную квоту ПланФакта.
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT i.offer_id
+              FROM order_items i
+              JOIN courier_orders o ON o.retailcrm_order_id = i.retailcrm_order_id
+              LEFT JOIN product_images p ON p.offer_id = i.offer_id
+             WHERE o.delivery_date >= date('now', '-1 day')
+               AND (p.offer_id IS NULL
+                    OR (p.image_url IS NULL
+                        AND p.checked_at < datetime('now', ?)))
+             LIMIT ?
+        """, (f"-{IMAGE_RECHECK_DAYS} day", limit)).fetchall()
+    return [row["offer_id"] for row in rows]
+
+
+def save_product_images(images: Dict[int, Optional[str]]) -> int:
+    """
+    Запомнить ссылки на фото. Отсутствие фото сохраняется как NULL, а не
+    пропускается: запись со `checked_at` — это и есть ответ «спрашивали, нет».
+    """
+    if not images:
+        return 0
+    with get_db() as conn:
+        conn.executemany(
+            "INSERT INTO product_images (offer_id, image_url, checked_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(offer_id) DO UPDATE SET "
+            "  image_url = excluded.image_url, checked_at = excluded.checked_at",
+            [(int(offer_id), url or None) for offer_id, url in images.items()],
+        )
+    return len(images)
 
 
 # ---------------------------------------------------------------------------

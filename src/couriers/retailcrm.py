@@ -422,6 +422,43 @@ class CourierOrdersClient:
         return orders
 
 
+    def get_product_images(self, offer_ids: List[int]) -> Dict[int, Optional[str]]:
+        """
+        Ссылки на фото товаров по идентификаторам торговых предложений.
+
+        Отдаёт запись на КАЖДЫЙ запрошенный оффер, в том числе `None` для тех,
+        у кого фото нет или кого CRM не вернула вовсе. Без этого товар без
+        фото попадал бы в очередь снова и снова и заставлял ходить наружу
+        каждый тик (CLAUDE.md, раздел про квоты внешних API).
+
+        Разведка 2026-09-08: `imageUrl` заполнен у 98% товаров, `offers.images`
+        содержит тот же URL. Это оригиналы с сайта (медиана 211 КБ), поэтому
+        ссылка только сохраняется — грузит её браузер курьера и только по тапу.
+        """
+        result: Dict[int, Optional[str]] = {int(offer_id): None for offer_id in offer_ids}
+        if not offer_ids:
+            return result
+
+        for start in range(0, len(offer_ids), PAGE_LIMIT):
+            chunk = offer_ids[start:start + PAGE_LIMIT]
+            data = self._get("api/v5/store/products", {
+                "filter[offerIds][]": chunk,
+                "limit": PAGE_LIMIT,
+                "page": 1,
+            })
+            for product in data.get("products") or []:
+                product_image = product.get("imageUrl")
+                for offer in product.get("offers") or []:
+                    offer_id = offer.get("id")
+                    if offer_id is None or int(offer_id) not in result:
+                        continue
+                    images = offer.get("images") or []
+                    result[int(offer_id)] = (images[0] if images else None) or product_image
+            if len(offer_ids) > PAGE_LIMIT:
+                time.sleep(PAGE_PAUSE_SECONDS)
+        return result
+
+
 def parse_catalog_page(products: List[Dict[str, Any]]) -> tuple:
     """
     Страница каталога → (офферы, связи с группами).

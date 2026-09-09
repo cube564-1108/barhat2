@@ -1,0 +1,26 @@
+{
+  "name": "Бархат — Доставка",
+  "short_name": "Доставка",
+  "description": "Заказы курьера: лента, карточка, маршрут",
+  "lang": "ru",
+  "start_url": "/app/courier",
+  "scope": "/app/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#faf4f9",
+  "theme_color": "#411330",
+  "icons": [
+    {
+      "src": "/app/courier-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/app/courier-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

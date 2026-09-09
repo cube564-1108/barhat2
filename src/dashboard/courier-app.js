@@ -1,0 +1,671 @@
+/*
+ * Экран курьера (PWA), Фаза 3 плана «Курьеры: доставка заказов».
+ *
+ * Что здесь важно понимать до правок:
+ *
+ * 1. **Фильтровать данные фронт не может и не должен.** Город, тип доставки и
+ *    видимые статусы применяет сервер; контактов до брони он просто не
+ *    присылает. Здесь нечего прятать — здесь показывают то, что пришло.
+ * 2. **Состояние заказа берётся из наших полей** (`is_free`, `is_mine`,
+ *    `assignment_state`, `is_ready`), а не из `status` CRM: между действием
+ *    курьера и его отражением в CRM проходит до минуты (находка К1 критики).
+ * 3. **Нативные диалоги внутри Пульса молча игнорируются** — только
+ *    `window.BarhatUI`.
+ * 4. **Перерисовка через innerHTML теряет прокрутку** — правило CLAUDE.md.
+ *    Лента перерисовывается каждые 30 секунд, и без возврата прокрутки курьера
+ *    выбрасывало бы наверх посреди чтения.
+ */
+
+(function () {
+    'use strict';
+
+    var REFRESH_MS = 30000;
+
+    var state = {
+        orders: [],
+        filter: 'free',
+        city: null,
+        profileWarning: null,
+        loadedAt: null,     // когда лента последний раз пришла с сервера
+        stale: false,       // последняя попытка не удалась
+        loading: false,
+        openOrderId: null
+    };
+
+    var el = {};
+
+    // === Утилиты ============================================================
+
+    /**
+     * Экранирование для вставки в HTML и в значения атрибутов.
+     *
+     * Именно так, а не через `div.textContent`: тот приём не экранирует кавычку,
+     * и любое значение с ней рвало атрибут `value="..."`. Эта ошибка уже была
+     * продублирована в четырёх файлах дашборда.
+     */
+    function esc(value) {
+        if (value === null || value === undefined) return '';
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function toast(message, kind) {
+        if (window.BarhatUI) window.BarhatUI.toast(message, kind || 'info');
+    }
+
+    /**
+     * Стенные часы салона в миллисекундах — в той же шкале, что и время
+     * доставки из CRM.
+     *
+     * Время доставки менеджер вводит так, как его видит флорист: «14:00» в
+     * Екатеринбурге и «14:00» в Новосибирске — разные моменты. Пояс устройства
+     * курьера к этому отношения не имеет (он может ехать с телефоном,
+     * настроенным на что угодно), поэтому сравниваем UTC-время с поправкой на
+     * пояс салона, а не локальное время браузера. Те же три шкалы разведены на
+     * сервере в src/couriers/salon_time.py.
+     */
+    function salonNowMs(utcOffset) {
+        if (utcOffset === null || utcOffset === undefined) return null;
+        return Date.now() + utcOffset * 3600000;
+    }
+
+    function slotStartMs(order) {
+        if (!order.delivery_date || !order.delivery_time_from) return null;
+        var d = order.delivery_date.split('-');
+        var t = order.delivery_time_from.split(':');
+        if (d.length !== 3 || t.length < 2) return null;
+        return Date.UTC(+d[0], +d[1] - 1, +d[2], +t[0], +t[1]);
+    }
+
+    /** «через 1 ч 20 мин» / «через 15 мин» / «время вышло». */
+    function countdown(order) {
+        var now = salonNowMs(order.utc_offset);
+        var start = slotStartMs(order);
+        if (now === null || start === null) return null;
+
+        var minutes = Math.round((start - now) / 60000);
+        if (minutes < 0) return { text: 'время вышло', late: true };
+        if (minutes < 60) return { text: 'через ' + minutes + ' мин', late: minutes <= 15 };
+
+        var hours = Math.floor(minutes / 60);
+        var rest = minutes % 60;
+        return {
+            text: 'через ' + hours + ' ч' + (rest ? ' ' + rest + ' мин' : ''),
+            late: false
+        };
+    }
+
+    function slotText(order) {
+        if (order.delivery_time_from && order.delivery_time_to) {
+            return order.delivery_time_from + '–' + order.delivery_time_to;
+        }
+        if (order.delivery_time_from) return 'с ' + order.delivery_time_from;
+        return 'время уточняется';
+    }
+
+    /** Телефон для tel:. Всё лишнее (скобки, пробелы, дефисы) убираем. */
+    function telHref(phone) {
+        var digits = String(phone || '').replace(/[^\d+]/g, '');
+        return digits ? 'tel:' + digits : null;
+    }
+
+    // === Загрузка данных ====================================================
+
+    function apiGet(url) {
+        return fetch(url, { credentials: 'same-origin' }).then(function (response) {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+        }).then(function (payload) {
+            if (!payload || payload.success !== true) {
+                throw new Error((payload && payload.error) || 'Сервер вернул ошибку');
+            }
+            return payload;
+        });
+    }
+
+    function loadProfile() {
+        return apiGet('/api/courier/profile').then(function (payload) {
+            state.city = payload.data.city;
+            state.profileWarning = payload.data.warning;
+        }).catch(function () {
+            // Профиль — не повод не показать ленту: без него просто нет подписи
+        });
+    }
+
+    function loadFeed() {
+        if (state.loading) return Promise.resolve();
+        state.loading = true;
+        renderBusy();
+
+        return apiGet('/api/courier/orders').then(function (payload) {
+            state.orders = payload.data || [];
+            state.loadedAt = new Date();
+            state.stale = false;
+            if (payload.meta && payload.meta.warning) {
+                state.profileWarning = payload.meta.warning;
+            }
+            if (payload.meta && payload.meta.city) state.city = payload.meta.city;
+        }).catch(function (error) {
+            // Показываем последнее загруженное с честной пометкой: цифра
+            // вчерашней свежести полезнее прочерка, но врать про актуальность
+            // нельзя.
+            state.stale = true;
+            if (!state.loadedAt) toast('Не удалось загрузить заказы: ' + error.message, 'error');
+        }).then(function () {
+            state.loading = false;
+            render();
+            if (state.openOrderId) refreshOpenCard();
+        });
+    }
+
+    // === Отбор и порядок ====================================================
+
+    function visibleOrders() {
+        var list = state.orders.filter(function (order) {
+            if (state.filter === 'free') return order.is_free;
+            if (state.filter === 'ready') return order.is_ready;
+            if (state.filter === 'mine') return order.is_mine;
+            return true;
+        });
+
+        // Сервер уже отдал заказы по времени доставки. Поднимаем наверх
+        // готовые: это то, что можно забирать прямо сейчас, — и ровно так это
+        // описано в §8 плана. Сортировка устойчивая, внутри группы порядок
+        // сервера сохраняется.
+        return list
+            .map(function (order, index) { return { order: order, index: index }; })
+            .sort(function (a, b) {
+                if (a.order.is_ready !== b.order.is_ready) return a.order.is_ready ? -1 : 1;
+                return a.index - b.index;
+            })
+            .map(function (item) { return item.order; });
+    }
+
+    function counts() {
+        return {
+            free: state.orders.filter(function (o) { return o.is_free; }).length,
+            ready: state.orders.filter(function (o) { return o.is_ready; }).length,
+            mine: state.orders.filter(function (o) { return o.is_mine; }).length,
+            all: state.orders.length
+        };
+    }
+
+    // === Отрисовка ленты ====================================================
+
+    function renderBusy() {
+        if (el.refresh) el.refresh.setAttribute('data-busy', state.loading ? '1' : '0');
+    }
+
+    function availabilityBadge(order) {
+        if (order.is_mine) {
+            return order.assignment_state === 'picked_up'
+                ? '<span class="cd-badge cd-badge--mine">У меня</span>'
+                : '<span class="cd-badge cd-badge--mine">Мой</span>';
+        }
+        if (order.is_free) return '<span class="cd-badge cd-badge--free">Свободен</span>';
+        return order.assignment_state === 'picked_up'
+            ? '<span class="cd-badge cd-badge--taken">Забрали</span>'
+            : '<span class="cd-badge cd-badge--taken">Занят</span>';
+    }
+
+    function readyBadge(order) {
+        return order.is_ready
+            ? '<span class="cd-badge cd-badge--ready">Готов</span>'
+            : '<span class="cd-badge cd-badge--cooking">Собирают</span>';
+    }
+
+    function cardHtml(order) {
+        var tick = countdown(order);
+        var classes = ['cd-card'];
+        if (order.is_mine) classes.push('cd-card--mine');
+        else if (order.is_ready) classes.push('cd-card--ready');
+
+        var parts = [];
+        parts.push('<article class="' + classes.join(' ') + '" data-order="'
+            + esc(order.retailcrm_order_id) + '">');
+        parts.push('<div class="cd-card__top">');
+        parts.push('<span class="cd-card__number">№ ' + esc(order.order_number || order.retailcrm_order_id) + '</span>');
+        parts.push(availabilityBadge(order));
+        parts.push(readyBadge(order));
+        parts.push('</div>');
+
+        parts.push('<p class="cd-card__route"><span class="cd-card__site">'
+            + esc(order.site_name || order.city || '') + '</span>'
+            + '<span class="cd-card__arrow">→</span>'
+            + esc(order.address_text || 'адрес не указан') + '</p>');
+
+        parts.push('<p class="cd-card__time">' + esc(slotText(order))
+            + (tick ? ' · <span class="cd-card__countdown'
+                + (tick.late ? ' cd-card__countdown--late' : '') + '">'
+                + esc(tick.text) + '</span>' : '')
+            + '</p>');
+
+        // Флаг «не связываться» виден уже в ленте, если контакты открыты:
+        // курьер должен узнать об этом раньше, чем возьмётся за телефон.
+        if (order.do_not_contact_recipient) {
+            parts.push('<p class="cd-card__flag">Не связываться с получателем</p>');
+        }
+
+        parts.push('<div class="cd-card__actions">');
+        if (order.is_free) {
+            parts.push('<button type="button" class="cd-btn" data-claim="'
+                + esc(order.retailcrm_order_id) + '">Забронировать</button>');
+        } else {
+            parts.push('<button type="button" class="cd-btn cd-btn--ghost" data-open="'
+                + esc(order.retailcrm_order_id) + '">Открыть заказ</button>');
+        }
+        parts.push('</div>');
+        parts.push('</article>');
+        return parts.join('');
+    }
+
+    function render() {
+        renderBusy();
+
+        el.subtitle.textContent = state.city
+            ? state.city + ' · ' + state.orders.length + ' заказов'
+            : 'Заказы вашего города';
+
+        if (state.profileWarning) {
+            el.warning.textContent = state.profileWarning;
+            el.warning.hidden = false;
+        } else {
+            el.warning.hidden = true;
+        }
+
+        if (state.stale && state.loadedAt) {
+            el.stale.textContent = 'Нет связи с сервером. Показаны данные на '
+                + formatClock(state.loadedAt);
+            el.stale.hidden = false;
+        } else {
+            el.stale.hidden = true;
+        }
+
+        var c = counts();
+        Array.prototype.forEach.call(el.filters.querySelectorAll('.cd-tab'), function (tab) {
+            var key = tab.getAttribute('data-filter');
+            tab.classList.toggle('cd-tab--active', key === state.filter);
+            tab.innerHTML = esc(tab.getAttribute('data-label'))
+                + '<span class="cd-tab__count">' + c[key] + '</span>';
+        });
+
+        // Прокрутку возвращаем сами: innerHTML выбрасывает её в начало, а
+        // лента перерисовывается каждые 30 секунд.
+        var scroll = window.scrollY;
+        var list = visibleOrders();
+        el.feed.innerHTML = list.length
+            ? list.map(cardHtml).join('')
+            : '<p class="cd-empty">' + esc(emptyText()) + '</p>';
+        window.scrollTo(0, scroll);
+    }
+
+    function emptyText() {
+        if (state.loading && !state.loadedAt) return 'Загружаем заказы…';
+        if (!state.city) return 'Вам не назначен город. Обратитесь к управляющему.';
+        if (state.filter === 'free') return 'Свободных заказов сейчас нет.';
+        if (state.filter === 'ready') return 'Готовых заказов сейчас нет.';
+        if (state.filter === 'mine') return 'Вы пока не взяли ни одного заказа.';
+        return 'Заказов на сегодня и завтра нет.';
+    }
+
+    function formatClock(date) {
+        return String(date.getHours()).padStart(2, '0') + ':'
+            + String(date.getMinutes()).padStart(2, '0');
+    }
+
+    // === Карточка заказа ====================================================
+
+    function openCard(orderId) {
+        state.openOrderId = orderId;
+        el.card.hidden = false;
+        el.card.innerHTML = sheetShell('<p class="cd-empty">Загружаем карточку…</p>', orderId);
+        // Аппаратная «назад» на Android обязана закрывать карточку, а не
+        // выкидывать из приложения: в standalone-режиме выход выглядит как сбой.
+        history.pushState({ courierLayer: 'card', orderId: orderId }, '');
+        refreshOpenCard();
+    }
+
+    function closeCard(fromHistory) {
+        state.openOrderId = null;
+        el.card.hidden = true;
+        el.card.innerHTML = '';
+        if (!fromHistory) historyBackIfOurs();
+    }
+
+    /**
+     * Снять свою запись истории, если она наша.
+     *
+     * Каждый слой (карточка, фото) кладёт свою запись, чтобы аппаратная
+     * «назад» закрывала слой, а не выходила из приложения. Закрытие кнопкой в
+     * интерфейсе обязано эту запись убрать — иначе «назад» потом срабатывает
+     * вхолостую, и курьеру приходится жать её дважды.
+     */
+    function historyBackIfOurs() {
+        if (history.state && history.state.courierLayer) history.back();
+    }
+
+    function refreshOpenCard() {
+        var orderId = state.openOrderId;
+        if (!orderId) return;
+        apiGet('/api/courier/orders/' + encodeURIComponent(orderId)).then(function (payload) {
+            if (state.openOrderId !== orderId) return;   // успели закрыть
+            el.card.innerHTML = sheetShell(cardBodyHtml(payload.data), orderId);
+        }).catch(function (error) {
+            if (state.openOrderId !== orderId) return;
+            el.card.innerHTML = sheetShell(
+                '<p class="cd-empty">Не удалось открыть заказ: ' + esc(error.message) + '</p>',
+                orderId);
+        });
+    }
+
+    function sheetShell(body, orderId) {
+        return '<div class="cd-sheet__head">'
+            + '<button type="button" class="cd-sheet__back" data-close="1" aria-label="Назад">'
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+            + ' stroke-linecap="round" stroke-linejoin="round" width="22" height="22">'
+            + '<path d="M19 12H5"></path><path d="M12 19l-7-7 7-7"></path></svg></button>'
+            + '<span class="cd-sheet__title">Заказ № ' + esc(orderId) + '</span>'
+            + '</div>'
+            + '<div class="cd-sheet__body">' + body + '</div>';
+    }
+
+    function block(label, value, note) {
+        return '<section class="cd-block">'
+            + '<div class="cd-block__label">' + esc(label) + '</div>'
+            + '<div class="cd-block__value">' + value + '</div>'
+            + (note ? '<div class="cd-block__note">' + esc(note) + '</div>' : '')
+            + '</section>';
+    }
+
+    function personHtml(order) {
+        // Получатель заполнен у 36% заказов — в двух случаях из трёх курьер
+        // звонит заказчику, и путать их нельзя: подпись обязательна.
+        //
+        // При флаге «не связываться» контакт всегда заказчик: показывать
+        // телефон получателя рядом с запретом звонить — приглашение ошибиться.
+        var name, phone, who;
+        if (order.recipient_phone && !order.recipient_is_customer
+                && !order.do_not_contact_recipient) {
+            name = order.recipient_name; phone = order.recipient_phone; who = 'получатель';
+        } else {
+            name = order.customer_name; phone = order.customer_phone; who = 'клиент';
+        }
+        if (!name && !phone) return null;
+        return {
+            html: '<div class="cd-block__value--big">' + esc(name || 'без имени') + '</div>'
+                + '<div class="cd-person__who">' + esc(who) + (phone ? ' · ' + esc(phone) : '') + '</div>',
+            phone: phone,
+            who: who
+        };
+    }
+
+    function itemsHtml(items) {
+        if (!items || !items.length) return '<div class="cd-block__value">Состав не указан</div>';
+        return items.map(function (item) {
+            var qty = item.quantity;
+            var photo = item.image_url
+                ? '<button type="button" class="cd-item__photo" data-photo="' + esc(item.image_url)
+                    + '" aria-label="Показать фото">'
+                    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+                    + ' stroke-linecap="round" stroke-linejoin="round" width="20" height="20">'
+                    + '<rect x="3" y="3" width="18" height="18" rx="2"></rect>'
+                    + '<circle cx="8.5" cy="8.5" r="1.5"></circle>'
+                    + '<path d="M21 15l-5-5L5 21"></path></svg></button>'
+                : '';
+            return '<div class="cd-item">'
+                + '<span class="cd-item__name">' + esc(item.product_name || 'без названия') + '</span>'
+                + '<span class="cd-item__qty">' + esc(qty) + '</span>'
+                + photo + '</div>';
+        }).join('');
+    }
+
+    function cardBodyHtml(order) {
+        var parts = [];
+
+        // Флаг «не связываться с получателем» — ПЕРВЫМ и крупно. Это
+        // сюрприз-доставка (5% заказов): звонок ломает подарок, и увидеть это
+        // надо раньше, чем телефон.
+        if (order.do_not_contact_recipient) {
+            parts.push('<div class="cd-alert">'
+                + '<span class="cd-alert__icon">'
+                + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+                + ' stroke-linecap="round" stroke-linejoin="round" width="26" height="26">'
+                + '<path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45'
+                + ' 12.84 12.84 0 0 0 2.29.62A2 2 0 0 1 21.72 16v3a2 2 0 0 1-2.18 2'
+                + ' 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34'
+                + 'A19.79 19.79 0 0 1 3.08 4.18 2 2 0 0 1 5.06 2h3a2 2 0 0 1 2 1.72'
+                + ' 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L9.09 9.91"></path>'
+                + '<path d="M2 2l20 20"></path></svg></span>'
+                + '<div><div class="cd-alert__title">Не связываться с получателем</div>'
+                + '<div class="cd-alert__text">Сюрприз-доставка. Не звоните и не пишите'
+                + ' получателю — все вопросы через заказчика.</div></div></div>');
+        }
+
+        var tick = countdown(order);
+        parts.push(block('Доставка',
+            '<div class="cd-block__value--big">' + esc(slotText(order)) + '</div>'
+            + (tick ? '<div class="cd-block__note">' + esc(tick.text) + '</div>' : ''),
+            order.delivery_date ? 'Дата: ' + order.delivery_date : null));
+
+        parts.push(block('Адрес',
+            '<div class="cd-block__value">' + esc(order.address_text || 'адрес не указан') + '</div>'
+            + (order.address_text
+                ? '<div class="cd-block__actions" style="margin-top:12px">'
+                    + '<button type="button" class="cd-btn cd-btn--ghost" data-route="'
+                    + esc([order.city, order.address_text].filter(Boolean).join(', '))
+                    + '">Маршрут</button></div>'
+                : '')));
+
+        parts.push(block('Забрать в салоне',
+            '<div class="cd-block__value">' + esc(order.site_name || order.city || 'салон не указан') + '</div>',
+            order.ready_planned_at ? 'Плановая готовность: ' + order.ready_planned_at : null));
+
+        var person = personHtml(order);
+        if (person) {
+            var call = person.phone
+                ? '<div style="margin-top:12px"><a class="cd-btn" href="'
+                    + esc(telHref(person.phone)) + '">Позвонить (' + esc(person.who) + ')</a></div>'
+                : '';
+            parts.push(block('Кому везём', person.html + call));
+        }
+
+        parts.push(block('Состав', itemsHtml(order.items)));
+
+        // Комментарии оператора и клиента — разные по смыслу, поэтому разными
+        // блоками, а не одной кучей.
+        if (order.manager_comment) parts.push(block('Комментарий оператора',
+            '<div class="cd-block__value">' + esc(order.manager_comment) + '</div>'));
+        if (order.customer_comment) parts.push(block('Комментарий клиента',
+            '<div class="cd-block__value">' + esc(order.customer_comment) + '</div>'));
+        if (order.note_text) parts.push(block('Примечание',
+            '<div class="cd-block__value">' + esc(order.note_text) + '</div>'));
+
+        if (order.is_free) {
+            parts.push('<button type="button" class="cd-btn cd-btn--accent" data-claim="'
+                + esc(order.retailcrm_order_id) + '">Забронировать</button>');
+        }
+
+        return parts.join('');
+    }
+
+    // === Фото ===============================================================
+
+    function openPhoto(url) {
+        el.photo.hidden = false;
+        history.pushState({ courierLayer: 'photo' }, '');
+        el.photo.innerHTML = '<button type="button" class="cd-photo__close" data-photo-close="1"'
+            + ' aria-label="Закрыть">'
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+            + ' stroke-linecap="round" stroke-linejoin="round" width="22" height="22">'
+            + '<path d="M18 6L6 18"></path><path d="M6 6l12 12"></path></svg></button>'
+            + '<span class="cd-photo__status">Загружаем фото…</span>';
+
+        var img = new Image();
+        img.className = 'cd-photo__img';
+        img.alt = 'Фото товара';
+        img.onload = function () {
+            var status = el.photo.querySelector('.cd-photo__status');
+            if (status) status.replaceWith(img);
+        };
+        img.onerror = function () {
+            var status = el.photo.querySelector('.cd-photo__status');
+            // Плейсхолдер вместо пустого экрана: ссылка ведёт на сайт, и он
+            // может не ответить — курьер должен понимать, что это не он сломал.
+            if (status) status.textContent = 'Фото не загрузилось';
+        };
+        img.src = url;
+    }
+
+    function closePhoto(fromHistory) {
+        el.photo.hidden = true;
+        el.photo.innerHTML = '';
+        if (!fromHistory) historyBackIfOurs();
+    }
+
+    // === Обработчики ========================================================
+
+    function claimNotReady() {
+        toast('Бронирование заказов включим в следующем обновлении приложения', 'info');
+    }
+
+    function onCardClick(event) {
+        var close = event.target.closest('[data-close]');
+        if (close) { closeCard(); return; }
+
+        var photo = event.target.closest('[data-photo]');
+        if (photo) { openPhoto(photo.getAttribute('data-photo')); return; }
+
+        var route = event.target.closest('[data-route]');
+        if (route) { openRoute(route.getAttribute('data-route')); return; }
+
+        if (event.target.closest('[data-claim]')) claimNotReady();
+    }
+
+    /**
+     * Маршрут до адреса.
+     *
+     * Обычная https-ссылка, а не схема `yandexnavi://`: своей схемой браузер
+     * ничего не делает, когда приложения нет, и кнопка выглядит сломанной.
+     * По https-ссылке Android сам предложит открыть её в Яндекс.Картах или
+     * Навигаторе, а без них она откроется в браузере.
+     *
+     * Точки маршрута появятся в Фазе 7 — там будут координаты из геокодера.
+     */
+    function openRoute(address) {
+        if (!address) return;
+        window.open('https://yandex.ru/maps/?rtext=~' + encodeURIComponent(address) + '&rtt=auto',
+            '_blank', 'noopener');
+    }
+
+    function bind() {
+        el.filters.addEventListener('click', function (event) {
+            var tab = event.target.closest('.cd-tab');
+            if (!tab) return;
+            state.filter = tab.getAttribute('data-filter');
+            render();
+            window.scrollTo(0, 0);
+        });
+
+        el.refresh.addEventListener('click', function () {
+            if (state.loading) return;
+            loadFeed();
+        });
+
+        el.feed.addEventListener('click', function (event) {
+            if (event.target.closest('[data-claim]')) { claimNotReady(); return; }
+
+            var open = event.target.closest('[data-open]');
+            if (open) { openCard(open.getAttribute('data-open')); return; }
+
+            var card = event.target.closest('[data-order]');
+            if (card) openCard(card.getAttribute('data-order'));
+        });
+
+        // Делегирование на самом слое, а не на его содержимом: карточка
+        // перерисовывается каждым обновлением, и обработчик на внутренностях
+        // копился бы по одному на перерисовку.
+        el.card.addEventListener('click', onCardClick);
+
+        el.photo.addEventListener('click', function (event) {
+            if (event.target.closest('[data-photo-close]') || event.target === el.photo) closePhoto();
+        });
+
+        window.addEventListener('popstate', function () {
+            if (!el.photo.hidden) { closePhoto(true); return; }
+            if (state.openOrderId) closeCard(true);
+        });
+
+        // Обновление по возврату во вкладку вместо бесконечного поллинга в
+        // фоне: телефон курьера не обязан греться, пока экран выключен.
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) loadFeed();
+        });
+
+        setInterval(function () {
+            if (!document.hidden) loadFeed();
+        }, REFRESH_MS);
+    }
+
+    // === Service worker =====================================================
+
+    function registerServiceWorker() {
+        if (!('serviceWorker' in navigator)) return;
+        navigator.serviceWorker.register('/app/courier-sw.js', { scope: '/app/' })
+            .catch(function (error) {
+                console.warn('Service worker не зарегистрировался:', error);
+            });
+
+        // Новая версия оболочки — перезагружаем страницу один раз. Без этого
+        // курьер после деплоя работал бы во вчерашнем экране (находка К5).
+        var reloading = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+            if (reloading) return;
+            reloading = true;
+            window.location.reload();
+        });
+    }
+
+    // === Старт ==============================================================
+
+    function start() {
+        el.boot = document.getElementById('cdBoot');
+        el.app = document.getElementById('cdApp');
+        el.feed = document.getElementById('cdFeed');
+        el.filters = document.getElementById('cdFilters');
+        el.subtitle = document.getElementById('cdSubtitle');
+        el.warning = document.getElementById('cdWarning');
+        el.stale = document.getElementById('cdStale');
+        el.refresh = document.getElementById('cdRefresh');
+        el.card = document.getElementById('cdCard');
+        el.photo = document.getElementById('cdPhoto');
+
+        // Подписи табов запоминаем до первой перерисовки: она переписывает их
+        // вместе со счётчиком.
+        Array.prototype.forEach.call(el.filters.querySelectorAll('.cd-tab'), function (tab) {
+            tab.setAttribute('data-label', tab.textContent.trim());
+        });
+
+        fetch('/api/auth/me', { credentials: 'same-origin' }).then(function (response) {
+            if (!response.ok) throw new Error('unauthorized');
+            return response.json();
+        }).then(function () {
+            el.boot.hidden = true;
+            el.app.hidden = false;
+            bind();
+            registerServiceWorker();
+            return loadProfile().then(loadFeed);
+        }).catch(function () {
+            window.location.href = '/login';
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', start);
+    } else {
+        start();
+    }
+})();
