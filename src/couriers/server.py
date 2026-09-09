@@ -545,8 +545,22 @@ MAX_WEIGHTS_BATCH = 500
 
 
 def _weights_window() -> tuple:
+    """Окно для СПИСКА товаров: какие позиции встречались в заказах."""
     today = date.today()
     return (today - timedelta(days=WEIGHTS_WINDOW_DAYS)).isoformat(), today.isoformat()
+
+
+def _recalc_window() -> tuple:
+    """
+    Окно для ПЕРЕСЧЁТА минут после правки нормы или тарифа.
+
+    Обязательно включает будущее. Сетка нагрузки показывает сегодня и
+    ближайшие дни, то есть живёт целиком на будущих заказах, а пересчёт по
+    окну «последние 60 дней» их не касался вовсе: человек сохранял норму,
+    открывал экран и не видел никаких изменений — до следующего прогона
+    синхронизации, то есть до получаса.
+    """
+    return _window(WEIGHTS_WINDOW_DAYS, FUTURE_WINDOW_DAYS)
 
 
 @couriers_bp.route("/weights", methods=["GET"])
@@ -791,7 +805,7 @@ def import_norms():
                f"применено {result['applied']}, снято {result['cleared']}, "
                f"ошибок {len(result['errors'])}")
 
-    date_from, date_to = _weights_window()
+    date_from, date_to = _recalc_window()
     try:
         storage.recalc_minutes_range(date_from, date_to)
     except Exception as e:
@@ -844,7 +858,7 @@ def save_time_norm():
 
     # Норма меняет время задним числом: без пересчёта экран показывал бы
     # старые минуты до следующего синка, и разметка выглядела бы бесполезной.
-    date_from, date_to = _weights_window()
+    date_from, date_to = _recalc_window()
     try:
         storage.recalc_minutes_range(date_from, date_to)
     except Exception as e:
@@ -934,7 +948,7 @@ def save_tariff():
         return error_response(str(e))
 
     log_action(username, "salon_load_tariff", str(data)[:200])
-    date_from, date_to = _weights_window()
+    date_from, date_to = _recalc_window()
     try:
         storage.recalc_minutes_range(date_from, date_to)
     except Exception as e:

@@ -2668,6 +2668,29 @@ def health_snapshot() -> Dict[str, Any]:
                 # Тем же соединением: второе поверх незакрытого — вложенный
                 # коннект, которым уже вешали базу.
                 "catalog": catalog_counts(conn),
+                # Нормы времени и результат расчёта. Без этих чисел «загрузка
+                # считается неправильно» невозможно ни подтвердить, ни
+                # опровергнуть снаружи: экран показывает проценты, а из чего
+                # они сложились — видно только здесь. Считаем по окну витрины,
+                # включая будущее: сетка нагрузки живёт на завтрашних заказах,
+                # и «посчитано за прошлый месяц» о ней ничего не говорит.
+                "norms": {
+                    "set": conn.execute(
+                        "SELECT COUNT(*) AS c FROM load_time_norms WHERE scope = 'offer'"
+                    ).fetchone()["c"],
+                    "orders_with_minutes": conn.execute(
+                        "SELECT COUNT(*) AS c FROM courier_orders "
+                        " WHERE delivery_date >= ? AND minutes_total > 0", (window_from,)
+                    ).fetchone()["c"],
+                    "orders_incomplete": conn.execute(
+                        "SELECT COUNT(*) AS c FROM courier_orders "
+                        " WHERE delivery_date >= ? AND items_without_norm > 0", (window_from,)
+                    ).fetchone()["c"],
+                    "minutes_avg": round(conn.execute(
+                        "SELECT AVG(minutes_total) AS a FROM courier_orders "
+                        " WHERE delivery_date >= ? AND minutes_total IS NOT NULL", (window_from,)
+                    ).fetchone()["a"] or 0, 1),
+                },
                 "statuses_as_load": conn.execute(
                     "SELECT COUNT(*) AS c FROM order_statuses WHERE counts_as_load = 1"
                 ).fetchone()["c"],
