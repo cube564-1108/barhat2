@@ -113,10 +113,11 @@ cheap_connects = len(connect_calls)
 cheap = response.get_json()
 
 check("GET /health -> 200", response.status_code == 200, f"({response.status_code})")
-# Потолок 2 = проба записи в barhat.db + чтение состояния квоты ПланФакта.
-# Всё остальное (пять снимков витрин, инвариант схемы) ушло за ?full=1.
-check(f"дешёвый вызов открыл базу {cheap_connects} раз(а) (потолок 2)",
-      cheap_connects <= 2, f"открыто: {connect_calls}")
+# Ноль, а не «немного». Замер прода 09.09.2026 показал, что файловые блоки
+# стоят 0-8 мс, а каждое соединение — 100-650 мс: пока в дешёвом ответе есть
+# хоть одно обращение к базе, вся цена ручки состоит из него.
+check(f"дешёвый вызов не открывает базу вовсе (открыл {cheap_connects})",
+      cheap_connects == 0, f"открыто: {connect_calls}")
 
 
 # ============================================================================
@@ -130,7 +131,8 @@ check("есть замер по блокам", isinstance(cheap.get("timings_ms"
 check("есть суммарное время", isinstance(cheap.get("total_ms"), (int, float)),
       f"({cheap.get('total_ms')!r})")
 check("состояние баз на месте", isinstance(cheap.get("databases"), dict) and cheap["databases"])
-check("проба записи на месте", isinstance(cheap.get("write_test"), dict))
+check("пробы записи в дешёвом ответе нет", "write_test" not in cheap)
+check("чтения квоты в дешёвом ответе нет", "planfact_quota" not in cheap)
 # Число файлов во вложениях — перечисление каталога целиком, это диагностика
 check("число файлов вложений не считается",
       all("files" not in v for v in cheap.get("attachments", {}).values()),
@@ -149,6 +151,8 @@ data = response.get_json()
 check("GET /health?full=1 -> 200", response.status_code == 200, f"({response.status_code})")
 check("есть pipelines", isinstance(data.get("pipelines"), dict))
 check("есть guarantees", isinstance(data.get("guarantees"), dict))
+check("есть проба записи", isinstance(data.get("write_test"), dict))
+check("есть остаток квоты ПланФакта", isinstance(data.get("planfact_quota"), dict))
 check("полный вызов дороже дешёвого по числу соединений",
       full_connects > cheap_connects, f"({full_connects} против {cheap_connects})")
 
