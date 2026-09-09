@@ -208,6 +208,13 @@ def init_salonload_tables() -> None:
         _add_column_if_missing(conn, "salon_capacity", "florists", "REAL")
         _add_column_if_missing(conn, "salon_capacity_exceptions", "florists", "REAL")
 
+        # Модель, в которой посчитано предупреждение. Числа в нём заморожены
+        # в момент создания (INSERT OR IGNORE, строка не обновляется), поэтому
+        # подписывать их единицей АКТИВНОЙ модели нельзя: после перехода на
+        # минуты старое «7,4 из 6 ед.» превратилось бы в «7,4 из 6 мин»,
+        # хотя минут там 74 из 60.
+        _add_column_if_missing(conn, "salon_load_alerts", "model", "TEXT")
+
         # Доля часа, которая у флориста уходит именно на сборку: приём заказа,
         # выдача, звонки — это тоже его час. Один коэффициент на салон, а не
         # число на каждый час: последнее никто не заполнит.
@@ -301,7 +308,8 @@ def set_timezone(store_id: int, utc_offset: int, username: Optional[str] = None)
 # ============================================================================
 
 def upsert_alert(store_id: int, date: str, hour: int, horizon: str,
-                 percent: float, units: float, capacity: float) -> bool:
+                 percent: float, units: float, capacity: float,
+                 model: Optional[str] = None) -> bool:
     """
     Записать предупреждение. False — про этот слот и горизонт уже говорили.
 
@@ -313,10 +321,11 @@ def upsert_alert(store_id: int, date: str, hour: int, horizon: str,
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO salon_load_alerts
-                   (store_id, date, hour, horizon, percent, units, capacity)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                   (store_id, date, hour, horizon, percent, units, capacity, model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (store_id, date, hour, horizon, percent, units, capacity),
+            (store_id, date, hour, horizon, percent, units, capacity,
+             model or DEFAULT_LOAD_MODEL),
         )
         conn.commit()
         return bool(cur.rowcount)
@@ -326,7 +335,8 @@ def upsert_alert(store_id: int, date: str, hour: int, horizon: str,
 
 def active_alerts(store_ids: Optional[List[int]], date_from: str) -> List[Dict[str, Any]]:
     """Неснятые предупреждения от указанной даты и дальше."""
-    query = ("SELECT id, store_id, date, hour, horizon, percent, units, capacity, created_at "
+    query = ("SELECT id, store_id, date, hour, horizon, percent, units, capacity, "
+             "       model, created_at "
              "FROM salon_load_alerts WHERE dismissed_at IS NULL AND resolved_at IS NULL "
              "AND date >= ?")
     params: List[Any] = [date_from]
@@ -546,7 +556,10 @@ def capacity_model_status() -> Dict[int, Dict[str, int]]:
                    SUM(CASE WHEN florists IS NOT NULL AND is_closed = 0
                             THEN 1 ELSE 0 END) AS florist_hours,
                    SUM(CASE WHEN capacity_units IS NULL AND is_closed = 0
-                            THEN 1 ELSE 0 END) AS gap_hours
+                            THEN 1 ELSE 0 END) AS gap_hours,
+                   SUM(CASE WHEN florists IS NULL AND is_closed = 0
+                            THEN 1 ELSE 0 END) AS florist_gap_hours,
+                   SUM(CASE WHEN is_closed = 0 THEN 1 ELSE 0 END) AS open_hours
               FROM salon_capacity
           GROUP BY store_id
             """
@@ -557,11 +570,16 @@ def capacity_model_status() -> Dict[int, Dict[str, int]]:
         row["store_id"]: {
             "units_hours": row["units_hours"] or 0,
             "florist_hours": row["florist_hours"] or 0,
-            # Рабочие часы БЕЗ старой ёмкости. До Ф6 процент считается по ней,
-            # и такой час в сетке серый — «ёмкость не задана». Появляется это
-            # само: у нового салона или когда расширили часы работы, а форма
+            "open_hours": row["open_hours"] or 0,
+            # Рабочие часы БЕЗ старой ёмкости. До перехода процент считается по
+            # ней, и такой час в сетке серый — «ёмкость не задана». Появляется
+            # это само: у нового салона или когда расширили часы работы, а форма
             # шлёт только флористов. Молча — значит незаметно.
             "gap_hours": row["gap_hours"] or 0,
+            # То же самое для новой модели. Салон, у которого флористы стоят
+            # на одном часе из двенадцати, «готовым» не является: после
+            # переключения одиннадцать часов станут серыми.
+            "florist_gap_hours": row["florist_gap_hours"] or 0,
         }
         for row in rows
     }
@@ -671,10 +689,12 @@ def model_health() -> Dict[str, Any]:
         counts = conn.execute(
             """
             SELECT COUNT(DISTINCT store_id) AS stores,
-                   COUNT(DISTINCT CASE WHEN florists IS NOT NULL THEN store_id END)
-                       AS stores_with_florists,
+                   COUNT(DISTINCT CASE WHEN florists IS NOT NULL AND is_closed = 0
+                                       THEN store_id END) AS stores_with_florists,
                    SUM(CASE WHEN capacity_units IS NULL AND is_closed = 0
-                            THEN 1 ELSE 0 END) AS gap_hours
+                            THEN 1 ELSE 0 END) AS gap_hours,
+                   SUM(CASE WHEN florists IS NULL AND is_closed = 0
+                            THEN 1 ELSE 0 END) AS florist_gap_hours
               FROM salon_capacity
             """
         ).fetchone()
@@ -684,7 +704,10 @@ def model_health() -> Dict[str, Any]:
         "model": model,
         "stores": counts["stores"] or 0,
         "stores_with_florists": counts["stores_with_florists"] or 0,
+        # Пробелы обеих моделей, а не только старой: дырой активной модели
+        # оказывается серая сетка, и увидеть её снаружи больше нечем.
         "hours_without_old_capacity": counts["gap_hours"] or 0,
+        "hours_without_florists": counts["florist_gap_hours"] or 0,
     }
 
 

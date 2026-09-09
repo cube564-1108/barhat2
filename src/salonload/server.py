@@ -215,9 +215,13 @@ def get_free_slots():
     if not metrics.valid_date(date_from):
         return error_response("from должен быть в формате YYYY-MM-DD")
 
+    units_raw = request.args.get("units")
     try:
         days = int(request.args.get("days", 3))
-        need_units = float(request.args.get("units", 1))
+        # Не подставляем 1 по умолчанию: единица зависит от активной модели, и
+        # «запас в одну минуту» отдавал бы забитый слот как свободный. Умолчание
+        # знает metrics.free_slots — там, где известна модель.
+        need_units = None if units_raw in (None, "") else float(units_raw)
     except (TypeError, ValueError):
         return error_response("days и units должны быть числами")
     if not (1 <= days <= 14):
@@ -361,8 +365,22 @@ def get_load_model():
     date_from = (date.today() - timedelta(days=COVERAGE_DAYS)).isoformat()
     coverage = couriers_storage.norms_coverage(date_from, date_to)
 
+    from salonkpi import storage as salonkpi_storage
+
     status = storage.capacity_model_status()
-    florist_stores = sum(1 for value in status.values() if value["florist_hours"])
+    names = {store["id"]: store["name"]
+             for store in salonkpi_storage.list_stores(_allowed_store_ids(), only_linked=True)}
+
+    # Салон готов, только если флористы стоят на ВСЕХ его рабочих часах.
+    # «Хотя бы один час» — это «9 из 9» в интерфейсе и серая сетка после
+    # переключения: предупреждение, которое не предупреждает.
+    ready = [store_id for store_id in names
+             if status.get(store_id, {}).get("open_hours")
+             and not status[store_id]["florist_gap_hours"]]
+    partial = [{"store_id": store_id, "store_name": names[store_id],
+                "hours_without_florists": status[store_id]["florist_gap_hours"]}
+               for store_id in sorted(names)
+               if status.get(store_id, {}).get("florist_gap_hours")]
 
     return success_response({
         "data": {
@@ -370,8 +388,9 @@ def get_load_model():
             "can_edit": _is_admin(),
             "coverage": {**coverage, "from": date_from, "to": date_to,
                          "days": COVERAGE_DAYS, "threshold": COVERAGE_THRESHOLD},
-            "stores_with_florists": florist_stores,
-            "stores_total": len(status),
+            "stores_with_florists": len(ready),
+            "stores_total": len(names),
+            "stores_partial": partial,
         }
     })
 

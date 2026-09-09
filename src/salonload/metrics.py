@@ -578,7 +578,8 @@ def scan_alerts() -> Dict[str, Any]:
             # В предупреждение пишутся числа АКТИВНОЙ модели: иначе после
             # переключения в тексте окажутся единицы, которых на экране уже нет.
             if storage.upsert_alert(store["id"], day, hour, horizon,
-                                    cell["percent"], cell["load"], cell["load_capacity"]):
+                                    cell["percent"], cell["load"], cell["load_capacity"],
+                                    model):
                 created += 1
 
     return {"created": created, "resolved": resolved, "no_timezone": skipped_no_tz}
@@ -604,8 +605,12 @@ def alerts(store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
         free = free_slots(item["store_id"], item["date"], days=2, grids=grids, model=model)
         suggestions = [slot for slot in free["slots"]
                        if not (slot["date"] == item["date"] and slot["hour"] == item["hour"])][:3]
+        # Единица берётся из модели САМОГО предупреждения: его числа заморожены
+        # при создании и после переключения остаются в прежних единицах.
+        item_model = item.get("model") or storage.DEFAULT_LOAD_MODEL
         result.append({**item,
                        "store_name": names[item["store_id"]],
+                       "unit": "мин" if item_model == storage.LOAD_MODEL_MINUTES else "ед.",
                        "free_slots": suggestions})
 
     return {

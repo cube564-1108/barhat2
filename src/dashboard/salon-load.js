@@ -257,8 +257,14 @@
     // за незаполненный справочник, который заполнять не обязательно.
 
     function capacityNote(data) {
-        const withoutCapacity = (data.stores || []).filter(store =>
-            store.cells.every(cell => cell.load_capacity === null && !cell.closed));
+        // Салон без ёмкости — тот, у которого НИ ОДИН рабочий час её не имеет.
+        // Закрытые часы в счёт не идут: раньше условие требовало `!cell.closed`
+        // у каждой ячейки, и один явно закрытый час глушил плашку целиком —
+        // салон оставался серым без единого объяснения.
+        const withoutCapacity = (data.stores || []).filter(store => {
+            const working = store.cells.filter(cell => !cell.closed);
+            return working.length && working.every(cell => cell.load_capacity === null);
+        });
         if (!withoutCapacity.length) return '';
         const names = withoutCapacity.map(s => s.store_name).join(', ');
         return note('warn', 'Ёмкость не задана',
@@ -288,9 +294,11 @@
     function alertsCard() {
         const alerts = state.alerts;
         if (!alerts) return '';
-        // Единица берётся из ответа предупреждений, а не из сетки: цифры в
-        // предупреждении записаны в момент его создания, и после переключения
-        // модели старые записи остаются в прежних единицах.
+        // Единица у КАЖДОГО предупреждения своя: его числа записаны в момент
+        // создания, и после переключения модели старые записи остаются в
+        // прежних единицах. `alerts.unit` — только запасной вариант для
+        // записей, сделанных до появления этого поля. Свободные слоты
+        // считаются здесь и сейчас, поэтому у них единица активная.
         const alertUnit = alerts.unit || 'ед.';
 
         // Молчание модуля и «всё спокойно» — разные вещи. Если синк не
@@ -330,7 +338,7 @@
                                     ${esc(dateLabel(alert.date))} · ${String(alert.hour).padStart(2, '0')}:00</span><br>
                                 <span class="sload-extra__value">${pct(alert.percent)}</span>
                                 <span class="sload-extra__label">${num(alert.units)} из
-                                    ${num(alert.capacity)} ${alertUnit} ·
+                                    ${num(alert.capacity)} ${esc(alert.unit || alertUnit)} ·
                                     ${alert.horizon === 'soon' ? 'ближайшие часы' : 'завтра'}</span>
                             </span>
                             <button class="sload-btn sload-btn--ghost" data-dismiss="${alert.id}">Разобрался</button>
@@ -430,7 +438,9 @@
             capacityText,
             data.florists ? `${num(data.florists)} ${plural(Math.round(data.florists),
                 'флорист', 'флориста', 'флористов')} в смене` : '',
-            data.orders_without_norm
+            // Нормы времени влияют только на минуты. В старой модели нагрузка
+            // считается по надбавкам, и пугать этим счётчиком там нечем.
+            data.orders_without_norm && state.data.model === 'minutes'
                 ? `в ${data.orders_without_norm} ${plural(data.orders_without_norm,
                     'заказе', 'заказах', 'заказах')} есть позиции без нормы — загрузка занижена`
                 : '',
@@ -616,7 +626,7 @@
         const body = orders.length ? `
             <p class="sload-card__caption">Всего ${num(result.data.load)} ${unit}
                 в ${orders.length} ${plural(orders.length, 'заказе', 'заказах', 'заказах')}.${
-                result.data.without_norm
+                result.data.without_norm && minutesModel
                     ? ` В ${result.data.without_norm} ${plural(result.data.without_norm,
                         'заказе', 'заказах', 'заказах')} есть позиции без нормы — эта цифра занижена.`
                     : ''}</p>
@@ -631,7 +641,7 @@
                         <td>${order.is_pickup
                             ? '<span class="sload-badge sload-badge--pickup">самовывоз</span>'
                             : '<span class="sload-badge">доставка</span>'}</td>
-                        <td>${num(order.load)}${order.without_norm
+                        <td>${num(order.load)}${order.without_norm && minutesModel
                             ? ' <span class="sload-badge sload-badge--warn">без нормы</span>' : ''}
                             ${minutesModel ? breakdown(order) : ''}</td>
                         <td>${order.amount ? Math.round(order.amount) + NBSP + '₽' : '—'}</td>
@@ -639,11 +649,21 @@
             </table>`
             : '<div class="sload-empty"><p>В этом слоте заказов нет.</p></div>';
 
-        modal(title, body,
-            (result.data.without_norm
+        const overlay = modal(title, body,
+            (result.data.without_norm && minutesModel && state.isAdmin
                 ? '<button class="sload-btn sload-btn--ghost" data-open-norms>Разметить нормы</button>'
                 : '') +
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
+
+        // Своя привязка обязательна: общий обработчик кликов висит на
+        // document и выходит, если клик не внутри #salonLoadContent, а модалка
+        // живёт в document.body. Без этого кнопка выглядит живой и ничего
+        // не делает — ровно тот баг, который в iframe Пульса уже ловили.
+        overlay.addEventListener('click', e => {
+            if (!e.target.closest('[data-open-norms]')) return;
+            overlay.remove();
+            openTimeNorms('missing');
+        });
     }
 
     async function openLoadModel() {
@@ -657,7 +677,6 @@
 
         const minutes = data.model === 'minutes';
         const coverage = data.coverage || {};
-        const ready = data.stores_with_florists === data.stores_total && data.stores_total > 0;
 
         const body = `
             <p class="sload-card__caption">Модель определяет, что делится на что в сетке.
@@ -679,9 +698,14 @@
 
             <h4 style="font-family:'Vollkorn',Georgia,serif;color:#411330;margin:0 0 4px">Готовность</h4>
             <ul style="margin:0 0 16px;padding-left:18px;line-height:1.8">
-                <li>Флористы заданы у ${data.stores_with_florists} из ${data.stores_total}
-                    ${plural(data.stores_total, 'салона', 'салонов', 'салонов')}${ready
-                        ? '' : ' — остальные после переключения останутся без процента'}</li>
+                <li>Флористы заданы на все рабочие часы у ${data.stores_with_florists}
+                    из ${data.stores_total}
+                    ${plural(data.stores_total, 'салона', 'салонов', 'салонов')}${
+                    (data.stores_partial || []).length
+                        ? ': не хватает у ' + data.stores_partial.map(s =>
+                            `${esc(s.store_name)} (${s.hours_without_florists} ч)`).join(', ') +
+                          ' — эти часы после переключения останутся без процента'
+                        : ''}</li>
                 <li>За ${coverage.days} дней позиции без нормы есть в
                     ${num(coverage.share)}% заказов
                     (${coverage.orders_incomplete} из ${coverage.orders});

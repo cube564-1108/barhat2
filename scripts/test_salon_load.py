@@ -1201,6 +1201,40 @@ def test_minutes_model():
         check("модель видна в диагностике", health["model"] == "minutes", f"получено {health}")
         check("диагностика считает салоны с флористами",
               health["stores_with_florists"] >= 1, f"получено {health}")
+        check("диагностика видит пробелы активной модели",
+              "hours_without_florists" in health, f"получено {health}")
+
+        # Находка ревью: салон с флористами на ОДНОМ часе не готов к переходу.
+        # «Хотя бы один час» показывало «9 из 9» и серую сетку после перехода.
+        storage.set_slots(OTHER_STORE_ID,
+                          [{"weekday": 0, "hour": 9, "capacity": 5.0, "florists": None,
+                            "closed": False}], "tester")
+        payload = (client.get("/api/salon-load/model").get_json() or {}).get("data", {})
+        partial = payload.get("stores_partial") or []
+        check("салон с незакрытыми часами без флористов виден как неполный",
+              any(s["store_id"] == OTHER_STORE_ID for s in partial), f"получено {payload}")
+        check("и не засчитан в готовые",
+              payload["stores_with_florists"] < payload["stores_total"], f"получено {payload}")
+
+        # Находка ревью: /free-slots не должен подставлять «1» вместо
+        # модельного умолчания — в минутах это отдало бы забитый слот.
+        response = client.get(
+            f"/api/salon-load/free-slots?store_id={STORE_ID}&from={DAY}&days=1")
+        slots = ((response.get_json() or {}).get("data") or {}).get("slots") or []
+        check("ручка свободных слотов знает про минуты",
+              all(s["free_units"] >= 30 for s in slots), f"получено {slots[:3]}")
+
+    # Находка ревью: числа предупреждения заморожены при создании, поэтому
+    # единица берётся из модели САМОГО предупреждения, а не из активной.
+    storage.upsert_alert(STORE_ID, DAY, 10, "day", 120.0, 7.4, 6.0,
+                         storage.LOAD_MODEL_ORDERS)
+    with app.test_client() as client:
+        login_as(client, "test-load-admin")
+        items = (((client.get("/api/salon-load/alerts").get_json() or {})
+                  .get("data") or {}).get("items") or [])
+        old = [i for i in items if i["store_id"] == STORE_ID and i["date"] == DAY]
+        check("старое предупреждение подписано своими единицами",
+              old and old[0]["unit"] == "ед.", f"получено {old[:1]}")
 
     ensure_user("test-load-manager", "manager", [STORE_ID])
     with app.test_client() as client:
