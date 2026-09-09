@@ -9,13 +9,13 @@
 
 Формула (решения владельца 2026-09-07):
 
-    время заказа = цветы + упаковка цветов + клубника + упаковка клубники
-                 + готовые товары
+    время заказа = цветы + упаковка + клубника + готовые товары
 
     цветы            — количество × тариф по диапазону и виду (моно/микс)
-    упаковка цветов  — фиксированная по тому же диапазону: лента или упаковка
     клубника         — граммы / 100 × тариф
-    упаковка клубники— фиксированная, зависит от режима (букет/коробочка)
+    упаковка         — ОДНА на заказ: бо́льшая из упаковки цветов (лента или
+                       упаковка по диапазону) и упаковки клубники (зависит от
+                       режима букет/коробочка)
     готовые товары   — норма товара × количество либо один раз за позицию
 
 Что НЕ считается временем: позиции с ролью `none` (открытки, топперы,
@@ -141,7 +141,7 @@ def order_minutes(items: List[Dict[str, Any]], norms: Dict[int, Dict[str, Any]],
             catalog_minutes += minutes if norm.get("basis") == BASIS_LINE else minutes * quantity
 
     flowers = 0.0
-    packaging = 0.0
+    flower_packaging = 0.0
     row = _flower_row(flower_tariffs, int(flower_count))
     if row is not None:
         # Микс — когда в заказе больше одной номенклатуры цветов. Из одного-двух
@@ -151,9 +151,10 @@ def order_minutes(items: List[Dict[str, Any]], norms: Dict[int, Dict[str, Any]],
         if len(flower_kinds) > 1 and row.get("mix_minutes") is not None:
             rate = row["mix_minutes"]
         flowers = flower_count * rate
-        packaging = row["package_minutes"] if has_packaging else row["ribbon_minutes"]
+        flower_packaging = row["package_minutes"] if has_packaging else row["ribbon_minutes"]
 
     berries = 0.0
+    berry_packaging = 0.0
     if berry_grams > 0:
         # При нескольких шапках берём наименьший offer_id — детерминированно,
         # а не «как повезёт с порядком позиций». Режим не объявлен — букет:
@@ -162,7 +163,14 @@ def order_minutes(items: List[Dict[str, Any]], norms: Dict[int, Dict[str, Any]],
         tariff = berry_tariffs.get(mode) or berry_tariffs.get(BERRY_BOUQUET)
         if tariff is None:
             raise TariffError(f"Нет тарифа для режима клубники «{mode}»")
-        berries = berry_grams / 100.0 * tariff["minutes_per_100g"] + tariff["package_minutes"]
+        berries = berry_grams / 100.0 * tariff["minutes_per_100g"]
+        berry_packaging = tariff["package_minutes"]
+
+    # Упаковка в заказе ОДНА (решение владельца 2026-09-09). Клубнично-цветочный
+    # букет пакуется один раз, а формула складывала упаковку цветов с упаковкой
+    # клубники и завышала такой заказ на 10 минут. Берём бо́льшую из двух: она
+    # отвечает более трудоёмкой упаковке, которая в таком букете и делается.
+    packaging = max(flower_packaging, berry_packaging)
 
     total = flowers + packaging + berries + catalog_minutes
     return {

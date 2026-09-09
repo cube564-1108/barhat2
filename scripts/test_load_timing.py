@@ -2,8 +2,11 @@
 Сторож расчёта минут сборки (Ф3 плана «нагрузка в минутах»).
 
 Проверяет то, что ломается молча:
-  - заказ из разбора считается ровно в 48,5 минут — цифра, на которой владелец
-    сверял модель, и любое расхождение с ней означает, что формула поехала;
+  - заказ из разбора считается ровно в 38,5 минут — цифра, на которой владелец
+    сверял модель, и любое расхождение с ней означает, что формула поехала
+    (было 48,5, пока упаковка цветов и упаковка клубники складывались);
+  - упаковка в заказе одна: складывать упаковку цветов с упаковкой клубники
+    нельзя, клубнично-цветочный букет пакуется один раз;
   - тариф выбирается по диапазону количества, а не «примерно»;
   - микс дороже монобукета, но только там, где микс вообще возможен: из 1–2
     цветков его не бывает;
@@ -13,7 +16,9 @@
     заведённый в граммах, даст ошибку в сотни раз;
   - дыра и пересечение в тарифной сетке прекращают расчёт с ошибкой, а не
     занижают загрузку молча;
-  - позиция без нормы не превращается в ноль незаметно: заказ помечается.
+  - позиция без нормы не превращается в ноль незаметно: заказ помечается;
+  - смена формулы пересчитывает уже накопленную витрину, а не оставляет старые
+    числа жить до суточного синка.
 
 ВАЖНО: прогон читает боевой .env, поэтому сеть глушится до импорта.
 
@@ -90,12 +95,33 @@ def test_reference_order():
     print("\n1. Заказ из разбора: 500 г клубники + 7 роз + упаковка")
     result = minutes([item(40, 1), item(20, 500), item(10, 7), item(30, 1)])
     check("цветы: 7 × 0,5 = 3,5", result["flowers"] == 3.5, f"получено {result['flowers']}")
-    check("упаковка цветов: строка упаковки есть → 10",
+    check("упаковка одна: max(упаковка цветов 10, упаковка клубники 10) = 10",
           result["packaging"] == 10, f"получено {result['packaging']}")
-    check("клубника: 500/100 × 5 + упаковка букета 10 = 35",
-          result["berries"] == 35, f"получено {result['berries']}")
-    check("итого 48,5 минут", result["total"] == 48.5, f"получено {result['total']}")
+    check("клубника: 500/100 × 5 = 25 (упаковка вынесена отдельно)",
+          result["berries"] == 25, f"получено {result['berries']}")
+    check("итого 38,5 минут", result["total"] == 38.5, f"получено {result['total']}")
     check("заказ посчитан полностью", result["without_norm"] == 0, f"получено {result}")
+
+
+def test_single_packaging():
+    print("\n1a. Упаковка в заказе одна, а не две")
+    # Клубника-коробочка (упаковка 2) плюс цветы с упаковкой (10): берётся 10,
+    # а не 12. Обратный случай — лента у цветов (5) против букета клубники (10).
+    box_and_flowers = minutes([item(45, 1), item(20, 100), item(10, 7), item(30, 1)])
+    check("упаковка цветов дороже коробочки — берётся она: 3,5 + 10 + 5 = 18,5",
+          box_and_flowers["total"] == 18.5, f"получено {box_and_flowers}")
+
+    ribbon_and_bouquet = minutes([item(40, 1), item(20, 100), item(10, 7)])
+    check("упаковка клубники дороже ленты — берётся она: 3,5 + 10 + 5 = 18,5",
+          ribbon_and_bouquet["total"] == 18.5, f"получено {ribbon_and_bouquet}")
+
+    only_berries = minutes([item(40, 1), item(20, 100)])
+    check("без цветов упаковка клубники всё равно считается: 5 + 10 = 15",
+          only_berries["total"] == 15.0, f"получено {only_berries}")
+
+    only_flowers = minutes([item(10, 7), item(30, 1)])
+    check("без клубники упаковка цветов не изменилась: 3,5 + 10 = 13,5",
+          only_flowers["total"] == 13.5, f"получено {only_flowers}")
 
 
 def test_ranges():
@@ -144,16 +170,20 @@ def test_berry_mode():
     print("\n6. Режим клубники задаёт упаковку")
     bouquet = minutes([item(40, 1), item(20, 100)])
     box = minutes([item(45, 1), item(20, 100)])
-    check("букет: 5 + упаковка 10", bouquet["berries"] == 15.0, f"получено {bouquet}")
-    check("коробочка: 5 + упаковка 2", box["berries"] == 7.0, f"получено {box}")
+    check("букет: 5 + упаковка 10", bouquet["total"] == 15.0, f"получено {bouquet}")
+    check("коробочка: 5 + упаковка 2", box["total"] == 7.0, f"получено {box}")
+    check("время сборки клубники от режима не зависит — только упаковка",
+          bouquet["berries"] == box["berries"] == 5.0
+          and (bouquet["packaging"], box["packaging"]) == (10.0, 2.0),
+          f"получено {bouquet} и {box}")
 
     default = minutes([item(20, 100)])
-    check("режим не объявлен — считаем букетом", default["berries"] == 15.0,
+    check("режим не объявлен — считаем букетом", default["total"] == 15.0,
           f"получено {default}")
 
     both = minutes([item(45, 1), item(40, 1), item(20, 100)])
     check("при двух шапках выбор детерминирован (меньший offer_id → букет)",
-          both["berries"] == 15.0, f"получено {both}")
+          both["total"] == 15.0, f"получено {both}")
 
 
 def test_without_norm():
@@ -242,8 +272,45 @@ def test_storage_roundtrip():
     check("смена роли пересчитывает витрину: 7 × 4 = 28", total == 28.0, f"получено {total}")
 
 
+def test_formula_backfill():
+    print("\n10. Смена формулы пересчитывает уже накопленное")
+    # Витрина после раздела 9: заказ на 7 роз с ролью catalog по 4 мин = 28.
+    # Портим число и снимаем отметку о пересчёте — так выглядит витрина,
+    # посчитанная предыдущей формулой.
+    with storage.get_db() as conn:
+        conn.execute("UPDATE courier_orders SET minutes_total = 999")
+        conn.execute("DELETE FROM sync_state WHERE key IN (?, ?)",
+                     (storage.MINUTES_FORMULA_KEY, storage.MINUTES_FORMULA_CURSOR_KEY))
+
+    storage._backfill_minutes_formula()
+
+    with storage.get_db() as conn:
+        total = conn.execute("SELECT minutes_total FROM courier_orders "
+                             "WHERE retailcrm_order_id = 1").fetchone()["minutes_total"]
+        state = {row["key"]: row["value"] for row in conn.execute(
+            "SELECT key, value FROM sync_state")}
+    check("старое число пересчитано, а не дождалось суточного синка",
+          total == 28.0, f"получено {total}")
+    check("версия формулы отмечена",
+          state.get(storage.MINUTES_FORMULA_KEY) == storage.MINUTES_FORMULA_VERSION,
+          f"получено {state}")
+    check("курсор убран после завершения",
+          storage.MINUTES_FORMULA_CURSOR_KEY not in state, f"получено {state}")
+
+    # Повторный вызов не должен трогать витрину: отметка стоит.
+    with storage.get_db() as conn:
+        conn.execute("UPDATE courier_orders SET minutes_total = 777")
+    storage._backfill_minutes_formula()
+    with storage.get_db() as conn:
+        again = conn.execute("SELECT minutes_total FROM courier_orders "
+                             "WHERE retailcrm_order_id = 1").fetchone()["minutes_total"]
+    check("повторный старт воркера не пересчитывает заново", again == 777.0,
+          f"получено {again}")
+
+
 def main():
     test_reference_order()
+    test_single_packaging()
     test_ranges()
     test_mono_vs_mix()
     test_over_last_range()
@@ -252,6 +319,7 @@ def main():
     test_without_norm()
     test_broken_tariffs()
     test_storage_roundtrip()
+    test_formula_backfill()
 
     print()
     if failures:
