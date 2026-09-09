@@ -260,6 +260,20 @@ ALLOWED = {
 }
 used = {c.lower() for c in re.findall(r"#[0-9a-fA-F]{3,8}", css)}
 check("своих цветов в CSS нет", used <= ALLOWED, f"(лишние: {sorted(used - ALLOWED)})")
+
+# Атрибут `hidden` даёт display:none таблицей стилей браузера, с самым низким
+# приоритетом: любое своё правило display его перебивает. Так экран загрузки
+# (`display: flex`) висел поверх работающего приложения — страница загрузилась,
+# лента пришла, а курьер видел «Загрузка…». Правило проверяем, а не глазами:
+# слои прячутся атрибутом в четырёх местах, и следующий `display` в CSS
+# сломает их молча.
+check("hidden перебивает свой display",
+      re.search(r"\[hidden\][^{]*\{[^}]*display:\s*none\s*!important", css),
+      "(нужно правило [hidden] { display: none !important })")
+html = sources["courier-app.html"]
+check("светлая тема объявлена — Chrome не перекрасит",
+      "color-scheme" in css and 'name="color-scheme"' in html,
+      "(без этого Android инвертирует палитру в тёмную)")
 check("фон страницы — фирменный", "--bx-bg:           #faf4f9" in css or "#faf4f9" in css)
 check("градиентная шапка на месте", "--bx-grad-header" in css and ".cd-header" in css)
 check("карточки: радиус 16px и граница спеки",
