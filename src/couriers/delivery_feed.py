@@ -213,9 +213,10 @@ def fetch_missing_images(client, deadline: Optional[float] = None) -> int:
     if deadline is not None and time.monotonic() >= deadline:
         return 0
 
-    from .delivery_storage import pending_image_offer_ids, save_product_images
-
     try:
+        # Импорт внутри try, а не над ним: обещание «не роняем тик» должно
+        # держаться целиком, включая сам импорт.
+        from .delivery_storage import pending_image_offer_ids, save_product_images
         offer_ids = pending_image_offer_ids()
         if not offer_ids:
             return 0
