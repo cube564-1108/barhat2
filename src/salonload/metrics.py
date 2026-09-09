@@ -78,16 +78,26 @@ def _level(percent: Optional[float], closed: bool) -> str:
 
 
 def _effective_capacity(store_id: int, day: str, weekday: int, hour: int,
-                        weekly: Dict[str, Any], exceptions: Dict[str, Any]) -> Dict[str, Any]:
+                        weekly: Dict[str, Any], exceptions: Dict[str, Any],
+                        shares: Optional[Dict[int, float]] = None) -> Dict[str, Any]:
     """
     Ёмкость слота: исключение на дату важнее недельного графика.
 
     Отсутствие обеих записей — это «не задана», а не ноль.
+
+    Отдаётся сразу в двух видах: `capacity` (старые единицы, по ним сейчас
+    считается процент) и `florists` + `capacity_minutes` (новая модель). Одно
+    в другое не переводится: пока модель не переключена (Ф6), минуты — это
+    справочная величина рядом, а не подмена процента.
     """
+    share = (shares or {}).get(store_id)
+
     exception = exceptions.get(f"{store_id}:{day}:{hour}")
     if exception is not None:
         return {
             "capacity": exception["capacity"],
+            "florists": exception.get("florists"),
+            "capacity_minutes": storage.capacity_minutes(exception.get("florists"), share),
             "pickup_capacity": exception["pickup_capacity"],
             "closed": exception["closed"],
             "source": "exception",
@@ -97,13 +107,15 @@ def _effective_capacity(store_id: int, day: str, weekday: int, hour: int,
     if regular is not None:
         return {
             "capacity": regular["capacity"],
+            "florists": regular.get("florists"),
+            "capacity_minutes": storage.capacity_minutes(regular.get("florists"), share),
             "pickup_capacity": regular["pickup_capacity"],
             "closed": regular["closed"],
             "source": "weekly",
             "reason": None,
         }
-    return {"capacity": None, "pickup_capacity": None, "closed": False,
-            "source": None, "reason": None}
+    return {"capacity": None, "florists": None, "capacity_minutes": None,
+            "pickup_capacity": None, "closed": False, "source": None, "reason": None}
 
 
 def _stores_for(store_ids: Optional[List[int]]) -> List[Dict[str, Any]]:
@@ -140,6 +152,7 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
     weekday = datetime.strptime(day, "%Y-%m-%d").date().weekday()
     weekly = storage.capacity_map(ids)
     exceptions = storage.exceptions_for(ids, day, day)
+    shares = storage.assembly_share_map()
 
     statuses = couriers_storage.load_status_codes()
     rows = couriers_storage.load_by_slot(day, day, statuses)
@@ -162,18 +175,25 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
             continue
 
         if row["hour"] is None:
-            bucket = no_time.setdefault(store_id, {"orders": 0, "units": 0.0, "unparsed": 0})
+            bucket = no_time.setdefault(store_id,
+                                        {"orders": 0, "units": 0.0, "minutes": 0.0, "unparsed": 0})
             bucket["orders"] += row["orders"]
             bucket["units"] += row["units"]
+            bucket["minutes"] += row.get("minutes", 0.0)
             bucket["unparsed"] += row["unparsed_orders"]
             continue
 
         cell = loads.setdefault(f"{store_id}:{row['hour']}",
-                                {"orders": 0, "units": 0.0, "pickup_orders": 0, "pickup_units": 0.0})
+                                {"orders": 0, "units": 0.0, "minutes": 0.0,
+                                 "orders_without_norm": 0,
+                                 "pickup_orders": 0, "pickup_units": 0.0, "pickup_minutes": 0.0})
         cell["orders"] += row["orders"]
         cell["units"] += row["units"]
+        cell["minutes"] += row.get("minutes", 0.0)
+        cell["orders_without_norm"] += row.get("orders_without_norm", 0)
         cell["pickup_orders"] += row["pickup_orders"]
         cell["pickup_units"] += row["pickup_units"]
+        cell["pickup_minutes"] += row.get("pickup_minutes", 0.0)
 
     grid = []
     for store in stores:
@@ -181,24 +201,41 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
         day_units = 0.0
         day_capacity = 0.0
         has_capacity = False
+        day_minutes = 0.0
+        day_capacity_minutes = 0.0
+        has_florists = False
         for hour in storage.HOURS:
             load = loads.get(f"{store['id']}:{hour}", {})
-            capacity = _effective_capacity(store["id"], day, weekday, hour, weekly, exceptions)
+            capacity = _effective_capacity(store["id"], day, weekday, hour,
+                                           weekly, exceptions, shares)
             units = round(load.get("units", 0.0), 2)
+            minutes = round(load.get("minutes", 0.0), 2)
             percent = _percent(units, capacity["capacity"])
 
             day_units += units
+            day_minutes += minutes
             if capacity["capacity"] is not None and not capacity["closed"]:
                 day_capacity += capacity["capacity"]
                 has_capacity = True
+            if capacity["capacity_minutes"] is not None and not capacity["closed"]:
+                day_capacity_minutes += capacity["capacity_minutes"]
+                has_florists = True
 
             cells.append({
                 "hour": hour,
                 "orders": load.get("orders", 0),
                 "units": units,
+                # Минуты и флористы идут рядом со старыми единицами, а не
+                # вместо них: процент и цвет ячейки до Ф6 считает старая
+                # модель, и подменять их «похожим» числом нельзя.
+                "minutes": minutes,
+                "orders_without_norm": load.get("orders_without_norm", 0),
                 "pickup_orders": load.get("pickup_orders", 0),
                 "pickup_units": round(load.get("pickup_units", 0.0), 2),
+                "pickup_minutes": round(load.get("pickup_minutes", 0.0), 2),
                 "capacity": capacity["capacity"],
+                "florists": capacity["florists"],
+                "capacity_minutes": capacity["capacity_minutes"],
                 "pickup_capacity": capacity["pickup_capacity"],
                 "closed": capacity["closed"],
                 "capacity_source": capacity["source"],
@@ -215,6 +252,8 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
             "day_units": round(day_units, 2),
             "day_capacity": round(day_capacity, 2) if has_capacity else None,
             "day_percent": _percent(day_units, day_capacity if has_capacity else None),
+            "day_minutes": round(day_minutes, 2),
+            "day_capacity_minutes": round(day_capacity_minutes, 2) if has_florists else None,
             "no_time": no_time.get(store["id"]),
         })
 
@@ -522,55 +561,93 @@ def suggest_capacity(store_id: int, days: int = 30) -> Dict[str, Any]:
     перцентиль: среднее занижает норму хвостом пустых часов, максимум —
     завышает разовым праздником.
 
+    **Отдаётся в тех же единицах, что и поле ввода** — в минутах и в
+    флористах. Подсказка «6,2 единицы» под полем «флористов в смене» не просто
+    бесполезна: её применят как есть, и салон получит шесть флористов вместо
+    одного. Старые единицы тоже возвращаются — по ним до Ф6 считается сетка.
+
     Значение только предлагается. Применять его автоматически нельзя: занижение
     нормы превращается в постоянный ложный перегруз, и на модуль перестают
     смотреть — это первый пункт pre-mortem.
     """
     date_to = date.today().isoformat()
     date_from = (date.today() - timedelta(days=days)).isoformat()
+    share = storage.assembly_share_map().get(store_id, storage.DEFAULT_ASSEMBLY_SHARE)
+    empty = {"store_id": store_id, "samples": 0, "median": None, "p80": None,
+             "median_minutes": None, "p80_minutes": None, "max_minutes": None,
+             "median_florists": None, "p80_florists": None,
+             "assembly_share": share,
+             "current": _current_capacity(store_id, "capacity"),
+             "current_florists": _current_capacity(store_id, "florists"),
+             "from": date_from, "to": date_to}
 
     links = salonkpi_storage.resolve_map(salonkpi_storage.SOURCE_CRM_STORE)
     keys = {key for key, sid in links.items() if sid == store_id}
     if not keys:
-        return {"store_id": store_id, "samples": 0, "median": None, "p80": None, "current": None}
+        return empty
 
     rows = [row for row in couriers_storage.load_by_slot(date_from, date_to)
             if row["store_key"] in keys and row["hour"] is not None]
 
-    hourly: Dict[str, float] = {}
+    hourly_units: Dict[str, float] = {}
+    hourly_minutes: Dict[str, float] = {}
     for row in rows:
         key = f"{row['date']}:{row['hour']}"
-        hourly[key] = hourly.get(key, 0.0) + row["units"]
+        hourly_units[key] = hourly_units.get(key, 0.0) + row["units"]
+        hourly_minutes[key] = hourly_minutes.get(key, 0.0) + row.get("minutes", 0.0)
 
-    values = sorted(v for v in hourly.values() if v > 0)
-    if not values:
-        return {"store_id": store_id, "samples": 0, "median": None, "p80": None,
-                "current": _current_capacity(store_id), "from": date_from, "to": date_to}
+    units = sorted(v for v in hourly_units.values() if v > 0)
+    minutes = sorted(v for v in hourly_minutes.values() if v > 0)
+    if not units and not minutes:
+        return empty
 
-    def percentile(data, share):
-        index = min(len(data) - 1, max(0, int(round((len(data) - 1) * share))))
+    def percentile(data, quantile):
+        if not data:
+            return None
+        index = min(len(data) - 1, max(0, int(round((len(data) - 1) * quantile))))
         return round(data[index], 1)
+
+    def to_florists(value):
+        """Минуты в час → люди. Округляем до половины: 0,5 флориста — реальность."""
+        if value is None:
+            return None
+        per_person = storage.MINUTES_PER_FLORIST_HOUR * share
+        if per_person <= 0:
+            return None
+        return round(value / per_person * 2) / 2
+
+    median_minutes = percentile(minutes, 0.5)
+    p80_minutes = percentile(minutes, 0.8)
 
     return {
         "store_id": store_id,
-        "samples": len(values),
-        "median": percentile(values, 0.5),
-        "p80": percentile(values, 0.8),
-        "max": round(values[-1], 1),
-        "current": _current_capacity(store_id),
+        "samples": len(minutes) or len(units),
+        # Старые единицы — пока по ним считается сетка.
+        "median": percentile(units, 0.5),
+        "p80": percentile(units, 0.8),
+        "max": round(units[-1], 1) if units else None,
+        # Минуты и люди — то, в чём задаётся ёмкость с Ф4.
+        "median_minutes": median_minutes,
+        "p80_minutes": p80_minutes,
+        "max_minutes": round(minutes[-1], 1) if minutes else None,
+        "median_florists": to_florists(median_minutes),
+        "p80_florists": to_florists(p80_minutes),
+        "assembly_share": share,
+        "current": _current_capacity(store_id, "capacity"),
+        "current_florists": _current_capacity(store_id, "florists"),
         "from": date_from,
         "to": date_to,
     }
 
 
-def _current_capacity(store_id: int) -> Optional[float]:
-    """Самая частая ёмкость в недельной сетке — то, что стоит сейчас."""
+def _current_capacity(store_id: int, field: str = "capacity") -> Optional[float]:
+    """Самое частое значение в недельной сетке — то, что стоит сейчас."""
     grid = storage.weekly_grid(store_id)
     counts: Dict[float, int] = {}
     for value in grid.values():
-        if value["capacity"] is None or value["closed"]:
+        if value.get(field) is None or value["closed"]:
             continue
-        counts[value["capacity"]] = counts.get(value["capacity"], 0) + 1
+        counts[value[field]] = counts.get(value[field], 0) + 1
     if not counts:
         return None
     return max(counts.items(), key=lambda kv: kv[1])[0]

@@ -2954,19 +2954,26 @@ def load_by_slot(date_from: str, date_to: str,
             SELECT delivery_date, store_key, ready_hour,
                    COUNT(*)                                   AS orders,
                    COALESCE(SUM(weight_units), 0)             AS units,
+                   COALESCE(SUM(minutes_total), 0)            AS minutes,
                    SUM(CASE WHEN delivery_code IN ({pickup_codes}) THEN 1 ELSE 0 END)
                                                               AS pickup_orders,
                    COALESCE(SUM(CASE WHEN delivery_code IN ({pickup_codes})
                                      THEN weight_units ELSE 0 END), 0)
                                                               AS pickup_units,
+                   COALESCE(SUM(CASE WHEN delivery_code IN ({pickup_codes})
+                                     THEN minutes_total ELSE 0 END), 0)
+                                                              AS pickup_minutes,
                    SUM(CASE WHEN ready_source = 'unparsed' THEN 1 ELSE 0 END)
-                                                              AS unparsed_orders
+                                                              AS unparsed_orders,
+                   SUM(CASE WHEN items_without_norm > 0 THEN 1 ELSE 0 END)
+                                                              AS orders_without_norm
               FROM courier_orders
              WHERE delivery_date >= ? AND delivery_date <= ?
                AND status IN ({placeholders})
           GROUP BY delivery_date, store_key, ready_hour
             """,
-            (*PICKUP_DELIVERY_CODES, *PICKUP_DELIVERY_CODES, date_from, date_to, *statuses),
+            (*PICKUP_DELIVERY_CODES, *PICKUP_DELIVERY_CODES, *PICKUP_DELIVERY_CODES,
+             date_from, date_to, *statuses),
         ).fetchall()
 
     return [
@@ -2976,9 +2983,18 @@ def load_by_slot(date_from: str, date_to: str,
             "hour": row["ready_hour"],
             "orders": row["orders"],
             "units": round(row["units"] or 0, 2),
+            # Минуты идут тем же агрегатом, а не вторым запросом: витрину и так
+            # читают на каждый показ сетки, а на `/data` каждое обращение
+            # стоит сотни миллисекунд.
+            "minutes": round(row["minutes"] or 0, 2),
             "pickup_orders": row["pickup_orders"] or 0,
             "pickup_units": round(row["pickup_units"] or 0, 2),
+            "pickup_minutes": round(row["pickup_minutes"] or 0, 2),
             "unparsed_orders": row["unparsed_orders"] or 0,
+            # Заказов, у которых есть позиция без нормы: нагрузка занижена.
+            # Считаем ЗАКАЗЫ, а не товары — «N товаров без веса» в прошлой
+            # модели превратилось в фон, который перестали замечать.
+            "orders_without_norm": row["orders_without_norm"] or 0,
         }
         for row in rows
     ]

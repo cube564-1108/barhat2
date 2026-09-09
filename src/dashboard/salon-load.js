@@ -579,6 +579,34 @@
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
     }
 
+    async function showCapacityModel(overlay) {
+        // Салоны, у которых ёмкость осталась в старых безразмерных единицах.
+        // Молча перевести «6 единиц» в «6 флористов» нельзя — это разные
+        // величины, и перевод соврал бы в цифре, на которой стоит весь экран.
+        // Девять салонов по одному значению — пять минут работы человека,
+        // а неверная конвертация живёт месяцами.
+        const box = overlay.querySelector('#sloadCapModel');
+        if (!box) return;
+        let data;
+        try {
+            data = (await api('/api/salon-load/capacity/model')).data;
+        } catch (error) {
+            box.innerHTML = '';
+            return;
+        }
+        if (!data.stale || !data.stale.length) {
+            box.innerHTML = '';
+            return;
+        }
+        const names = data.stale.map(s => esc(s.store_name)).join(', ');
+        box.innerHTML = note('bad',
+            `Ёмкость задана в старых единицах: ${data.stale.length} ${plural(data.stale.length,
+                'салон', 'салона', 'салонов')}`,
+            `${names} — здесь ещё стоит «единиц в час». Перевести это в людей автоматически ` +
+            'нельзя: «6 единиц» и «6 флористов» — разные величины. Задайте число флористов ' +
+            'часами работы ниже; до этого салон считается по старой модели.');
+    }
+
     async function openCapacity() {
         let stores;
         try {
@@ -599,10 +627,13 @@
             `<option value="${s.id}">${esc(s.name)}${s.has_capacity ? '' : ' — не задана'}</option>`).join('');
 
         const body = `
-            <p class="sload-card__caption">Ёмкость — сколько единиц трудоёмкости салон успевает за час.
-                Одна единица — это примерно один обычный заказ. Сетка 7×24 на девять салонов — это
-                1512 полей, поэтому основной способ ввода здесь: часы работы и норма в час,
-                остальное закрывается автоматически.</p>
+            <div id="sloadCapModel"></div>
+
+            <p class="sload-card__caption">Ёмкость салона задаётся числом флористов в смене:
+                один человек — это 60 минут сборки в час. Число проверяется глазами и не требует
+                подбора. Дробное значение допустимо: полсмены, подмена, флорист на два салона —
+                это 0,5. Сетка 7×24 на девять салонов — это 1512 полей, поэтому основной способ
+                ввода здесь: часы работы и число людей, остальное закрывается автоматически.</p>
 
             <div style="display:grid;gap:10px;grid-template-columns:1fr;margin-bottom:16px">
                 <label class="sload-extra__label">Салон
@@ -618,9 +649,9 @@
                     <label class="sload-extra__label">Закрытие
                         <input type="number" min="1" max="24" value="21" class="sload-input"
                             id="sloadClose" style="width:100%;margin-top:4px"></label>
-                    <label class="sload-extra__label">Единиц в час
-                        <input type="number" min="0.5" step="0.5" value="6" class="sload-input"
-                            id="sloadUnits" style="width:100%;margin-top:4px"></label>
+                    <label class="sload-extra__label">Флористов в смене
+                        <input type="number" min="0.5" step="0.5" value="1" class="sload-input"
+                            id="sloadFlorists" style="width:100%;margin-top:4px"></label>
                     <label class="sload-extra__label">Выдача в час (необязательно)
                         <input type="number" min="0" step="0.5" class="sload-input"
                             id="sloadPickup" style="width:100%;margin-top:4px"></label>
@@ -648,8 +679,8 @@
                 ставятся руками — в обычной статистике их нет.</p>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 <input type="date" class="sload-input" id="sloadExcDate" value="${esc(state.date)}">
-                <input type="number" min="0" step="0.5" class="sload-input" id="sloadExcUnits"
-                    placeholder="ед./час" style="width:110px">
+                <input type="number" min="0" step="0.5" class="sload-input" id="sloadExcFlorists"
+                    placeholder="флористов" style="width:120px">
                 <input type="text" class="sload-input" id="sloadExcReason" placeholder="Причина" style="flex:1;min-width:160px">
                 <label style="display:flex;align-items:center;gap:6px;font-size:13px">
                     <input type="checkbox" id="sloadExcClosed"> закрыт весь день</label>
@@ -658,6 +689,9 @@
 
         const overlay = modal('Ёмкость салонов', body,
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
+        // Плашка живёт отдельным запросом и рисуется после открытия окна:
+        // ждать её, чтобы показать форму, незачем — форма и без неё рабочая.
+        showCapacityModel(overlay);
 
         overlay.addEventListener('click', async e => {
             const suggest = e.target.closest('[data-suggest]');
@@ -668,16 +702,23 @@
                 try {
                     const result = await api(`/api/salon-load/capacity/suggest?store_id=${storeId}`);
                     const data = result.data;
-                    box.innerHTML = data.samples
-                        ? note('info', `За месяц реально собирали ${num(data.median)} ед. в час (медиана)`,
-                            `Загруженные часы доходили до ${num(data.p80)} ед. (80% случаев) и ` +
-                            `${num(data.max)} ед. в пике. Сейчас стоит ${data.current === null
-                                ? 'ничего' : num(data.current) + ' ед.'}. ` +
+                    // Подсказка обязана быть в тех же единицах, что и поле рядом:
+                    // «6,2 единицы» под полем «флористов в смене» применят как есть.
+                    box.innerHTML = data.samples && data.median_minutes !== null
+                        ? note('info',
+                            `За месяц реально собирали ${num(data.median_minutes)} мин в час — ` +
+                            `это ${num(data.median_florists)} ${plural(Math.round(data.median_florists),
+                                'флорист', 'флориста', 'флористов')}`,
+                            `Загруженные часы доходили до ${num(data.p80_minutes)} мин ` +
+                            `(${num(data.p80_florists)} чел., 80% случаев) и ${num(data.max_minutes)} мин ` +
+                            `в пике. Сейчас в смене стоит ${data.current_florists === null
+                                ? 'ничего' : num(data.current_florists)}. ` +
                             'Число только предложено: заниженная норма даёт постоянный ложный перегруз, ' +
                             'и на сетку перестают смотреть. Решает человек.')
                         : note('info', 'Данных пока нет',
-                            'За месяц в этом салоне не набралось часов с заказами — норму задайте руками, ' +
-                            'а через месяц работы вернитесь к этой кнопке.');
+                            'За месяц в этом салоне не набралось часов с посчитанными минутами — ' +
+                            'число людей задайте руками. Если минут нет совсем, значит товары ещё ' +
+                            'не размечены нормами времени.');
                 } catch (error) {
                     toast('Не удалось посчитать: ' + error.message, 'error');
                 }
@@ -709,7 +750,7 @@
                         store_id: Number(overlay.querySelector('#sloadCapStore').value),
                         open_hour: roundClock ? 0 : Number(overlay.querySelector('#sloadOpen').value),
                         close_hour: roundClock ? 24 : Number(overlay.querySelector('#sloadClose').value),
-                        capacity: Number(overlay.querySelector('#sloadUnits').value),
+                        florists: Number(overlay.querySelector('#sloadFlorists').value),
                         pickup_capacity: pickupRaw === '' ? null : Number(pickupRaw)
                     }));
                     toast('График сохранён', 'success');
@@ -726,10 +767,10 @@
                     }));
                     toast('График скопирован', 'success');
                 } else {
-                    const unitsRaw = overlay.querySelector('#sloadExcUnits').value;
+                    const floristsRaw = overlay.querySelector('#sloadExcFlorists').value;
                     const closed = overlay.querySelector('#sloadExcClosed').checked;
-                    if (unitsRaw === '' && !closed) {
-                        toast('Укажите ёмкость или отметьте «закрыт»', 'error');
+                    if (floristsRaw === '' && !closed) {
+                        toast('Укажите число флористов или отметьте «закрыт»', 'error');
                         button.disabled = false;
                         return;
                     }
@@ -737,12 +778,13 @@
                         store_id: Number(overlay.querySelector('#sloadCapStore').value),
                         date: overlay.querySelector('#sloadExcDate').value,
                         hour: null,
-                        capacity: unitsRaw === '' ? null : Number(unitsRaw),
+                        florists: floristsRaw === '' ? null : Number(floristsRaw),
                         closed: closed,
                         reason: overlay.querySelector('#sloadExcReason').value
                     }));
                     toast('Исключение сохранено', 'success');
                 }
+                showCapacityModel(overlay);
                 state.data = null;
                 state.week = null;
                 load();

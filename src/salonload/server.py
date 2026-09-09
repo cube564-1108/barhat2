@@ -339,6 +339,40 @@ def get_capacity():
     })
 
 
+@salonload_bp.route("/capacity/model", methods=["GET"])
+@section_required("salon_load")
+def get_capacity_model():
+    """
+    Кто ещё сидит на старых единицах ёмкости.
+
+    Отсюда берётся плашка «ёмкость задана в старых единицах — перезадайте».
+    Конвертировать «6 единиц» в «6 флористов» нельзя: это разные величины, и
+    молчаливый перевод соврал бы в цифре, на которой стоит весь экран.
+    """
+    from salonkpi import storage as salonkpi_storage
+
+    allowed = _allowed_store_ids()
+    status = storage.capacity_model_status()
+    names = {store["id"]: store["name"]
+             for store in salonkpi_storage.list_stores(allowed, only_linked=True)}
+
+    stale = [{"store_id": store_id, "store_name": names[store_id],
+              "units_hours": value["units_hours"]}
+             for store_id, value in sorted(status.items())
+             if store_id in names and value["units_hours"] and not value["florist_hours"]]
+    ready = [store_id for store_id, value in status.items()
+             if store_id in names and value["florist_hours"]]
+
+    return success_response({
+        "data": {
+            "stale": stale,
+            "ready_count": len(ready),
+            "total": len(names),
+            "minutes_per_florist_hour": storage.MINUTES_PER_FLORIST_HOUR,
+        }
+    })
+
+
 @salonload_bp.route("/capacity", methods=["POST"])
 @role_required("admin")
 @require_ajax_header
@@ -384,9 +418,19 @@ def save_working_hours():
         store_id = int(data.get("store_id"))
         open_hour = int(data.get("open_hour"))
         close_hour = int(data.get("close_hour"))
-        capacity = float(data.get("capacity"))
     except (TypeError, ValueError):
-        return error_response("Нужны store_id, open_hour, close_hour и capacity")
+        return error_response("Нужны store_id, open_hour и close_hour")
+
+    # Ёмкость приходит в флористах (новая модель) либо в старых единицах.
+    # Обе необязательные по отдельности, но одна из двух обязана быть: без
+    # этого форма молча заполнила бы неделю пустыми часами.
+    try:
+        capacity = None if data.get("capacity") in (None, "") else float(data["capacity"])
+        florists = None if data.get("florists") in (None, "") else float(data["florists"])
+    except (TypeError, ValueError):
+        return error_response("Ёмкость и число флористов должны быть числами")
+    if capacity is None and florists is None:
+        return error_response("Укажите число флористов в смене")
 
     pickup = data.get("pickup_capacity")
     weekdays = data.get("weekdays")
@@ -398,13 +442,14 @@ def save_working_hours():
         saved = storage.apply_working_hours(
             store_id, open_hour, close_hour, capacity,
             None if pickup in (None, "") else float(pickup),
-            weekdays, getattr(current_user, "username", None))
+            weekdays, getattr(current_user, "username", None), florists)
     except ValueError as e:
         return error_response(str(e))
 
     _bump_version()
+    amount = (f"{florists} флористов" if florists is not None else f"{capacity} ед/час")
     log_action(current_user.username, "salon_load_working_hours",
-               f"салон {store_id}: {open_hour}:00–{close_hour}:00, {capacity} ед/час")
+               f"салон {store_id}: {open_hour}:00–{close_hour}:00, {amount}")
     return success_response({"saved": saved})
 
 
@@ -488,15 +533,19 @@ def save_exception():
 
     capacity = data.get("capacity")
     pickup = data.get("pickup_capacity")
+    florists = data.get("florists")
     try:
         capacity = None if capacity in (None, "") else float(capacity)
         pickup = None if pickup in (None, "") else float(pickup)
+        florists = None if florists in (None, "") else float(florists)
     except (TypeError, ValueError):
         return error_response("Ёмкость должна быть числом")
+    if florists is not None and florists < 0:
+        return error_response("Число флористов не может быть отрицательным")
 
     saved = storage.set_exception(store_id, day, hour, capacity, pickup,
                                   bool(data.get("closed")), (data.get("reason") or "").strip() or None,
-                                  getattr(current_user, "username", None))
+                                  getattr(current_user, "username", None), florists)
     _bump_version()
     log_action(current_user.username, "salon_load_exception", f"салон {store_id}, {day}")
     return success_response({"saved": saved})

@@ -1,5 +1,19 @@
 """
-Ёмкость салонов: сколько единиц трудоёмкости салон успевает за час.
+Ёмкость салонов: сколько работы салон успевает за час.
+
+Ёмкость живёт в двух видах одновременно, и это временно (до Ф6 плана
+«нагрузка в минутах»):
+
+  - `capacity_units` — старая безразмерная модель «единиц в час». По ней
+    сейчас считается сетка;
+  - `florists` — число флористов в смене. Ёмкость в минутах = флористы × 60 ×
+    `salon_settings.assembly_share`. По ней сетка начнёт считать после
+    переключения модели.
+
+Одно в другое НЕ конвертируется. «6 единиц» и «6 флористов» — разные вещи, и
+молча превратить одно в другое значит соврать в цифре, по которой принимают
+решения. Салон, у которого заполнено только старое поле, виден плашкой
+«ёмкость задана в старых единицах — перезадайте» (`capacity_model_status`).
 
 База — barhat.db, рядом со `stores` и `salon_links`: таблицы крошечные
 (9 салонов × 168 часов), а соединять их с заказами в SQL всё равно нельзя —
@@ -36,10 +50,39 @@ DB_PATH = resolve_data_path("BARHAT_DB_PATH", "barhat.db")
 HOURS = tuple(range(24))
 WEEKDAYS = tuple(range(7))  # 0 — понедельник, как date.weekday()
 
+# Минут работы, которые даёт один флорист за час. Константа, а не настройка:
+# час — это час. Всё, что делает флориста менее продуктивным (приём, выдача,
+# звонки), живёт в `assembly_share` и вводится осознанно.
+MINUTES_PER_FLORIST_HOUR = 60.0
+
+# Доля часа, уходящая на сборку, когда салон её не задавал.
+DEFAULT_ASSEMBLY_SHARE = 1.0
+
 
 def get_db() -> sqlite3.Connection:
     """Соединение с общей базой. Настройки — в sqlite_conn (WAL один раз на файл)."""
     return sqlite_connect(DB_PATH, timeout=20)
+
+
+def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
+    """
+    Идемпотентная миграция колонки.
+
+    На проде 2 воркера gunicorn стартуют одновременно, оба видят «колонки нет» и
+    оба выполняют ALTER. Оба штатных исхода гонки (duplicate column name,
+    database is locked) означают, что колонку создаёт сосед, — цель достигнута,
+    ронять старт воркера нельзя.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column in existing:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    except sqlite3.OperationalError as e:
+        message = str(e).lower()
+        if "duplicate column" not in message and "locked" not in message:
+            raise
+        logger.info(f"Миграция {table}.{column}: колонку создаёт другой воркер ({e})")
 
 
 # Часовые пояса городов. Нужны ровно для одного: понять, который сейчас час в
@@ -137,6 +180,37 @@ def init_salonload_tables() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_salon_load_alert_date ON salon_load_alerts(date)"
         )
+
+        # ====================================================================
+        # Ф4 «нагрузка в минутах»: ёмкость задаётся числом флористов в смене,
+        # а не абстрактными единицами. Минуты выводятся умножением на 60.
+        #
+        # REAL, а не INTEGER: полсмены, подмена, флорист на два салона — всё
+        # это законные значения, и 0,5 флориста придётся вводить с первого дня.
+        #
+        # `capacity_units` остаётся рядом и НЕ конвертируется: «6 единиц» и
+        # «6 флористов» — разные вещи, и молча превратить одно в другое значит
+        # соврать. Пока модель не переключена (Ф6), сетка считает по старой
+        # колонке, а плашка в интерфейсе просит перезадать.
+        # ====================================================================
+        _add_column_if_missing(conn, "salon_capacity", "florists", "REAL")
+        _add_column_if_missing(conn, "salon_capacity_exceptions", "florists", "REAL")
+
+        # Доля часа, которая у флориста уходит именно на сборку: приём заказа,
+        # выдача, звонки — это тоже его час. Один коэффициент на салон, а не
+        # число на каждый час: последнее никто не заполнит.
+        #
+        # По умолчанию 1.0 и в интерфейс пока не выведен (К11 критики): этим
+        # коэффициентом легко «починить» любое расхождение вместо того, чтобы
+        # найти неверный тариф. Трогать — после сверки норм на живых заказах.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS salon_settings (
+                store_id INTEGER PRIMARY KEY,
+                assembly_share REAL NOT NULL DEFAULT 1.0,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -338,7 +412,7 @@ def weekly_grid(store_id: int) -> Dict[str, Dict[str, Any]]:
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT weekday, hour, capacity_units, pickup_capacity, is_closed "
+            "SELECT weekday, hour, capacity_units, florists, pickup_capacity, is_closed "
             "FROM salon_capacity WHERE store_id = ?",
             (store_id,),
         ).fetchall()
@@ -347,6 +421,7 @@ def weekly_grid(store_id: int) -> Dict[str, Dict[str, Any]]:
     return {
         f"{row['weekday']}:{row['hour']}": {
             "capacity": row["capacity_units"],
+            "florists": row["florists"],
             "pickup_capacity": row["pickup_capacity"],
             "closed": bool(row["is_closed"]),
         }
@@ -363,7 +438,8 @@ def exceptions_for(store_ids: List[int], date_from: str, date_to: str) -> Dict[s
     try:
         rows = conn.execute(
             f"""
-            SELECT store_id, date, hour, capacity_units, pickup_capacity, is_closed, reason
+            SELECT store_id, date, hour, capacity_units, florists, pickup_capacity,
+                   is_closed, reason
               FROM salon_capacity_exceptions
              WHERE store_id IN ({placeholders}) AND date >= ? AND date <= ?
             """,
@@ -374,6 +450,7 @@ def exceptions_for(store_ids: List[int], date_from: str, date_to: str) -> Dict[s
     return {
         f"{row['store_id']}:{row['date']}:{row['hour']}": {
             "capacity": row["capacity_units"],
+            "florists": row["florists"],
             "pickup_capacity": row["pickup_capacity"],
             "closed": bool(row["is_closed"]),
             "reason": row["reason"],
@@ -391,7 +468,7 @@ def capacity_map(store_ids: List[int]) -> Dict[str, Dict[str, Any]]:
     try:
         rows = conn.execute(
             f"""
-            SELECT store_id, weekday, hour, capacity_units, pickup_capacity, is_closed
+            SELECT store_id, weekday, hour, capacity_units, florists, pickup_capacity, is_closed
               FROM salon_capacity WHERE store_id IN ({placeholders})
             """,
             tuple(store_ids),
@@ -401,6 +478,7 @@ def capacity_map(store_ids: List[int]) -> Dict[str, Dict[str, Any]]:
     return {
         f"{row['store_id']}:{row['weekday']}:{row['hour']}": {
             "capacity": row["capacity_units"],
+            "florists": row["florists"],
             "pickup_capacity": row["pickup_capacity"],
             "closed": bool(row["is_closed"]),
         }
@@ -409,15 +487,107 @@ def capacity_map(store_ids: List[int]) -> Dict[str, Dict[str, Any]]:
 
 
 def stores_with_capacity() -> List[int]:
-    """Салоны, у которых ёмкость вообще задана — для плашки «не задана»."""
+    """
+    Салоны, у которых ёмкость вообще задана — для плашки «не задана».
+
+    Задана в любой из двух моделей: салон, перезаданный в флористах, но ещё не
+    имеющий старых единиц, — это заполненный салон, а не пустой.
+    """
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT DISTINCT store_id FROM salon_capacity WHERE capacity_units IS NOT NULL"
+            "SELECT DISTINCT store_id FROM salon_capacity "
+            " WHERE capacity_units IS NOT NULL OR florists IS NOT NULL"
         ).fetchall()
     finally:
         conn.close()
     return [row["store_id"] for row in rows]
+
+
+def capacity_model_status() -> Dict[int, Dict[str, int]]:
+    """
+    Сколько часов у каждого салона задано в старых единицах и сколько — в флористах.
+
+    Отсюда берётся плашка «ёмкость задана в старых единицах — перезадайте».
+    Молчаливой конвертации не будет: 9 салонов × одно значение — это пять минут
+    работы человека, а неверная конвертация живёт месяцами и портит все цифры,
+    которые на ней стоят.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT store_id,
+                   SUM(CASE WHEN capacity_units IS NOT NULL AND is_closed = 0
+                            THEN 1 ELSE 0 END) AS units_hours,
+                   SUM(CASE WHEN florists IS NOT NULL AND is_closed = 0
+                            THEN 1 ELSE 0 END) AS florist_hours
+              FROM salon_capacity
+          GROUP BY store_id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        row["store_id"]: {
+            "units_hours": row["units_hours"] or 0,
+            "florist_hours": row["florist_hours"] or 0,
+        }
+        for row in rows
+    }
+
+
+def assembly_share_map() -> Dict[int, float]:
+    """{store_id: доля часа на сборку}. Салона нет в таблице — значит 1.0."""
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT store_id, assembly_share FROM salon_settings").fetchall()
+    finally:
+        conn.close()
+    return {row["store_id"]: row["assembly_share"] for row in rows}
+
+
+def set_assembly_share(store_id: int, share: float, username: Optional[str] = None) -> None:
+    """
+    Доля часа, уходящая на сборку.
+
+    В интерфейс пока не выведена намеренно (К11 критики плана): этим
+    коэффициентом можно «починить» любое расхождение вместо того, чтобы найти
+    неверный тариф. Сначала нормы сверяются на живых заказах, и только потом
+    появляется поле.
+    """
+    if not 0 < share <= 1:
+        raise ValueError("Доля времени на сборку должна быть больше 0 и не больше 1")
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO salon_settings (store_id, assembly_share, updated_by, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(store_id) DO UPDATE SET
+                assembly_share = excluded.assembly_share,
+                updated_by = excluded.updated_by,
+                updated_at = datetime('now')
+            """,
+            (store_id, float(share), username),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def capacity_minutes(florists: Optional[float], assembly_share: Optional[float]) -> Optional[float]:
+    """
+    Ёмкость слота в минутах сборки. None — ёмкость не задана.
+
+    Одно место на весь модуль: формула «флористы × 60 × доля» будет нужна и
+    сетке, и подсказке, и предупреждениям, а разъехавшиеся копии одной формулы
+    дают разные числа на соседних экранах.
+    """
+    if florists is None:
+        return None
+    share = DEFAULT_ASSEMBLY_SHARE if assembly_share is None else assembly_share
+    return round(florists * MINUTES_PER_FLORIST_HOUR * share, 2)
 
 
 # ============================================================================
@@ -429,9 +599,9 @@ def set_slots(store_id: int, slots: List[Dict[str, Any]], username: Optional[str
     Проставить ячейки недельной сетки пачкой.
 
     slot: {"weekday": 0-6, "hour": 0-23, "capacity": число|None,
-           "pickup_capacity": число|None, "closed": bool}
+           "florists": число|None, "pickup_capacity": число|None, "closed": bool}
 
-    capacity=None и closed=False — это «ёмкость не задана»: строка удаляется,
+    Всё пусто и closed=False — это «ёмкость не задана»: строка удаляется,
     чтобы «не задана» и «ноль» не оказались одним и тем же числом в базе.
     """
     if not slots:
@@ -445,10 +615,11 @@ def set_slots(store_id: int, slots: List[Dict[str, Any]], username: Optional[str
                 raise ValueError(f"Некорректный слот: день {weekday}, час {hour}")
 
             capacity = slot.get("capacity")
+            florists = slot.get("florists")
             pickup = slot.get("pickup_capacity")
             closed = bool(slot.get("closed"))
 
-            if capacity is None and pickup is None and not closed:
+            if capacity is None and florists is None and pickup is None and not closed:
                 conn.execute(
                     "DELETE FROM salon_capacity WHERE store_id = ? AND weekday = ? AND hour = ?",
                     (store_id, weekday, hour),
@@ -457,15 +628,18 @@ def set_slots(store_id: int, slots: List[Dict[str, Any]], username: Optional[str
 
             if capacity is not None and float(capacity) < 0:
                 raise ValueError("Ёмкость не может быть отрицательной")
+            if florists is not None and float(florists) < 0:
+                raise ValueError("Число флористов не может быть отрицательным")
 
             conn.execute(
                 """
                 INSERT INTO salon_capacity
-                       (store_id, weekday, hour, capacity_units, pickup_capacity, is_closed,
-                        updated_by, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                       (store_id, weekday, hour, capacity_units, florists, pickup_capacity,
+                        is_closed, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(store_id, weekday, hour) DO UPDATE SET
                     capacity_units = excluded.capacity_units,
+                    florists = excluded.florists,
                     pickup_capacity = excluded.pickup_capacity,
                     is_closed = excluded.is_closed,
                     updated_by = excluded.updated_by,
@@ -473,6 +647,7 @@ def set_slots(store_id: int, slots: List[Dict[str, Any]], username: Optional[str
                 """,
                 (store_id, weekday, hour,
                  None if capacity is None else float(capacity),
+                 None if florists is None else float(florists),
                  None if pickup is None else float(pickup),
                  1 if closed else 0, username),
             )
@@ -482,10 +657,12 @@ def set_slots(store_id: int, slots: List[Dict[str, Any]], username: Optional[str
         conn.close()
 
 
-def apply_working_hours(store_id: int, open_hour: int, close_hour: int, capacity: float,
+def apply_working_hours(store_id: int, open_hour: int, close_hour: int,
+                        capacity: Optional[float] = None,
                         pickup_capacity: Optional[float] = None,
                         weekdays: Optional[List[int]] = None,
-                        username: Optional[str] = None) -> int:
+                        username: Optional[str] = None,
+                        florists: Optional[float] = None) -> int:
     """
     Заполнить сетку одним движением: часы работы + ёмкость в час.
 
@@ -499,6 +676,12 @@ def apply_working_hours(store_id: int, open_hour: int, close_hour: int, capacity
       - ночной, через полночь: 22 → 6. Здесь `close_hour <= open_hour`, и
         раньше такой график просто нельзя было задать — окно считалось
         «заданным неверно», а салон оставался с пустой сеткой.
+
+    Заполнять можно числом флористов (новая модель), старыми единицами в час
+    или обоими сразу. **Та модель, которую не передали, не затирается**: пока
+    сетка считает по `capacity_units`, ввод флористов не имеет права обнулить
+    работающий экран, а после переключения — наоборот. Прежние значения
+    берутся одним чтением недельной сетки, а не запросом на каждый из 168 часов.
     """
     if not 0 <= open_hour <= 23:
         raise ValueError("Час открытия должен быть от 0 до 23")
@@ -507,8 +690,12 @@ def apply_working_hours(store_id: int, open_hour: int, close_hour: int, capacity
     if open_hour == close_hour:
         raise ValueError("Открытие и закрытие совпадают. "
                          "Для круглосуточного режима задайте 0 и 24")
-    if capacity <= 0:
+    if capacity is None and florists is None:
+        raise ValueError("Укажите число флористов в смене")
+    if capacity is not None and capacity <= 0:
         raise ValueError("Ёмкость должна быть больше нуля")
+    if florists is not None and florists <= 0:
+        raise ValueError("Число флористов должно быть больше нуля")
 
     def is_working(hour: int) -> bool:
         if open_hour < close_hour:
@@ -516,15 +703,20 @@ def apply_working_hours(store_id: int, open_hour: int, close_hour: int, capacity
         # Через полночь: рабочие часы — хвост суток и начало следующих.
         return hour >= open_hour or hour < close_hour
 
+    previous = weekly_grid(store_id)
     days = weekdays if weekdays is not None else list(WEEKDAYS)
     slots = []
     for weekday in days:
         for hour in HOURS:
             working = is_working(hour)
+            before = previous.get(f"{weekday}:{hour}") or {}
             slots.append({
                 "weekday": weekday,
                 "hour": hour,
-                "capacity": capacity if working else None,
+                "capacity": (capacity if capacity is not None
+                             else before.get("capacity")) if working else None,
+                "florists": (florists if florists is not None
+                             else before.get("florists")) if working else None,
                 "pickup_capacity": pickup_capacity if working else None,
                 "closed": not working,
             })
@@ -551,6 +743,7 @@ def copy_week(source_store_id: int, target_store_id: int, username: Optional[str
                 "weekday": weekday,
                 "hour": hour,
                 "capacity": value["capacity"] if value else None,
+                "florists": value["florists"] if value else None,
                 "pickup_capacity": value["pickup_capacity"] if value else None,
                 "closed": value["closed"] if value else False,
             })
@@ -560,18 +753,23 @@ def copy_week(source_store_id: int, target_store_id: int, username: Optional[str
 
 def set_exception(store_id: int, date: str, hour: Optional[int], capacity: Optional[float],
                   pickup_capacity: Optional[float] = None, closed: bool = False,
-                  reason: Optional[str] = None, username: Optional[str] = None) -> int:
+                  reason: Optional[str] = None, username: Optional[str] = None,
+                  florists: Optional[float] = None) -> int:
     """
     Исключение на дату. hour=None — на весь день (все 24 часа).
 
-    capacity=None и closed=False снимает исключение: день возвращается к
-    обычному графику.
+    Всё пусто и closed=False снимает исключение: день возвращается к обычному
+    графику.
+
+    Флористы задаются здесь так же, как в недельном графике: 14 февраля в смене
+    выходит не столько же людей, сколько во вторник, и без этого поля праздник
+    после переключения модели (Ф6) остался бы с обычной ёмкостью.
     """
     hours = HOURS if hour is None else (int(hour),)
     conn = get_db()
     try:
         for h in hours:
-            if capacity is None and pickup_capacity is None and not closed:
+            if capacity is None and florists is None and pickup_capacity is None and not closed:
                 conn.execute(
                     "DELETE FROM salon_capacity_exceptions "
                     "WHERE store_id = ? AND date = ? AND hour = ?",
@@ -581,11 +779,12 @@ def set_exception(store_id: int, date: str, hour: Optional[int], capacity: Optio
             conn.execute(
                 """
                 INSERT INTO salon_capacity_exceptions
-                       (store_id, date, hour, capacity_units, pickup_capacity, is_closed,
-                        reason, updated_by, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                       (store_id, date, hour, capacity_units, florists, pickup_capacity,
+                        is_closed, reason, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(store_id, date, hour) DO UPDATE SET
                     capacity_units = excluded.capacity_units,
+                    florists = excluded.florists,
                     pickup_capacity = excluded.pickup_capacity,
                     is_closed = excluded.is_closed,
                     reason = excluded.reason,
@@ -594,6 +793,7 @@ def set_exception(store_id: int, date: str, hour: Optional[int], capacity: Optio
                 """,
                 (store_id, date, h,
                  None if capacity is None else float(capacity),
+                 None if florists is None else float(florists),
                  None if pickup_capacity is None else float(pickup_capacity),
                  1 if closed else 0, reason, username),
             )
@@ -616,7 +816,9 @@ def list_exceptions(store_ids: List[int], date_from: str, date_to: str) -> List[
                    SUM(is_closed) AS closed_hours,
                    MAX(reason) AS reason,
                    MIN(capacity_units) AS min_capacity,
-                   MAX(capacity_units) AS max_capacity
+                   MAX(capacity_units) AS max_capacity,
+                   MIN(florists) AS min_florists,
+                   MAX(florists) AS max_florists
               FROM salon_capacity_exceptions
              WHERE store_id IN ({placeholders}) AND date >= ? AND date <= ?
           GROUP BY store_id, date
@@ -635,6 +837,8 @@ def list_exceptions(store_ids: List[int], date_from: str, date_to: str) -> List[
             "reason": row["reason"],
             "min_capacity": row["min_capacity"],
             "max_capacity": row["max_capacity"],
+            "min_florists": row["min_florists"],
+            "max_florists": row["max_florists"],
         }
         for row in rows
     ]

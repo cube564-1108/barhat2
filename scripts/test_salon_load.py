@@ -915,6 +915,121 @@ def test_review_fixes():
           metrics.day_grid(DAY, None)["unassigned"] is not None, "сводка пропала у админа")
 
 
+def test_capacity_in_florists():
+    """Ф4: ёмкость задаётся людьми, старые единицы при этом не трогаются."""
+    print("\n16. Ёмкость в флористах")
+    from pyrus.server import app
+
+    FLORIST_STORE = OTHER_STORE_ID
+
+    # Салон живёт на старой модели: единицы есть, флористов нет.
+    storage.apply_working_hours(FLORIST_STORE, 9, 21, capacity=6.0)
+    status = storage.capacity_model_status()[FLORIST_STORE]
+    # 12 рабочих часов × 7 дней недели: статус считается по всей сетке салона.
+    check("салон на старых единицах виден как таковой",
+          status["units_hours"] == 84 and status["florist_hours"] == 0, f"получено {status}")
+
+    # Заполняем флористами — старая ёмкость обязана остаться на месте, иначе
+    # экран, который до Ф6 считает по ней, обнулится прямо на глазах.
+    storage.apply_working_hours(FLORIST_STORE, 9, 21, florists=1.5)
+    grid = storage.weekly_grid(FLORIST_STORE)
+    slot = grid["0:10"]
+    check("флористы записаны", slot["florists"] == 1.5, f"получено {slot}")
+    check("старая ёмкость не затёрта вводом флористов", slot["capacity"] == 6.0,
+          f"получено {slot}")
+    check("нерабочий час остался закрытым и пустым",
+          grid["0:3"]["closed"] and grid["0:3"]["florists"] is None, f"получено {grid['0:3']}")
+
+    # И симметрично: правка старой ёмкости не сносит уже заданных людей.
+    storage.apply_working_hours(FLORIST_STORE, 9, 21, capacity=7.0)
+    slot = storage.weekly_grid(FLORIST_STORE)["0:10"]
+    check("флористы не затёрты правкой старой ёмкости",
+          slot["capacity"] == 7.0 and slot["florists"] == 1.5, f"получено {slot}")
+
+    status = storage.capacity_model_status()[FLORIST_STORE]
+    check("салон больше не считается «в старых единицах»", status["florist_hours"] == 84,
+          f"получено {status}")
+
+    # Минуты выводятся из людей, а не задаются отдельно.
+    check("ёмкость в минутах = флористы × 60",
+          storage.capacity_minutes(1.5, None) == 90.0,
+          f"получено {storage.capacity_minutes(1.5, None)}")
+    check("доля времени на сборку уменьшает ёмкость",
+          storage.capacity_minutes(1.5, 0.5) == 45.0,
+          f"получено {storage.capacity_minutes(1.5, 0.5)}")
+    check("ёмкость не задана — это None, а не ноль",
+          storage.capacity_minutes(None, None) is None)
+
+    storage.set_assembly_share(FLORIST_STORE, 0.75)
+    check("доля времени на сборку сохранена",
+          storage.assembly_share_map().get(FLORIST_STORE) == 0.75,
+          f"получено {storage.assembly_share_map()}")
+    for bad in (0, -1, 1.5):
+        try:
+            storage.set_assembly_share(FLORIST_STORE, bad)
+            check(f"доля {bad} отклонена", False, "исключения не было")
+        except ValueError:
+            check(f"доля {bad} отклонена", True)
+    storage.set_assembly_share(FLORIST_STORE, 1.0)
+
+    # Сетка отдаёт обе величины рядом: процент до Ф6 считает старая модель.
+    grid = metrics.day_grid(DAY, [FLORIST_STORE])
+    store_row = grid["stores"][0]
+    cell = next(c for c in store_row["cells"] if c["hour"] == 10)
+    check("в ячейке есть и старая ёмкость, и флористы",
+          cell["capacity"] == 7.0 and cell["florists"] == 1.5, f"получено {cell}")
+    check("в ячейке есть ёмкость в минутах", cell["capacity_minutes"] == 90.0,
+          f"получено {cell}")
+    check("процент по-прежнему считается по старой модели",
+          cell["percent"] == metrics._percent(cell["units"], 7.0), f"получено {cell}")
+
+    # Исключение на дату тоже задаётся людьми: 14 февраля в смене выходит
+    # не столько же, сколько во вторник.
+    storage.set_exception(FLORIST_STORE, DAY, None, None, florists=3.0, reason="праздник")
+    exceptions = storage.exceptions_for([FLORIST_STORE], DAY, DAY)
+    check("исключение хранит флористов",
+          exceptions[f"{FLORIST_STORE}:{DAY}:10"]["florists"] == 3.0,
+          f"получено {exceptions.get(f'{FLORIST_STORE}:{DAY}:10')}")
+    cell = next(c for c in metrics.day_grid(DAY, [FLORIST_STORE])["stores"][0]["cells"]
+                if c["hour"] == 10)
+    check("исключение важнее недельного графика и в минутах",
+          cell["capacity_minutes"] == 180.0, f"получено {cell}")
+    storage.set_exception(FLORIST_STORE, DAY, None, None)
+
+    # Подсказка обязана быть в тех же единицах, что и поле.
+    suggestion = metrics.suggest_capacity(STORE_ID, days=60)
+    check("подсказка отдаёт минуты", "median_minutes" in suggestion, f"получено {suggestion}")
+    check("подсказка отдаёт людей", "median_florists" in suggestion, f"получено {suggestion}")
+    if suggestion["median_minutes"]:
+        expected = round(suggestion["median_minutes"] / 60.0 * 2) / 2
+        check("люди пересчитаны из минут, а не взяты из старых единиц",
+              suggestion["median_florists"] == expected,
+              f"получено {suggestion['median_florists']}, ожидалось {expected}")
+
+    # HTTP: пустая форма не заполняет неделю пустыми часами.
+    ensure_user("test-load-admin", "admin", [])
+    with app.test_client() as client:
+        login_as(client, "test-load-admin")
+        response = client.post("/api/salon-load/capacity/working-hours",
+                               json={"store_id": FLORIST_STORE, "open_hour": 9, "close_hour": 21},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("без флористов и без ёмкости ручка отвечает 400",
+              response.status_code == 400, f"получено {response.status_code}")
+
+        response = client.post("/api/salon-load/capacity/working-hours",
+                               json={"store_id": FLORIST_STORE, "open_hour": 9,
+                                     "close_hour": 21, "florists": 2},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("ручка принимает флористов", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:200]}")
+
+        payload = (client.get("/api/salon-load/capacity/model").get_json() or {}).get("data", {})
+        check("статус модели отдаётся ручкой", "stale" in payload, f"получено {payload}")
+        check("перезаданный салон не числится в старых единицах",
+              all(s["store_id"] != FLORIST_STORE for s in payload.get("stale", [])),
+              f"получено {payload}")
+
+
 def main():
     setup_data()
     test_capacity_states()
@@ -932,6 +1047,7 @@ def main():
     test_review_fixes()
     test_weight_units_model()
     test_round_clock()
+    test_capacity_in_florists()
 
     print()
     if failures:
