@@ -1515,9 +1515,20 @@ def set_time_norms_bulk(rows: List[Dict[str, Any]], username: Optional[str] = No
                 """,
                 applied,
             )
+
+        # Снимаем только то, что действительно было размечено. В выгрузке у
+        # неразмеченного товара роль пуста, и обратная загрузка нетронутого
+        # файла иначе слала бы DELETE по сотням строк и рапортовала «снято:
+        # 300» — человек решил бы, что случайно стёр работу.
         if cleared:
-            conn.executemany(
-                "DELETE FROM load_time_norms WHERE scope = 'offer' AND scope_id = ?", cleared)
+            existing = {row["scope_id"] for row in conn.execute(
+                "SELECT scope_id FROM load_time_norms WHERE scope = 'offer'")}
+            to_delete = [pair for pair in cleared if pair[0] in existing]
+            if to_delete:
+                conn.executemany(
+                    "DELETE FROM load_time_norms WHERE scope = 'offer' AND scope_id = ?",
+                    to_delete)
+            cleared = to_delete
 
     return {"applied": len(applied), "cleared": len(cleared), "errors": errors}
 

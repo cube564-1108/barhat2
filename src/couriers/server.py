@@ -693,11 +693,24 @@ NORMS_CSV_HEADERS = [
     "offer_id", "Артикул", "Товар", "Заказов", "Кол-во в позиции", "Ед.",
     "Роль", "Минут", "За что", "Клубника",
 ]
-# Колонки, которые импорт читает по заголовку, а не по номеру: человек в Excel
-# переставит столбцы или вставит свой — и импорт по номеру начнёт писать время
-# в поле роли.
-NORMS_IMPORT_COLUMNS = {"offer_id": "offer_id", "Роль": "role", "Минут": "minutes",
-                        "За что": "basis", "Клубника": "berry_mode"}
+# Импорт читает колонки по ЗАГОЛОВКУ, а не по номеру (разбор файла — в
+# salon-load.js, parseNormsCsv): человек в Excel переставляет столбцы и
+# вставляет свои, и разбор по номеру начал бы писать время в поле роли.
+# Заголовки берутся отсюда же, поэтому переименование колонки видно сразу.
+
+
+def _csv_safe(value: Optional[str]) -> str:
+    """
+    Обезвредить значение, которое Excel примет за формулу.
+
+    Название товара приходит из CRM, а туда его вводит человек. Значение,
+    начинающееся с `=`, `+`, `-` или `@`, Excel исполняет как формулу при
+    открытии файла — и открывает файл не тот, кто это ввёл. Апостроф впереди
+    делает ячейку текстовой; на экране его не видно, а при обратном импорте он
+    роли не играет: мы читаем оттуда только offer_id и служебные коды.
+    """
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@") else text
 
 
 @couriers_bp.route("/time-norms/export", methods=["GET"])
@@ -724,7 +737,7 @@ def export_norms():
     for row in rows:
         norm = row.get("norm") or {}
         writer.writerow([
-            row["offer_id"], row.get("article") or "", row.get("product_name") or "",
+            row["offer_id"], _csv_safe(row.get("article")), _csv_safe(row.get("product_name")),
             row["orders"],
             "" if row.get("median_quantity") is None else str(row["median_quantity"]).replace(".", ","),
             row.get("unit_code") or "",

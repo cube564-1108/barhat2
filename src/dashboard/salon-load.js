@@ -1147,9 +1147,13 @@
                         (errors.length ? `, с ошибками: ${errors.length}` : ''),
                         errors.length ? 'error' : 'success');
                     if (errors.length) {
-                        BarhatUI.alert('Строки, которые не удалось применить',
-                            errors.slice(0, 20).join('\n') +
-                            (errors.length > 20 ? `\n…и ещё ${errors.length - 20}` : ''));
+                        // Один аргумент: у BarhatUI.alert второй параметр — это
+                        // ТИП сообщения, а не текст. Передав тело вторым, мы бы
+                        // молча потеряли весь список ошибок.
+                        BarhatUI.alert('Строки, которые не удалось применить:\n' +
+                            errors.slice(0, 15).join('\n') +
+                            (errors.length > 15 ? `\n…и ещё ${errors.length - 15}` : ''),
+                            'error');
                     }
                     state.data = null;
                     state.week = null;
@@ -1162,16 +1166,45 @@
         }
     }
 
-    // Разбор выгруженного файла. Читаем по ЗАГОЛОВКАМ, а не по номерам
-    // колонок: в Excel столбцы переставляют и вставляют свои, и разбор по
-    // номеру начал бы писать время в поле роли.
-    function parseNormsCsv(text) {
-        const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(line => line.trim());
-        if (!lines.length) return [];
+    // Разбор с учётом кавычек. Наивный split(';') разорвал бы название товара,
+    // в котором есть точка с запятой: Excel такое значение закавычивает, а
+    // разбор по символу сдвинул бы все следующие колонки — и «Минут» уехало бы
+    // в «Роль». Порча была бы молчаливой: строка применилась бы, но не та.
+    // Внутри кавычек допустимы и перевод строки, и удвоенная кавычка.
+    function parseCsvRows(text, delimiter) {
+        const rows = [];
+        let row = [], cell = '', quoted = false;
 
-        const delimiter = lines[0].includes(';') ? ';' : ',';
-        const split = line => line.split(delimiter).map(cell => cell.trim().replace(/^"|"$/g, ''));
-        const headers = split(lines[0]);
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (quoted) {
+                if (ch === '"') {
+                    if (text[i + 1] === '"') { cell += '"'; i++; } else { quoted = false; }
+                } else { cell += ch; }
+                continue;
+            }
+            if (ch === '"') { quoted = true; }
+            else if (ch === delimiter) { row.push(cell); cell = ''; }
+            else if (ch === '\r') { /* пропускаем: перевод строки ловим по \n */ }
+            else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+            else { cell += ch; }
+        }
+        if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+        return rows.filter(cells => cells.some(value => value.trim() !== ''));
+    }
+
+    // Читаем по ЗАГОЛОВКАМ, а не по номерам колонок: в Excel столбцы
+    // переставляют и вставляют свои, и разбор по номеру начал бы писать время
+    // в поле роли.
+    function parseNormsCsv(text) {
+        const clean = text.replace(/^﻿/, '');
+        const firstLine = clean.split('\n')[0] || '';
+        const delimiter = firstLine.includes(';') ? ';' : ',';
+
+        const table = parseCsvRows(clean, delimiter).map(cells => cells.map(c => c.trim()));
+        if (!table.length) return [];
+        const lines = table;
+        const headers = lines[0];
         const index = name => headers.indexOf(name);
         const columns = {
             offer_id: index('offer_id'), role: index('Роль'), minutes: index('Минут'),
@@ -1182,8 +1215,7 @@
         }
 
         const rows = [];
-        for (const line of lines.slice(1)) {
-            const cells = split(line);
+        for (const cells of lines.slice(1)) {
             const id = Number(cells[columns.offer_id]);
             if (!id) continue;
             const cell = name => columns[name] >= 0 ? (cells[columns[name]] || '') : '';
