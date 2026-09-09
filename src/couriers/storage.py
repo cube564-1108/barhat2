@@ -828,11 +828,20 @@ def _backfill_minutes_formula() -> None:
     Устройство то же, что у `_backfill_weight_model`, и по тем же причинам:
     кусками по датам, с курсором в `sync_state`, под `BEGIN IMMEDIATE`.
     Отличие одно — сам расчёт идёт на Python и своим соединением, поэтому
-    кусок сначала **захватывается** (курсор двигается и коммитится), и только
-    потом считается. Держать write-лок общей базы всё время расчёта нельзя, а
-    открывать второе соединение внутри своей же транзакции — тем более.
-    Если расчёт куска упал, курсор возвращается назад: пропущенный кусок хуже
-    посчитанного дважды.
+    **курсор двигается ПОСЛЕ того, как кусок посчитан**, а не до.
+
+    Порядок здесь решает всё. Схема «сначала захватить кусок, потом считать»
+    выглядит аккуратнее — два воркера не берут один и тот же диапазон, — но у
+    неё нет честного отката: если расчёт упал, а сосед уже ушёл вперёд, вернуть
+    курсор назад нельзя, не отменив его работу. Кусок остаётся непосчитанным
+    навсегда, а версия формулы всё равно проставляется, и диапазон дат тихо
+    живёт на старой формуле.
+
+    Поэтому считаем сначала, а курсор двигаем после — и только вперёд. Цена —
+    два воркера могут посчитать один кусок дважды; пересчёт идемпотентен, это
+    лишние секунды на старте, а не расхождение в данных. Держать write-лок всё
+    время расчёта нельзя, открывать второе соединение внутри своей транзакции —
+    тем более.
 
     Падать здесь нельзя ни при каких обстоятельствах — это старт воркера.
     """
@@ -841,77 +850,95 @@ def _backfill_minutes_formula() -> None:
         if time.monotonic() > deadline:
             logger.info("Пересчёт минут: бюджет старта исчерпан, продолжим со следующего")
             return
-        start = None
-        conn = sqlite_connect(DB_PATH, timeout=30)
-        conn.isolation_level = None
+
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            state = {
-                row["key"]: row["value"]
-                for row in conn.execute(
-                    "SELECT key, value FROM sync_state WHERE key IN (?, ?)",
-                    (MINUTES_FORMULA_KEY, MINUTES_FORMULA_CURSOR_KEY),
-                )
-            }
-            if state.get(MINUTES_FORMULA_KEY) == MINUTES_FORMULA_VERSION:
-                conn.execute("ROLLBACK")
-                return
-
-            # Границы двумя запросами: `SELECT MIN(x), MAX(x)` одним запросом —
-            # это полный скан, SQLite берёт крайнюю строку индекса только когда
-            # агрегат в запросе один.
-            first = conn.execute(
-                "SELECT MIN(delivery_date) AS d FROM courier_orders").fetchone()["d"]
-            last = conn.execute(
-                "SELECT MAX(delivery_date) AS d FROM courier_orders").fetchone()["d"]
-            start = state.get(MINUTES_FORMULA_CURSOR_KEY) or first
-            if start is None or last is None or start > last:
-                _set_sync_state(conn, MINUTES_FORMULA_KEY, MINUTES_FORMULA_VERSION)
-                conn.execute("DELETE FROM sync_state WHERE key = ?",
-                             (MINUTES_FORMULA_CURSOR_KEY,))
-                conn.execute("COMMIT")
-                logger.info("Минуты пересчитаны под формулу «упаковка одна»")
-                return
-
-            chunk_to = (datetime.strptime(start, "%Y-%m-%d").date()
-                        + timedelta(days=MINUTES_FORMULA_CHUNK_DAYS - 1))
-            _set_sync_state(conn, MINUTES_FORMULA_CURSOR_KEY,
-                            (chunk_to + timedelta(days=1)).isoformat())
-            conn.execute("COMMIT")
+            claim = _next_minutes_chunk()
         except Exception as e:
             logger.warning(f"Пересчёт минут под новую формулу отложен: {e}")
             return
-        finally:
-            conn.close()
+        if claim is None:
+            return
+        start, chunk_to = claim
 
         try:
-            recalc_minutes_range(start, chunk_to.isoformat())
-            logger.info(f"Пересчёт минут: {start}—{chunk_to.isoformat()} готов")
+            recalc_minutes_range(start, chunk_to)
         except Exception as e:
-            logger.warning(f"Пересчёт минут {start}—{chunk_to.isoformat()} не удался: {e}")
-            _rewind_minutes_formula_cursor(start, (chunk_to + timedelta(days=1)).isoformat())
+            # Курсор не двинулся — этот же кусок возьмёт следующий старт,
+            # а версия формулы не проставится, пока не пройдёт весь диапазон.
+            logger.warning(f"Пересчёт минут {start}—{chunk_to} не удался: {e}")
+            return
+
+        try:
+            _advance_minutes_cursor(chunk_to)
+            logger.info(f"Пересчёт минут: {start}—{chunk_to} готов")
+        except Exception as e:
+            logger.warning(f"Курсор пересчёта минут не сдвинулся: {e}")
             return
 
 
-def _rewind_minutes_formula_cursor(start: str, claimed: str) -> None:
+def _next_minutes_chunk() -> Optional[tuple]:
     """
-    Вернуть курсор на упавший кусок, чтобы следующий старт взял его снова.
+    Следующий непосчитанный кусок дат либо None, если пересчёт завершён.
 
-    Только если курсор всё ещё там, куда мы его поставили: воркера два, и
-    второй мог уйти дальше. Затереть его прогресс своей неудачей — заставить
-    пересчитать заново уже посчитанное.
+    Ничего не пишет, кроме отметки «готово» в самом конце: захват куска
+    курсором до расчёта делает упавший кусок невозвратным (см. выше).
     """
     conn = sqlite_connect(DB_PATH, timeout=30)
     conn.isolation_level = None
     try:
         conn.execute("BEGIN IMMEDIATE")
-        current = conn.execute("SELECT value FROM sync_state WHERE key = ?",
-                               (MINUTES_FORMULA_CURSOR_KEY,)).fetchone()
-        if current and current["value"] == claimed:
-            _set_sync_state(conn, MINUTES_FORMULA_CURSOR_KEY, start)
+        state = {
+            row["key"]: row["value"]
+            for row in conn.execute(
+                "SELECT key, value FROM sync_state WHERE key IN (?, ?)",
+                (MINUTES_FORMULA_KEY, MINUTES_FORMULA_CURSOR_KEY),
+            )
+        }
+        if state.get(MINUTES_FORMULA_KEY) == MINUTES_FORMULA_VERSION:
+            conn.execute("ROLLBACK")
+            return None
+
+        # Границы двумя запросами: `SELECT MIN(x), MAX(x)` одним запросом —
+        # это полный скан, SQLite берёт крайнюю строку индекса только когда
+        # агрегат в запросе один.
+        first = conn.execute(
+            "SELECT MIN(delivery_date) AS d FROM courier_orders").fetchone()["d"]
+        last = conn.execute(
+            "SELECT MAX(delivery_date) AS d FROM courier_orders").fetchone()["d"]
+        start = state.get(MINUTES_FORMULA_CURSOR_KEY) or first
+        if start is None or last is None or start > last:
+            _set_sync_state(conn, MINUTES_FORMULA_KEY, MINUTES_FORMULA_VERSION)
+            conn.execute("DELETE FROM sync_state WHERE key = ?",
+                         (MINUTES_FORMULA_CURSOR_KEY,))
+            conn.execute("COMMIT")
+            logger.info("Минуты пересчитаны под формулу «упаковка одна»")
+            return None
+
+        conn.execute("ROLLBACK")
+        chunk_to = (datetime.strptime(start, "%Y-%m-%d").date()
+                    + timedelta(days=MINUTES_FORMULA_CHUNK_DAYS - 1))
+        return start, chunk_to.isoformat()
+    finally:
+        conn.close()
+
+
+def _advance_minutes_cursor(chunk_to: str) -> None:
+    """
+    Сдвинуть курсор за посчитанный кусок — и только вперёд.
+
+    Второй воркер мог уйти дальше; откатывать его прогресс своим, более старым
+    значением значит заставить пересчитать уже посчитанное.
+    """
+    following = (datetime.strptime(chunk_to, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT value FROM sync_state WHERE key = ?",
+                           (MINUTES_FORMULA_CURSOR_KEY,)).fetchone()
+        if row is None or not row["value"] or row["value"] < following:
+            _set_sync_state(conn, MINUTES_FORMULA_CURSOR_KEY, following)
         conn.execute("COMMIT")
-    except Exception as e:
-        logger.warning(f"Курсор пересчёта минут не откатился: {e}")
     finally:
         conn.close()
 

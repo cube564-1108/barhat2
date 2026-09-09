@@ -594,17 +594,28 @@
             box.innerHTML = '';
             return;
         }
-        if (!data.stale || !data.stale.length) {
-            box.innerHTML = '';
-            return;
+        const stale = data.stale || [];
+        const gaps = data.gaps || [];
+        let html = '';
+        if (stale.length) {
+            const names = stale.map(s => esc(s.store_name)).join(', ');
+            html += note('bad',
+                `Ёмкость задана в старых единицах: ${stale.length} ${plural(stale.length,
+                    'салон', 'салона', 'салонов')}`,
+                `${names} — здесь ещё стоит «единиц в час». Перевести это в людей автоматически ` +
+                'нельзя: «6 единиц» и «6 флористов» — разные величины. Задайте число флористов ' +
+                'часами работы ниже; до этого салон считается по старой модели.');
         }
-        const names = data.stale.map(s => esc(s.store_name)).join(', ');
-        box.innerHTML = note('bad',
-            `Ёмкость задана в старых единицах: ${data.stale.length} ${plural(data.stale.length,
-                'салон', 'салона', 'салонов')}`,
-            `${names} — здесь ещё стоит «единиц в час». Перевести это в людей автоматически ` +
-            'нельзя: «6 единиц» и «6 флористов» — разные величины. Задайте число флористов ' +
-            'часами работы ниже; до этого салон считается по старой модели.');
+        // Вторая беда и другое лечение: люди заданы, а старой ёмкости у части
+        // часов нет — до перехода на минуты эти часы в сетке серые.
+        if (gaps.length) {
+            const names = gaps.map(s => `${esc(s.store_name)} (${s.gap_hours} ч)`).join(', ');
+            html += note('bad', 'Есть рабочие часы без ёмкости в старой модели',
+                `${names}. До перехода на минуты процент в сетке считается по «единицам в час», ` +
+                'и эти часы показываются как «ёмкость не задана». Заполните поле ' +
+                '«Единиц в час» вместе с часами работы.');
+        }
+        box.innerHTML = html;
     }
 
     async function openCapacity() {
@@ -652,10 +663,17 @@
                     <label class="sload-extra__label">Флористов в смене
                         <input type="number" min="0.5" step="0.5" value="1" class="sload-input"
                             id="sloadFlorists" style="width:100%;margin-top:4px"></label>
+                    <label class="sload-extra__label">Единиц в час (до перехода)
+                        <input type="number" min="0" step="0.5" class="sload-input"
+                            id="sloadUnits" style="width:100%;margin-top:4px"></label>
                     <label class="sload-extra__label">Выдача в час (необязательно)
                         <input type="number" min="0" step="0.5" class="sload-input"
                             id="sloadPickup" style="width:100%;margin-top:4px"></label>
                 </div>
+                <p class="sload-card__caption" style="margin:0">«Единиц в час» — старая модель,
+                    по ней сетка считает процент до перехода на минуты. Пустое поле оставляет
+                    прежнее значение часа; у нового салона и у часов, которых раньше не было,
+                    его заполнить нужно, иначе они останутся серыми.</p>
                 <p class="sload-card__caption" style="margin:0">Ночная смена задаётся часами через
                     полночь: открытие 22, закрытие 6.</p>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -681,6 +699,8 @@
                 <input type="date" class="sload-input" id="sloadExcDate" value="${esc(state.date)}">
                 <input type="number" min="0" step="0.5" class="sload-input" id="sloadExcFlorists"
                     placeholder="флористов" style="width:120px">
+                <input type="number" min="0" step="0.5" class="sload-input" id="sloadExcUnits"
+                    placeholder="ед./час" style="width:110px">
                 <input type="text" class="sload-input" id="sloadExcReason" placeholder="Причина" style="flex:1;min-width:160px">
                 <label style="display:flex;align-items:center;gap:6px;font-size:13px">
                     <input type="checkbox" id="sloadExcClosed"> закрыт весь день</label>
@@ -745,12 +765,17 @@
             try {
                 if (applyHours) {
                     const pickupRaw = overlay.querySelector('#sloadPickup').value;
+                    const unitsRaw = overlay.querySelector('#sloadUnits').value;
                     const roundClock = overlay.querySelector('#sloadAllDay').checked;
                     await api('/api/salon-load/capacity/working-hours', postOptions({
                         store_id: Number(overlay.querySelector('#sloadCapStore').value),
                         open_hour: roundClock ? 0 : Number(overlay.querySelector('#sloadOpen').value),
                         close_hour: roundClock ? 24 : Number(overlay.querySelector('#sloadClose').value),
                         florists: Number(overlay.querySelector('#sloadFlorists').value),
+                        // Пустое поле — не «ноль», а «оставить прежнее»: сетка до
+                        // Ф6 считает по старым единицам, и обнулять их вводом
+                        // флористов нельзя.
+                        capacity: unitsRaw === '' ? null : Number(unitsRaw),
                         pickup_capacity: pickupRaw === '' ? null : Number(pickupRaw)
                     }));
                     toast('График сохранён', 'success');
@@ -768,8 +793,9 @@
                     toast('График скопирован', 'success');
                 } else {
                     const floristsRaw = overlay.querySelector('#sloadExcFlorists').value;
+                    const excUnitsRaw = overlay.querySelector('#sloadExcUnits').value;
                     const closed = overlay.querySelector('#sloadExcClosed').checked;
-                    if (floristsRaw === '' && !closed) {
+                    if (floristsRaw === '' && excUnitsRaw === '' && !closed) {
                         toast('Укажите число флористов или отметьте «закрыт»', 'error');
                         button.disabled = false;
                         return;
@@ -779,6 +805,9 @@
                         date: overlay.querySelector('#sloadExcDate').value,
                         hour: null,
                         florists: floristsRaw === '' ? null : Number(floristsRaw),
+                        // Не заполнено — исключение об этой величине молчит, и
+                        // час берёт её из обычного графика (см. _effective_capacity).
+                        capacity: excUnitsRaw === '' ? null : Number(excUnitsRaw),
                         closed: closed,
                         reason: overlay.querySelector('#sloadExcReason').value
                     }));

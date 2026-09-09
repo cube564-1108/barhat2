@@ -360,12 +360,20 @@ def get_capacity_model():
               "units_hours": value["units_hours"]}
              for store_id, value in sorted(status.items())
              if store_id in names and value["units_hours"] and not value["florist_hours"]]
+    # Рабочие часы без старой ёмкости: до Ф6 они серые в сетке. Это не то же
+    # самое, что «салон на старых единицах», и лечится другим действием —
+    # заполнить «единиц в час», а не «флористов».
+    gaps = [{"store_id": store_id, "store_name": names[store_id],
+             "gap_hours": value["gap_hours"]}
+            for store_id, value in sorted(status.items())
+            if store_id in names and value["gap_hours"]]
     ready = [store_id for store_id, value in status.items()
              if store_id in names and value["florist_hours"]]
 
     return success_response({
         "data": {
             "stale": stale,
+            "gaps": gaps,
             "ready_count": len(ready),
             "total": len(names),
             "minutes_per_florist_hour": storage.MINUTES_PER_FLORIST_HOUR,

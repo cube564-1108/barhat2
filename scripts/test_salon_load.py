@@ -994,6 +994,21 @@ def test_capacity_in_florists():
                 if c["hour"] == 10)
     check("исключение важнее недельного графика и в минутах",
           cell["capacity_minutes"] == 180.0, f"получено {cell}")
+    # Находка ревью: исключение про ЛЮДЕЙ не должно обнулять старую ёмкость.
+    # Иначе 14 февраля целиком серое — процента нет, предупреждений нет.
+    check("исключение про людей не обнуляет старую ёмкость",
+          cell["capacity"] == 7.0, f"получено {cell}")
+    check("процент у даты с исключением по-прежнему считается",
+          cell["percent"] is not None or cell["units"] == 0, f"получено {cell}")
+
+    # А исключение, которое ГОВОРИТ про старую ёмкость, её и перекрывает.
+    storage.set_exception(FLORIST_STORE, DAY, None, 2.0, reason="ремонт")
+    cell = next(c for c in metrics.day_grid(DAY, [FLORIST_STORE])["stores"][0]["cells"]
+                if c["hour"] == 10)
+    check("исключение про единицы перекрывает недельный график",
+          cell["capacity"] == 2.0, f"получено {cell}")
+    check("а про людей молчит — берутся из графика", cell["florists"] == 1.5,
+          f"получено {cell}")
     storage.set_exception(FLORIST_STORE, DAY, None, None)
 
     # Подсказка обязана быть в тех же единицах, что и поле.
@@ -1028,6 +1043,30 @@ def test_capacity_in_florists():
         check("перезаданный салон не числится в старых единицах",
               all(s["store_id"] != FLORIST_STORE for s in payload.get("stale", [])),
               f"получено {payload}")
+
+        # Находка ревью: расширили часы работы — у новых часов нет старой
+        # ёмкости, и до Ф6 они серые. Это обязано быть видно, а не молчать.
+        response = client.post("/api/salon-load/capacity/working-hours",
+                               json={"store_id": FLORIST_STORE, "open_hour": 8,
+                                     "close_hour": 22, "florists": 2},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("расширение часов сохранено", response.status_code == 200,
+              f"получено {response.status_code}")
+        gap = storage.capacity_model_status()[FLORIST_STORE]["gap_hours"]
+        check("часы без старой ёмкости посчитаны", gap == 14,
+              f"получено {gap} (8–9 и 21–22 по семь дней)")
+        payload = (client.get("/api/salon-load/capacity/model").get_json() or {}).get("data", {})
+        check("и показаны отдельной плашкой",
+              any(s["store_id"] == FLORIST_STORE for s in payload.get("gaps", [])),
+              f"получено {payload}")
+
+        # Заполнили старую ёмкость — предупреждение уходит.
+        response = client.post("/api/salon-load/capacity/working-hours",
+                               json={"store_id": FLORIST_STORE, "open_hour": 8,
+                                     "close_hour": 22, "florists": 2, "capacity": 8},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        gap = storage.capacity_model_status()[FLORIST_STORE]["gap_hours"]
+        check("после ввода старой ёмкости пропусков нет", gap == 0, f"получено {gap}")
 
 
 def main():

@@ -89,22 +89,34 @@ def _effective_capacity(store_id: int, day: str, weekday: int, hour: int,
     считается процент) и `florists` + `capacity_minutes` (новая модель). Одно
     в другое не переводится: пока модель не переключена (Ф6), минуты — это
     справочная величина рядом, а не подмена процента.
+
+    **Исключение перекрывает только то, о чём говорит.** Оно заводится про одну
+    величину («14 февраля выходит три флориста»), а молчит про остальные — и
+    молчание обязано означать «как в обычном графике», а не «не задано». Иначе
+    запись про людей обнуляет старую ёмкость, и вся дата становится серой:
+    процент не считается, предупреждения о перегрузе по ней не срабатывают.
+    Ровно это и произошло бы 14 февраля, потому что форма исключений шлёт
+    флористов, а сетка до Ф6 считает по старым единицам.
     """
     share = (shares or {}).get(store_id)
+    regular = weekly.get(f"{store_id}:{weekday}:{hour}") or {}
 
     exception = exceptions.get(f"{store_id}:{day}:{hour}")
     if exception is not None:
+        def stated(field):
+            value = exception.get(field)
+            return regular.get(field) if value is None else value
+
         return {
-            "capacity": exception["capacity"],
-            "florists": exception.get("florists"),
-            "capacity_minutes": storage.capacity_minutes(exception.get("florists"), share),
-            "pickup_capacity": exception["pickup_capacity"],
+            "capacity": stated("capacity"),
+            "florists": stated("florists"),
+            "capacity_minutes": storage.capacity_minutes(stated("florists"), share),
+            "pickup_capacity": stated("pickup_capacity"),
             "closed": exception["closed"],
             "source": "exception",
             "reason": exception.get("reason"),
         }
-    regular = weekly.get(f"{store_id}:{weekday}:{hour}")
-    if regular is not None:
+    if regular:
         return {
             "capacity": regular["capacity"],
             "florists": regular.get("florists"),
@@ -573,18 +585,27 @@ def suggest_capacity(store_id: int, days: int = 30) -> Dict[str, Any]:
     date_to = date.today().isoformat()
     date_from = (date.today() - timedelta(days=days)).isoformat()
     share = storage.assembly_share_map().get(store_id, storage.DEFAULT_ASSEMBLY_SHARE)
-    empty = {"store_id": store_id, "samples": 0, "median": None, "p80": None,
-             "median_minutes": None, "p80_minutes": None, "max_minutes": None,
-             "median_florists": None, "p80_florists": None,
-             "assembly_share": share,
-             "current": _current_capacity(store_id, "capacity"),
-             "current_florists": _current_capacity(store_id, "florists"),
-             "from": date_from, "to": date_to}
+
+    # Недельная сетка читается ОДИН раз на весь ответ. Раньше «текущее
+    # значение» бралось отдельным вызовом на каждое поле, и один клик по
+    # подсказке стоил четырёх одинаковых чтений с диска, где обращение — это
+    # 90–700 мс.
+    weekly = storage.weekly_grid(store_id)
+    current = _most_common(weekly, "capacity")
+    current_florists = _most_common(weekly, "florists")
+
+    def empty():
+        return {"store_id": store_id, "samples": 0, "median": None, "p80": None,
+                "max": None, "median_minutes": None, "p80_minutes": None,
+                "max_minutes": None, "median_florists": None, "p80_florists": None,
+                "assembly_share": share, "current": current,
+                "current_florists": current_florists,
+                "from": date_from, "to": date_to}
 
     links = salonkpi_storage.resolve_map(salonkpi_storage.SOURCE_CRM_STORE)
     keys = {key for key, sid in links.items() if sid == store_id}
     if not keys:
-        return empty
+        return empty()
 
     rows = [row for row in couriers_storage.load_by_slot(date_from, date_to)
             if row["store_key"] in keys and row["hour"] is not None]
@@ -599,7 +620,7 @@ def suggest_capacity(store_id: int, days: int = 30) -> Dict[str, Any]:
     units = sorted(v for v in hourly_units.values() if v > 0)
     minutes = sorted(v for v in hourly_minutes.values() if v > 0)
     if not units and not minutes:
-        return empty
+        return empty()
 
     def percentile(data, quantile):
         if not data:
@@ -633,16 +654,15 @@ def suggest_capacity(store_id: int, days: int = 30) -> Dict[str, Any]:
         "median_florists": to_florists(median_minutes),
         "p80_florists": to_florists(p80_minutes),
         "assembly_share": share,
-        "current": _current_capacity(store_id, "capacity"),
-        "current_florists": _current_capacity(store_id, "florists"),
+        "current": current,
+        "current_florists": current_florists,
         "from": date_from,
         "to": date_to,
     }
 
 
-def _current_capacity(store_id: int, field: str = "capacity") -> Optional[float]:
-    """Самое частое значение в недельной сетке — то, что стоит сейчас."""
-    grid = storage.weekly_grid(store_id)
+def _most_common(grid: Dict[str, Any], field: str) -> Optional[float]:
+    """Самое частое значение в уже прочитанной недельной сетке."""
     counts: Dict[float, int] = {}
     for value in grid.values():
         if value.get(field) is None or value["closed"]:

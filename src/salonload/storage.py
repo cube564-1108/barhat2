@@ -521,7 +521,9 @@ def capacity_model_status() -> Dict[int, Dict[str, int]]:
                    SUM(CASE WHEN capacity_units IS NOT NULL AND is_closed = 0
                             THEN 1 ELSE 0 END) AS units_hours,
                    SUM(CASE WHEN florists IS NOT NULL AND is_closed = 0
-                            THEN 1 ELSE 0 END) AS florist_hours
+                            THEN 1 ELSE 0 END) AS florist_hours,
+                   SUM(CASE WHEN capacity_units IS NULL AND is_closed = 0
+                            THEN 1 ELSE 0 END) AS gap_hours
               FROM salon_capacity
           GROUP BY store_id
             """
@@ -532,6 +534,11 @@ def capacity_model_status() -> Dict[int, Dict[str, int]]:
         row["store_id"]: {
             "units_hours": row["units_hours"] or 0,
             "florist_hours": row["florist_hours"] or 0,
+            # Рабочие часы БЕЗ старой ёмкости. До Ф6 процент считается по ней,
+            # и такой час в сетке серый — «ёмкость не задана». Появляется это
+            # само: у нового салона или когда расширили часы работы, а форма
+            # шлёт только флористов. Молча — значит незаметно.
+            "gap_hours": row["gap_hours"] or 0,
         }
         for row in rows
     }
