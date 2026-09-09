@@ -1069,6 +1069,151 @@ def test_capacity_in_florists():
         check("после ввода старой ёмкости пропусков нет", gap == 0, f"получено {gap}")
 
 
+def test_minutes_model():
+    """Ф5–Ф6: переключение модели, минуты на экране, счётчик занижения."""
+    print("\n17. Модель нагрузки в минутах")
+    from pyrus.server import app
+
+    check("по умолчанию считаем по-старому",
+          storage.get_load_model() == storage.LOAD_MODEL_ORDERS,
+          f"получено {storage.get_load_model()}")
+
+    # Салон с известной ёмкостью и известными минутами.
+    storage.apply_working_hours(STORE_ID, 0, 24, capacity=10.0, florists=2.0, username="tester")
+    grid_orders = metrics.day_grid(DAY, [STORE_ID])
+    cell_orders = next(c for c in grid_orders["stores"][0]["cells"] if c["hour"] == 10)
+    check("до переключения единица — старая", grid_orders["unit"] == "ед.",
+          f"получено {grid_orders['unit']}")
+    check("нагрузка ячейки — старые единицы", cell_orders["load"] == cell_orders["units"],
+          f"получено {cell_orders}")
+    # Сравниваем с полем самой ячейки, а не с числом из apply_working_hours:
+    # на этот час предыдущие разделы могли поставить исключение на дату, и
+    # тогда 10 — не то значение, которое обязано быть.
+    check("ёмкость ячейки — старые единицы",
+          cell_orders["load_capacity"] == cell_orders["capacity"], f"получено {cell_orders}")
+
+    storage.set_load_model(storage.LOAD_MODEL_MINUTES, "tester")
+    grid_minutes = metrics.day_grid(DAY, [STORE_ID])
+    cell_minutes = next(c for c in grid_minutes["stores"][0]["cells"] if c["hour"] == 10)
+    check("после переключения единица — минуты", grid_minutes["unit"] == "мин",
+          f"получено {grid_minutes['unit']}")
+    check("нагрузка ячейки — минуты", cell_minutes["load"] == cell_minutes["minutes"],
+          f"получено {cell_minutes}")
+    check("ёмкость ячейки = флористы × 60", cell_minutes["load_capacity"] == 120.0,
+          f"получено {cell_minutes}")
+    check("процент пересчитан по минутам",
+          cell_minutes["percent"] == metrics._percent(cell_minutes["minutes"], 120.0),
+          f"получено {cell_minutes}")
+    # Обе величины остаются рядом: после переключения нужно уметь объяснить,
+    # откуда взялось прежнее число.
+    check("старые единицы никуда не делись",
+          cell_minutes["units"] == cell_orders["units"], f"получено {cell_minutes}")
+
+    # Счётчик занижения считает ЗАКАЗЫ, а не товары.
+    check("счётчик занижения есть в дне",
+          "day_without_norm" in grid_minutes["stores"][0], f"получено {grid_minutes['stores'][0]}")
+
+    # Недельная теплокарта считает по той же модели.
+    week = metrics.week_grid(DAY, days=1, store_ids=[STORE_ID])
+    check("теплокарта тоже в минутах", week["unit"] == "мин", f"получено {week['unit']}")
+
+    # Разбор слота отдаёт расшифровку минут.
+    slot = metrics.slot_orders(DAY, STORE_ID, 10)
+    check("разбор слота в минутах", slot["unit"] == "мин", f"получено {slot['unit']}")
+    if slot["orders"]:
+        first = slot["orders"][0]
+        check("у заказа есть разбор минут по составляющим",
+              set(first["minutes_parts"]) == {"flowers", "packaging", "berries", "catalog"},
+              f"получено {first}")
+        check("нагрузка заказа — минуты", first["load"] == (first["minutes"] or 0),
+              f"получено {first}")
+
+    # Свободные слоты меряются в единицах активной модели: «запас в одну
+    # минуту» пропустил бы забитый слот как свободный.
+    free = metrics.free_slots(STORE_ID, DAY, days=1, model=storage.LOAD_MODEL_MINUTES)
+    tight = [s for s in free["slots"] if s["free_units"] < 30]
+    check("слот с запасом меньше получаса не предлагается", not tight, f"получено {tight}")
+
+    # Откат — то же переключение, а не деплой.
+    storage.set_load_model(storage.LOAD_MODEL_ORDERS, "tester")
+    check("откат вернул старую модель", metrics.day_grid(DAY, [STORE_ID])["unit"] == "ед.")
+
+    # Кривое значение не гасит экран всей сети.
+    storage.set_setting(storage.LOAD_MODEL_KEY, "минуточку")
+    check("неизвестная модель читается как старая",
+          storage.get_load_model() == storage.LOAD_MODEL_ORDERS,
+          f"получено {storage.get_load_model()}")
+    storage.set_load_model(storage.LOAD_MODEL_ORDERS, "tester")
+    try:
+        storage.set_load_model("что-нибудь", "tester")
+        check("запись кривой модели отклонена", False, "исключения не было")
+    except ValueError:
+        check("запись кривой модели отклонена", True)
+
+    with app.test_client() as client:
+        login_as(client, "test-load-admin")
+        payload = (client.get("/api/salon-load/model").get_json() or {}).get("data", {})
+        check("ручка отдаёт модель и покрытие",
+              payload.get("model") == "orders" and "coverage" in payload, f"получено {payload}")
+
+        response = client.post("/api/salon-load/model", json={"model": "чепуха"},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("кривая модель через ручку — 400", response.status_code == 400,
+              f"получено {response.status_code}")
+
+        # Хорошее покрытие — переключаем без лишних вопросов.
+        response = client.post("/api/salon-load/model", json={"model": "minutes"},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("при хорошем покрытии подтверждение не требуется",
+              response.status_code == 200, f"получено {response.status_code}")
+        storage.set_load_model(storage.LOAD_MODEL_ORDERS, "tester")
+
+    # Портим покрытие заведомо: заказ с неразмеченной позицией в окне, по
+    # которому считается готовность. Иначе проверка порога зависит от того,
+    # что оставили после себя соседние разделы.
+    dirty_day = (_TODAY - timedelta(days=10)).isoformat()
+    couriers_storage.replace_orders_window(dirty_day, dirty_day, [
+        retailcrm.parse_order(dict(
+            order(9100 + i, hour=11, items=[{"quantity": 1,
+                                             "offer": {"id": 9999, "displayName": "Без нормы"}}]),
+            delivery={"date": dirty_day, "code": "dostavka-kurerom"}), {})
+        for i in range(4)
+    ])
+
+    with app.test_client() as client:
+        login_as(client, "test-load-admin")
+        # Порог предупреждает, а не запрещает: 409 без подтверждения, 200 с ним.
+        response = client.post("/api/salon-load/model", json={"model": "minutes"},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("плохое покрытие даёт 409, а не молчаливое переключение",
+              response.status_code == 409, f"получено {response.status_code}")
+        check("модель при этом не изменилась",
+              storage.get_load_model() == storage.LOAD_MODEL_ORDERS)
+
+        response = client.post("/api/salon-load/model",
+                               json={"model": "minutes", "confirm": True},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("с подтверждением переключение проходит", response.status_code == 200,
+              f"получено {response.status_code} {response.get_data(as_text=True)[:200]}")
+        check("модель переключена", storage.get_load_model() == storage.LOAD_MODEL_MINUTES)
+
+        health = storage.model_health()
+        check("модель видна в диагностике", health["model"] == "minutes", f"получено {health}")
+        check("диагностика считает салоны с флористами",
+              health["stores_with_florists"] >= 1, f"получено {health}")
+
+    ensure_user("test-load-manager", "manager", [STORE_ID])
+    with app.test_client() as client:
+        login_as(client, "test-load-manager")
+        response = client.post("/api/salon-load/model",
+                               json={"model": "orders", "confirm": True},
+                               headers={"X-Requested-With": "barhat-dashboard"})
+        check("менеджер модель не переключает", response.status_code == 403,
+              f"получено {response.status_code}")
+
+    storage.set_load_model(storage.LOAD_MODEL_ORDERS, "tester")
+
+
 def main():
     setup_data()
     test_capacity_states()
@@ -1087,6 +1232,7 @@ def main():
     test_weight_units_model()
     test_round_clock()
     test_capacity_in_florists()
+    test_minutes_model()
 
     print()
     if failures:

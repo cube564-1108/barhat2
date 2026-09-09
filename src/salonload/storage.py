@@ -58,6 +58,18 @@ MINUTES_PER_FLORIST_HOUR = 60.0
 # Доля часа, уходящая на сборку, когда салон её не задавал.
 DEFAULT_ASSEMBLY_SHARE = 1.0
 
+# Модель нагрузки. `orders` — старая безразмерная («заказ = 1 единица +
+# надбавки»), `minutes` — минуты сборки против ёмкости в людях.
+#
+# Настройка, а не флаг в коде: откат обязан быть переключением, а не деплоем.
+# Если после перехода цифры окажутся неправдоподобными, вернуться нужно за
+# секунды, а не за сборку.
+LOAD_MODEL_KEY = "load_model"
+LOAD_MODEL_ORDERS = "orders"
+LOAD_MODEL_MINUTES = "minutes"
+LOAD_MODELS = (LOAD_MODEL_ORDERS, LOAD_MODEL_MINUTES)
+DEFAULT_LOAD_MODEL = LOAD_MODEL_ORDERS
+
 
 def get_db() -> sqlite3.Connection:
     """Соединение с общей базой. Настройки — в sqlite_conn (WAL один раз на файл)."""
@@ -207,6 +219,17 @@ def init_salonload_tables() -> None:
             CREATE TABLE IF NOT EXISTS salon_settings (
                 store_id INTEGER PRIMARY KEY,
                 assembly_share REAL NOT NULL DEFAULT 1.0,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # Настройки модуля, общие на всю сеть. Отдельная таблица от
+        # `salon_settings`: там ключ — салон, здесь ключа нет вовсе.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS salonload_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
                 updated_by TEXT,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
@@ -581,6 +604,88 @@ def set_assembly_share(store_id: int, share: float, username: Optional[str] = No
         conn.commit()
     finally:
         conn.close()
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT value FROM salonload_settings WHERE key = ?",
+                           (key,)).fetchone()
+    finally:
+        conn.close()
+    return default if row is None or row["value"] is None else row["value"]
+
+
+def set_setting(key: str, value: str, username: Optional[str] = None) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO salonload_settings (key, value, updated_by, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_by = excluded.updated_by,
+                updated_at = datetime('now')
+            """,
+            (key, value, username),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_load_model() -> str:
+    """
+    Активная модель нагрузки.
+
+    Неизвестное значение в базе — это старая модель, а не падение: настройку
+    правит человек, и опечатка не должна гасить экран всей сети.
+    """
+    value = get_setting(LOAD_MODEL_KEY, DEFAULT_LOAD_MODEL)
+    return value if value in LOAD_MODELS else DEFAULT_LOAD_MODEL
+
+
+def set_load_model(value: str, username: Optional[str] = None) -> None:
+    if value not in LOAD_MODELS:
+        raise ValueError(f"Модель нагрузки может быть {' или '.join(LOAD_MODELS)}")
+    set_setting(LOAD_MODEL_KEY, value, username)
+
+
+def model_health() -> Dict[str, Any]:
+    """
+    Состояние модели нагрузки для `/health?full=1` — ОДНИМ соединением.
+
+    Снаружи иначе не проверить ни то, что миграция колонки прошла, ни то,
+    какая модель сейчас активна: экран показывает проценты, а из чего они
+    сложились — не показывает. Консоли у контейнера нет.
+
+    Одно соединение, а не три вызова подряд: цену диагностики определяет число
+    открытых соединений к общему сетевому диску, а не размер таблиц.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT value FROM salonload_settings WHERE key = ?",
+                           (LOAD_MODEL_KEY,)).fetchone()
+        model = row["value"] if row and row["value"] in LOAD_MODELS else DEFAULT_LOAD_MODEL
+        counts = conn.execute(
+            """
+            SELECT COUNT(DISTINCT store_id) AS stores,
+                   COUNT(DISTINCT CASE WHEN florists IS NOT NULL THEN store_id END)
+                       AS stores_with_florists,
+                   SUM(CASE WHEN capacity_units IS NULL AND is_closed = 0
+                            THEN 1 ELSE 0 END) AS gap_hours
+              FROM salon_capacity
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        "model": model,
+        "stores": counts["stores"] or 0,
+        "stores_with_florists": counts["stores_with_florists"] or 0,
+        "hours_without_old_capacity": counts["gap_hours"] or 0,
+    }
 
 
 def capacity_minutes(florists: Optional[float], assembly_share: Optional[float]) -> Optional[float]:

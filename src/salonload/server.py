@@ -24,6 +24,13 @@ auth_path = os.path.join(os.path.dirname(__file__), "../")
 sys.path.insert(0, auth_path)
 from auth import log_action, require_ajax_header, role_required, section_required  # noqa: E402
 
+# Окно, по которому считается покрытие разметки перед переходом на минуты, и
+# доля недосчитанных заказов, выше которой переключение требует подтверждения.
+# Порог предупреждает, а не запрещает: в потоке всегда есть хвост, и жёсткая
+# блокировка означала бы «никогда» (К16 критики плана).
+COVERAGE_DAYS = 60
+COVERAGE_THRESHOLD = 10.0
+
 from . import metrics, storage  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -337,6 +344,73 @@ def get_capacity():
             "can_edit": _is_admin(),
         }
     })
+
+
+@salonload_bp.route("/model", methods=["GET"])
+@section_required("salon_load")
+def get_load_model():
+    """
+    Активная модель нагрузки и готовность к переходу на минуты.
+
+    Покрытие считается здесь же: переключать модель вслепую нельзя — 76%
+    потока это каталожные товары, и без разметки экран станет пустым.
+    """
+    from couriers import storage as couriers_storage
+
+    date_to = date.today().isoformat()
+    date_from = (date.today() - timedelta(days=COVERAGE_DAYS)).isoformat()
+    coverage = couriers_storage.norms_coverage(date_from, date_to)
+
+    status = storage.capacity_model_status()
+    florist_stores = sum(1 for value in status.values() if value["florist_hours"])
+
+    return success_response({
+        "data": {
+            "model": storage.get_load_model(),
+            "can_edit": _is_admin(),
+            "coverage": {**coverage, "from": date_from, "to": date_to,
+                         "days": COVERAGE_DAYS, "threshold": COVERAGE_THRESHOLD},
+            "stores_with_florists": florist_stores,
+            "stores_total": len(status),
+        }
+    })
+
+
+@salonload_bp.route("/model", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def save_load_model():
+    """
+    Переключить модель нагрузки: {"model": "minutes"}.
+
+    Порог покрытия ПРЕДУПРЕЖДАЕТ, но не запрещает (К16 критики плана): в потоке
+    всегда есть неразмеченный хвост, и жёсткий порог заблокировал бы переход
+    навсегда. Решение принимает человек — но подтверждением, а не случайно,
+    поэтому ниже порога требуется явный `confirm`.
+    """
+    data = request.get_json(silent=True) or {}
+    model = (data.get("model") or "").strip()
+
+    if model == storage.LOAD_MODEL_MINUTES and not data.get("confirm"):
+        from couriers import storage as couriers_storage
+
+        date_to = date.today().isoformat()
+        date_from = (date.today() - timedelta(days=COVERAGE_DAYS)).isoformat()
+        coverage = couriers_storage.norms_coverage(date_from, date_to)
+        if coverage["share"] > COVERAGE_THRESHOLD:
+            return error_response(
+                f"За {COVERAGE_DAYS} дней в {coverage['share']}% заказов есть позиции без нормы "
+                f"({coverage['offers_without_norm']} товаров). Загрузка будет занижена. "
+                "Подтвердите переключение, если это осознанное решение.", 409)
+
+    try:
+        storage.set_load_model(model, getattr(current_user, "username", None))
+    except ValueError as e:
+        return error_response(str(e))
+
+    _bump_version()
+    log_action(current_user.username, "salon_load_model", f"модель нагрузки: {model}")
+    return success_response({"model": model})
 
 
 @salonload_bp.route("/capacity/model", methods=["GET"])

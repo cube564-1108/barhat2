@@ -147,7 +147,7 @@ def _stores_for(store_ids: Optional[List[int]]) -> List[Dict[str, Any]]:
 
 
 def day_grid(day: str, store_ids: Optional[List[int]] = None,
-             with_context: bool = True) -> Dict[str, Any]:
+             with_context: bool = True, model: Optional[str] = None) -> Dict[str, Any]:
     """
     Сетка «часы × салоны» за один день.
 
@@ -156,7 +156,13 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
     свободных слотов, расчёт предупреждений) строят по несколько сеток на
     запрос. На диске `/data`, где запрос стоит 90–700 мс, разница получается в
     десятки обращений.
+
+    model передаётся сверху по той же причине: настройка одна на всю сеть, а
+    сеток на запрос бывает несколько, и перечитывать её на каждую — лишние
+    обращения к тому же медленному диску.
     """
+    model = model or storage.get_load_model()
+    minutes_model = model == storage.LOAD_MODEL_MINUTES
     stores = _stores_for(store_ids)
     ids = [store["id"] for store in stores]
     key_to_store = {key: store["id"] for store in stores for key in store["keys"]}
@@ -216,16 +222,25 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
         day_minutes = 0.0
         day_capacity_minutes = 0.0
         has_florists = False
+        day_without_norm = 0
         for hour in storage.HOURS:
             load = loads.get(f"{store['id']}:{hour}", {})
             capacity = _effective_capacity(store["id"], day, weekday, hour,
                                            weekly, exceptions, shares)
             units = round(load.get("units", 0.0), 2)
             minutes = round(load.get("minutes", 0.0), 2)
-            percent = _percent(units, capacity["capacity"])
+
+            # Активная модель решает, что делить на что. Обе величины при этом
+            # остаются в ячейке: разбор «51 из 60 мин» показывается рядом с
+            # процентом, а после переключения нужно уметь объяснить, откуда
+            # взялось прежнее число.
+            value = minutes if minutes_model else units
+            value_capacity = capacity["capacity_minutes"] if minutes_model else capacity["capacity"]
+            percent = _percent(value, value_capacity)
 
             day_units += units
             day_minutes += minutes
+            day_without_norm += load.get("orders_without_norm", 0)
             if capacity["capacity"] is not None and not capacity["closed"]:
                 day_capacity += capacity["capacity"]
                 has_capacity = True
@@ -237,9 +252,6 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
                 "hour": hour,
                 "orders": load.get("orders", 0),
                 "units": units,
-                # Минуты и флористы идут рядом со старыми единицами, а не
-                # вместо них: процент и цвет ячейки до Ф6 считает старая
-                # модель, и подменять их «похожим» числом нельзя.
                 "minutes": minutes,
                 "orders_without_norm": load.get("orders_without_norm", 0),
                 "pickup_orders": load.get("pickup_orders", 0),
@@ -252,10 +264,17 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
                 "closed": capacity["closed"],
                 "capacity_source": capacity["source"],
                 "reason": capacity["reason"],
+                # Что показывать и от чего считался процент — решено здесь, а
+                # не в интерфейсе: иначе экран и предупреждения разъедутся.
+                "load": value,
+                "load_capacity": value_capacity,
                 "percent": percent,
                 "level": _level(percent, capacity["closed"]),
             })
 
+        day_value = day_minutes if minutes_model else day_units
+        day_value_capacity = ((day_capacity_minutes if has_florists else None) if minutes_model
+                              else (day_capacity if has_capacity else None))
         grid.append({
             "store_id": store["id"],
             "store_name": store["name"],
@@ -263,9 +282,12 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
             "cells": cells,
             "day_units": round(day_units, 2),
             "day_capacity": round(day_capacity, 2) if has_capacity else None,
-            "day_percent": _percent(day_units, day_capacity if has_capacity else None),
             "day_minutes": round(day_minutes, 2),
             "day_capacity_minutes": round(day_capacity_minutes, 2) if has_florists else None,
+            "day_load": round(day_value, 2),
+            "day_load_capacity": day_value_capacity,
+            "day_percent": _percent(day_value, day_value_capacity),
+            "day_without_norm": day_without_norm,
             "no_time": no_time.get(store["id"]),
         })
 
@@ -279,6 +301,11 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
         # флористу это чужие цифры, а разобрать их он всё равно не может.
         "unassigned": unassigned if (unassigned["orders"] and store_ids is None) else None,
         "thresholds": {"tight": THRESHOLD_TIGHT, "over": THRESHOLD_OVER},
+        # Единица подписывается в ответе, а не выводится интерфейсом из
+        # догадки: цифра без единицы измерения — ровно та ошибка, ради
+        # которой весь модуль переделывается.
+        "model": model,
+        "unit": "мин" if minutes_model else "ед.",
         # Разбора нагрузки на базу и надбавки здесь больше нет: экран его не
         # показывает, а стоил он двух обращений к общему медленному диску на
         # каждый показ сетки. Разбор живёт в справочнике надбавок, где на него
@@ -288,8 +315,11 @@ def day_grid(day: str, store_ids: Optional[List[int]] = None,
     }
 
 
-def week_grid(date_from: str, days: int = 7, store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+def week_grid(date_from: str, days: int = 7, store_ids: Optional[List[int]] = None,
+              model: Optional[str] = None) -> Dict[str, Any]:
     """Дневная загрузка по салонам за период — календарь-heatmap."""
+    model = model or storage.get_load_model()
+    minutes_model = model == storage.LOAD_MODEL_MINUTES
     start = datetime.strptime(date_from, "%Y-%m-%d").date()
     date_to = (start + timedelta(days=days - 1)).isoformat()
 
@@ -299,16 +329,17 @@ def week_grid(date_from: str, days: int = 7, store_ids: Optional[List[int]] = No
 
     weekly = storage.capacity_map(ids)
     exceptions = storage.exceptions_for(ids, date_from, date_to)
+    shares = storage.assembly_share_map()
     rows = couriers_storage.load_by_slot(date_from, date_to)
 
-    units: Dict[str, float] = {}
+    values: Dict[str, float] = {}
     orders: Dict[str, int] = {}
     for row in rows:
         store_id = key_to_store.get(row["store_key"]) if row["store_key"] else None
         if store_id is None:
             continue
         key = f"{store_id}:{row['date']}"
-        units[key] = units.get(key, 0.0) + row["units"]
+        values[key] = values.get(key, 0.0) + (row["minutes"] if minutes_model else row["units"])
         orders[key] = orders.get(key, 0) + row["orders"]
 
     dates = [(start + timedelta(days=i)).isoformat() for i in range(days)]
@@ -321,14 +352,16 @@ def week_grid(date_from: str, days: int = 7, store_ids: Optional[List[int]] = No
             has_capacity = False
             closed_all = True
             for hour in storage.HOURS:
-                capacity = _effective_capacity(store["id"], day, weekday, hour, weekly, exceptions)
+                capacity = _effective_capacity(store["id"], day, weekday, hour,
+                                               weekly, exceptions, shares)
                 if not capacity["closed"]:
                     closed_all = False
-                if capacity["capacity"] is not None and not capacity["closed"]:
-                    capacity_total += capacity["capacity"]
+                value = capacity["capacity_minutes"] if minutes_model else capacity["capacity"]
+                if value is not None and not capacity["closed"]:
+                    capacity_total += value
                     has_capacity = True
 
-            day_units = round(units.get(f"{store['id']}:{day}", 0.0), 2)
+            day_units = round(values.get(f"{store['id']}:{day}", 0.0), 2)
             percent = _percent(day_units, capacity_total if has_capacity else None)
             cells.append({
                 "date": day,
@@ -354,11 +387,16 @@ def week_grid(date_from: str, days: int = 7, store_ids: Optional[List[int]] = No
         "thresholds": {"tight": THRESHOLD_TIGHT, "over": THRESHOLD_OVER},
         "freshness": freshness(date_from, date_to),
         "no_stores": not stores,
+        "model": model,
+        "unit": "мин" if minutes_model else "ед.",
     }
 
 
-def slot_orders(day: str, store_id: int, hour: Optional[int]) -> Dict[str, Any]:
+def slot_orders(day: str, store_id: int, hour: Optional[int],
+                model: Optional[str] = None) -> Dict[str, Any]:
     """Заказы одного слота — клик по ячейке."""
+    model = model or storage.get_load_model()
+    minutes_model = model == storage.LOAD_MODEL_MINUTES
     links = salonkpi_storage.resolve_map(salonkpi_storage.SOURCE_CRM_STORE)
     keys = [key for key, sid in links.items() if sid == store_id]
 
@@ -367,17 +405,26 @@ def slot_orders(day: str, store_id: int, hour: Optional[int]) -> Dict[str, Any]:
         orders.extend(couriers_storage.list_slot_orders(day, key, hour))
     orders.sort(key=lambda o: (o["ready_time"] or "", o["order_id"]))
 
+    for item in orders:
+        item["load"] = (item["minutes"] or 0) if minutes_model else item["units"]
+
     return {
         "date": day,
         "store_id": store_id,
         "hour": hour,
         "orders": orders,
         "units": round(sum(o["units"] or 0 for o in orders), 2),
+        "minutes": round(sum(o["minutes"] or 0 for o in orders), 2),
+        "load": round(sum(o["load"] or 0 for o in orders), 2),
+        "without_norm": sum(1 for o in orders if o["without_norm"]),
+        "model": model,
+        "unit": "мин" if minutes_model else "ед.",
     }
 
 
-def free_slots(store_id: int, date_from: str, days: int = 3, need_units: float = 1.0,
-               grids: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+def free_slots(store_id: int, date_from: str, days: int = 3, need_units: Optional[float] = None,
+               grids: Optional[Dict[str, Dict[str, Any]]] = None,
+               model: Optional[str] = None) -> Dict[str, Any]:
     """
     Ближайшие слоты, где ещё есть запас.
 
@@ -392,7 +439,16 @@ def free_slots(store_id: int, date_from: str, days: int = 3, need_units: float =
 
     grids — общий кэш сеток на запрос. Каждая сетка это несколько обращений к
     медленному диску, а предупреждений на экране бывает десяток.
+
+    need_units меряется в единицах активной модели. Умолчание поэтому тоже
+    зависит от неё: «запас в одну единицу» и «запас в одну минуту» — разные
+    требования, и второе пропустило бы забитый слот как свободный. Полчаса —
+    это заметный кусок работы флориста, в который влезает средний заказ.
     """
+    model = model or storage.get_load_model()
+    if need_units is None:
+        need_units = (storage.MINUTES_PER_FLORIST_HOUR / 2
+                      if model == storage.LOAD_MODEL_MINUTES else 1.0)
     offset = storage.timezone_map().get(store_id)
     now_local = salon_now(offset) if offset is not None else None
 
@@ -404,19 +460,19 @@ def free_slots(store_id: int, date_from: str, days: int = 3, need_units: float =
         day = (start + timedelta(days=i)).isoformat()
         grid = cache.get(day)
         if grid is None:
-            grid = day_grid(day, None, with_context=False)
+            grid = day_grid(day, None, with_context=False, model=model)
             cache[day] = grid
 
         for store in grid["stores"]:
             if store["store_id"] != store_id:
                 continue
             for cell in store["cells"]:
-                if cell["closed"] or cell["capacity"] is None:
+                if cell["closed"] or cell["load_capacity"] is None:
                     continue
                 if now_local is not None and day == now_local.date().isoformat() \
                         and cell["hour"] <= now_local.hour:
                     continue
-                free = cell["capacity"] - cell["units"]
+                free = cell["load_capacity"] - cell["load"]
                 if free >= need_units:
                     slots.append({
                         "date": day,
@@ -455,6 +511,9 @@ def scan_alerts() -> Dict[str, Any]:
     Салон без заданного часового пояса пропускается: «через 3 часа» без пояса
     посчиталось бы по времени сервера и приехало бы мимо на 5–7 часов.
     """
+    # Модель читается один раз на весь прогон: сеток здесь строится десяток,
+    # а настройка одна на сеть.
+    model = storage.get_load_model()
     offsets = storage.timezone_map()
     stores = _stores_for(None)
     created = 0
@@ -468,7 +527,7 @@ def scan_alerts() -> Dict[str, Any]:
     for alert in storage.open_alerts_for_scan(today_any):
         grid = grids.get(alert["date"])
         if grid is None:
-            grid = day_grid(alert["date"], None, with_context=False)
+            grid = day_grid(alert["date"], None, with_context=False, model=model)
             grids[alert["date"]] = grid
         store = next((s for s in grid["stores"] if s["store_id"] == alert["store_id"]), None)
         if not store:
@@ -505,7 +564,7 @@ def scan_alerts() -> Dict[str, Any]:
         for day, hour, horizon in targets:
             grid = grids.get(day)
             if grid is None:
-                grid = day_grid(day, None, with_context=False)
+                grid = day_grid(day, None, with_context=False, model=model)
                 grids[day] = grid
             row = next((s for s in grid["stores"] if s["store_id"] == store["id"]), None)
             if not row:
@@ -516,8 +575,10 @@ def scan_alerts() -> Dict[str, Any]:
                 continue
             if cell["percent"] < THRESHOLD_OVER:
                 continue
+            # В предупреждение пишутся числа АКТИВНОЙ модели: иначе после
+            # переключения в тексте окажутся единицы, которых на экране уже нет.
             if storage.upsert_alert(store["id"], day, hour, horizon,
-                                    cell["percent"], cell["units"], cell["capacity"]):
+                                    cell["percent"], cell["load"], cell["load_capacity"]):
                 created += 1
 
     return {"created": created, "resolved": resolved, "no_timezone": skipped_no_tz}
@@ -528,6 +589,7 @@ def alerts(store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
     today = date.today().isoformat()
     items = storage.active_alerts(store_ids, today)
 
+    model = storage.get_load_model()
     names = {store["id"]: store["name"] for store in salonkpi_storage.list_stores(store_ids)}
     result = []
     # Общий кэш сеток на весь ответ: без него десяток предупреждений строил бы
@@ -539,7 +601,7 @@ def alerts(store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
         # Альтернатива считается здесь же: предупреждение без ответа «куда
         # переносить» не меняет решений — человек не станет звонить клиенту,
         # чтобы предложить «когда-нибудь потом».
-        free = free_slots(item["store_id"], item["date"], days=2, need_units=1.0, grids=grids)
+        free = free_slots(item["store_id"], item["date"], days=2, grids=grids, model=model)
         suggestions = [slot for slot in free["slots"]
                        if not (slot["date"] == item["date"] and slot["hour"] == item["hour"])][:3]
         result.append({**item,
@@ -549,6 +611,8 @@ def alerts(store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
     return {
         "items": result,
         "stats": storage.alerts_stats((date.today() - timedelta(days=30)).isoformat(), store_ids),
+        "model": model,
+        "unit": "мин" if model == storage.LOAD_MODEL_MINUTES else "ед.",
     }
 
 

@@ -2836,6 +2836,14 @@ def health_snapshot() -> Dict[str, Any]:
                         "SELECT AVG(minutes_total) AS a FROM courier_orders "
                         " WHERE delivery_date >= ? AND minutes_total IS NOT NULL", (window_from,)
                     ).fetchone()["a"] or 0, 1),
+                    # Версия формулы, под которую пересчитана витрина. Без неё
+                    # «бэкфилл прошёл или нет» снаружи не отличить: среднее по
+                    # заказу меняется на десятые, потому что правка касается
+                    # малой доли потока.
+                    "formula": (
+                        conn.execute("SELECT value FROM sync_state WHERE key = ?",
+                                     (MINUTES_FORMULA_KEY,)).fetchone() or {"value": None}
+                    )["value"],
                 },
                 "statuses_as_load": conn.execute(
                     "SELECT COUNT(*) AS c FROM order_statuses WHERE counts_as_load = 1"
@@ -3045,7 +3053,9 @@ def list_slot_orders(date: str, store_key: str, hour: Optional[int],
         rows = conn.execute(
             f"""
             SELECT retailcrm_order_id, order_number, ready_time, ready_source,
-                   delivery_code, status, weight_units, total_summ
+                   delivery_code, status, weight_units, total_summ,
+                   minutes_total, minutes_flowers, minutes_packaging,
+                   minutes_berries, minutes_catalog, items_without_norm
               FROM courier_orders
              WHERE delivery_date = ? AND store_key = ? AND {hour_condition}
                AND status IN ({placeholders})
@@ -3066,6 +3076,17 @@ def list_slot_orders(date: str, store_key: str, hour: Optional[int],
             "status": row["status"],
             "units": row["weight_units"],
             "amount": row["total_summ"],
+            "minutes": row["minutes_total"],
+            # Разбор хранится колонками и отдаётся как есть: вопрос «почему у
+            # этого заказа 48 минут» задают именно здесь, и отвечать на него
+            # повторным расчётом — терять время на каждый клик.
+            "minutes_parts": {
+                "flowers": row["minutes_flowers"],
+                "packaging": row["minutes_packaging"],
+                "berries": row["minutes_berries"],
+                "catalog": row["minutes_catalog"],
+            },
+            "without_norm": row["items_without_norm"] or 0,
         }
         for row in rows
     ]

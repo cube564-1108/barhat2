@@ -89,7 +89,12 @@
         const response = await fetch(url, options);
         const result = await response.json().catch(() => ({}));
         if (!response.ok || result.success === false) {
-            throw new Error(result.error || `Ошибка ${response.status}`);
+            const error = new Error(result.error || `Ошибка ${response.status}`);
+            // Код нужен вызывающему: 409 «покрытие ниже порога» — это вопрос
+            // человеку, а 400 «неверная модель» — сломанный запрос. Без кода
+            // их не различить, и на любую ошибку выскакивал бы вопрос.
+            error.status = response.status;
+            throw error;
         }
         return result;
     }
@@ -185,7 +190,8 @@
                     <button class="sload-btn sload-btn--onhead" data-open="capacity">Ёмкость салонов</button>
                     <button class="sload-btn sload-btn--onhead" data-open="norms">Нормы времени</button>
                     <button class="sload-btn sload-btn--onhead" data-open="weights">Надбавки</button>
-                    <button class="sload-btn sload-btn--onhead" data-open="statuses">Статусы заказов</button>` : ''}
+                    <button class="sload-btn sload-btn--onhead" data-open="statuses">Статусы заказов</button>
+                    <button class="sload-btn sload-btn--onhead" data-open="model">Модель нагрузки</button>` : ''}
             </div>
         </header>`;
     }
@@ -252,18 +258,40 @@
 
     function capacityNote(data) {
         const withoutCapacity = (data.stores || []).filter(store =>
-            store.cells.every(cell => cell.capacity === null && !cell.closed));
+            store.cells.every(cell => cell.load_capacity === null && !cell.closed));
         if (!withoutCapacity.length) return '';
         const names = withoutCapacity.map(s => s.store_name).join(', ');
         return note('warn', 'Ёмкость не задана',
             `Проценты не считаются для: ${esc(names)}. ` +
-            (state.isAdmin ? 'Задайте часы работы и норму в «Ёмкости салонов».'
+            (state.isAdmin ? 'Задайте часы работы и число флористов в «Ёмкости салонов».'
                 : 'Обратитесь к администратору.'));
+    }
+
+    function normsNote(data) {
+        // Счётчик занижения. Считаем ЗАКАЗЫ, а не товары: «14 товаров без
+        // нормы» ничего не говорит о цифре на экране и через неделю
+        // превращается в фон, который перестают замечать. Пока основной поток
+        // размечен, счётчика нет вовсе.
+        if (data.model !== 'minutes') return '';
+        const total = (data.stores || []).reduce((sum, s) => sum + (s.day_without_norm || 0), 0);
+        if (!total) return '';
+        return note('warn', `Загрузка занижена: ${total} ${plural(total,
+            'заказ', 'заказа', 'заказов')} посчитан${total === 1 ? '' : 'ы'} не полностью`,
+            `В ${plural(total, 'этом заказе', 'этих заказах', 'этих заказах')} есть позиции ` +
+            'без нормы времени — их минуты в сетку не попали. ' +
+            (state.isAdmin
+                ? '<button class="sload-btn sload-btn--ghost" data-open-norms ' +
+                  'style="margin-top:8px">Разметить нормы</button>'
+                : 'Разметку делает администратор.'));
     }
 
     function alertsCard() {
         const alerts = state.alerts;
         if (!alerts) return '';
+        // Единица берётся из ответа предупреждений, а не из сетки: цифры в
+        // предупреждении записаны в момент его создания, и после переключения
+        // модели старые записи остаются в прежних единицах.
+        const alertUnit = alerts.unit || 'ед.';
 
         // Молчание модуля и «всё спокойно» — разные вещи. Если синк не
         // проходил больше двух часов, предупреждений просто нет физически.
@@ -302,7 +330,7 @@
                                     ${esc(dateLabel(alert.date))} · ${String(alert.hour).padStart(2, '0')}:00</span><br>
                                 <span class="sload-extra__value">${pct(alert.percent)}</span>
                                 <span class="sload-extra__label">${num(alert.units)} из
-                                    ${num(alert.capacity)} ед. ·
+                                    ${num(alert.capacity)} ${alertUnit} ·
                                     ${alert.horizon === 'soon' ? 'ближайшие часы' : 'завтра'}</span>
                             </span>
                             <button class="sload-btn sload-btn--ghost" data-dismiss="${alert.id}">Разобрался</button>
@@ -313,7 +341,7 @@
                                     `<button class="sload-badge sload-badge--pickup" style="border:none;cursor:pointer"
                                         data-free-slot data-store="${alert.store_id}" data-date="${esc(slot.date)}"
                                         data-hour="${slot.hour}">${esc(dateLabel(slot.date).split(',')[0])},
-                                        ${String(slot.hour).padStart(2, '0')}:00 — запас ${num(slot.free_units)} ед.</button>`).join(' ')
+                                        ${String(slot.hour).padStart(2, '0')}:00 — запас ${num(slot.free_units)} ${alertUnit}</button>`).join(' ')
                                 : 'Свободных слотов рядом нет — здесь нужен ещё один флорист, а не перенос.'}
                         </div>
                     </div>`).join('')}
@@ -350,13 +378,15 @@
             </tr>`).join('');
 
         return header() + toolbar() + alertsCard() +
-            freshnessNote(data.freshness) + capacityNote(data) + `
+            freshnessNote(data.freshness) + capacityNote(data) + normsNote(data) + `
             <div class="sload-card">
                 <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
                     <div>
                         <h2 class="sload-card__title">${esc(dateLabel(data.date))}</h2>
                         <p class="sload-card__caption">Часы — местное время салона. В ячейке:
-                            процент загрузки и число заказов. Трудоёмкость — в подсказке и по клику.</p>
+                            процент загрузки и число заказов. ${data.model === 'minutes'
+                                ? 'Минуты сборки — в подсказке и по клику.'
+                                : 'Трудоёмкость — в подсказке и по клику.'}</p>
                     </div>
                 </div>
                 <div class="sload-grid-wrap">
@@ -383,15 +413,27 @@
                 <span class="sload-cell__sub">закрыт</span></div></td>`;
         }
 
-        if (!data.orders && data.capacity === null) {
+        if (!data.orders && data.load_capacity === null) {
             return '<td><div class="sload-cell sload-cell--empty"><span class="sload-cell__value">·</span></div></td>';
         }
 
         const level = data.level === 'unknown' && !data.orders ? 'empty' : data.level;
+        const unit = state.data.unit || 'ед.';
+        // «85% — 51 из 60 мин»: процент сам по себе не проверить, а из чего он
+        // сложился — проверить можно. Единица берётся из ответа, а не
+        // угадывается: она зависит от активной модели.
+        const capacityText = data.load_capacity === null
+            ? 'ёмкость не задана'
+            : `${num(data.load)} из ${num(data.load_capacity)} ${unit}`;
         const title = [
             `${data.orders} ${plural(data.orders, 'заказ', 'заказа', 'заказов')}`,
-            `${num(data.units)} ед. трудоёмкости`,
-            data.capacity === null ? 'ёмкость не задана' : `ёмкость ${num(data.capacity)} ед.`,
+            capacityText,
+            data.florists ? `${num(data.florists)} ${plural(Math.round(data.florists),
+                'флорист', 'флориста', 'флористов')} в смене` : '',
+            data.orders_without_norm
+                ? `в ${data.orders_without_norm} ${plural(data.orders_without_norm,
+                    'заказе', 'заказах', 'заказах')} есть позиции без нормы — загрузка занижена`
+                : '',
             data.pickup_orders ? `самовывоз: ${data.pickup_orders}` : '',
             data.reason ? `причина: ${data.reason}` : ''
         ].filter(Boolean).join(' · ');
@@ -556,11 +598,31 @@
             ? `Заказы без времени готовности · ${store ? store.store_name : ''}`
             : `${String(hour).padStart(2, '0')}:00 · ${store ? store.store_name : ''}`;
 
+        const unit = result.data.unit || 'ед.';
+        const minutesModel = result.data.model === 'minutes';
+
+        // Расшифровка минут заказа. Составляющие уже лежат колонками в витрине
+        // — это тот же запрос, а не ещё одно чтение на клик.
+        const breakdown = order => {
+            const parts = order.minutes_parts || {};
+            const items = [
+                ['цветы', parts.flowers], ['клубника', parts.berries],
+                ['упаковка', parts.packaging], ['каталог', parts.catalog]
+            ].filter(([, value]) => value).map(([name, value]) => `${name} ${num(value)}`);
+            if (!items.length) return '';
+            return `<div class="sload-cell__sub" style="text-align:left">${esc(items.join(' + '))}</div>`;
+        };
+
         const body = orders.length ? `
-            <p class="sload-card__caption">Всего ${num(result.data.units)} ед. трудоёмкости
-                в ${orders.length} ${plural(orders.length, 'заказе', 'заказах', 'заказах')}.</p>
+            <p class="sload-card__caption">Всего ${num(result.data.load)} ${unit}
+                в ${orders.length} ${plural(orders.length, 'заказе', 'заказах', 'заказах')}.${
+                result.data.without_norm
+                    ? ` В ${result.data.without_norm} ${plural(result.data.without_norm,
+                        'заказе', 'заказах', 'заказах')} есть позиции без нормы — эта цифра занижена.`
+                    : ''}</p>
             <table class="sload-modal-table">
-                <thead><tr><th>Заказ</th><th>Готовность</th><th>Тип</th><th>Трудоёмкость</th><th>Сумма</th></tr></thead>
+                <thead><tr><th>Заказ</th><th>Готовность</th><th>Тип</th>
+                    <th>${minutesModel ? 'Минуты' : 'Трудоёмкость'}</th><th>Сумма</th></tr></thead>
                 <tbody>${orders.map(order => `
                     <tr>
                         <td>№${esc(order.number || order.order_id)}</td>
@@ -569,14 +631,118 @@
                         <td>${order.is_pickup
                             ? '<span class="sload-badge sload-badge--pickup">самовывоз</span>'
                             : '<span class="sload-badge">доставка</span>'}</td>
-                        <td>${num(order.units)}</td>
+                        <td>${num(order.load)}${order.without_norm
+                            ? ' <span class="sload-badge sload-badge--warn">без нормы</span>' : ''}
+                            ${minutesModel ? breakdown(order) : ''}</td>
                         <td>${order.amount ? Math.round(order.amount) + NBSP + '₽' : '—'}</td>
                     </tr>`).join('')}</tbody>
             </table>`
             : '<div class="sload-empty"><p>В этом слоте заказов нет.</p></div>';
 
         modal(title, body,
+            (result.data.without_norm
+                ? '<button class="sload-btn sload-btn--ghost" data-open-norms>Разметить нормы</button>'
+                : '') +
             '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
+    }
+
+    async function openLoadModel() {
+        let data;
+        try {
+            data = (await api('/api/salon-load/model')).data;
+        } catch (error) {
+            toast('Не удалось прочитать модель нагрузки: ' + error.message, 'error');
+            return;
+        }
+
+        const minutes = data.model === 'minutes';
+        const coverage = data.coverage || {};
+        const ready = data.stores_with_florists === data.stores_total && data.stores_total > 0;
+
+        const body = `
+            <p class="sload-card__caption">Модель определяет, что делится на что в сетке.
+                Переключение обратимо и не требует сборки: если цифры окажутся
+                неправдоподобными, вернитесь сюда же.</p>
+
+            <div class="sload-note ${minutes ? 'sload-note--info' : ''}" style="margin-bottom:16px">
+                <span style="line-height:0;flex:0 0 auto">${icon(ICON_CLOCK, 18)}</span>
+                <div class="sload-note__body">
+                    <div class="sload-note__title">Сейчас: ${minutes
+                        ? 'минуты сборки против ёмкости в флористах'
+                        : 'заказы против ёмкости в единицах'}</div>
+                    <div>${minutes
+                        ? 'Нагрузка слота — сумма минут сборки заказов, ёмкость — флористы × 60.'
+                        : 'Нагрузка слота — заказ за единицу плюс надбавки, ёмкость — «единиц в час». ' +
+                          'Величина безразмерная: проверить её нечем.'}</div>
+                </div>
+            </div>
+
+            <h4 style="font-family:'Vollkorn',Georgia,serif;color:#411330;margin:0 0 4px">Готовность</h4>
+            <ul style="margin:0 0 16px;padding-left:18px;line-height:1.8">
+                <li>Флористы заданы у ${data.stores_with_florists} из ${data.stores_total}
+                    ${plural(data.stores_total, 'салона', 'салонов', 'салонов')}${ready
+                        ? '' : ' — остальные после переключения останутся без процента'}</li>
+                <li>За ${coverage.days} дней позиции без нормы есть в
+                    ${num(coverage.share)}% заказов
+                    (${coverage.orders_incomplete} из ${coverage.orders});
+                    неразмеченных товаров — ${coverage.offers_without_norm}</li>
+            </ul>
+
+            ${coverage.share > coverage.threshold ? note('warn',
+                'Разметка покрывает не весь поток',
+                'Заказы с неразмеченными позициями посчитаются не полностью, и загрузка ' +
+                'окажется занижена. Это не запрет — решение ваше, но переключение попросит ' +
+                'подтверждения.') : ''}
+
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                ${minutes
+                    ? '<button class="sload-btn sload-btn--ghost" data-set-model="orders">Вернуться к заказам</button>'
+                    : '<button class="sload-btn" data-set-model="minutes">Перейти на минуты</button>'}
+            </div>`;
+
+        const overlay = modal('Модель нагрузки', body,
+            '<button class="sload-btn sload-btn--ghost" data-close>Закрыть</button>');
+
+        overlay.addEventListener('click', async e => {
+            const button = e.target.closest('[data-set-model]');
+            if (!button) return;
+            const target = button.dataset.setModel;
+            button.disabled = true;
+            try {
+                await api('/api/salon-load/model', postOptions({ model: target }));
+            } catch (error) {
+                // 409 — покрытие ниже порога. Порог предупреждает, а не
+                // запрещает: спрашиваем человека и повторяем с подтверждением.
+                // Любая другая ошибка — это сломанный запрос, а не вопрос.
+                if (error.status !== 409) {
+                    toast('Не удалось переключить: ' + error.message, 'error');
+                    button.disabled = false;
+                    return;
+                }
+                // Нативный confirm внутри iframe Пульса молча игнорируется —
+                // только window.BarhatUI.
+                const confirmed = await window.BarhatUI.confirm(error.message,
+                    { title: 'Переключить всё равно?', confirmText: 'Переключить' });
+                if (!confirmed) {
+                    button.disabled = false;
+                    return;
+                }
+                try {
+                    await api('/api/salon-load/model',
+                        postOptions({ model: target, confirm: true }));
+                } catch (retryError) {
+                    toast('Не удалось переключить: ' + retryError.message, 'error');
+                    button.disabled = false;
+                    return;
+                }
+            }
+            toast(target === 'minutes' ? 'Считаем в минутах' : 'Вернулись к заказам', 'success');
+            overlay.remove();
+            state.data = null;
+            state.week = null;
+            state.alerts = null;
+            load();
+        });
     }
 
     async function showCapacityModel(overlay) {
@@ -1608,6 +1774,19 @@
             if (open.dataset.open === 'norms') openTimeNorms('groups');
             if (open.dataset.open === 'weights') openWeights(true);
             if (open.dataset.open === 'statuses') openStatuses();
+            if (open.dataset.open === 'model') openLoadModel();
+            return;
+        }
+
+        // «Разметить нормы» из разбора слота и из счётчика занижения ведёт
+        // сразу на вкладку «Без нормы»: показать список всех товаров человеку,
+        // который пришёл за конкретными недосчитанными, — значит заставить его
+        // искать. Своя модалка поверх чужой не нужна — закрываем текущую.
+        const openNorms = e.target.closest('[data-open-norms]');
+        if (openNorms) {
+            const overlay = openNorms.closest('.modal-overlay');
+            if (overlay) overlay.remove();
+            openTimeNorms('missing');
             return;
         }
 

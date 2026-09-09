@@ -693,7 +693,16 @@ def health_check():
         # названий салонов нет. Пять снимков в четыре базы — самый дорогой
         # блок ручки, поэтому он за ?full=1.
         from salonkpi.metrics import pipeline_health
-        return pipeline_health(full=True)
+        result = pipeline_health(full=True)
+        # Модель нагрузки и готовность ёмкости — одним соединением. Какая
+        # модель активна, снаружи иначе не увидеть вовсе, а «миграция колонки
+        # прошла» проверяется только тем, что этот блок вообще посчитался.
+        try:
+            from salonload.storage import model_health
+            result["salon_load"] = model_health()
+        except Exception as e:
+            result["salon_load"] = {"error": f"{type(e).__name__}: {e}"}
+        return result
 
     body = {
         'status': 'ok',
