@@ -36,7 +36,8 @@
         stale: false,       // последняя попытка не удалась
         loading: false,
         openOrderId: null,
-        pushKey: null       // публичный VAPID; null = пуши не настроены
+        pushKey: null,      // публичный VAPID; null = пуши не настроены
+        pushOn: false       // подписка этого устройства оформлена
     };
 
     var el = {};
@@ -439,8 +440,20 @@
             ? state.city + ' · ' + state.orders.length + ' заказов'
             : 'Заказы вашего города';
 
-        if (state.profileWarning) {
-            el.warning.textContent = state.profileWarning;
+        // «Включил уведомления, а они не приходят» — это почти всегда
+        // отсутствие профиля курьера с городом: адресатов нового заказа
+        // выбирают по нему. Молчать об этом нельзя: человек считает, что всё
+        // настроено, и ждёт звука, которого не будет.
+        var warnings = [];
+        if (state.profileWarning) warnings.push(state.profileWarning);
+        if (state.pushOn && !state.city) {
+            warnings.push('Уведомления включены, но вам не назначен город — '
+                + 'о новых заказах они приходить не будут. '
+                + 'Попросите управляющего завести профиль курьера.');
+        }
+
+        if (warnings.length) {
+            el.warning.textContent = warnings.join(' ');
             el.warning.hidden = false;
         } else {
             el.warning.hidden = true;
@@ -1151,6 +1164,8 @@
                 if (existing) {
                     // Подписка могла быть выдана до перезапуска сервера —
                     // пересохраняем, чтобы она точно лежала в базе
+                    state.pushOn = true;
+                    render();
                     return sendSubscription(existing);
                 }
                 renderPushButton();
@@ -1188,7 +1203,9 @@
                 });
             }).then(sendSubscription).then(function () {
                 toast('Уведомления включены', 'success');
+                state.pushOn = true;
                 if (button) button.remove();
+                render();
             });
         }).catch(function (error) {
             toast('Не удалось включить уведомления: ' + error.message, 'error');

@@ -725,8 +725,20 @@ def health_check():
         with couriers_db() as conn:
             subscriptions = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM push_subscriptions").fetchone()["cnt"]
+            # Подписка есть, а уведомлений нет — почти всегда потому, что у
+            # учётки нет профиля курьера с городом: адресатов «нового заказа»
+            # выбирают именно по нему. Считаем ПОДПИСАННЫХ курьеров, а не всех
+            # подряд: «две подписки и ноль адресатов» — это и есть диагноз.
+            addressable = conn.execute(
+                "SELECT COUNT(DISTINCT p.user_id) AS cnt FROM courier_profiles p "
+                "  JOIN push_subscriptions s ON s.user_id = p.user_id "
+                " WHERE p.active = 1 AND p.city IS NOT NULL").fetchone()["cnt"]
+            events = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM push_events").fetchone()["cnt"]
         return {'configured': courier_push.is_configured(),
-                'subscriptions': subscriptions}
+                'subscriptions': subscriptions,
+                'addressable_couriers': addressable,
+                'events_sent': events}
 
     if full:
         body['courier_push'] = timed('courier_push', collect_push)
