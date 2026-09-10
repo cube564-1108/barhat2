@@ -338,9 +338,32 @@ check("флаг «не связываться» выводится первым 
 # Номер заказа и внутренний id CRM — разные числа. Пока шапка карточки
 # подставляла id, превью показывало «№ 154368», а карточка того же заказа —
 # «Заказ № 268835»: курьер назвал бы оператору несуществующий номер.
-check("шапка карточки не подставляет внутренний id CRM",
-      "Заказ № ' + esc(orderNumber)" in js and "esc(orderId)" not in js,
+check("шапка карточки печатает номер, а не id",
+      "Заказ № ' + esc(orderNumber)" in js,
       "(номер человеку — order_number, retailcrm_order_id только в data-*)")
+# Заголовок собирается ровно одной функцией, и все её вызовы обязаны
+# проходить через displayNumber: иначе id снова просочится на экран
+def calls_of(source, name):
+    """Аргументы каждого вызова функции: регуляркой вложенные скобки не взять."""
+    found = []
+    for match in re.finditer(re.escape(name) + r"\(", source):
+        depth, i = 0, match.end() - 1
+        while i < len(source):
+            if source[i] == "(":
+                depth += 1
+            elif source[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    found.append(source[match.end():i])
+                    break
+            i += 1
+    return found
+
+
+sheet_calls = [call for call in calls_of(js, "sheetShell") if call.strip() != "body, orderNumber"]
+check("все вызовы шапки идут через displayNumber",
+      len(sheet_calls) >= 3 and all("displayNumber" in call for call in sheet_calls),
+      f"({[c[:50] for c in sheet_calls]})")
 check("номер берётся из order_number", "function displayNumber" in js)
 
 check("прокрутка возвращается после перерисовки",

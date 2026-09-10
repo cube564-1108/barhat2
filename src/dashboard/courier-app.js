@@ -548,6 +548,9 @@
             if (state.openOrderId !== orderId) return;   // успели закрыть
             el.card.innerHTML = sheetShell(cardBodyHtml(payload.data),
                                            displayNumber(payload.data, orderId));
+            // Свайп живёт на своих pointer-событиях, делегированием его не
+            // поймать: обработчик вешается заново после каждой перерисовки
+            bindSlide(el.card);
         }).catch(function (error) {
             if (state.openOrderId !== orderId) return;
             el.card.innerHTML = sheetShell(
@@ -736,12 +739,29 @@
         if (order.note_text) parts.push(block('Примечание',
             '<div class="cd-block__value">' + esc(order.note_text) + '</div>'));
 
-        if (order.is_mine) {
-            parts.push('<button type="button" class="cd-btn cd-btn--ghost" data-release="'
-                + esc(order.retailcrm_order_id) + '">Отказаться от заказа</button>');
+        var id = esc(order.retailcrm_order_id);
+        if (order.is_mine && order.assignment_state === 'picked_up') {
+            // Доставка — необратимое действие, и оно не должно висеть на одном
+            // тапе: телефон в кармане нажимает сам. Отсюда свайп (§3 плана).
+            parts.push('<div class="cd-slide" data-slide-order="' + id + '">'
+                + '<span class="cd-slide__hint">Проведите вправо — доставлено</span>'
+                + '<span class="cd-slide__knob">'
+                + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+                + ' stroke-linecap="round" stroke-linejoin="round" width="22" height="22">'
+                + '<path d="M5 12h14"></path><path d="M12 5l7 7-7 7"></path></svg></span></div>');
+            parts.push('<button type="button" class="cd-btn cd-btn--ghost" data-problem-open="'
+                + id + '">Проблема</button>');
+        } else if (order.is_mine) {
+            parts.push('<button type="button" class="cd-btn cd-btn--accent" data-pickup="'
+                + id + '">Забрал заказ</button>');
+            parts.push('<div class="cd-btn-row">'
+                + '<button type="button" class="cd-btn cd-btn--ghost" data-release="'
+                + id + '">Отказаться</button>'
+                + '<button type="button" class="cd-btn cd-btn--ghost" data-problem-open="'
+                + id + '">Проблема</button></div>');
         } else if (order.is_free) {
             parts.push('<button type="button" class="cd-btn cd-btn--accent" data-claim="'
-                + esc(order.retailcrm_order_id) + '">Забронировать</button>');
+                + id + '">Забронировать</button>');
         }
 
         return parts.join('');
@@ -783,15 +803,19 @@
 
     // === Обработчики ========================================================
 
-    function apiPost(url) {
+    function apiPost(url, body) {
         return fetch(url, {
             method: 'POST',
             credentials: 'same-origin',
+            body: body ? JSON.stringify(body) : undefined,
             // Ручки записи требуют именно это значение (см. AJAX_HEADER_VALUE
             // в auth.py): браузер не даёт поставить кастомный заголовок в
             // межсайтовом запросе, и это вся защита от CSRF — токенов в
             // проекте нет. Привычное 'XMLHttpRequest' здесь не подойдёт.
-            headers: { 'X-Requested-With': 'barhat-dashboard' }
+            headers: {
+                'X-Requested-With': 'barhat-dashboard',
+                'Content-Type': 'application/json'
+            }
         }).then(function (response) {
             return response.json().catch(function () { return {}; })
                 .then(function (payload) {
@@ -835,6 +859,77 @@
             });
     }
 
+    var PROBLEM_REASONS = [
+        { action: 'no_answer', title: 'Не дозвонился' },
+        { action: 'reschedule', title: 'Просят привезти позже' },
+        { action: 'refused', title: 'Отказ от заказа' },
+        { action: 'wrong_address', title: 'Адрес не тот' }
+    ];
+
+    /**
+     * Отметка курьера, уходящая в CRM.
+     *
+     * Курьер не ждёт CRM: сервер меняет состояние сразу и кладёт отправку в
+     * очередь. Поэтому «сохранено» здесь честно, даже когда CRM лежит.
+     */
+    function sendAction(orderId, action, extra, button) {
+        if (button && button.disabled) return Promise.resolve();
+        if (button) { button.disabled = true; button.textContent = 'Сохраняем…'; }
+
+        var body = { action: action };
+        if (extra) Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
+
+        return apiPost('/api/courier/orders/' + encodeURIComponent(orderId) + '/action', body)
+            .then(function (payload) {
+                if (payload.data && payload.data.warning) {
+                    toast(payload.data.warning, 'error');
+                } else {
+                    toast('Отметка сохранена', 'success');
+                }
+                closeCard();
+                return loadFeed();
+            })
+            .catch(function (error) {
+                if (error.code === 'not_ready') {
+                    // Не запрет, а предупреждение: статус «Заказ готов» ставят
+                    // в момент начала окна доставки, а у трети заказов позже.
+                    // Запретить забирать — значит заставить курьера стоять в
+                    // салоне и ждать, пока флорист щёлкнет статус.
+                    return confirmNotReady(orderId, button);
+                }
+                toast(error.message, 'error');
+                if (button) { button.disabled = false; }
+                loadFeed();
+            });
+    }
+
+    function confirmNotReady(orderId, button) {
+        return window.BarhatUI.confirm(
+            'Заказ ещё не отмечен готовым. Всё равно забираете?',
+            { title: 'Заказ не готов', confirmText: 'Забираю', cancelText: 'Отмена' }
+        ).then(function (ok) {
+            if (!ok) {
+                if (button) { button.disabled = false; button.textContent = 'Забрал заказ'; }
+                return;
+            }
+            return sendAction(orderId, 'pickup', { force_not_ready: true }, button);
+        });
+    }
+
+    function askProblem(orderId) {
+        var buttons = PROBLEM_REASONS.map(function (reason) {
+            return '<button type="button" class="cd-btn cd-btn--ghost" data-problem="'
+                + esc(reason.action) + '" data-problem-order="' + esc(orderId) + '">'
+                + esc(reason.title) + '</button>';
+        }).join('');
+        // Предустановленные причины, а не ввод текста: набирать за рулём никто
+        // не будет, и данные разъедутся с жизнью
+        el.card.querySelector('.cd-sheet__body').insertAdjacentHTML('afterbegin',
+            '<section class="cd-block"><div class="cd-block__label">Что случилось</div>'
+            + '<div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">'
+            + buttons + '</div></section>');
+    }
+
     function releaseOrder(orderId, button) {
         if (button.disabled) return;
         window.BarhatUI.confirm('Вернуть заказ в общий список?', {
@@ -871,7 +966,67 @@
         if (claim) { claimOrder(claim.getAttribute('data-claim'), claim); return; }
 
         var release = event.target.closest('[data-release]');
-        if (release) releaseOrder(release.getAttribute('data-release'), release);
+        if (release) { releaseOrder(release.getAttribute('data-release'), release); return; }
+
+        var pickup = event.target.closest('[data-pickup]');
+        if (pickup) {
+            sendAction(pickup.getAttribute('data-pickup'), 'pickup', null, pickup);
+            return;
+        }
+
+        var problemOpen = event.target.closest('[data-problem-open]');
+        if (problemOpen) { askProblem(problemOpen.getAttribute('data-problem-open')); return; }
+
+        var problem = event.target.closest('[data-problem]');
+        if (problem) {
+            sendAction(problem.getAttribute('data-problem-order'),
+                       problem.getAttribute('data-problem'), null, problem);
+        }
+    }
+
+    /**
+     * Свайп «Доставлено».
+     *
+     * Pointer events, а не touch: одним обработчиком закрываются и палец, и
+     * мышь (карточку открывают и с компьютера). Порог — 65% ширины: меньше
+     * срабатывает от случайного смаза, больше не дотягивается одной рукой.
+     */
+    function bindSlide(root) {
+        var slide = root.querySelector('[data-slide-order]');
+        if (!slide) return;
+        var knob = slide.querySelector('.cd-slide__knob');
+        var startX = null;
+        var maxShift = 0;
+
+        function move(event) {
+            if (startX === null) return;
+            var shift = Math.max(0, Math.min(event.clientX - startX, maxShift));
+            knob.style.transform = 'translateX(' + shift + 'px)';
+            slide.classList.toggle('cd-slide--armed', shift >= maxShift * 0.65);
+        }
+
+        function end(event) {
+            if (startX === null) return;
+            var shift = Math.max(0, Math.min(event.clientX - startX, maxShift));
+            startX = null;
+            knob.style.transform = '';
+            slide.classList.remove('cd-slide--armed');
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', end);
+            window.removeEventListener('pointercancel', end);
+            if (shift >= maxShift * 0.65) {
+                slide.classList.add('cd-slide--busy');
+                sendAction(slide.getAttribute('data-slide-order'), 'deliver', null, null);
+            }
+        }
+
+        knob.addEventListener('pointerdown', function (event) {
+            startX = event.clientX;
+            maxShift = slide.clientWidth - knob.offsetWidth - 8;
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', end);
+            window.addEventListener('pointercancel', end);
+        });
     }
 
     /**

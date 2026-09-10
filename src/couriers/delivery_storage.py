@@ -845,6 +845,268 @@ def release_order(order_id: int, courier_user_id: int,
         conn.close()
 
 
+# --- действия курьера, уходящие в CRM --------------------------------------
+ACTION_PICKUP = "pickup"
+ACTION_DELIVER = "deliver"
+ACTION_NO_ANSWER = "no_answer"
+ACTION_RESCHEDULE = "reschedule"
+ACTION_REFUSED = "refused"
+ACTION_WRONG_ADDRESS = "wrong_address"
+
+# Причины «не получилось» — кнопками, а не вводом текста: набирать за рулём
+# никто не будет, и данные разъедутся с жизнью (§3 плана).
+PROBLEM_ACTIONS = {
+    ACTION_NO_ANSWER: "Не дозвонился",
+    ACTION_RESCHEDULE: "Просят привезти позже",
+    ACTION_REFUSED: "Отказ от заказа",
+    ACTION_WRONG_ADDRESS: "Адрес не тот",
+}
+
+ALL_ACTIONS = {
+    ACTION_PICKUP: "Забрал заказ",
+    ACTION_DELIVER: "Доставил",
+    **PROBLEM_ACTIONS,
+}
+
+OUTBOX_PENDING = "pending"
+OUTBOX_SENT = "sent"
+OUTBOX_FAILED = "failed"
+
+# Сколько ждать перед повтором и сколько попыток делать. CRM может лежать
+# минутами; курьер этого ждать не должен, а мы не должны долбить её в цикле.
+OUTBOX_RETRY_SECONDS = 300
+OUTBOX_MAX_ATTEMPTS = 8
+
+
+def list_action_statuses() -> List[Dict[str, Any]]:
+    """Справочник «действие → статус CRM» со всеми действиями, включая пустые."""
+    with get_db() as conn:
+        rows = {row["action"]: dict(row) for row in conn.execute(
+            "SELECT * FROM courier_action_statuses")}
+    return [
+        {
+            "action": action,
+            "title": title,
+            "status_code": (rows.get(action) or {}).get("status_code"),
+            "updated_by": (rows.get(action) or {}).get("updated_by"),
+            "updated_at": (rows.get(action) or {}).get("updated_at"),
+            "is_problem": action in PROBLEM_ACTIONS,
+        }
+        for action, title in ALL_ACTIONS.items()
+    ]
+
+
+def set_action_status(action: str, status_code: Optional[str], username: str) -> None:
+    if action not in ALL_ACTIONS:
+        raise ValueError(f"Неизвестное действие: {action}")
+    code = (status_code or "").strip() or None
+    with get_db() as conn:
+        if code is not None:
+            known = conn.execute(
+                "SELECT 1 FROM order_statuses WHERE code = ?", (code,)).fetchone()
+            if known is None:
+                # Код придумали руками — в CRM его нет, и отправка молча
+                # потеряла бы статус. Это ровно история с НДС в банк.
+                raise ValueError(f"Статуса «{code}» нет в справочнике CRM")
+        conn.execute(
+            "INSERT INTO courier_action_statuses (action, status_code, updated_by, updated_at) "
+            "VALUES (?, ?, ?, datetime('now')) "
+            "ON CONFLICT(action) DO UPDATE SET status_code = excluded.status_code, "
+            "  updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+            (action, code, username),
+        )
+
+
+def _action_status_locked(conn, action: str) -> str:
+    """
+    Код статуса CRM для действия — или отказ с внятным текстом.
+
+    Пустой маппинг ОСТАНАВЛИВАЕТ действие, а не отправляет в CRM что-нибудь
+    похожее: параметр внешней системы — данные, а не догадка (CLAUDE.md).
+    """
+    row = conn.execute(
+        "SELECT status_code FROM courier_action_statuses WHERE action = ?",
+        (action,)).fetchone()
+    code = row["status_code"] if row else None
+    if not code:
+        raise ClaimError(
+            f"Для действия «{ALL_ACTIONS.get(action, action)}» не выбран статус "
+            f"в CRM. Попросите администратора настроить справочник.",
+            "not_configured")
+    return code
+
+
+def _enqueue_locked(conn, order_id: int, assignment_id: Optional[int], action: str,
+                    status_code: str, courier_crm_id: Optional[int],
+                    username: str) -> None:
+    """Положить отправку в очередь тем же соединением, что и смену состояния."""
+    conn.execute(
+        "INSERT INTO crm_status_outbox "
+        "  (retailcrm_order_id, assignment_id, action, target_status, "
+        "   courier_crm_id, state, next_attempt_at, created_by, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, datetime('now'))",
+        (order_id, assignment_id, action, status_code, courier_crm_id,
+         OUTBOX_PENDING, username),
+    )
+
+
+def advance_assignment(order_id: int, courier_user_id: int, action: str,
+                       username: str, courier_crm_id: Optional[int] = None,
+                       problem_note: Optional[str] = None,
+                       force_not_ready: bool = False) -> Dict[str, Any]:
+    """
+    Отметка курьера: «Забрал», «Доставил» или проблема.
+
+    Состояние меняется у нас и попадает в очередь отправки ОДНОЙ транзакцией.
+    Если бы очередь наполнялась отдельно, падение между двумя записями давало
+    бы либо доставленный заказ, о котором CRM не узнает, либо отправку статуса
+    по несостоявшемуся действию.
+
+    Курьер не ждёт CRM: наружу запись уносит фон. CRM отвечает секундами и
+    иногда лежит, а воркеров у сайта два.
+    """
+    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        row = _assignment_row(conn, order_id)
+        if row is None:
+            raise ClaimError("Заказ за вами не числится", "gone")
+        if row["courier_user_id"] != courier_user_id:
+            raise ClaimError("Это чужой заказ", "forbidden")
+
+        status_code = _action_status_locked(conn, action)
+
+        if action == ACTION_PICKUP:
+            if row["state"] != STATE_CLAIMED:
+                raise ClaimError("Заказ уже забран", "already")
+            # «Забрал» у неготового заказа не блокируем — предупреждаем.
+            # Разведка показала: статус «Заказ готов» ставят в момент начала
+            # окна доставки, а у трети заказов уже после него. Запрет заставил
+            # бы курьера стоять в салоне и ждать, пока флорист щёлкнет статус.
+            ready = {code["status_code"] for code in conn.execute(
+                "SELECT status_code FROM courier_visible_statuses WHERE role = ?",
+                (ROLE_READY,))}
+            order_status = conn.execute(
+                "SELECT status FROM courier_orders WHERE retailcrm_order_id = ?",
+                (order_id,)).fetchone()
+            is_ready = bool(order_status and order_status["status"] in ready)
+            if not is_ready and not force_not_ready:
+                raise ClaimError("Заказ не отмечен готовым", "not_ready")
+            conn.execute(
+                "UPDATE delivery_assignments SET state = ?, picked_up_at = ?, "
+                "       problem_note = COALESCE(?, problem_note) WHERE id = ?",
+                (STATE_PICKED_UP, now,
+                 None if is_ready else "забран до отметки «Заказ готов»", row["id"]),
+            )
+        elif action == ACTION_DELIVER:
+            if row["state"] != STATE_PICKED_UP:
+                raise ClaimError("Сначала отметьте, что забрали заказ", "order")
+            conn.execute(
+                "UPDATE delivery_assignments SET state = ?, delivered_at = ? WHERE id = ?",
+                (STATE_DELIVERED, now, row["id"]),
+            )
+        elif action in PROBLEM_ACTIONS:
+            conn.execute(
+                "UPDATE delivery_assignments SET state = ?, problem_code = ?, "
+                "       problem_note = ? WHERE id = ?",
+                (STATE_PROBLEM, action, problem_note, row["id"]),
+            )
+        else:
+            raise ClaimError(f"Неизвестное действие: {action}", "bad_action")
+
+        # courierId пишем только вместе с «Забрал»: бронь может слететь, а
+        # факт «повёз» — уже нет. Если оператор проставил другого курьера,
+        # наш перезапишет — поэтому и только в этот момент.
+        _enqueue_locked(conn, order_id, row["id"], action, status_code,
+                        courier_crm_id if action == ACTION_PICKUP else None,
+                        username)
+
+        conn.execute("COMMIT")
+        return {"retailcrm_order_id": order_id, "action": action,
+                "target_status": status_code}
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def take_outbox_batch(limit: int = 20) -> List[Dict[str, Any]]:
+    """Что пора отправить в CRM."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM crm_status_outbox "
+            " WHERE state = ? AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now')) "
+            " ORDER BY id LIMIT ?",
+            (OUTBOX_PENDING, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_outbox_sent(outbox_id: int, response_code: Optional[int] = 200) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE crm_status_outbox SET state = ?, sent_at = datetime('now'), "
+            "       attempts = attempts + 1, response_code = ?, error_message = NULL "
+            " WHERE id = ?",
+            (OUTBOX_SENT, response_code, outbox_id),
+        )
+
+
+def mark_outbox_failed(outbox_id: int, message: str,
+                       response_code: Optional[int] = None,
+                       retry: bool = True) -> None:
+    """
+    Отметить неудачу.
+
+    Упавшая задача повторяется с ОТСРОЧКОЙ, а не каждым тиком: вечный
+    кандидат в очереди — это тот самый механизм, которым выжгли месячную
+    квоту ПланФакта. После OUTBOX_MAX_ATTEMPTS попыток задача перестаёт
+    ходить наружу и ждёт человека — она видна в журнале.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT attempts FROM crm_status_outbox WHERE id = ?", (outbox_id,)
+        ).fetchone()
+        attempts = (row["attempts"] if row else 0) + 1
+        exhausted = attempts >= OUTBOX_MAX_ATTEMPTS or not retry
+        conn.execute(
+            "UPDATE crm_status_outbox SET state = ?, attempts = ?, "
+            "       response_code = ?, error_message = ?, "
+            "       next_attempt_at = CASE WHEN ? THEN NULL "
+            f"            ELSE datetime('now', '+{OUTBOX_RETRY_SECONDS} seconds') END "
+            " WHERE id = ?",
+            (OUTBOX_FAILED if exhausted else OUTBOX_PENDING, attempts,
+             response_code, message[:500], 1 if exhausted else 0, outbox_id),
+        )
+
+
+def list_outbox(limit: int = 100, state: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Журнал отправок: что мы отправили и что CRM ответила.
+
+    Вопрос «что мы им отправили» возникает всегда, и отвечать на него чтением
+    кода — потерянный час (CLAUDE.md, история с НДС в банк).
+    """
+    sql = ("SELECT b.*, o.order_number FROM crm_status_outbox b "
+           " LEFT JOIN courier_orders o ON o.retailcrm_order_id = b.retailcrm_order_id")
+    params: List[Any] = []
+    if state:
+        sql += " WHERE b.state = ?"
+        params.append(state)
+    sql += " ORDER BY b.id DESC LIMIT ?"
+    params.append(limit)
+
+    with get_db() as conn:
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    for row in rows:
+        row["action_title"] = ALL_ACTIONS.get(row["action"], row["action"])
+    return rows
+
+
 def expire_stale_claims() -> int:
     """
     Снять брони, до окна доставки которых осталось меньше положенного.

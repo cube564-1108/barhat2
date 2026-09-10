@@ -15,6 +15,7 @@
 - limit принимает только 20/50/100, иначе 400 Errors in the pagination parameters.
 """
 
+import json
 import logging
 import os
 import re
@@ -421,6 +422,62 @@ class CourierOrdersClient:
                 time.sleep(PAGE_PAUSE_SECONDS)
         return orders
 
+
+    def _post(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        POST в RetailCRM: form-urlencoded, а не JSON.
+
+        Это требование API: тело — обычная форма, а сложные структуры внутри
+        неё передаются JSON-СТРОКОЙ в отдельном поле (`order`). Отправка
+        привычного `json=` возвращает 400 с бесполезным текстом.
+        """
+        if not self.api_url or not self.api_key:
+            raise RetailCRMError("RetailCRM не настроен: задайте RETAILCRM_URL и RETAILCRM_API_KEY")
+
+        url = f"{self.api_url}/{endpoint.lstrip('/')}"
+        try:
+            response = self.session.post(url, data=data, timeout=self.timeout)
+        except requests.exceptions.RequestException as e:
+            raise RetailCRMError(f"Сеть/таймаут при запросе {endpoint}: {e}") from e
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+
+        if not response.ok or not payload.get("success", False):
+            message = payload.get("errorMsg") or response.text[:300]
+            # Код ответа отдаём наверх: 4xx повторять бессмысленно, 5xx стоит
+            error = RetailCRMError(f"RetailCRM отклонил {endpoint}: {message}")
+            error.status_code = response.status_code
+            raise error
+        return payload
+
+    def edit_order(self, order_id: int, status: Optional[str] = None,
+                   courier_id: Optional[int] = None,
+                   site: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Изменить заказ: статус и/или курьера.
+
+        `courier_id` пишется вместе с «Забрал», и это про ДЕНЬГИ: модуль
+        «Оплата курьерам» считает выплаты по `delivery.data.courierId`, и без
+        него работа курьера просто не попадёт в оплату (§7-тер плана).
+
+        `by=id` обязателен: без него CRM ищет заказ по externalId и отвечает
+        «не найден» на совершенно живой заказ.
+        """
+        order: Dict[str, Any] = {}
+        if status:
+            order["status"] = status
+        if courier_id is not None:
+            order["delivery"] = {"data": {"courierId": int(courier_id)}}
+        if not order:
+            raise RetailCRMError("Нечего отправлять: не задан ни статус, ни курьер")
+
+        data = {"by": "id", "order": json.dumps(order, ensure_ascii=False)}
+        if site:
+            data["site"] = site
+        return self._post(f"api/v5/orders/{order_id}/edit", data)
 
     def get_product_images(self, offer_ids: List[int]) -> Dict[int, Optional[str]]:
         """

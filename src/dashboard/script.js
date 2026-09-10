@@ -210,6 +210,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (pageName === 'salon_load' && window.SalonLoadModule) {
                 window.SalonLoadModule.onPageActivated(currentUser);
             }
+
+            // Активируем контроль доставки
+            if (pageName === 'courier_dispatch' && window.CourierDispatchModule) {
+                window.CourierDispatchModule.onPageActivated(currentUser);
+            }
         } else {
             // Если страницы нет, показываем заглушку
             const targetNav = document.querySelector(`.nav-item[data-page="${pageName}"]`);

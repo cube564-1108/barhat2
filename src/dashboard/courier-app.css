@@ -387,6 +387,38 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     border-radius: var(--bx-r-lg); color: var(--bx-wine); cursor: pointer;
 }
 
+/* ===== Свайп «Доставлено» =============================================== */
+/* Необратимое действие не должно висеть на одном тапе: телефон в кармане
+   нажимает сам. Порог срабатывания — 65% ширины (см. bindSlide). */
+
+.cd-slide {
+    position: relative;
+    display: flex; align-items: center;
+    min-height: 56px;
+    padding: 4px;
+    border-radius: var(--bx-r-xl);
+    background: var(--bx-pink-wash);
+    overflow: hidden;
+    touch-action: pan-y;      /* горизонтальный жест забираем себе */
+    user-select: none;
+}
+.cd-slide__hint {
+    position: absolute; left: 0; right: 0; text-align: center;
+    font-size: 14px; font-weight: 600; color: var(--bx-wine);
+    pointer-events: none;
+}
+.cd-slide__knob {
+    position: relative; z-index: 1;
+    width: 52px; height: 48px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--bx-r-lg);
+    background: var(--bx-wine); color: #fff;
+    cursor: grab; touch-action: none;
+}
+.cd-slide--armed { background: #ecfdf5; }
+.cd-slide--armed .cd-slide__knob { background: #047857; }
+.cd-slide--busy { opacity: .6; pointer-events: none; }
+
 /* ===== Полноэкранное фото =============================================== */
 
 .cd-photo {

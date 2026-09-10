@@ -1365,6 +1365,12 @@ def salon_load_js():
     return send_from_directory(DASHBOARD_DIR, 'salon-load.js')
 
 
+@app.route('/courier-dispatch.js')
+def serve_courier_dispatch():
+    """Отдаёт скрипт раздела «Контроль доставки»"""
+    return send_from_directory(DASHBOARD_DIR, 'courier-dispatch.js')
+
+
 @app.route('/salon-load.css')
 def salon_load_css():
     return send_from_directory(DASHBOARD_DIR, 'salon-load.css')

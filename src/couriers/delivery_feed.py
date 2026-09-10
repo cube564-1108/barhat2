@@ -192,7 +192,61 @@ def run_once(deadline: Optional[float] = None) -> Dict[str, Any]:
 
     stats["images"] = fetch_missing_images(client, deadline=deadline)
     stats["claims"] = sweep_assignments()
+    stats["outbox"] = push_status_outbox(client, deadline=deadline)
     return stats
+
+
+def push_status_outbox(client, deadline: Optional[float] = None) -> Dict[str, int]:
+    """
+    Отправить в CRM накопленные отметки курьеров.
+
+    Здесь, а не в обработчике: CRM отвечает секундами и иногда лежит, а
+    воркеров у сайта два — живой внешний вызов из запроса уже дважды укладывал
+    прод. Курьер жмёт «Забрал», запись падает в базу мгновенно, наружу её
+    уносит этот проход.
+
+    Эхо собственных записей лента отбрасывает по `apiKey.current`, так что
+    отправленный нами статус не вернётся и не перепишет состояние.
+    """
+    from .delivery_storage import (mark_outbox_failed, mark_outbox_sent,
+                                   take_outbox_batch)
+
+    result = {"sent": 0, "failed": 0}
+    try:
+        batch = take_outbox_batch()
+    except Exception as e:
+        logger.warning(f"Очередь статусов: не удалось прочитать — {e}")
+        return result
+
+    for task in batch:
+        if deadline is not None and time.monotonic() >= deadline:
+            # Остаток уедет следующим тиком: лучше отправить половину, чем
+            # занять воркер на всю очередь
+            break
+        try:
+            client.edit_order(
+                order_id=task["retailcrm_order_id"],
+                status=task["target_status"],
+                courier_id=task["courier_crm_id"],
+            )
+            mark_outbox_sent(task["id"])
+            result["sent"] += 1
+        except Exception as e:
+            status_code = getattr(e, "status_code", None)
+            # 4xx повторять бессмысленно: заказ удалён, статус переименован,
+            # ключ отозван. Повтор такой задачи — вечный кандидат в очереди.
+            retry = not (status_code and 400 <= status_code < 500
+                         and status_code not in (408, 429))
+            mark_outbox_failed(task["id"], str(e), status_code, retry=retry)
+            result["failed"] += 1
+            logger.warning(
+                f"Очередь статусов: заказ {task['retailcrm_order_id']} "
+                f"({task['action']} → {task['target_status']}) не ушёл: {e}")
+
+    if result["sent"] or result["failed"]:
+        logger.info(f"Очередь статусов: отправлено {result['sent']}, "
+                    f"ошибок {result['failed']}")
+    return result
 
 
 def sweep_assignments() -> Dict[str, int]:

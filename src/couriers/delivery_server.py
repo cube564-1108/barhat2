@@ -266,6 +266,47 @@ def release_order(order_id: int):
     return success_response(result)
 
 
+@delivery_bp.route("/orders/<int:order_id>/action", methods=["POST"])
+@section_required("courier_app", DISPATCH_SECTION)
+@require_ajax_header
+def order_action(order_id: int):
+    """
+    Отметка курьера: «Забрал», «Доставил», проблема.
+
+    Состояние меняется мгновенно, статус в CRM уходит фоном — курьер не ждёт
+    внешнюю систему и работает, даже когда CRM лежит.
+    """
+    payload = request.get_json(silent=True) or {}
+    action = payload.get("action")
+    if action not in ds.ALL_ACTIONS:
+        return error_response(f"Неизвестное действие: {action}")
+
+    profile = ds.get_courier_profile(int(current_user.id)) or {}
+
+    try:
+        result = ds.advance_assignment(
+            order_id=order_id,
+            courier_user_id=int(current_user.id),
+            action=action,
+            username=current_user.username,
+            courier_crm_id=profile.get("retailcrm_courier_id"),
+            problem_note=(payload.get("note") or None),
+            force_not_ready=bool(payload.get("force_not_ready")),
+        )
+    except ds.ClaimError as e:
+        return _claim_failed(e)
+
+    log_action(current_user.username, f"courier_{action}", f"Заказ {order_id}")
+
+    # Курьер не сопоставлен с CRM — доставка не попадёт в расчёт оплаты.
+    # Молчать об этом до конца месяца нельзя, но и мешать доставке из-за
+    # незаполненного справочника тоже (§7-тер).
+    if action == ds.ACTION_PICKUP and not profile.get("retailcrm_courier_id"):
+        result["warning"] = ("Ваша учётная запись не связана с курьером в CRM — "
+                             "эта доставка может не попасть в расчёт оплаты")
+    return success_response(result)
+
+
 # ---------------------------------------------------------------------------
 # Разбор броней (управляющий)
 # ---------------------------------------------------------------------------
@@ -332,6 +373,41 @@ def set_status(status_code: str):
     log_action(current_user.username, "courier_status_role",
                f"{status_code} → {role or 'убран'}")
     return success_response(ds.list_visible_statuses())
+
+
+@delivery_bp.route("/action-statuses", methods=["GET"])
+@section_required(DISPATCH_SECTION)
+def get_action_statuses():
+    """Справочник «действие курьера → статус CRM» плюс статусы для выбора."""
+    return success_response({
+        "actions": ds.list_action_statuses(),
+        "statuses": storage.list_order_statuses(),
+    })
+
+
+@delivery_bp.route("/action-statuses/<action>", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def set_action_status(action: str):
+    """Назначить действию код статуса CRM (или очистить, заблокировав действие)."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        ds.set_action_status(action, payload.get("status_code"), current_user.username)
+    except ValueError as e:
+        return error_response(str(e))
+    log_action(current_user.username, "courier_action_status",
+               f"{action} → {payload.get('status_code') or 'не задан'}")
+    return success_response(ds.list_action_statuses())
+
+
+@delivery_bp.route("/outbox", methods=["GET"])
+@section_required(DISPATCH_SECTION)
+def get_outbox():
+    """Журнал отправок в CRM: что ушло, что ответили, что застряло."""
+    return success_response(ds.list_outbox(
+        limit=min(int(request.args.get("limit", 100)), 500),
+        state=request.args.get("state") or None,
+    ))
 
 
 @delivery_bp.route("/profiles", methods=["GET"])
