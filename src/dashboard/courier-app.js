@@ -381,26 +381,82 @@
             + '</section>';
     }
 
-    function personHtml(order) {
-        // Получатель заполнен у 36% заказов — в двух случаях из трёх курьер
-        // звонит заказчику, и путать их нельзя: подпись обязательна.
-        //
-        // При флаге «не связываться» контакт всегда заказчик: показывать
-        // телефон получателя рядом с запретом звонить — приглашение ошибиться.
-        var name, phone, who;
-        if (order.recipient_phone && !order.recipient_is_customer
-                && !order.do_not_contact_recipient) {
-            name = order.recipient_name; phone = order.recipient_phone; who = 'получатель';
-        } else {
-            name = order.customer_name; phone = order.customer_phone; who = 'клиент';
+    /**
+     * Дата салона «ДД.ММ.ГГГГ». Чистую дату отдаём в BarhatTime — он её не
+     * конвертирует.
+     */
+    function fmtDate(value) {
+        if (!value) return null;
+        return window.BarhatTime
+            ? window.BarhatTime.formatPlainDate(value, null)
+            : String(value);
+    }
+
+    /**
+     * Отметка «ГГГГ-ММ-ДД ЧЧ:ММ:СС» → «ДД.ММ.ГГГГ ЧЧ:ММ», БЕЗ перевода часовых
+     * поясов.
+     *
+     * Своим кодом, а не `BarhatTime.formatDateTime`: тот считает время
+     * пришедшим в UTC и переводит его в пояс устройства. Плановая готовность —
+     * стенные часы салона, то самое «14:00», которое ввёл менеджер. Курьер
+     * может ехать с телефоном, настроенным на другой город, и перевод сдвинул
+     * бы ему готовность на два часа.
+     */
+    function fmtSalonStamp(value) {
+        if (!value) return null;
+        var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(value).trim());
+        if (!m) return String(value);
+        return m[3] + '.' + m[2] + '.' + m[1] + ' ' + m[4] + ':' + m[5];
+    }
+
+    /** «1 250 ₽» — с разделителем разрядов, как везде в дашборде. */
+    function fmtMoney(value) {
+        var number = Number(value);
+        if (!isFinite(number) || number <= 0) return null;
+        return number.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' ₽';
+    }
+
+    /**
+     * Оба контакта: получатель и заказчик, каждый своей строкой.
+     *
+     * Раньше карточка показывала кого-то одного, выбирая за курьера. Это
+     * ошибка: получатель заполнен у 36% заказов, и в остальных случаях звонить
+     * надо заказчику — но бывает нужен и тот, и другой (не открыли дверь,
+     * уточнить адрес). Кто есть кто — подписью, иначе курьер поздравит
+     * заказчика с сюрпризом, который тот сам и оплатил.
+     */
+    function contactsHtml(order) {
+        var rows = [];
+
+        if (order.recipient_name || order.recipient_phone) {
+            rows.push(contactRow(
+                'Получатель', order.recipient_name, order.recipient_phone,
+                order.do_not_contact_recipient
+                    ? 'Не звонить — сюрприз-доставка'
+                    : null));
         }
-        if (!name && !phone) return null;
-        return {
-            html: '<div class="cd-block__value--big">' + esc(name || 'без имени') + '</div>'
-                + '<div class="cd-person__who">' + esc(who) + (phone ? ' · ' + esc(phone) : '') + '</div>',
-            phone: phone,
-            who: who
-        };
+        if (order.customer_name || order.customer_phone) {
+            rows.push(contactRow(
+                'Заказчик', order.customer_name, order.customer_phone,
+                order.do_not_contact_recipient
+                    ? 'Все вопросы по доставке — сюда'
+                    : null));
+        }
+        return rows.length ? rows.join('') : null;
+    }
+
+    function contactRow(role, name, phone, note) {
+        var call = phone && !(role === 'Получатель' && note)
+            ? '<div style="margin-top:10px"><a class="cd-btn" href="' + esc(telHref(phone))
+                + '">Позвонить</a></div>'
+            : '';
+        return '<div class="cd-block__row">'
+            + '<div class="cd-person__who">' + esc(role) + '</div>'
+            + '<div class="cd-block__value--big">' + esc(name || 'без имени') + '</div>'
+            + (phone ? '<div class="cd-block__value">' + esc(phone) + '</div>' : '')
+            + (note ? '<div class="cd-block__note">' + esc(note) + '</div>' : '')
+            + call
+            + '</div>';
     }
 
     function itemsHtml(items) {
@@ -446,10 +502,11 @@
         }
 
         var tick = countdown(order);
+        var date = fmtDate(order.delivery_date);
         parts.push(block('Доставка',
             '<div class="cd-block__value--big">' + esc(slotText(order)) + '</div>'
             + (tick ? '<div class="cd-block__note">' + esc(tick.text) + '</div>' : ''),
-            order.delivery_date ? 'Дата: ' + order.delivery_date : null));
+            date ? 'Дата: ' + date : null));
 
         parts.push(block('Адрес',
             '<div class="cd-block__value">' + esc(order.address_text || 'адрес не указан') + '</div>'
@@ -460,20 +517,21 @@
                     + '">Маршрут</button></div>'
                 : '')));
 
+        var ready = fmtSalonStamp(order.ready_planned_at);
         parts.push(block('Забрать в салоне',
             '<div class="cd-block__value">' + esc(order.site_name || order.city || 'салон не указан') + '</div>',
-            order.ready_planned_at ? 'Плановая готовность: ' + order.ready_planned_at : null));
+            ready ? 'Плановая готовность: ' + ready : null));
 
-        var person = personHtml(order);
-        if (person) {
-            var call = person.phone
-                ? '<div style="margin-top:12px"><a class="cd-btn" href="'
-                    + esc(telHref(person.phone)) + '">Позвонить (' + esc(person.who) + ')</a></div>'
-                : '';
-            parts.push(block('Кому везём', person.html + call));
-        }
+        var contacts = contactsHtml(order);
+        if (contacts) parts.push(block('Контакты', contacts));
 
         parts.push(block('Состав', itemsHtml(order.items)));
+
+        var pay = fmtMoney(order.net_cost);
+        if (pay) {
+            parts.push(block('Себестоимость доставки',
+                '<div class="cd-block__value--big">' + esc(pay) + '</div>'));
+        }
 
         // Комментарии оператора и клиента — разные по смыслу, поэтому разными
         // блоками, а не одной кучей.

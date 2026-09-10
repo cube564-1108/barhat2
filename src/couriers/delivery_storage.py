@@ -372,6 +372,12 @@ PUBLIC_ORDER_FIELDS = (
     "retailcrm_order_id", "order_number", "delivery_date", "site_code", "city",
     "store_key", "address_text", "delivery_time_from", "delivery_time_to",
     "ready_time", "ready_planned_at", "status",
+    # «Не связываться с получателем» — не персональные данные, а указание, как
+    # везти. Пока флаг лежал среди контактов, курьер узнавал о нём только
+    # после брони: до неё карточка приходила без него, и сюрприз-доставку
+    # было нечем отличить от обычной ровно в тот момент, когда решают, брать
+    # заказ или нет.
+    "do_not_contact_recipient",
 )
 
 # Поля с персональными данными: отдаются только тому, кто взял заказ (и
@@ -379,7 +385,7 @@ PUBLIC_ORDER_FIELDS = (
 # который «просто просматривают», лишним быть не должен.
 PRIVATE_ORDER_FIELDS = (
     "recipient_name", "recipient_phone", "customer_name", "customer_phone",
-    "manager_comment", "customer_comment", "note_text", "do_not_contact_recipient",
+    "manager_comment", "customer_comment", "note_text",
     "recipient_is_customer",
 )
 
@@ -526,6 +532,12 @@ def order_for_courier(order_id: int, city: Optional[str],
         "is_free": row.get("assignment_state") is None,
         "expires_at": row.get("expires_at"),
         "items": items,
+        # Себестоимость доставки — это оплата курьеру за ходку. В ленте её
+        # нет намеренно: список с ценниками превращает свободный захват в
+        # разбор заказов по выгодности, а дальние и дешёвые повисают
+        # (черри-пикинг, §3 плана). В карточке её видит тот, кто уже открыл
+        # конкретный заказ.
+        "net_cost": row.get("net_cost"),
     })
     if with_private or mine:
         card.update({field: row.get(field) for field in PRIVATE_ORDER_FIELDS})

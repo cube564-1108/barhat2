@@ -205,8 +205,13 @@ print("\n4. Очередь фото товаров")
 with cs.get_db() as conn:
     conn.execute(
         "INSERT INTO courier_orders (retailcrm_order_id, order_number, delivery_date, "
-        "site_code, city, status) VALUES (?, ?, date('now'), ?, ?, ?)",
-        (5001, "5001", "site-a", "Новосибирск", "send-to-florist"),
+        "site_code, city, status, net_cost, do_not_contact_recipient, "
+        "recipient_name, recipient_phone, customer_name, customer_phone, "
+        "customer_comment) "
+        "VALUES (?, ?, date('now'), ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+        (5001, "5001", "site-a", "Новосибирск", "send-to-florist", 450.0,
+         "Мария", "+7 913 000-00-01", "Иван", "+7 913 000-00-02",
+         "Позвонить за час"),
     )
     for offer_id, name in ((11, "Букет «Восход»"), (12, "Клубника в шоколаде")):
         conn.execute(
@@ -225,11 +230,49 @@ check("товар БЕЗ фото тоже уходит из очереди — 
       12 not in pending, f"({pending})")
 
 card = ds.order_for_courier(5001, city="Новосибирск", courier_user_id=1, with_private=True)
+check("карточка отдаёт себестоимость доставки", "net_cost" in card, f"({sorted(card)})")
 images = {item["offer_id"]: item.get("image_url") for item in card["items"]}
 check("карточка отдаёт ссылку на фото",
       images.get(11) == "https://example.test/buket.jpg", f"({images})")
 check("товар без фото отдаётся без ссылки, а не пропадает",
       12 in images and images[12] is None, f"({images})")
+
+
+# ============================================================================
+print("\n4-бис. Что видно ДО брони, а что только после")
+# ============================================================================
+# Флаг «не связываться» — это указание, как везти, а не персональные данные.
+# Пока он лежал среди контактов, курьер узнавал о сюрприз-доставке только
+# после брони — то есть уже взяв заказ. Телефоны и комментарии при этом
+# обязаны остаться закрытыми: объём ПДн «просто на просмотр» лишним быть
+# не должен.
+
+public_card = ds.order_for_courier(5001, city="Новосибирск",
+                                   courier_user_id=999, with_private=False)
+check("флаг «не связываться» виден до брони",
+      public_card.get("do_not_contact_recipient") == 1,
+      f"({public_card.get('do_not_contact_recipient')})")
+for field in ("recipient_phone", "customer_phone", "customer_comment"):
+    check(f"{field} до брони не отдаётся", field not in public_card)
+
+public_list = ds.list_orders_for_courier(
+    city="Новосибирск", date_from="2000-01-01", date_to="2099-01-01",
+    courier_user_id=999, with_private=False)
+row = next((o for o in public_list if o["retailcrm_order_id"] == 5001), None)
+check("флаг «не связываться» виден и в ленте",
+      bool(row) and row.get("do_not_contact_recipient") == 1,
+      f"({row and sorted(row)})")
+check("себестоимости доставки в ленте нет — иначе разбор заказов по выгодности",
+      bool(row) and "net_cost" not in row, f"({row and sorted(row)})")
+
+private_card = ds.order_for_courier(5001, city="Новосибирск",
+                                    courier_user_id=1, with_private=True)
+check("оба контакта отдаются после брони",
+      private_card.get("recipient_phone") and private_card.get("customer_phone"),
+      f"({private_card.get('recipient_phone')}, {private_card.get('customer_phone')})")
+check("комментарий клиента отдаётся",
+      private_card.get("customer_comment") == "Позвонить за час",
+      f"({private_card.get('customer_comment')})")
 
 
 # ============================================================================
@@ -286,8 +329,11 @@ for bad in ("alert(", "confirm(", "prompt("):
     check(f"нет нативного {bad[:-1]}()",
           not re.search(r"(?<![.\w])" + re.escape(bad), js), "")
 check("диалоги через BarhatUI", "BarhatUI" in js)
-check("флаг «не связываться» выводится первым",
-      js.index("do_not_contact_recipient") < js.index("Доставка"),
+# Порядок блоков смотрим внутри самой сборки карточки, а не по всему файлу:
+# упоминание поля в любой другой функции сделало бы проверку бессмысленной.
+card_body = js[js.index("function cardBodyHtml"):]
+check("флаг «не связываться» выводится первым блоком карточки",
+      card_body.index("do_not_contact_recipient") < card_body.index("block('Доставка'"),
       "(блок с флагом должен идти раньше остальных)")
 check("прокрутка возвращается после перерисовки",
       "window.scrollY" in js and "window.scrollTo" in js)
