@@ -49,6 +49,16 @@ os.environ["PYRUS_DB_PATH"] = os.path.join(WORK_DIR, "pyrus.db")
 os.environ["MOYSKLAD_DB_PATH"] = os.path.join(WORK_DIR, "moysklad.db")
 os.environ["DISABLE_SCHEDULERS"] = "1"
 
+# Ключи VAPID гасим ЯВНО, до импорта приложения.
+#
+# Приложение при импорте читает боевой .env, и как только владелец завёл там
+# настоящие ключи, сторож начал проверять не то: раздел «без ключей модуль
+# молчит» проходил бы с боевой парой, а отправка ушла бы к реальному
+# push-сервису. `load_dotenv()` не перезаписывает уже заданные переменные,
+# поэтому пустые значения здесь выигрывают.
+os.environ["VAPID_PUBLIC_KEY"] = ""
+os.environ["VAPID_PRIVATE_KEY"] = ""
+
 failures = []
 
 

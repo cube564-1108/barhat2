@@ -714,7 +714,22 @@ def health_check():
         'disk': timed('disk', _disk_free_info),
     }
 
+    def collect_push():
+        # Ключи VAPID живут в переменных окружения и читаются при импорте
+        # модуля. Проверить снаружи, доехали ли они на прод, иначе можно
+        # только с телефона курьера — а «уведомления не приходят» выглядит
+        # одинаково и когда ключей нет, и когда никто не подписался.
+        # Самих ключей здесь нет: ручка публичная.
+        from couriers import push as courier_push
+        from couriers.storage import get_db as couriers_db
+        with couriers_db() as conn:
+            subscriptions = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM push_subscriptions").fetchone()["cnt"]
+        return {'configured': courier_push.is_configured(),
+                'subscriptions': subscriptions}
+
     if full:
+        body['courier_push'] = timed('courier_push', collect_push)
         body['planfact_quota'] = timed('planfact_quota', collect_quota)
         body['write_test'] = timed(
             'write_test',
