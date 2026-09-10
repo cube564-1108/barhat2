@@ -191,7 +191,39 @@ def run_once(deadline: Optional[float] = None) -> Dict[str, Any]:
             break
 
     stats["images"] = fetch_missing_images(client, deadline=deadline)
+    stats["claims"] = sweep_assignments()
     return stats
+
+
+def sweep_assignments() -> Dict[str, int]:
+    """
+    Прибрать брони: снять просроченные и те, чьих заказов больше нет.
+
+    Здесь, а не отдельным планировщиком, по двум причинам. Во-первых, тик
+    ленты уже захвачен талоном на обоих воркерах — своя фоновая задача
+    означала бы второй лок и второй ритм обращений к общему медленному
+    `/data`. Во-вторых, уборка осмысленна ровно после того, как витрина
+    обновилась: заказ, который отменили минуту назад, виден именно сейчас.
+
+    Ошибка не роняет тик: перенос курсора истории важнее уборки, а её
+    повторит следующая минута.
+    """
+    from . import storage
+    from .delivery_storage import expire_stale_claims, release_orphan_claims
+
+    result = {"expired": 0}
+    try:
+        result["expired"] = expire_stale_claims()
+        codes = [row["code"] for row in storage.list_delivery_types()
+                 if row.get("counts_as_courier")]
+        result.update(release_orphan_claims(codes))
+    except Exception as e:
+        logger.warning(f"Лента изменений: уборка броней не удалась — {e}")
+
+    dropped = sum(value for value in result.values() if value)
+    if dropped:
+        logger.info(f"Брони: снято {dropped} ({result})")
+    return result
 
 
 def fetch_missing_images(client, deadline: Optional[float] = None) -> int:

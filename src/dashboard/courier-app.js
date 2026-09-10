@@ -366,9 +366,12 @@
                 : '<span class="cd-badge cd-badge--mine">Мой</span>';
         }
         if (order.is_free) return '<span class="cd-badge cd-badge--free">Свободен</span>';
-        return order.assignment_state === 'picked_up'
-            ? '<span class="cd-badge cd-badge--taken">Забрали</span>'
-            : '<span class="cd-badge cd-badge--taken">Занят</span>';
+        // С именем, а не глухое «Занят»: курьер видит, что происходит со
+        // всеми заказами города, и не звонит выяснять, свободен ли заказ
+        var who = order.assignment_courier_name;
+        var what = order.assignment_state === 'picked_up' ? 'Забрал' : 'Взял';
+        return '<span class="cd-badge cd-badge--taken">'
+            + esc(who ? what + ' ' + who : 'Занят') + '</span>';
     }
 
     function readyBadge(order) {
@@ -410,7 +413,13 @@
         }
 
         parts.push('<div class="cd-card__actions">');
-        if (order.is_free) {
+        if (order.is_mine) {
+            parts.push('<div class="cd-btn-row">'
+                + '<button type="button" class="cd-btn cd-btn--ghost" data-release="'
+                + esc(order.retailcrm_order_id) + '">Отказаться</button>'
+                + '<button type="button" class="cd-btn" data-open="'
+                + esc(order.retailcrm_order_id) + '">Открыть заказ</button></div>');
+        } else if (order.is_free) {
             parts.push('<button type="button" class="cd-btn" data-claim="'
                 + esc(order.retailcrm_order_id) + '">Забронировать</button>');
         } else {
@@ -709,7 +718,10 @@
         if (order.note_text) parts.push(block('Примечание',
             '<div class="cd-block__value">' + esc(order.note_text) + '</div>'));
 
-        if (order.is_free) {
+        if (order.is_mine) {
+            parts.push('<button type="button" class="cd-btn cd-btn--ghost" data-release="'
+                + esc(order.retailcrm_order_id) + '">Отказаться от заказа</button>');
+        } else if (order.is_free) {
             parts.push('<button type="button" class="cd-btn cd-btn--accent" data-claim="'
                 + esc(order.retailcrm_order_id) + '">Забронировать</button>');
         }
@@ -753,8 +765,78 @@
 
     // === Обработчики ========================================================
 
-    function claimNotReady() {
-        toast('Бронирование заказов включим в следующем обновлении приложения', 'info');
+    function apiPost(url) {
+        return fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            // Ручки записи требуют именно это значение (см. AJAX_HEADER_VALUE
+            // в auth.py): браузер не даёт поставить кастомный заголовок в
+            // межсайтовом запросе, и это вся защита от CSRF — токенов в
+            // проекте нет. Привычное 'XMLHttpRequest' здесь не подойдёт.
+            headers: { 'X-Requested-With': 'barhat-dashboard' }
+        }).then(function (response) {
+            return response.json().catch(function () { return {}; })
+                .then(function (payload) {
+                    if (!response.ok || payload.success !== true) {
+                        var error = new Error(payload.error || ('HTTP ' + response.status));
+                        error.code = payload.code;
+                        throw error;
+                    }
+                    return payload;
+                });
+        });
+    }
+
+    /**
+     * Бронь заказа.
+     *
+     * Кнопка блокируется на время запроса — это третий уровень защиты от
+     * двойной брони (первые два: `BEGIN IMMEDIATE` и уникальный индекс).
+     * Без него один медленный клик превращается в три запроса: кнопка
+     * выглядит живой, и её дожимают.
+     */
+    function claimOrder(orderId, button) {
+        if (button.disabled) return;
+        button.disabled = true;
+        button.textContent = 'Бронируем…';
+
+        apiPost('/api/courier/orders/' + encodeURIComponent(orderId) + '/claim')
+            .then(function () {
+                toast('Заказ ваш', 'success');
+                return loadFeed();
+            })
+            .catch(function (error) {
+                // «Занят» — это не сбой, а новость: список устарел, и его
+                // надо перечитать, чтобы курьер увидел, кто успел
+                toast(error.message, error.code === 'taken' ? 'info' : 'error');
+                if (error.code === 'taken' || error.code === 'gone') loadFeed();
+                else {
+                    button.disabled = false;
+                    button.textContent = 'Забронировать';
+                }
+            });
+    }
+
+    function releaseOrder(orderId, button) {
+        if (button.disabled) return;
+        window.BarhatUI.confirm('Вернуть заказ в общий список?', {
+            title: 'Отказаться от заказа',
+            confirmText: 'Отказаться',
+            cancelText: 'Оставить'
+        }).then(function (ok) {
+            if (!ok) return;
+            button.disabled = true;
+            button.textContent = 'Отпускаем…';
+            apiPost('/api/courier/orders/' + encodeURIComponent(orderId) + '/release')
+                .then(function () {
+                    toast('Заказ вернулся в общий список', 'info');
+                    return loadFeed();
+                })
+                .catch(function (error) {
+                    toast(error.message, 'error');
+                    loadFeed();
+                });
+        });
     }
 
     function onCardClick(event) {
@@ -767,7 +849,11 @@
         var route = event.target.closest('[data-route]');
         if (route) { openRoute(route.getAttribute('data-route')); return; }
 
-        if (event.target.closest('[data-claim]')) claimNotReady();
+        var claim = event.target.closest('[data-claim]');
+        if (claim) { claimOrder(claim.getAttribute('data-claim'), claim); return; }
+
+        var release = event.target.closest('[data-release]');
+        if (release) releaseOrder(release.getAttribute('data-release'), release);
     }
 
     /**
@@ -816,7 +902,11 @@
         });
 
         el.feed.addEventListener('click', function (event) {
-            if (event.target.closest('[data-claim]')) { claimNotReady(); return; }
+            var claim = event.target.closest('[data-claim]');
+            if (claim) { claimOrder(claim.getAttribute('data-claim'), claim); return; }
+
+            var release = event.target.closest('[data-release]');
+            if (release) { releaseOrder(release.getAttribute('data-release'), release); return; }
 
             var open = event.target.closest('[data-open]');
             if (open) { openCard(open.getAttribute('data-open')); return; }

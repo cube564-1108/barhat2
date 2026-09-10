@@ -190,6 +190,120 @@ def get_profile():
 
 
 # ---------------------------------------------------------------------------
+# Бронь
+# ---------------------------------------------------------------------------
+
+# Код причины отказа → HTTP-статус. «Занято» и «не ваш город» требуют разных
+# действий человека, и одним кодом их подавать нельзя: фронту пришлось бы
+# разбирать текст ошибки, а он меняется.
+CLAIM_ERROR_STATUS = {
+    "not_found": 404,
+    "forbidden": 403,
+    "taken": 409,
+    "already_mine": 409,
+    "gone": 409,
+    "limit": 409,
+    "picked_up": 409,
+    "horizon": 400,
+}
+
+
+def _claim_failed(error: ds.ClaimError):
+    return jsonify({"success": False, "error": str(error), "code": error.code}), \
+        CLAIM_ERROR_STATUS.get(error.code, 409)
+
+
+@delivery_bp.route("/orders/<int:order_id>/claim", methods=["POST"])
+@section_required("courier_app", DISPATCH_SECTION)
+@require_ajax_header
+def claim_order(order_id: int):
+    """
+    Забронировать заказ за собой.
+
+    Гонку держит хранилище (`BEGIN IMMEDIATE` + уникальный индекс): двое
+    нажавших одновременно получают один — бронь, второй — 409 с именем того,
+    кто успел. 500 здесь быть не должно ни при каком исходе гонки.
+    """
+    dispatch = _has_dispatch()
+    city = _courier_city()
+    if not dispatch and not city:
+        return error_response("Вам не назначен город", 403)
+
+    try:
+        result = ds.claim_order(
+            order_id=order_id,
+            courier_user_id=int(current_user.id),
+            courier_name=current_user.display_name or current_user.username,
+            city=city,
+            allow_any_city=dispatch,
+        )
+    except ds.ClaimError as e:
+        return _claim_failed(e)
+
+    log_action(current_user.username, "courier_claim",
+               f"Заказ {result.get('order_number') or order_id}")
+    return success_response(result)
+
+
+@delivery_bp.route("/orders/<int:order_id>/release", methods=["POST"])
+@section_required("courier_app", DISPATCH_SECTION)
+@require_ajax_header
+def release_order(order_id: int):
+    """
+    Отказаться от своей брони. Без объяснений, но с записью в журнал:
+    автоснятия и отказы — вход для разговора, а не для санкции.
+    """
+    try:
+        result = ds.release_order(
+            order_id=order_id,
+            courier_user_id=int(current_user.id),
+            reason=ds.RELEASE_SELF,
+        )
+    except ds.ClaimError as e:
+        return _claim_failed(e)
+
+    log_action(current_user.username, "courier_release", f"Заказ {order_id}")
+    return success_response(result)
+
+
+# ---------------------------------------------------------------------------
+# Разбор броней (управляющий)
+# ---------------------------------------------------------------------------
+
+@delivery_bp.route("/assignments", methods=["GET"])
+@section_required(DISPATCH_SECTION)
+def get_assignments():
+    """Живые брони города: кто что везёт и что уже просрочено."""
+    return success_response(ds.list_active_assignments(request.args.get("city")))
+
+
+@delivery_bp.route("/assignments/<int:order_id>/release", methods=["POST"])
+@section_required(DISPATCH_SECTION)
+@require_ajax_header
+def admin_release(order_id: int):
+    """
+    Снять чужую бронь.
+
+    Отдельная ручка под секцией управляющего, а не флаг в курьерской:
+    «снять бронь у любого» — другое право, и выдавать его курьеру нельзя.
+    Консоли у контейнера на этом тарифе нет, поэтому разбор зависших броней
+    возможен только так.
+    """
+    try:
+        result = ds.release_order(
+            order_id=order_id,
+            courier_user_id=int(current_user.id),
+            reason=ds.RELEASE_ADMIN,
+            allow_any_courier=True,
+        )
+    except ds.ClaimError as e:
+        return _claim_failed(e)
+
+    log_action(current_user.username, "courier_release_admin", f"Заказ {order_id}")
+    return success_response(result)
+
+
+# ---------------------------------------------------------------------------
 # Настройки (админ)
 # ---------------------------------------------------------------------------
 

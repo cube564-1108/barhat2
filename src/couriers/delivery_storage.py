@@ -20,7 +20,12 @@ import logging
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from .storage import _add_column_if_missing, get_db
+from datetime import datetime
+
+from sqlite_conn import connect as sqlite_connect
+
+from . import salon_time
+from .storage import DB_PATH, _add_column_if_missing, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +185,12 @@ def init_delivery_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_assign_courier_state "
             "ON delivery_assignments(courier_user_id, state)"
         )
+        # Имя курьера кладём рядом с бронью, а не подтягиваем из users.
+        # Учётки живут в barhat.db, брони — в couriers.db: это разные файлы,
+        # JOIN между ними невозможен, а второе соединение в горячем пути стоит
+        # 90-700 мс на сетевом /data. Плюс имя нужно ровно на момент брони:
+        # человека переименуют, а «кто взял заказ 5 сентября» не меняется.
+        _add_column_if_missing(conn, "delivery_assignments", "courier_name", "TEXT")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS courier_city_settings (
@@ -446,7 +457,8 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
     sql = f"""
         SELECT o.*, s.name AS site_name, s.utc_offset,
                a.id AS assignment_id, a.state AS assignment_state,
-               a.courier_user_id AS assignment_user_id, a.expires_at
+               a.courier_user_id AS assignment_user_id, a.expires_at,
+               a.courier_name AS assignment_courier_name
         FROM courier_orders o
         LEFT JOIN courier_sites s ON s.code = o.site_code
         LEFT JOIN delivery_assignments a
@@ -472,6 +484,9 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
             "is_mine": mine,
             "is_free": row.get("assignment_state") is None,
             "expires_at": row.get("expires_at"),
+            # Имя того, кто взял заказ: «Забронирован (Иван)» вместо глухого
+            # «Занят». Курьер видит, что происходит со всеми заказами города
+            "assignment_courier_name": row.get("assignment_courier_name"),
         })
         # Контакты — только по своей брони либо управляющему.
         if with_private or mine:
@@ -495,7 +510,8 @@ def order_for_courier(order_id: int, city: Optional[str],
         row = conn.execute("""
             SELECT o.*, s.name AS site_name, s.utc_offset,
                    a.id AS assignment_id, a.state AS assignment_state,
-                   a.courier_user_id AS assignment_user_id, a.expires_at
+                   a.courier_user_id AS assignment_user_id, a.expires_at,
+                   a.courier_name AS assignment_courier_name
             FROM courier_orders o
             LEFT JOIN courier_sites s ON s.code = o.site_code
             LEFT JOIN delivery_assignments a
@@ -531,6 +547,7 @@ def order_for_courier(order_id: int, city: Optional[str],
         "is_mine": mine,
         "is_free": row.get("assignment_state") is None,
         "expires_at": row.get("expires_at"),
+        "assignment_courier_name": row.get("assignment_courier_name"),
         "items": items,
         # Себестоимость доставки — это оплата курьеру за ходку. В ленте её
         # нет намеренно: список с ценниками превращает свободный захват в
@@ -544,6 +561,358 @@ def order_for_courier(order_id: int, city: Optional[str],
     else:
         card["address_text"] = _short_address(row.get("address_text"))
     return card
+
+
+# ---------------------------------------------------------------------------
+# Бронь заказа (Фаза 4)
+# ---------------------------------------------------------------------------
+
+class ClaimError(Exception):
+    """
+    Бронь не состоялась по понятной причине.
+
+    `code` нужен, чтобы ручка отдала правильный HTTP-статус: «занят» — это
+    409 и предложение обновить список, «чужой город» — 403, «не тот день» —
+    400. Один статус на все случаи заставил бы фронт разбирать текст.
+    """
+
+    def __init__(self, message: str, code: str = "conflict"):
+        super().__init__(message)
+        self.code = code
+
+
+def _assignment_row(conn, order_id: int):
+    """Живая бронь заказа, если она есть."""
+    return conn.execute(
+        "SELECT * FROM delivery_assignments "
+        " WHERE retailcrm_order_id = ? AND state IN (?, ?)",
+        (order_id, STATE_CLAIMED, STATE_PICKED_UP),
+    ).fetchone()
+
+
+def claim_order(order_id: int, courier_user_id: int, courier_name: str,
+                city: Optional[str], allow_any_city: bool = False) -> Dict[str, Any]:
+    """
+    Забронировать заказ за курьером.
+
+    **Проверка и запись — одна транзакция под `BEGIN IMMEDIATE`** (правило
+    CLAUDE.md). На проде до 16 параллельных обработчиков, а запрос к базе
+    стоит 90-700 мс: между «свободен ли заказ» в одном соединении и `INSERT`
+    в другом лежит окно шириной в сотни миллисекунд, и в него проходят все
+    нажатия разом. Ровно так 29.08.26 открылись три смены на одной точке.
+
+    Инвариант держат три уровня, и нужны все три: частичный уникальный индекс
+    в схеме, эта транзакция и блокировка кнопки на фронте.
+    """
+    now = datetime.utcnow()
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None          # транзакцией управляем сами
+    try:
+        conn.execute("BEGIN IMMEDIATE")  # write-лок ДО чтения
+
+        order = conn.execute("""
+            SELECT o.retailcrm_order_id, o.order_number, o.city, o.status,
+                   o.delivery_date, o.delivery_time_from, s.utc_offset
+              FROM courier_orders o
+              LEFT JOIN courier_sites s ON s.code = o.site_code
+             WHERE o.retailcrm_order_id = ?
+        """, (order_id,)).fetchone()
+
+        if order is None:
+            raise ClaimError("Заказ не найден", "not_found")
+        if not allow_any_city and order["city"] != city:
+            raise ClaimError("Этот заказ не вашего города", "forbidden")
+
+        # Тем же соединением, что и всё остальное в транзакции: вызов
+        # visible_status_codes() открыл бы второе соединение к той же базе,
+        # пока мы держим write-лок, — вложенным соединением здесь уже дважды
+        # вешали запись.
+        visible = {row["status_code"] for row in conn.execute(
+            "SELECT status_code FROM courier_visible_statuses")}
+        if order["status"] not in visible:
+            # Статус мог уйти, пока экран не обновился: заказ отменили или
+            # передали службе доставки
+            raise ClaimError("Заказ больше не доступен для доставки", "gone")
+
+        settings = _city_settings_locked(conn, order["city"])
+
+        _check_horizon(order, settings["claim_horizon_days"], now)
+
+        taken = _assignment_row(conn, order_id)
+        if taken is not None:
+            if taken["courier_user_id"] == courier_user_id:
+                raise ClaimError("Этот заказ уже ваш", "already_mine")
+            who = taken["courier_name"] or "другой курьер"
+            raise ClaimError(f"Заказ уже забрал {who}", "taken")
+
+        limit = settings["max_active_claims"]
+        active = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM delivery_assignments "
+            " WHERE courier_user_id = ? AND state IN (?, ?)",
+            (courier_user_id, STATE_CLAIMED, STATE_PICKED_UP),
+        ).fetchone()["cnt"]
+        if active >= limit:
+            raise ClaimError(
+                f"У вас уже {active} заказ(а) в работе — это предел для города. "
+                f"Завершите или отпустите один из них.", "limit")
+
+        expires_at = salon_time.claim_expires_at(
+            order["delivery_date"], order["delivery_time_from"], order["utc_offset"]
+        ) if order["utc_offset"] is not None else None
+
+        conn.execute(
+            "INSERT INTO delivery_assignments "
+            "  (retailcrm_order_id, courier_user_id, courier_name, state, "
+            "   claimed_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (order_id, courier_user_id, courier_name, STATE_CLAIMED,
+             now.isoformat(sep=" ", timespec="seconds"),
+             expires_at.isoformat(sep=" ", timespec="seconds") if expires_at else None),
+        )
+        conn.execute("COMMIT")
+        return {
+            "retailcrm_order_id": order_id,
+            "order_number": order["order_number"],
+            "state": STATE_CLAIMED,
+            "expires_at": expires_at.isoformat(sep=" ", timespec="seconds") if expires_at else None,
+        }
+    except ClaimError:
+        conn.execute("ROLLBACK")
+        raise
+    except sqlite3.IntegrityError:
+        # Уникальный индекс сработал: соседний запрос успел вставить бронь
+        # между нашей проверкой и записью. Это штатный исход гонки, а не 500.
+        conn.execute("ROLLBACK")
+        raise ClaimError("Заказ только что забрал другой курьер", "taken")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def _city_settings_locked(conn, city: Optional[str]) -> Dict[str, Any]:
+    """
+    Настройки города тем же соединением, что и проверка.
+
+    Отдельным вызовом `city_settings()` это было бы второе соединение внутри
+    открытой транзакции — то самое вложенное соединение, которым уже дважды
+    вешали запись в общую базу.
+    """
+    row = conn.execute(
+        "SELECT * FROM courier_city_settings WHERE city = ?", (city,)
+    ).fetchone() if city else None
+
+    def pick(field, default):
+        value = row[field] if row is not None else None
+        return default if value is None else value
+
+    return {
+        "max_active_claims": pick("max_active_claims", DEFAULT_MAX_ACTIVE_CLAIMS),
+        "claim_horizon_days": pick("claim_horizon_days", DEFAULT_CLAIM_HORIZON_DAYS),
+    }
+
+
+def _check_horizon(order, horizon_days: int, now: datetime) -> None:
+    """
+    Нельзя забить неделю с утра: бронировать можно сегодня и ещё N дней.
+
+    «Сегодня» — по стенным часам САЛОНА, а не сервера. В UTC+7 рабочий день
+    начинается, когда в UTC ещё вчера, и курьер из Новосибирска в девять утра
+    получал бы «этот заказ на завтра».
+    """
+    offset = order["utc_offset"]
+    if offset is None:
+        return          # пояс не задан — не наказываем курьера за настройку
+    today = salon_time.utc_to_local(now, offset).date()
+    try:
+        target = datetime.strptime(order["delivery_date"], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return
+    if target < today:
+        raise ClaimError("Дата доставки уже прошла", "horizon")
+    if (target - today).days > horizon_days:
+        raise ClaimError(
+            f"Заказ на {target.strftime('%d.%m.%Y')} — бронировать можно "
+            f"только ближайшие дни", "horizon")
+
+
+def release_order(order_id: int, courier_user_id: int,
+                  reason: str = RELEASE_SELF,
+                  allow_any_courier: bool = False) -> Dict[str, Any]:
+    """
+    Отпустить бронь.
+
+    Тоже под `BEGIN IMMEDIATE`: между «бронь ещё моя» и записью успевает
+    пройти фоновое автоснятие (находка К3 критики плана).
+
+    Запись не удаляется, а помечается: «кто и почему отпустил заказ» — вход
+    для разговора с курьером, и стирать это нельзя.
+    """
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _assignment_row(conn, order_id)
+        if row is None:
+            raise ClaimError("Бронь уже снята", "gone")
+        if not allow_any_courier and row["courier_user_id"] != courier_user_id:
+            raise ClaimError("Это чужая бронь", "forbidden")
+        if row["state"] == STATE_PICKED_UP and not allow_any_courier:
+            # Заказ физически у курьера: «отпустить» его кнопкой нельзя,
+            # иначе букет уедет неизвестно куда
+            raise ClaimError("Заказ уже забран — отпустить его может только "
+                             "управляющий", "picked_up")
+
+        conn.execute(
+            "UPDATE delivery_assignments SET state = ?, released_at = ?, "
+            "       release_reason = ? WHERE id = ?",
+            (STATE_RELEASED, datetime.utcnow().isoformat(sep=" ", timespec="seconds"),
+             reason, row["id"]),
+        )
+        conn.execute("COMMIT")
+        return {"retailcrm_order_id": order_id, "state": STATE_RELEASED,
+                "release_reason": reason}
+    except Exception:
+        # Откат в одном месте, а не у каждого raise: второй ROLLBACK по уже
+        # закрытой транзакции сам бросает исключение и подменяет причину
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def expire_stale_claims() -> int:
+    """
+    Снять брони, до окна доставки которых осталось меньше положенного.
+
+    Только из состояния `claimed` (находка К3): курьер может стоять в салоне
+    и жать «Забрал» ровно в эту секунду, и отобрать у него заказ с букетом в
+    руках нельзя. Кто первый взял write-лок, тот и выиграл.
+
+    Запись помечается `expired`, а не удаляется: если курьер всё-таки забрал
+    заказ, по журналу видно, что произошло.
+    """
+    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            "UPDATE delivery_assignments "
+            "   SET state = ?, released_at = ?, release_reason = ? "
+            " WHERE state = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+            (STATE_RELEASED, now, RELEASE_EXPIRED, STATE_CLAIMED, now),
+        )
+        conn.execute("COMMIT")
+        return cursor.rowcount or 0
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None) -> Dict[str, int]:
+    """
+    Снять брони с заказов, которых больше нет или которые уехали мимо нас.
+
+    Долг Фазы 2 и находка К2: глубокий синк чистит окно витрины через DELETE
+    по дате доставки. Заказ отменили — строка исчезла, а бронь осталась и
+    висит у курьера в «моих» вечно.
+
+    Три случая, и различать их надо: заказа нет в витрине или он ушёл из
+    видимых статусов (`order_gone`), либо его передали службе доставки
+    (`outsourced`). Причина видна курьеру и попадёт в пуш Фазы 6 —
+    «заказ отозван» и «заказ передали Яндексу» это разные новости.
+    """
+    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    result = {RELEASE_ORDER_GONE: 0, RELEASE_OUTSOURCED: 0}
+
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        # Аутсорс проверяем первым: заказ с чужим типом доставки тоже
+        # «не в видимых статусах» не окажется, и без отдельной ветки причина
+        # была бы всегда order_gone
+        if courier_delivery_codes:
+            placeholders = ",".join("?" * len(courier_delivery_codes))
+            cursor = conn.execute(
+                f"UPDATE delivery_assignments "
+                f"   SET state = ?, released_at = ?, release_reason = ? "
+                f" WHERE state = ? AND retailcrm_order_id IN ("
+                f"     SELECT o.retailcrm_order_id FROM courier_orders o "
+                f"      WHERE o.delivery_code IS NOT NULL "
+                f"        AND o.delivery_code NOT IN ({placeholders}))",
+                (STATE_RELEASED, now, RELEASE_OUTSOURCED, STATE_CLAIMED,
+                 *courier_delivery_codes),
+            )
+            result[RELEASE_OUTSOURCED] = cursor.rowcount or 0
+
+        cursor = conn.execute(
+            "UPDATE delivery_assignments "
+            "   SET state = ?, released_at = ?, release_reason = ? "
+            " WHERE state = ? AND retailcrm_order_id NOT IN ("
+            "     SELECT o.retailcrm_order_id FROM courier_orders o "
+            "      WHERE o.status IN (SELECT status_code FROM courier_visible_statuses))",
+            (STATE_RELEASED, now, RELEASE_ORDER_GONE, STATE_CLAIMED),
+        )
+        result[RELEASE_ORDER_GONE] = cursor.rowcount or 0
+
+        conn.execute("COMMIT")
+        return result
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def list_active_assignments(city: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Живые брони с данными заказа — для экрана управляющего и разбора зависших.
+
+    Отдаёт и просроченные (`is_overdue`): именно они и есть предмет разбора,
+    когда у курьера сломалась машина, а заказ висит.
+    """
+    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    sql = """
+        SELECT a.*, o.order_number, o.city, o.delivery_date,
+               o.delivery_time_from, o.status, s.name AS site_name
+          FROM delivery_assignments a
+          LEFT JOIN courier_orders o ON o.retailcrm_order_id = a.retailcrm_order_id
+          LEFT JOIN courier_sites s ON s.code = o.site_code
+         WHERE a.state IN (?, ?)
+    """
+    params: List[Any] = [STATE_CLAIMED, STATE_PICKED_UP]
+    if city:
+        sql += " AND o.city = ?"
+        params.append(city)
+    sql += " ORDER BY a.expires_at IS NULL, a.expires_at"
+
+    with get_db() as conn:
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    for row in rows:
+        row["is_overdue"] = bool(row.get("expires_at")
+                                 and row["state"] == STATE_CLAIMED
+                                 and row["expires_at"] <= now)
+        # Заказа нет в витрине — его отменили или он уехал за окно синка
+        row["order_missing"] = row.get("order_number") is None
+    return rows
+
+
+def my_active_claims(courier_user_id: int) -> List[Dict[str, Any]]:
+    """Живые брони курьера — для лимита и экрана «Мои»."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM delivery_assignments "
+            " WHERE courier_user_id = ? AND state IN (?, ?) ORDER BY expires_at",
+            (courier_user_id, STATE_CLAIMED, STATE_PICKED_UP),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
