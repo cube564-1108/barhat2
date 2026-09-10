@@ -30,8 +30,10 @@ try:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
 except ImportError:
-    print("Нужна библиотека cryptography. Установите зависимости:")
-    print("    pip install -r requirements.txt")
+    # Именно cryptography, а не весь requirements.txt: для разовой генерации
+    # ключей ни pywebpush, ни остальной набор не нужны
+    print("Нужна библиотека cryptography. Установите её:")
+    print("    python -m pip install cryptography")
     sys.exit(1)
 
 
