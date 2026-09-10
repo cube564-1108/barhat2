@@ -73,7 +73,12 @@ with app.app_context():
 cs.init_couriers_tables()
 ds.init_delivery_tables()
 
-TODAY = datetime.utcnow().date()
+# «Сегодня» по стенным часам САЛОНА, а не по UTC: в 18:31 UTC в салоне UTC+7
+# уже следующие сутки, и заказ, датированный «сегодня» по UTC, для салона
+# вчерашний — бронь его законно отвергает. Без этой поправки сторож проходил
+# только в определённые часы суток.
+SALON_UTC_OFFSET = 7
+TODAY = (datetime.utcnow() + timedelta(hours=SALON_UTC_OFFSET)).date()
 
 with cs.get_db() as conn:
     conn.execute("INSERT OR REPLACE INTO courier_sites (code, name, city, utc_offset) "

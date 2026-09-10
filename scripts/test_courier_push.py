@@ -85,7 +85,12 @@ with app.app_context():
 cs.init_couriers_tables()
 ds.init_delivery_tables()
 
-TODAY = datetime.utcnow().date()
+# «Сегодня» по стенным часам САЛОНА, а не по UTC: в 18:31 UTC в салоне UTC+7
+# уже следующие сутки, и заказ, датированный «сегодня» по UTC, для салона
+# вчерашний — бронь его законно отвергает. Без этой поправки сторож проходил
+# только в определённые часы суток.
+SALON_UTC_OFFSET = 7
+TODAY = (datetime.utcnow() + timedelta(hours=SALON_UTC_OFFSET)).date()
 
 with cs.get_db() as conn:
     conn.execute("INSERT OR REPLACE INTO courier_sites (code, name, city, utc_offset) "
@@ -135,6 +140,28 @@ sent = []
 push.send_to_users = lambda user_ids, payload: sent.append(
     {"users": list(user_ids), "payload": payload}) or {"sent": len(user_ids)}
 
+# Время замораживаем явно.
+#
+# Тихие часы по умолчанию — 22:00–08:00 по салону, и прогон в вечерние часы
+# гасил бы отправку: сторож проходил только днём и «падал» ночью, хотя код
+# при этом исправен. Проверять надо поведение, а не час, в который запустили.
+import couriers.push as push_module  # noqa: E402
+
+REAL_DATETIME = push_module.datetime
+NIGHT = datetime(2026, 9, 10, 18, 0)   # 01:00 по салону UTC+7
+DAY = datetime(2026, 9, 10, 6, 0)      # 13:00 по салону UTC+7
+
+
+def freeze(moment):
+    class Frozen:
+        @staticmethod
+        def utcnow():
+            return moment
+    push_module.datetime = Frozen
+
+
+freeze(DAY)
+
 check("уведомление о новом заказе ушло", push.notify_new_order(order) is True)
 check("адресаты — курьеры своего города", sent and sent[0]["users"] == [501],
       f"({sent and sent[0]['users']})")
@@ -171,33 +198,18 @@ with cs.get_db() as conn:
         "INSERT OR REPLACE INTO courier_city_settings "
         "  (city, quiet_hours_from, quiet_hours_to) VALUES ('Новосибирск', '22:00', '08:00')")
 
-# 18:00 UTC при UTC+7 = 01:00 по салону — ночь
-night = datetime(2026, 9, 10, 18, 0)
-# 06:00 UTC при UTC+7 = 13:00 по салону — день
-day = datetime(2026, 9, 10, 6, 0)
-
 check("ночь по салону распознана",
-      push.in_quiet_hours("Новосибирск", 7, night) is True)
+      push.in_quiet_hours("Новосибирск", 7, NIGHT) is True)
 check("день по салону распознан",
-      push.in_quiet_hours("Новосибирск", 7, day) is False)
+      push.in_quiet_hours("Новосибирск", 7, DAY) is False)
 check("тот же момент в другом поясе — уже не ночь",
-      push.in_quiet_hours("Новосибирск", 2, night) is False,
+      push.in_quiet_hours("Новосибирск", 2, NIGHT) is False,
       "(20:00 по салону при UTC+2)")
 check("пояс не задан — не молчим: пропущенный заказ хуже позднего звонка",
-      push.in_quiet_hours("Новосибирск", None, night) is False)
+      push.in_quiet_hours("Новосибирск", None, NIGHT) is False)
 
 sent.clear()
-import couriers.push as push_module  # noqa: E402
-real_now = push_module.datetime
-
-
-class FrozenNight:
-    @staticmethod
-    def utcnow():
-        return night
-
-
-push_module.datetime = FrozenNight
+freeze(NIGHT)
 try:
     with cs.get_db() as conn:
         conn.execute("UPDATE courier_orders SET retailcrm_order_id = 8002 "
@@ -208,7 +220,7 @@ try:
     check("и право на событие не тратится — утром напомним",
           ds.claim_push_event(8002, ds.EVENT_NEW_ORDER) is True)
 finally:
-    push_module.datetime = real_now
+    push_module.datetime = REAL_DATETIME
 
 
 # ============================================================================

@@ -1,0 +1,94 @@
+/*
+ * Раздел «Контроль доставки» — токены --bx-* по DESIGN-SPEC.md.
+ *
+ * Свой файл, а не styles.css: общие стили дашборда написаны на старом
+ * неймспейсе --barkhat-*, и переписывать их ради одного раздела мы не будем
+ * (правило CLAUDE.md). Новый код — на --bx-*, как salon-kpi.css и
+ * invoices-v2.css.
+ */
+
+.cdisp {
+    --bx-wine:      #411330;
+    --bx-pink-wash: #F3E3EE;
+    --bx-bg:        #faf4f9;
+    --bx-white:     #ffffff;
+    --bx-text:      #3C3C3C;
+    --bx-text-2:    #6F6F6F;
+    --bx-muted:     #9b8f97;
+    --bx-border:    #eee2ea;
+    --bx-up:        #0a7d3f;
+    --bx-down:      #c0322f;
+    --bx-r-lg:  8px;
+    --bx-r-xl:  12px;
+    --bx-r-2xl: 16px;
+    --bx-font-head: 'Vollkorn', Georgia, serif;
+}
+
+.cdisp h3 {
+    font-family: var(--bx-font-head);
+    color: var(--bx-wine);
+    font-weight: 700;
+    font-size: 18px;
+    margin: 0 0 6px;
+}
+
+/* Вкладки */
+.cdisp-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+
+/* KPI-плитки: крупные числа винные, tabular-nums — по §5 спеки */
+.cdisp-tiles {
+    display: grid; gap: 12px; margin-bottom: 20px;
+    grid-template-columns: repeat(4, 1fr);
+}
+@media (max-width: 900px) { .cdisp-tiles { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px) { .cdisp-tiles { grid-template-columns: 1fr; } }
+
+.cdisp-tile {
+    background: var(--bx-white);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    padding: 16px;
+}
+.cdisp-tile__label {
+    font-size: 11.5px; color: var(--bx-muted); text-transform: uppercase;
+    letter-spacing: .03em; line-height: 1.2;
+}
+.cdisp-tile__value {
+    font-weight: 700; font-size: 28px; color: var(--bx-wine);
+    margin: 6px 0 0; line-height: 1;
+    font-variant-numeric: tabular-nums lining-nums; letter-spacing: -0.01em;
+}
+
+/* Блок тревоги «никто не взял» */
+.cdisp-alarm {
+    background: var(--bx-white);
+    border: 1px solid rgba(192, 50, 47, 0.30);
+    border-left: 3px solid var(--bx-down);
+    border-radius: var(--bx-r-2xl);
+    padding: 16px; margin-bottom: 20px;
+}
+.cdisp-alarm h3 { color: var(--bx-down); }
+
+.cdisp-table {
+    width: 100%; border-collapse: collapse; margin: 10px 0 4px;
+    font-size: 14px; color: var(--bx-text);
+}
+.cdisp-table th, .cdisp-table td {
+    border-bottom: 1px solid var(--bx-border);
+    padding: 9px 10px; text-align: left; vertical-align: middle;
+}
+.cdisp-table th {
+    background: var(--bx-pink-wash); color: var(--bx-wine);
+    font-weight: 600; font-size: 12.5px; white-space: nowrap;
+}
+.cdisp-table td { font-variant-numeric: tabular-nums; }
+.cdisp-table tr:last-child td { border-bottom: none; }
+
+.cdisp-ok   { color: var(--bx-up); }
+.cdisp-bad  { color: var(--bx-down); }
+.cdisp-note { color: var(--bx-muted); font-size: 13px; margin: 4px 0 0; }
+
+.cdisp-form {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+    margin-top: 12px;
+}

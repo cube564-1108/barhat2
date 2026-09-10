@@ -1398,6 +1398,12 @@ def serve_courier_dispatch():
     return send_from_directory(DASHBOARD_DIR, 'courier-dispatch.js')
 
 
+@app.route('/courier-dispatch.css')
+def serve_courier_dispatch_css():
+    """Отдаёт стили раздела «Контроль доставки» (токены --bx-* по DESIGN-SPEC)"""
+    return send_from_directory(DASHBOARD_DIR, 'courier-dispatch.css')
+
+
 @app.route('/salon-load.css')
 def salon_load_css():
     return send_from_directory(DASHBOARD_DIR, 'salon-load.css')

@@ -1330,6 +1330,184 @@ def list_active_assignments(city: Optional[str] = None) -> List[Dict[str, Any]]:
     return rows
 
 
+def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
+                      courier_delivery_codes: Optional[List[str]] = None
+                      ) -> Dict[str, Any]:
+    """
+    Где сейчас каждый заказ — экран управляющего.
+
+    Один запрос на всю картину: доступность заказа считается из НАШЕЙ таблицы
+    броней, а не из статуса CRM (находка К1) — между действием курьера и его
+    отражением в CRM проходит до минуты, и экран не должен врать эту минуту.
+
+    Заказы без брони, до окна доставки которых осталось меньше порога города,
+    помечаются `unclaimed_alert`: это ровно тот случай, где решение «отдать
+    аутсорсу» принимает человек, а следит агент (§7-бис).
+    """
+    codes = visible_status_codes()
+    visible = codes.get(ROLE_VISIBLE, []) + codes.get(ROLE_READY, [])
+    if not visible:
+        return {"orders": [], "totals": {}, "unclaimed": []}
+
+    conditions = ["o.delivery_date >= ?", "o.delivery_date <= ?",
+                  f"o.status IN ({','.join('?' * len(visible))})"]
+    params: List[Any] = [date_from, date_to, *visible]
+    if city:
+        conditions.append("o.city = ?")
+        params.append(city)
+    if courier_delivery_codes:
+        conditions.append(
+            f"o.delivery_code IN ({','.join('?' * len(courier_delivery_codes))})")
+        params.extend(courier_delivery_codes)
+
+    with get_db() as conn:
+        rows = [dict(row) for row in conn.execute(f"""
+            SELECT o.retailcrm_order_id, o.order_number, o.city, o.status,
+                   o.delivery_date, o.delivery_time_from, o.delivery_time_to,
+                   o.net_cost, s.name AS site_name, s.utc_offset,
+                   a.state AS assignment_state, a.courier_name, a.courier_user_id,
+                   a.claimed_at, a.picked_up_at, a.expires_at
+              FROM courier_orders o
+              LEFT JOIN courier_sites s ON s.code = o.site_code
+              LEFT JOIN delivery_assignments a
+                     ON a.retailcrm_order_id = o.retailcrm_order_id
+                    AND a.state IN ('{STATE_CLAIMED}', '{STATE_PICKED_UP}', '{STATE_DELIVERED}')
+             WHERE {' AND '.join(conditions)}
+             ORDER BY o.delivery_date, o.delivery_time_from IS NULL, o.delivery_time_from
+        """, params).fetchall()]
+
+    ready = set(codes.get(ROLE_READY, []))
+    totals = {"free": 0, "claimed": 0, "picked_up": 0, "delivered": 0,
+              "unclaimed_alert": 0}
+    now = datetime.utcnow()
+
+    for row in rows:
+        state = row.get("assignment_state") or "free"
+        row["state"] = state
+        row["is_ready"] = row.get("status") in ready
+        totals[state] = totals.get(state, 0) + 1
+
+        # Порог тревоги свой в каждом городе: города различаются размером и
+        # числом курьеров, одно число на сеть будет либо шуметь, либо опаздывать
+        row["unclaimed_alert"] = False
+        if state == "free" and row.get("utc_offset") is not None:
+            minutes = city_settings(row.get("city"))["unclaimed_alert_minutes"]
+            alert_at = salon_time.unclaimed_alert_at(
+                row["delivery_date"], row.get("delivery_time_from"),
+                row["utc_offset"], minutes)
+            row["unclaimed_alert"] = alert_at <= now
+            if row["unclaimed_alert"]:
+                totals["unclaimed_alert"] += 1
+
+    return {
+        "orders": rows,
+        "totals": totals,
+        "unclaimed": [row for row in rows if row["unclaimed_alert"]],
+    }
+
+
+def delivery_metrics(date_from: str, date_to: str,
+                     city: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Показатели работы курьеров за период.
+
+    Непосчитанный показатель — это `None` с причиной, а не ноль: «нет данных»
+    и «ноль минут» читаются человеком по-разному, и подменять одно другим
+    нельзя.
+
+    «Время от появления заказа до брони» здесь НЕ считается: момент, когда
+    заказ стал виден курьерам, нигде не записан — есть только `synced_at`,
+    а это время синка, а не появления. Показывать его под видом ожидания
+    значит выдумать цифру.
+    """
+    where = ["o.delivery_date >= ?", "o.delivery_date <= ?"]
+    params: List[Any] = [date_from, date_to]
+    if city:
+        where.append("o.city = ?")
+        params.append(city)
+    clause = " AND ".join(where)
+
+    with get_db() as conn:
+        claims = [dict(row) for row in conn.execute(f"""
+            SELECT a.state, a.release_reason, a.claimed_at, a.picked_up_at,
+                   a.delivered_at, o.delivery_time_to, o.delivery_date,
+                   s.utc_offset
+              FROM delivery_assignments a
+              JOIN courier_orders o ON o.retailcrm_order_id = a.retailcrm_order_id
+              LEFT JOIN courier_sites s ON s.code = o.site_code
+             WHERE {clause}
+        """, params).fetchall()]
+
+        outsourced = conn.execute(f"""
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(o.net_cost), 0) AS amount
+              FROM delivery_assignments a
+              JOIN courier_orders o ON o.retailcrm_order_id = a.retailcrm_order_id
+             WHERE a.release_reason = ? AND {clause}
+        """, (RELEASE_OUTSOURCED, *params)).fetchone()
+
+    def minutes_between(start: Optional[str], end: Optional[str]) -> Optional[float]:
+        if not start or not end:
+            return None
+        try:
+            a = datetime.fromisoformat(start)
+            b = datetime.fromisoformat(end)
+        except ValueError:
+            return None
+        return (b - a).total_seconds() / 60.0
+
+    pickup_times = [m for m in (minutes_between(c["claimed_at"], c["picked_up_at"])
+                                for c in claims) if m is not None and m >= 0]
+
+    on_time, late = 0, 0
+    for claim in claims:
+        if not claim["delivered_at"] or not claim["delivery_time_to"]:
+            continue
+        if claim["utc_offset"] is None:
+            continue
+        try:
+            deadline = salon_time.local_to_utc(
+                salon_time.parse_local(claim["delivery_date"], claim["delivery_time_to"]),
+                claim["utc_offset"])
+            delivered = datetime.fromisoformat(claim["delivered_at"])
+        except (ValueError, TypeError):
+            continue
+        if delivered <= deadline:
+            on_time += 1
+        else:
+            late += 1
+
+    total = len(claims)
+    expired = sum(1 for c in claims if c["release_reason"] == RELEASE_EXPIRED)
+
+    def median(values: List[float]) -> Optional[float]:
+        if not values:
+            return None
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[middle]
+        return (ordered[middle - 1] + ordered[middle]) / 2
+
+    return {
+        "period": {"from": date_from, "to": date_to},
+        "claims_total": total,
+        "expired_share": round(expired / total * 100, 1) if total else None,
+        "expired_count": expired,
+        # Медиана, а не среднее: одна ходка через весь город сдвигает среднее
+        # так, что оно перестаёт описывать обычный день
+        "minutes_to_pickup_median": round(median(pickup_times), 1) if pickup_times else None,
+        "delivered_on_time": on_time,
+        "delivered_late": late,
+        "on_time_share": (round(on_time / (on_time + late) * 100, 1)
+                          if (on_time + late) else None),
+        "outsourced_after_release": outsourced["cnt"],
+        "outsourced_amount": round(outsourced["amount"] or 0, 2),
+        # Честно называем, чего не умеем: момент появления заказа в ленте
+        # нигде не записан
+        "not_measured": ["время от появления заказа до брони"],
+    }
+
+
 def my_active_claims(courier_user_id: int) -> List[Dict[str, Any]]:
     """Живые брони курьера — для лимита и экрана «Мои»."""
     with get_db() as conn:

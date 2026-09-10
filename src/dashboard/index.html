@@ -15,6 +15,7 @@
     <link rel="stylesheet" href="/invoices-v2.css">
     <link rel="stylesheet" href="/salon-kpi.css">
     <link rel="stylesheet" href="/salon-load.css">
+    <link rel="stylesheet" href="/courier-dispatch.css">
     <!-- chart.js — со своего домена, не с jsdelivr: чужой CDN означал лишние
          DNS + TLS перед первой отрисовкой и зависимость от его доступности.
          defer у всех скриптов: качаются параллельно с разбором страницы,
@@ -968,7 +969,7 @@
                     <section class="section">
                         <h2 class="section-title">КОНТРОЛЬ ДОСТАВКИ</h2>
                         <p class="section-description">Настройка отправки статусов в CRM и журнал отправок. Живые брони и метрики появятся отдельно</p>
-                        <div id="cdispRoot"></div>
+                        <div id="cdispRoot" class="cdisp"></div>
                     </section>
                 </div>
 

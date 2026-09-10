@@ -368,6 +368,42 @@ def get_assignments():
     return success_response(ds.list_active_assignments(request.args.get("city")))
 
 
+@delivery_bp.route("/overview", methods=["GET"])
+@section_required(DISPATCH_SECTION)
+def get_overview():
+    """
+    «Доставка сегодня»: где сейчас каждый заказ.
+
+    Период по умолчанию — сегодня и завтра: горизонт, в котором вообще
+    что-то решают. Дальше смотреть незачем, а лишние даты стоят чтения.
+    """
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+    if not (_valid_date(date_from) and _valid_date(date_to)):
+        date_from, date_to = _default_period()
+
+    return success_response(ds.dispatch_overview(
+        city=request.args.get("city") or None,
+        date_from=date_from,
+        date_to=date_to,
+        courier_delivery_codes=_courier_delivery_codes(),
+    ), {"date_from": date_from, "date_to": date_to})
+
+
+@delivery_bp.route("/metrics", methods=["GET"])
+@section_required(DISPATCH_SECTION)
+def get_metrics():
+    """Показатели работы курьеров за период."""
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+    if not (_valid_date(date_from) and _valid_date(date_to)):
+        today = date.today()
+        date_from = (today - timedelta(days=30)).isoformat()
+        date_to = today.isoformat()
+    return success_response(ds.delivery_metrics(
+        date_from, date_to, request.args.get("city") or None))
+
+
 @delivery_bp.route("/assignments/<int:order_id>/release", methods=["POST"])
 @section_required(DISPATCH_SECTION)
 @require_ajax_header
