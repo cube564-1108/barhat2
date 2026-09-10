@@ -215,6 +215,60 @@ def init_delivery_tables() -> None:
         # кандидатом в очереди и заставляет ходить в CRM каждый тик; ровно так
         # выжигалась месячная квота ПланФакта (CLAUDE.md, раздел про квоты).
         # ====================================================================
+        # ====================================================================
+        # Действие курьера → код статуса в CRM. Заполняет человек.
+        #
+        # Ровно то правило CLAUDE.md, из-за которого счета уходили в банк без
+        # НДС: то, что уходит во внешнюю систему, — данные, а не разбор
+        # названия. Статусы в CRM переименовывают и заводят новые, и вывод
+        # кода из названия сломается молча.
+        #
+        # Пустой status_code = действие заблокировано с внятным текстом.
+        # Это лучше, чем отправить в CRM «что-нибудь похожее».
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS courier_action_statuses (
+                action TEXT PRIMARY KEY,
+                status_code TEXT,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # ====================================================================
+        # Что мы отправили в CRM и что она ответила. Очередь и журнал в одной
+        # таблице.
+        #
+        # Отправка НЕ внутри запроса курьера: CRM может отвечать секундами
+        # или лежать, а у нас два воркера на весь сайт. Курьер отмечает
+        # «Забрал» — запись падает в базу мгновенно, наружу её уносит фон.
+        #
+        # Журнал не чистится: вопрос «что мы им отправили и что они ответили»
+        # возникает всегда, и отвечать на него чтением кода — потерянный час.
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_status_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                retailcrm_order_id INTEGER NOT NULL,
+                assignment_id INTEGER,
+                action TEXT NOT NULL,
+                target_status TEXT NOT NULL,
+                courier_crm_id INTEGER,
+                state TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                sent_at TEXT,
+                response_code INTEGER,
+                error_message TEXT,
+                created_by TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_pending "
+            "ON crm_status_outbox(state, next_attempt_at)"
+        )
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS product_images (
                 -- INTEGER, как offer_id в order_items и crm_offers: SQLite не
@@ -441,9 +495,18 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         return []
     ready = set(codes.get(ROLE_READY, []))
 
-    conditions = ["o.delivery_date >= ?", "o.delivery_date <= ?",
-                  f"o.status IN ({','.join('?' * len(visible))})"]
+    # Свой забронированный заказ виден курьеру ВСЕГДА, даже когда его статус
+    # ушёл из видимых. Живой путь заказа — «Передан флористу → Заказ готов →
+    # Вызван курьер → Выполнен», и на третьем шаге заказ иначе пропадал бы из
+    # «Моих» ровно у того, кто его везёт. Бронь при этом жива (см.
+    # release_orphan_claims), и заказ без строки в ленте выглядел бы как сбой.
+    status_condition = f"o.status IN ({','.join('?' * len(visible))})"
     params: List[Any] = [date_from, date_to, *visible]
+    if courier_user_id is not None:
+        status_condition = f"({status_condition} OR a.courier_user_id = ?)"
+        params.append(courier_user_id)
+
+    conditions = ["o.delivery_date >= ?", "o.delivery_date <= ?", status_condition]
 
     if city:
         conditions.append("o.city = ?")
@@ -851,12 +914,29 @@ def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None) ->
             )
             result[RELEASE_OUTSOURCED] = cursor.rowcount or 0
 
+        # «Заказ пропал» — это исчез из витрины или отменён, а НЕ «статус ушёл
+        # из видимых».
+        #
+        # Разница дорогая. Живой путь заказа сегодня — «Передан флористу →
+        # Заказ готов → Вызван курьер → Выполнен», и `call-courier` проходят
+        # 83% заказов. В справочнике видимых его нет, и по правилу «не виден —
+        # значит пропал» бронь слетала бы у большинства заказов ровно в тот
+        # момент, когда оператор двигает статус вперёд. Плюс Фаза 5 ставит
+        # статусы сама («Передан курьеру»), и модуль отбирал бы заказ у
+        # собственного курьера.
+        #
+        # Ошибиться здесь можно в две стороны, и они неравноценны: лишняя
+        # живая бронь видна курьеру и снимается кнопкой, а лишнее снятие
+        # отдаёт один букет двоим.
         cursor = conn.execute(
             "UPDATE delivery_assignments "
             "   SET state = ?, released_at = ?, release_reason = ? "
-            " WHERE state = ? AND retailcrm_order_id NOT IN ("
-            "     SELECT o.retailcrm_order_id FROM courier_orders o "
-            "      WHERE o.status IN (SELECT status_code FROM courier_visible_statuses))",
+            " WHERE state = ? AND ("
+            "     retailcrm_order_id NOT IN (SELECT retailcrm_order_id FROM courier_orders)"
+            "     OR retailcrm_order_id IN ("
+            "         SELECT o.retailcrm_order_id FROM courier_orders o "
+            "           JOIN order_statuses s ON s.code = o.status "
+            "          WHERE s.group_code = 'cancel'))",
             (STATE_RELEASED, now, RELEASE_ORDER_GONE, STATE_CLAIMED),
         )
         result[RELEASE_ORDER_GONE] = cursor.rowcount or 0

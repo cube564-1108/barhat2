@@ -495,10 +495,27 @@
 
     // === Карточка заказа ====================================================
 
+    /**
+     * Номер заказа для показа человеку.
+     *
+     * `retailcrm_order_id` — внутренний идентификатор CRM, он НЕ равен номеру
+     * заказа и человеку ничего не говорит. Пока шапка карточки подставляла
+     * его, превью показывало «№ 154368», а карточка того же заказа —
+     * «Заказ № 268835»: курьер назвал бы оператору несуществующий номер.
+     */
+    function displayNumber(order, fallbackId) {
+        if (order && order.order_number) return order.order_number;
+        var known = state.orders.filter(function (o) {
+            return String(o.retailcrm_order_id) === String(fallbackId);
+        })[0];
+        return (known && known.order_number) || fallbackId;
+    }
+
     function openCard(orderId) {
         state.openOrderId = orderId;
         el.card.hidden = false;
-        el.card.innerHTML = sheetShell('<p class="cd-empty">Загружаем карточку…</p>', orderId);
+        el.card.innerHTML = sheetShell('<p class="cd-empty">Загружаем карточку…</p>',
+                                       displayNumber(null, orderId));
         // Аппаратная «назад» на Android обязана закрывать карточку, а не
         // выкидывать из приложения: в standalone-режиме выход выглядит как сбой.
         history.pushState({ courierLayer: 'card', orderId: orderId }, '');
@@ -529,22 +546,23 @@
         if (!orderId) return;
         apiGet('/api/courier/orders/' + encodeURIComponent(orderId)).then(function (payload) {
             if (state.openOrderId !== orderId) return;   // успели закрыть
-            el.card.innerHTML = sheetShell(cardBodyHtml(payload.data), orderId);
+            el.card.innerHTML = sheetShell(cardBodyHtml(payload.data),
+                                           displayNumber(payload.data, orderId));
         }).catch(function (error) {
             if (state.openOrderId !== orderId) return;
             el.card.innerHTML = sheetShell(
                 '<p class="cd-empty">Не удалось открыть заказ: ' + esc(error.message) + '</p>',
-                orderId);
+                displayNumber(null, orderId));
         });
     }
 
-    function sheetShell(body, orderId) {
+    function sheetShell(body, orderNumber) {
         return '<div class="cd-sheet__head">'
             + '<button type="button" class="cd-sheet__back" data-close="1" aria-label="Назад">'
             + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
             + ' stroke-linecap="round" stroke-linejoin="round" width="22" height="22">'
             + '<path d="M19 12H5"></path><path d="M12 19l-7-7 7-7"></path></svg></button>'
-            + '<span class="cd-sheet__title">Заказ № ' + esc(orderId) + '</span>'
+            + '<span class="cd-sheet__title">Заказ № ' + esc(orderNumber) + '</span>'
             + '</div>'
             + '<div class="cd-sheet__body">' + body + '</div>';
     }

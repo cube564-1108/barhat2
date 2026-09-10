@@ -315,12 +315,30 @@ check("снятая по таймеру помечена expired",
 print("\n7. Заказ отменили или отдали службе доставки")
 # ============================================================================
 
+# Отмена определяется по ГРУППЕ статуса из справочника, а не по тому, что
+# статуса нет среди видимых: живой путь заказа проходит через «Вызван
+# курьер», которого в видимых нет, и по правилу «не виден — значит пропал»
+# бронь слетала бы у большинства заказов.
+with cs.get_db() as conn:
+    conn.execute("INSERT OR REPLACE INTO order_statuses (code, name, group_code) "
+                 "VALUES ('cancel-other', 'Отменён', 'cancel')")
+    conn.execute("INSERT OR REPLACE INTO order_statuses (code, name, group_code) "
+                 "VALUES ('call-courier', 'Вызван курьер', 'assembling')")
+
 add_order(9030)
 ds.claim_order(9030, courier_user_id=900, courier_name="Отменённый",
                city="Новосибирск")
 with cs.get_db() as conn:
     conn.execute("UPDATE courier_orders SET status = 'cancel-other' "
                  " WHERE retailcrm_order_id = 9030")
+
+# Заказ, который оператор просто двинул вперёд, бронь терять НЕ должен
+add_order(9032)
+ds.claim_order(9032, courier_user_id=902, courier_name="Едущий",
+               city="Новосибирск")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET status = 'call-courier' "
+                 " WHERE retailcrm_order_id = 9032")
 
 add_order(9031)
 ds.claim_order(9031, courier_user_id=901, courier_name="Аутсорсный",
@@ -342,6 +360,21 @@ check("бронь отменённого заказа снята",
       gone["release_reason"] == "order_gone", f"({dict(gone)}, {swept})")
 check("бронь переданного аутсорсу снята с отдельной причиной",
       outsourced["release_reason"] == "outsourced", f"({dict(outsourced)}, {swept})")
+
+with cs.get_db() as conn:
+    moved = conn.execute(
+        "SELECT state FROM delivery_assignments "
+        " WHERE retailcrm_order_id = 9032 ORDER BY id DESC LIMIT 1").fetchone()["state"]
+check("статус двинули вперёд — бронь осталась", moved == "claimed", f"({moved})")
+
+# И заказ обязан остаться видимым своему курьеру: иначе он пропадает из
+# «Моих» ровно у того, кто его везёт
+own = ds.list_orders_for_courier(
+    city="Новосибирск", date_from="2000-01-01", date_to="2099-01-01",
+    courier_user_id=902, courier_delivery_codes=["dostavka-kurerom"])
+check("свой заказ виден и вне видимых статусов",
+      any(o["retailcrm_order_id"] == 9032 and o["is_mine"] for o in own),
+      f"({[o['retailcrm_order_id'] for o in own]})")
 
 
 # ============================================================================

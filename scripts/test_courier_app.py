@@ -335,6 +335,14 @@ card_body = js[js.index("function cardBodyHtml"):]
 check("флаг «не связываться» выводится первым блоком карточки",
       card_body.index("do_not_contact_recipient") < card_body.index("block('Доставка'"),
       "(блок с флагом должен идти раньше остальных)")
+# Номер заказа и внутренний id CRM — разные числа. Пока шапка карточки
+# подставляла id, превью показывало «№ 154368», а карточка того же заказа —
+# «Заказ № 268835»: курьер назвал бы оператору несуществующий номер.
+check("шапка карточки не подставляет внутренний id CRM",
+      "Заказ № ' + esc(orderNumber)" in js and "esc(orderId)" not in js,
+      "(номер человеку — order_number, retailcrm_order_id только в data-*)")
+check("номер берётся из order_number", "function displayNumber" in js)
+
 check("прокрутка возвращается после перерисовки",
       "window.scrollY" in js and "window.scrollTo" in js)
 check("экран не выводит действие из статуса CRM",
