@@ -21,9 +21,15 @@
 
     var REFRESH_MS = 30000;
 
+    // Выбранные салоны переживают перезапуск: курьер собирает ходку из
+    // двух-трёх точек и не должен выставлять их заново после каждого закрытия
+    // приложения. Ключ с префиксом — на странице живут и другие модули.
+    var SITES_KEY = 'courier-app:sites';
+
     var state = {
         orders: [],
         filter: 'free',
+        sites: [],          // коды выбранных салонов; пусто = все
         city: null,
         profileWarning: null,
         loadedAt: null,     // когда лента последний раз пришла с сервера
@@ -162,14 +168,113 @@
         });
     }
 
+    // === Салоны забора ======================================================
+
+    /**
+     * Хранилище может быть недоступно (приватный режим, отключённые cookie).
+     * Фильтр по салону — удобство, а не данные: не сохранилось так не
+     * сохранилось, приложение из-за этого падать не должно.
+     */
+    function loadSites() {
+        try {
+            var raw = window.localStorage.getItem(SITES_KEY);
+            var parsed = raw ? JSON.parse(raw) : [];
+            return Array.isArray(parsed) ? parsed.map(String) : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function saveSites() {
+        try {
+            window.localStorage.setItem(SITES_KEY, JSON.stringify(state.sites));
+        } catch (e) { /* см. loadSites */ }
+    }
+
+    function siteKey(order) {
+        return String(order.site_code || order.site_name || '');
+    }
+
+    /** Салоны, встречающиеся в ленте, со счётчиком по текущему табу. */
+    function siteOptions() {
+        var byTab = ordersByTab();
+        var map = {};
+        state.orders.forEach(function (order) {
+            var key = siteKey(order);
+            if (!key) return;
+            if (!map[key]) {
+                map[key] = { code: key, name: order.site_name || order.city || key, count: 0 };
+            }
+        });
+        byTab.forEach(function (order) {
+            var entry = map[siteKey(order)];
+            if (entry) entry.count += 1;
+        });
+        // Выбранный салон, из которого заказы разобрали, обязан остаться в
+        // ряду: иначе список пуст, а причины на экране нет.
+        state.sites.forEach(function (code) {
+            if (!map[code]) map[code] = { code: code, name: code, count: 0 };
+        });
+        return Object.keys(map)
+            .map(function (key) { return map[key]; })
+            .sort(function (a, b) { return a.name.localeCompare(b.name, 'ru'); });
+    }
+
+    function toggleSite(code) {
+        var index = state.sites.indexOf(code);
+        if (index === -1) state.sites.push(code);
+        else state.sites.splice(index, 1);
+        saveSites();
+        render();
+        window.scrollTo(0, 0);
+    }
+
+    function renderSites() {
+        var options = siteOptions();
+
+        // Один салон — ряд не нужен: выбор из одного варианта только занимает
+        // место на маленьком экране.
+        if (options.length < 2) {
+            el.sites.hidden = true;
+            el.sites.innerHTML = '';
+            return;
+        }
+
+        var html = options.map(function (option) {
+            var on = state.sites.indexOf(option.code) !== -1;
+            return '<button type="button" class="cd-site' + (on ? ' cd-site--on' : '')
+                + '" data-site="' + esc(option.code) + '"'
+                + ' aria-pressed="' + (on ? 'true' : 'false') + '">'
+                + esc(option.name)
+                + '<span class="cd-site__count">' + option.count + '</span></button>';
+        });
+
+        if (state.sites.length) {
+            html.unshift('<button type="button" class="cd-site cd-site__reset"'
+                + ' data-site-reset="1">Все салоны</button>');
+        }
+
+        el.sites.innerHTML = html.join('');
+        el.sites.hidden = false;
+    }
+
     // === Отбор и порядок ====================================================
 
-    function visibleOrders() {
-        var list = state.orders.filter(function (order) {
+    /** Заказы под текущим табом, БЕЗ фильтра по салону (по ним считаем салоны). */
+    function ordersByTab() {
+        return state.orders.filter(function (order) {
             if (state.filter === 'free') return order.is_free;
             if (state.filter === 'ready') return order.is_ready;
             if (state.filter === 'mine') return order.is_mine;
             return true;
+        });
+    }
+
+    function visibleOrders() {
+        var list = ordersByTab().filter(function (order) {
+            // Пустой выбор — это «все салоны», а не «ни одного»
+            if (!state.sites.length) return true;
+            return state.sites.indexOf(siteKey(order)) !== -1;
         });
 
         // Сервер уже отдал заказы по времени доставки. Поднимаем наверх
@@ -186,11 +291,17 @@
     }
 
     function counts() {
+        // Счётчики на табах считаются по выбранным салонам: иначе «Свободные 7»
+        // при пустом списке — не подсказка, а враньё.
+        var scope = state.orders.filter(function (order) {
+            if (!state.sites.length) return true;
+            return state.sites.indexOf(siteKey(order)) !== -1;
+        });
         return {
-            free: state.orders.filter(function (o) { return o.is_free; }).length,
-            ready: state.orders.filter(function (o) { return o.is_ready; }).length,
-            mine: state.orders.filter(function (o) { return o.is_mine; }).length,
-            all: state.orders.length
+            free: scope.filter(function (o) { return o.is_free; }).length,
+            ready: scope.filter(function (o) { return o.is_ready; }).length,
+            mine: scope.filter(function (o) { return o.is_mine; }).length,
+            all: scope.length
         };
     }
 
@@ -293,6 +404,8 @@
                 + '<span class="cd-tab__count">' + c[key] + '</span>';
         });
 
+        renderSites();
+
         // Прокрутку возвращаем сами: innerHTML выбрасывает её в начало, а
         // лента перерисовывается каждые 30 секунд.
         var scroll = window.scrollY;
@@ -306,6 +419,12 @@
     function emptyText() {
         if (state.loading && !state.loadedAt) return 'Загружаем заказы…';
         if (!state.city) return 'Вам не назначен город. Обратитесь к управляющему.';
+        // Пустой экран из-за собственного фильтра обязан объяснять себя:
+        // иначе это выглядит как «заказов нет» и как сбой приложения.
+        if (state.sites.length) {
+            return 'В выбранных салонах подходящих заказов нет. '
+                + 'Нажмите «Все салоны», чтобы увидеть остальные.';
+        }
         if (state.filter === 'free') return 'Свободных заказов сейчас нет.';
         if (state.filter === 'ready') return 'Готовых заказов сейчас нет.';
         if (state.filter === 'mine') return 'Вы пока не взяли ни одного заказа.';
@@ -628,6 +747,18 @@
             window.scrollTo(0, 0);
         });
 
+        el.sites.addEventListener('click', function (event) {
+            if (event.target.closest('[data-site-reset]')) {
+                state.sites = [];
+                saveSites();
+                render();
+                window.scrollTo(0, 0);
+                return;
+            }
+            var chip = event.target.closest('[data-site]');
+            if (chip) toggleSite(chip.getAttribute('data-site'));
+        });
+
         el.refresh.addEventListener('click', function () {
             if (state.loading) return;
             loadFeed();
@@ -694,6 +825,7 @@
         el.app = document.getElementById('cdApp');
         el.feed = document.getElementById('cdFeed');
         el.filters = document.getElementById('cdFilters');
+        el.sites = document.getElementById('cdSites');
         el.subtitle = document.getElementById('cdSubtitle');
         el.warning = document.getElementById('cdWarning');
         el.stale = document.getElementById('cdStale');
@@ -706,6 +838,8 @@
         Array.prototype.forEach.call(el.filters.querySelectorAll('.cd-tab'), function (tab) {
             tab.setAttribute('data-label', tab.textContent.trim());
         });
+
+        state.sites = loadSites();
 
         fetch('/api/auth/me', { credentials: 'same-origin' }).then(function (response) {
             if (!response.ok) throw new Error('unauthorized');

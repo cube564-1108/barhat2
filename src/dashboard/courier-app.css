@@ -180,6 +180,28 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
 .cd-tab--active { background: var(--bx-wine); color: #fff; font-weight: 500; }
 .cd-tab__count { opacity: .65; margin-left: 4px; font-variant-numeric: tabular-nums; }
 
+/* ===== Салоны забора (множественный выбор) =============================== */
+
+.cd-sites {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 12px 16px 0;
+}
+.cd-site {
+    min-height: 40px;
+    padding: 8px 14px;
+    border: 1px solid var(--bx-border);
+    border-radius: 9999px;
+    background: var(--bx-white);
+    color: var(--bx-wine); font-family: inherit; font-size: 14px;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+}
+/* Выбранный салон — винная заливка, как активный таб: одно и то же значение
+   «выбрано» не должно выглядеть в двух местах по-разному */
+.cd-site--on { background: var(--bx-wine); color: #fff; border-color: var(--bx-wine); }
+.cd-site__count { opacity: .65; font-variant-numeric: tabular-nums; }
+.cd-site__reset { color: var(--bx-text-2); }
+
 /* ===== Лента ============================================================= */
 
 .cd-feed { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
