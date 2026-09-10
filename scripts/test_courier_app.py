@@ -366,6 +366,21 @@ sites_block = js[js.index("function toggleSite"):js.index("// === Отбор и 
 check("переключение салона не ходит на сервер", "fetch(" not in sites_block)
 check("пустой экран из-за фильтра объясняет себя",
       "В выбранных салонах" in js)
+# Аппаратная «назад» обязана закрывать верхний слой. Пропустить слой в этом
+# разборе — значит выкинуть курьера из приложения вместо закрытия списка.
+popstate = js[js.index("addEventListener('popstate'"):]
+for layer in ("closePhoto(true)", "closeSites(true)", "closeCard(true)"):
+    check(f"«назад» закрывает слой: {layer}", layer in popstate[:600], "")
+# Комментарии вырезаем: и в разметке, и в скрипте `<select` упомянут ровно
+# затем, чтобы объяснить, почему его тут нет.
+html_code = re.sub(r"<!--.*?-->", "", sources["courier-app.html"], flags=re.S)
+js_code = re.sub(r"/\*.*?\*/|//[^\n]*", "", js, flags=re.S)
+check("нативный select не используется",
+      "<select" not in js_code and "<select" not in html_code,
+      "(на Android он мелкий и почти неуправляем одной рукой)")
+check("строка фильтра постоянной высоты",
+      ".cd-sitebar" in css and "flex-wrap" not in css.split(".cd-sitebar")[1][:200],
+      "(ряд чипов разъезжался на три строки и двигал ленту)")
 
 
 # ============================================================================

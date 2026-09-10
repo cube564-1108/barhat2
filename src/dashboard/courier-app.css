@@ -182,25 +182,48 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
 
 /* ===== Салоны забора (множественный выбор) =============================== */
 
-.cd-sites {
-    display: flex; flex-wrap: wrap; gap: 8px;
-    margin: 12px 16px 0;
-}
-.cd-site {
-    min-height: 40px;
-    padding: 8px 14px;
+/* Строка постоянной высоты: что бы ни было выбрано, лента не съезжает вниз */
+.cd-sitebar { margin: 12px 16px 0; }
+.cd-sitebtn {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    width: 100%; min-height: var(--cd-touch);
+    padding: 10px 16px;
     border: 1px solid var(--bx-border);
-    border-radius: 9999px;
+    border-radius: var(--bx-r-xl);
     background: var(--bx-white);
-    color: var(--bx-wine); font-family: inherit; font-size: 14px;
+    color: var(--bx-wine); font-family: inherit; font-size: 14px; font-weight: 500;
     cursor: pointer;
-    display: inline-flex; align-items: center; gap: 6px;
 }
-/* Выбранный салон — винная заливка, как активный таб: одно и то же значение
-   «выбрано» не должно выглядеть в двух местах по-разному */
-.cd-site--on { background: var(--bx-wine); color: #fff; border-color: var(--bx-wine); }
-.cd-site__count { opacity: .65; font-variant-numeric: tabular-nums; }
-.cd-site__reset { color: var(--bx-text-2); }
+.cd-sitebtn__label {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Фильтр включён — видно, не читая подпись */
+.cd-sitebtn--on { background: var(--bx-wine); color: #fff; border-color: var(--bx-wine); }
+
+/* Строка салона в слое выбора: вся строка — цель нажатия, не только галочка */
+.cd-siterow {
+    display: flex; align-items: center; gap: 14px;
+    width: 100%; min-height: 56px;
+    padding: 12px 16px;
+    border: none; border-bottom: 1px solid var(--bx-border);
+    background: transparent;
+    font-family: inherit; font-size: 16px; text-align: left;
+    color: var(--bx-text); cursor: pointer;
+}
+.cd-siterow:last-child { border-bottom: none; }
+.cd-siterow__box {
+    flex: 0 0 auto; width: 26px; height: 26px;
+    border: 2px solid var(--bx-border); border-radius: var(--bx-r-md);
+    display: flex; align-items: center; justify-content: center;
+    color: transparent;
+}
+.cd-siterow--on .cd-siterow__box {
+    background: var(--bx-wine); border-color: var(--bx-wine); color: #fff;
+}
+.cd-siterow__name { flex: 1 1 auto; min-width: 0; }
+.cd-siterow__count {
+    flex: 0 0 auto; color: var(--bx-muted); font-variant-numeric: tabular-nums;
+}
 
 /* ===== Лента ============================================================= */
 

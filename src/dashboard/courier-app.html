@@ -70,10 +70,21 @@
         <button type="button" class="cd-tab" data-filter="all">Все</button>
     </nav>
 
-    <!-- Салоны забора. Множественный выбор: за одну ходку курьер берёт заказы
-         из нескольких салонов, и «один салон за раз» тут мешал бы. Ряд
-         скрывается, когда салон в ленте всего один. -->
-    <div class="cd-sites" id="cdSites" hidden></div>
+    <!-- Салоны забора. Одна строка постоянной высоты: ряд чипов на узком
+         экране разъезжался на три строки и двигал ленту. Сам выбор —
+         отдельным слоем, там крупные цели и множественный выбор (за ходку
+         курьер берёт заказы из нескольких салонов). Строка скрывается,
+         когда салон в ленте всего один. -->
+    <div class="cd-sitebar" id="cdSiteBar" hidden>
+        <button type="button" class="cd-sitebtn" id="cdSitesOpen">
+            <span class="cd-sitebtn__label" id="cdSitesLabel">Все салоны</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                 stroke-linecap="round" stroke-linejoin="round" width="18" height="18"
+                 aria-hidden="true">
+                <path d="M6 9l6 6 6-6"></path>
+            </svg>
+        </button>
+    </div>
 
     <main class="cd-feed" id="cdFeed"></main>
 </div>
@@ -82,6 +93,10 @@
      На телефоне это единственный способ дать крупные цели и не заставлять
      курьера целиться в мелочь на ходу. -->
 <div class="cd-sheet" id="cdCard" hidden></div>
+
+<!-- Выбор салонов забора: слой, а не выпадающий список. Нативный
+     <select multiple> на Android — мелкий и почти неуправляемый одной рукой. -->
+<div class="cd-sheet" id="cdSites" hidden></div>
 
 <!-- Фото позиции. Оригиналы с сайта весят 211 КБ в медиане, поэтому грузятся
      только по тапу и только по одному. -->

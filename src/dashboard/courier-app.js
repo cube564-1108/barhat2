@@ -225,37 +225,85 @@
         if (index === -1) state.sites.push(code);
         else state.sites.splice(index, 1);
         saveSites();
-        render();
-        window.scrollTo(0, 0);
+        render();              // лента и счётчики обновляются сразу за выбором
+        if (!el.sites.hidden) renderSitesSheet();
     }
 
-    function renderSites() {
+    /**
+     * Подпись на кнопке. Названия перечисляем, пока их немного: «Восход,
+     * Заря» отвечает на вопрос сразу, а «выбрано 2» заставляет открывать
+     * список, чтобы вспомнить, что именно выбрано.
+     */
+    function sitesLabel(options) {
+        if (!state.sites.length) return 'Все салоны';
+
+        var names = state.sites.map(function (code) {
+            var found = options.filter(function (o) { return o.code === code; })[0];
+            return found ? found.name : code;
+        });
+        if (names.length <= 2) return names.join(', ');
+        return 'Салоны: ' + names.length + ' из ' + options.length;
+    }
+
+    /** Строка постоянной высоты под фильтрами; сам выбор — отдельным слоем. */
+    function renderSiteBar() {
         var options = siteOptions();
 
-        // Один салон — ряд не нужен: выбор из одного варианта только занимает
-        // место на маленьком экране.
+        // Один салон — строка не нужна: выбор из одного варианта только
+        // занимает место на маленьком экране.
         if (options.length < 2) {
-            el.sites.hidden = true;
-            el.sites.innerHTML = '';
+            el.siteBar.hidden = true;
             return;
         }
+        el.siteBar.hidden = false;
+        el.sitesLabel.textContent = sitesLabel(options);
+        el.sitesOpen.classList.toggle('cd-sitebtn--on', state.sites.length > 0);
+    }
 
-        var html = options.map(function (option) {
+    function openSites() {
+        el.sites.hidden = false;
+        renderSitesSheet();
+        history.pushState({ courierLayer: 'sites' }, '');
+    }
+
+    function closeSites(fromHistory) {
+        el.sites.hidden = true;
+        el.sites.innerHTML = '';
+        if (!fromHistory) historyBackIfOurs();
+    }
+
+    function renderSitesSheet() {
+        var options = siteOptions();
+        var rows = options.map(function (option) {
             var on = state.sites.indexOf(option.code) !== -1;
-            return '<button type="button" class="cd-site' + (on ? ' cd-site--on' : '')
+            return '<button type="button" class="cd-siterow' + (on ? ' cd-siterow--on' : '')
                 + '" data-site="' + esc(option.code) + '"'
                 + ' aria-pressed="' + (on ? 'true' : 'false') + '">'
-                + esc(option.name)
-                + '<span class="cd-site__count">' + option.count + '</span></button>';
-        });
+                + '<span class="cd-siterow__box">'
+                + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"'
+                + ' stroke-linecap="round" stroke-linejoin="round" width="16" height="16">'
+                + '<path d="M20 6L9 17l-5-5"></path></svg></span>'
+                + '<span class="cd-siterow__name">' + esc(option.name) + '</span>'
+                + '<span class="cd-siterow__count">' + option.count + '</span>'
+                + '</button>';
+        }).join('');
 
-        if (state.sites.length) {
-            html.unshift('<button type="button" class="cd-site cd-site__reset"'
-                + ' data-site-reset="1">Все салоны</button>');
-        }
-
-        el.sites.innerHTML = html.join('');
-        el.sites.hidden = false;
+        // Прокрутку слоя возвращаем: он перерисовывается на каждый выбор, а
+        // салонов может быть больше, чем помещается на экран.
+        var scroll = el.sites.scrollTop;
+        el.sites.innerHTML = '<div class="cd-sheet__head">'
+            + '<button type="button" class="cd-sheet__back" data-sites-close="1" aria-label="Назад">'
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+            + ' stroke-linecap="round" stroke-linejoin="round" width="22" height="22">'
+            + '<path d="M19 12H5"></path><path d="M12 19l-7-7 7-7"></path></svg></button>'
+            + '<span class="cd-sheet__title">Салоны забора</span></div>'
+            + '<div class="cd-sheet__body">'
+            + '<section class="cd-block" style="padding:0;overflow:hidden">' + rows + '</section>'
+            + '<button type="button" class="cd-btn cd-btn--ghost" data-site-reset="1">'
+            + 'Показать все салоны</button>'
+            + '<button type="button" class="cd-btn" data-sites-close="1">Готово</button>'
+            + '</div>';
+        el.sites.scrollTop = scroll;
     }
 
     // === Отбор и порядок ====================================================
@@ -404,7 +452,7 @@
                 + '<span class="cd-tab__count">' + c[key] + '</span>';
         });
 
-        renderSites();
+        renderSiteBar();
 
         // Прокрутку возвращаем сами: innerHTML выбрасывает её в начало, а
         // лента перерисовывается каждые 30 секунд.
@@ -747,16 +795,19 @@
             window.scrollTo(0, 0);
         });
 
+        el.sitesOpen.addEventListener('click', openSites);
+
         el.sites.addEventListener('click', function (event) {
+            if (event.target.closest('[data-sites-close]')) { closeSites(); return; }
             if (event.target.closest('[data-site-reset]')) {
                 state.sites = [];
                 saveSites();
                 render();
-                window.scrollTo(0, 0);
+                renderSitesSheet();
                 return;
             }
-            var chip = event.target.closest('[data-site]');
-            if (chip) toggleSite(chip.getAttribute('data-site'));
+            var row = event.target.closest('[data-site]');
+            if (row) toggleSite(row.getAttribute('data-site'));
         });
 
         el.refresh.addEventListener('click', function () {
@@ -783,8 +834,10 @@
             if (event.target.closest('[data-photo-close]') || event.target === el.photo) closePhoto();
         });
 
+        // Слои закрываются в обратном порядке открытия — верхний первым.
         window.addEventListener('popstate', function () {
             if (!el.photo.hidden) { closePhoto(true); return; }
+            if (!el.sites.hidden) { closeSites(true); return; }
             if (state.openOrderId) closeCard(true);
         });
 
@@ -825,6 +878,9 @@
         el.app = document.getElementById('cdApp');
         el.feed = document.getElementById('cdFeed');
         el.filters = document.getElementById('cdFilters');
+        el.siteBar = document.getElementById('cdSiteBar');
+        el.sitesOpen = document.getElementById('cdSitesOpen');
+        el.sitesLabel = document.getElementById('cdSitesLabel');
         el.sites = document.getElementById('cdSites');
         el.subtitle = document.getElementById('cdSubtitle');
         el.warning = document.getElementById('cdWarning');
