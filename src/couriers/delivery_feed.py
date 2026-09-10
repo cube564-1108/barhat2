@@ -27,7 +27,7 @@
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from . import retailcrm
@@ -265,19 +265,98 @@ def sweep_assignments() -> Dict[str, int]:
     from . import storage
     from .delivery_storage import expire_stale_claims, release_orphan_claims
 
-    result = {"expired": 0}
+    result = {"expired": 0, "orphan": 0}
+    released = []
     try:
-        result["expired"] = expire_stale_claims()
+        expired = expire_stale_claims()
         codes = [row["code"] for row in storage.list_delivery_types()
                  if row.get("counts_as_courier")]
-        result.update(release_orphan_claims(codes))
+        orphan = release_orphan_claims(codes)
+        released = expired + orphan
+        result["expired"] = len(expired)
+        result["orphan"] = len(orphan)
     except Exception as e:
         logger.warning(f"Лента изменений: уборка броней не удалась — {e}")
 
-    dropped = sum(value for value in result.values() if value)
-    if dropped:
-        logger.info(f"Брони: снято {dropped} ({result})")
+    if released:
+        logger.info(f"Брони: снято {len(released)} ({result})")
+    notify_courier_events(released)
     return result
+
+
+def notify_courier_events(released: List[Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Разослать пуши по событиям, накопившимся к этому тику.
+
+    Отправка живёт ВНУТРИ захваченной задачи ленты (находка К6): планировщик
+    крутится в каждом из двух воркеров, и без общего талона курьер получал бы
+    каждое уведомление дважды. Второй уровень защиты — журнал «заказ +
+    событие» в базе, он же переживает перезапуск.
+
+    Событие определяется по текущему состоянию, а не по разнице с прошлым
+    тиком: «что уже отправляли» помнит журнал, и такой обход не зависит от
+    того, сколько тиков пропустили.
+
+    Ошибка не роняет тик: пуш — усиление, а лента обновляется и сама.
+    """
+    from . import push
+    from .delivery_storage import (claims_about_to_expire, list_orders_for_courier,
+                                   visible_status_codes)
+
+    counts = {"new": 0, "ready": 0, "expiring": 0, "released": 0}
+    if not push.is_configured():
+        return counts
+
+    try:
+        for row in released:
+            order = _order_for_push(row["retailcrm_order_id"])
+            if order and push.notify_claim_released(
+                    order, row["courier_user_id"], row.get("release_reason")):
+                counts["released"] += 1
+
+        for row in claims_about_to_expire():
+            order = _order_for_push(row["retailcrm_order_id"])
+            if order and push.notify_claim_expiring(order, row["courier_user_id"]):
+                counts["expiring"] += 1
+
+        today = date.today().isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        codes = [r["code"] for r in storage.list_delivery_types()
+                 if r.get("counts_as_courier")]
+        ready_codes = set(visible_status_codes().get("ready", []))
+
+        # Город не задаём: смотрим все, а адресатов выбирает сам push по
+        # городу заказа
+        for order in list_orders_for_courier(city=None, date_from=today,
+                                             date_to=tomorrow,
+                                             courier_delivery_codes=codes):
+            if order["is_free"] and push.notify_new_order(order):
+                counts["new"] += 1
+            elif (order.get("status") in ready_codes
+                    and order.get("assignment_state") == "claimed"):
+                holder = order.get("assignment_user_id")
+                if holder and push.notify_ready(order, holder):
+                    counts["ready"] += 1
+    except Exception as e:
+        logger.warning(f"Push-уведомления: рассылка не удалась — {e}")
+
+    if any(counts.values()):
+        logger.info(f"Push: отправлено {counts}")
+    return counts
+
+
+def _order_for_push(order_id: int) -> Optional[Dict[str, Any]]:
+    """Минимум полей для текста уведомления. ПДн сюда не попадают."""
+    from .storage import get_db
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT o.retailcrm_order_id, o.order_number, o.city, o.address_text, "
+            "       o.delivery_time_from, s.name AS site_name, s.utc_offset "
+            "  FROM courier_orders o "
+            "  LEFT JOIN courier_sites s ON s.code = o.site_code "
+            " WHERE o.retailcrm_order_id = ?", (order_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def fetch_missing_images(client, deadline: Optional[float] = None) -> int:

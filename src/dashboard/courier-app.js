@@ -35,7 +35,8 @@
         loadedAt: null,     // когда лента последний раз пришла с сервера
         stale: false,       // последняя попытка не удалась
         loading: false,
-        openOrderId: null
+        openOrderId: null,
+        pushKey: null       // публичный VAPID; null = пуши не настроены
     };
 
     var el = {};
@@ -1115,6 +1116,90 @@
         }, REFRESH_MS);
     }
 
+    // === Push-уведомления ===================================================
+
+    /** base64url из манифеста → Uint8Array, как того требует PushManager. */
+    function urlBase64ToUint8Array(base64) {
+        var padding = '='.repeat((4 - base64.length % 4) % 4);
+        var normalized = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
+        var raw = window.atob(normalized);
+        var output = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) output[i] = raw.charCodeAt(i);
+        return output;
+    }
+
+    function pushSupported() {
+        return 'serviceWorker' in navigator && 'PushManager' in window
+            && 'Notification' in window;
+    }
+
+    /**
+     * Показать кнопку включения уведомлений — или объяснить, почему нельзя.
+     *
+     * Молча не подписываемся: разрешение спрашивается по нажатию, иначе
+     * Chrome его блокирует, а курьер не понимает, почему звука нет.
+     */
+    function setupPush() {
+        if (!pushSupported()) return;
+
+        apiGet('/api/courier/push/key').then(function (payload) {
+            if (!payload.data.configured) return;   // ключи не заведены
+            state.pushKey = payload.data.public_key;
+            return navigator.serviceWorker.ready.then(function (registration) {
+                return registration.pushManager.getSubscription();
+            }).then(function (existing) {
+                if (existing) {
+                    // Подписка могла быть выдана до перезапуска сервера —
+                    // пересохраняем, чтобы она точно лежала в базе
+                    return sendSubscription(existing);
+                }
+                renderPushButton();
+            });
+        }).catch(function () { /* пуши — усиление, а не условие работы */ });
+    }
+
+    function renderPushButton() {
+        if (document.getElementById('cdPushBtn')) return;
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.id = 'cdPushBtn';
+        button.className = 'cd-btn cd-btn--ghost';
+        button.style.margin = '12px 16px 0';
+        button.style.width = 'calc(100% - 32px)';
+        button.textContent = 'Включить уведомления о новых заказах';
+        button.addEventListener('click', subscribePush);
+        el.feed.parentNode.insertBefore(button, el.feed);
+    }
+
+    function subscribePush() {
+        var button = document.getElementById('cdPushBtn');
+        if (button) { button.disabled = true; button.textContent = 'Подключаем…'; }
+
+        Notification.requestPermission().then(function (permission) {
+            if (permission !== 'granted') {
+                toast('Уведомления запрещены в настройках браузера', 'error');
+                if (button) { button.disabled = false; button.textContent = 'Включить уведомления о новых заказах'; }
+                return;
+            }
+            return navigator.serviceWorker.ready.then(function (registration) {
+                return registration.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: urlBase64ToUint8Array(state.pushKey)
+                });
+            }).then(sendSubscription).then(function () {
+                toast('Уведомления включены', 'success');
+                if (button) button.remove();
+            });
+        }).catch(function (error) {
+            toast('Не удалось включить уведомления: ' + error.message, 'error');
+            if (button) { button.disabled = false; button.textContent = 'Включить уведомления о новых заказах'; }
+        });
+    }
+
+    function sendSubscription(subscription) {
+        return apiPost('/api/courier/push/subscribe', subscription.toJSON());
+    }
+
     // === Service worker =====================================================
 
     function registerServiceWorker() {
@@ -1168,6 +1253,7 @@
             el.app.hidden = false;
             bind();
             registerServiceWorker();
+            setupPush();
             return loadProfile().then(loadFeed);
         }).catch(function () {
             window.location.href = '/login';

@@ -269,6 +269,44 @@ def init_delivery_tables() -> None:
             "ON crm_status_outbox(state, next_attempt_at)"
         )
 
+        # ====================================================================
+        # Подписки на push. Одна строка на устройство: у курьера их бывает две
+        # (телефон и планшет), и отписка одного не должна гасить второе.
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                user_agent TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_ok_at TEXT,
+                failed_count INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id)"
+        )
+
+        # ====================================================================
+        # Журнал отправленных событий — защита от дублей (находка К6).
+        #
+        # Планировщик крутится в КАЖДОМ воркере, их два. Без этого журнала
+        # «новый заказ в городе» уходит курьеру дважды, а повтор тика после
+        # ошибки — ещё раз. Уникальный ключ «заказ + событие» делает отправку
+        # ровно однократной, и держит это БД, а не аккуратность кода.
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS push_events (
+                retailcrm_order_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (retailcrm_order_id, event_type)
+            )
+        """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS product_images (
                 -- INTEGER, как offer_id в order_items и crm_offers: SQLite не
@@ -1107,9 +1145,11 @@ def list_outbox(limit: int = 100, state: Optional[str] = None) -> List[Dict[str,
     return rows
 
 
-def expire_stale_claims() -> int:
+def expire_stale_claims() -> List[Dict[str, Any]]:
     """
     Снять брони, до окна доставки которых осталось меньше положенного.
+
+    Возвращает снятые записи — по ним уходят уведомления «бронь снята».
 
     Только из состояния `claimed` (находка К3): курьер может стоять в салоне
     и жать «Забрал» ровно в эту секунду, и отобрать у него заказ с букетом в
@@ -1123,14 +1163,23 @@ def expire_stale_claims() -> int:
     conn.isolation_level = None
     try:
         conn.execute("BEGIN IMMEDIATE")
-        cursor = conn.execute(
+        # Кого сняли, читаем ДО обновления и тем же соединением: иначе не
+        # узнать, кому уходит уведомление «бронь снята», а второй запрос
+        # после COMMIT уже ничего не найдёт — записи изменились.
+        victims = [dict(row) for row in conn.execute(
+            "SELECT id, retailcrm_order_id, courier_user_id FROM delivery_assignments "
+            " WHERE state = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+            (STATE_CLAIMED, now)).fetchall()]
+        conn.execute(
             "UPDATE delivery_assignments "
             "   SET state = ?, released_at = ?, release_reason = ? "
             " WHERE state = ? AND expires_at IS NOT NULL AND expires_at <= ?",
             (STATE_RELEASED, now, RELEASE_EXPIRED, STATE_CLAIMED, now),
         )
         conn.execute("COMMIT")
-        return cursor.rowcount or 0
+        for victim in victims:
+            victim["release_reason"] = RELEASE_EXPIRED
+        return victims
     except Exception:
         conn.execute("ROLLBACK")
         raise
@@ -1138,7 +1187,28 @@ def expire_stale_claims() -> int:
         conn.close()
 
 
-def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None) -> Dict[str, int]:
+def claims_about_to_expire(warn_minutes: int = salon_time.CLAIM_WARN_MINUTES
+                           ) -> List[Dict[str, Any]]:
+    """
+    Брони, которым осталось меньше `warn_minutes` до снятия.
+
+    Отдельным запросом, а не внутри снятия: предупредить надо ДО того, как
+    заказ ушёл, — в этом весь смысл. Повторов не будет: право на отправку
+    занимается журналом событий.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT a.retailcrm_order_id, a.courier_user_id, a.expires_at "
+            "  FROM delivery_assignments a "
+            " WHERE a.state = ? AND a.expires_at IS NOT NULL "
+            f"   AND a.expires_at <= datetime('now', '+{int(warn_minutes)} minutes') "
+            "   AND a.expires_at > datetime('now')",
+            (STATE_CLAIMED,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None
+                          ) -> List[Dict[str, Any]]:
     """
     Снять брони с заказов, которых больше нет или которые уехали мимо нас.
 
@@ -1152,7 +1222,7 @@ def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None) ->
     «заказ отозван» и «заказ передали Яндексу» это разные новости.
     """
     now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
-    result = {RELEASE_ORDER_GONE: 0, RELEASE_OUTSOURCED: 0}
+    released: List[Dict[str, Any]] = []
 
     conn = sqlite_connect(DB_PATH, timeout=30)
     conn.isolation_level = None
@@ -1164,17 +1234,25 @@ def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None) ->
         # была бы всегда order_gone
         if courier_delivery_codes:
             placeholders = ",".join("?" * len(courier_delivery_codes))
-            cursor = conn.execute(
-                f"UPDATE delivery_assignments "
-                f"   SET state = ?, released_at = ?, release_reason = ? "
+            outsourced_where = (
                 f" WHERE state = ? AND retailcrm_order_id IN ("
                 f"     SELECT o.retailcrm_order_id FROM courier_orders o "
                 f"      WHERE o.delivery_code IS NOT NULL "
-                f"        AND o.delivery_code NOT IN ({placeholders}))",
-                (STATE_RELEASED, now, RELEASE_OUTSOURCED, STATE_CLAIMED,
-                 *courier_delivery_codes),
+                f"        AND o.delivery_code NOT IN ({placeholders}))")
+            args = (STATE_CLAIMED, *courier_delivery_codes)
+            # Кого снимаем — читаем до обновления: после него этих строк уже
+            # не найти, а по ним уходят уведомления курьерам
+            victims = [dict(row) for row in conn.execute(
+                "SELECT id, retailcrm_order_id, courier_user_id "
+                "  FROM delivery_assignments" + outsourced_where, args).fetchall()]
+            conn.execute(
+                "UPDATE delivery_assignments "
+                "   SET state = ?, released_at = ?, release_reason = ?" + outsourced_where,
+                (STATE_RELEASED, now, RELEASE_OUTSOURCED, *args),
             )
-            result[RELEASE_OUTSOURCED] = cursor.rowcount or 0
+            for victim in victims:
+                victim["release_reason"] = RELEASE_OUTSOURCED
+            released.extend(victims)
 
         # «Заказ пропал» — это исчез из витрины или отменён, а НЕ «статус ушёл
         # из видимых».
@@ -1190,21 +1268,27 @@ def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None) ->
         # Ошибиться здесь можно в две стороны, и они неравноценны: лишняя
         # живая бронь видна курьеру и снимается кнопкой, а лишнее снятие
         # отдаёт один букет двоим.
-        cursor = conn.execute(
-            "UPDATE delivery_assignments "
-            "   SET state = ?, released_at = ?, release_reason = ? "
+        gone_where = (
             " WHERE state = ? AND ("
             "     retailcrm_order_id NOT IN (SELECT retailcrm_order_id FROM courier_orders)"
             "     OR retailcrm_order_id IN ("
             "         SELECT o.retailcrm_order_id FROM courier_orders o "
             "           JOIN order_statuses s ON s.code = o.status "
-            "          WHERE s.group_code = 'cancel'))",
+            "          WHERE s.group_code = 'cancel'))")
+        victims = [dict(row) for row in conn.execute(
+            "SELECT id, retailcrm_order_id, courier_user_id "
+            "  FROM delivery_assignments" + gone_where, (STATE_CLAIMED,)).fetchall()]
+        conn.execute(
+            "UPDATE delivery_assignments "
+            "   SET state = ?, released_at = ?, release_reason = ?" + gone_where,
             (STATE_RELEASED, now, RELEASE_ORDER_GONE, STATE_CLAIMED),
         )
-        result[RELEASE_ORDER_GONE] = cursor.rowcount or 0
+        for victim in victims:
+            victim["release_reason"] = RELEASE_ORDER_GONE
+        released.extend(victims)
 
         conn.execute("COMMIT")
-        return result
+        return released
     except Exception:
         conn.execute("ROLLBACK")
         raise
@@ -1255,6 +1339,111 @@ def my_active_claims(courier_user_id: int) -> List[Dict[str, Any]]:
             (courier_user_id, STATE_CLAIMED, STATE_PICKED_UP),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Push: подписки и защита от дублей
+# ---------------------------------------------------------------------------
+
+EVENT_NEW_ORDER = "new_order"
+EVENT_READY = "ready"
+EVENT_CLAIM_EXPIRING = "claim_expiring"
+EVENT_CLAIM_RELEASED = "claim_released"
+EVENT_ORDER_GONE = "order_gone"
+
+# Подписка, которая падает подряд столько раз, снимается сама. Push-сервис
+# отвечает 410/404 на протухший endpoint, но бывает и молчание — очередь не
+# должна копиться вечно.
+PUSH_MAX_FAILURES = 5
+
+
+def save_push_subscription(user_id: int, endpoint: str, p256dh: str, auth: str,
+                           user_agent: Optional[str] = None) -> None:
+    """
+    Запомнить подписку устройства.
+
+    Тот же endpoint у другого пользователя означает, что телефоном
+    воспользовался другой человек: перезаписываем владельца, иначе пуши о
+    заказах поедут не тому.
+    """
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, "
+            "  p256dh = excluded.p256dh, auth = excluded.auth, "
+            "  user_agent = excluded.user_agent, failed_count = 0",
+            (user_id, endpoint, p256dh, auth, user_agent),
+        )
+
+
+def delete_push_subscription(endpoint: str) -> None:
+    with get_db() as conn:
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+
+
+def push_subscriptions_for(user_ids: List[int]) -> List[Dict[str, Any]]:
+    if not user_ids:
+        return []
+    placeholders = ",".join("?" * len(user_ids))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM push_subscriptions WHERE user_id IN ({placeholders})",
+            user_ids,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_push_ok(endpoint: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE push_subscriptions SET last_ok_at = datetime('now'), failed_count = 0 "
+            " WHERE endpoint = ?", (endpoint,))
+
+
+def mark_push_failed(endpoint: str, drop: bool = False) -> None:
+    """Протухший endpoint снимаем: иначе очередь копится и тратит время тика."""
+    with get_db() as conn:
+        if drop:
+            conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+            return
+        conn.execute(
+            "UPDATE push_subscriptions SET failed_count = failed_count + 1 "
+            " WHERE endpoint = ?", (endpoint,))
+        conn.execute(
+            "DELETE FROM push_subscriptions WHERE endpoint = ? AND failed_count >= ?",
+            (endpoint, PUSH_MAX_FAILURES))
+
+
+def claim_push_event(order_id: int, event_type: str) -> bool:
+    """
+    Занять право отправить событие. True — отправляем, False — уже отправлено.
+
+    Держит уникальный ключ в БД, а не аккуратность кода: планировщик крутится
+    в каждом из двух воркеров, и «новый заказ» иначе уходит дважды (К6).
+    """
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO push_events (retailcrm_order_id, event_type) VALUES (?, ?)",
+                (order_id, event_type),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def courier_user_ids(city: Optional[str]) -> List[int]:
+    """Активные курьеры города — кому уходит «новый заказ»."""
+    with get_db() as conn:
+        if city:
+            rows = conn.execute(
+                "SELECT user_id FROM courier_profiles WHERE active = 1 AND city = ?",
+                (city,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT user_id FROM courier_profiles WHERE active = 1").fetchall()
+    return [row["user_id"] for row in rows]
 
 
 # ---------------------------------------------------------------------------

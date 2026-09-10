@@ -308,6 +308,56 @@ def order_action(order_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Push-уведомления
+# ---------------------------------------------------------------------------
+
+@delivery_bp.route("/push/key", methods=["GET"])
+@section_required("courier_app", DISPATCH_SECTION)
+def get_push_key():
+    """
+    Публичный ключ VAPID для подписки в браузере.
+
+    `null` означает «пуши не настроены» — экран покажет это словами, а не
+    молча не подпишется. Ключи кладёт человек в `.env`, сгенерировав их
+    скриптом `scripts/generate_vapid_keys.py`.
+    """
+    from . import push
+    return success_response({"public_key": push.public_key(),
+                             "configured": push.is_configured()})
+
+
+@delivery_bp.route("/push/subscribe", methods=["POST"])
+@section_required("courier_app", DISPATCH_SECTION)
+@require_ajax_header
+def push_subscribe():
+    """Запомнить подписку устройства."""
+    payload = request.get_json(silent=True) or {}
+    endpoint = payload.get("endpoint")
+    keys = payload.get("keys") or {}
+    if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+        return error_response("Подписка неполная")
+
+    ds.save_push_subscription(
+        user_id=int(current_user.id),
+        endpoint=endpoint,
+        p256dh=keys["p256dh"],
+        auth=keys["auth"],
+        user_agent=(request.headers.get("User-Agent") or "")[:300],
+    )
+    return success_response({"subscribed": True})
+
+
+@delivery_bp.route("/push/unsubscribe", methods=["POST"])
+@section_required("courier_app", DISPATCH_SECTION)
+@require_ajax_header
+def push_unsubscribe():
+    payload = request.get_json(silent=True) or {}
+    if payload.get("endpoint"):
+        ds.delete_push_subscription(payload["endpoint"])
+    return success_response({"subscribed": False})
+
+
+# ---------------------------------------------------------------------------
 # Разбор броней (управляющий)
 # ---------------------------------------------------------------------------
 

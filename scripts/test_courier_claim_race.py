@@ -297,7 +297,11 @@ with cs.get_db() as conn:
                  " WHERE retailcrm_order_id = 9002", (past,))
 
 dropped = ds.expire_stale_claims()
-check("просроченная бронь снята", dropped >= 1, f"({dropped})")
+# Снятые записи возвращаются списком: по ним уходят пуши «бронь снята»,
+# и знать, КОГО сняли, надо не меньше, чем сколько
+check("просроченная бронь снята", len(dropped) >= 1, f"({dropped})")
+check("известно, кому уходит уведомление",
+      all(row.get("courier_user_id") for row in dropped), f"({dropped})")
 
 with cs.get_db() as conn:
     picked = conn.execute(

@@ -54,6 +54,50 @@ self.addEventListener('message', (event) => {
     if (event.data === 'skip-waiting') self.skipWaiting();
 });
 
+// === Push ===================================================================
+//
+// В уведомлении нет персональных данных: оно видно на экране блокировки, и
+// имя с телефоном получателя туда попадать не должны (§10.5 плана). Текст
+// целиком формирует сервер — здесь только показ.
+
+self.addEventListener('push', (event) => {
+    let payload = {};
+    try {
+        payload = event.data ? event.data.json() : {};
+    } catch (e) {
+        payload = { title: 'Доставка', body: 'Есть изменения по заказам' };
+    }
+
+    event.waitUntil(self.registration.showNotification(payload.title || 'Доставка', {
+        body: payload.body || '',
+        icon: '/app/courier-icon.svg',
+        badge: '/app/courier-icon.svg',
+        // tag с номером заказа: повтор того же события заменяет уведомление,
+        // а не сыплет их стопкой
+        tag: payload.tag || 'courier',
+        renotify: true,
+        vibrate: [120, 60, 120],
+        data: { url: payload.url || '/app/courier' }
+    }));
+});
+
+self.addEventListener('notificationclick', (event) => {
+    event.notification.close();
+    const target = (event.notification.data && event.notification.data.url) || '/app/courier';
+
+    // Уже открытую вкладку поднимаем, а не открываем вторую: курьер иначе
+    // копит десяток копий приложения за смену.
+    event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+        .then((clients) => {
+            for (const client of clients) {
+                if (client.url.indexOf('/app/courier') !== -1 && 'focus' in client) {
+                    return client.focus();
+                }
+            }
+            return self.clients.openWindow(target);
+        }));
+});
+
 self.addEventListener('fetch', (event) => {
     const request = event.request;
     if (request.method !== 'GET') return;
