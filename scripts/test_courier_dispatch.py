@@ -355,6 +355,87 @@ check("нет эмодзи в разделе", not EMOJI.findall(js) and not EMO
 
 
 # ============================================================================
+print("\n6. Курьер в CRM разошёлся с нашей бронью")
+# ============================================================================
+# По этому полю модуль «Оплата курьерам» считает выплаты, и правит его не
+# только наш модуль: оператор назначает курьера руками (68 правок за день).
+# Расхождение — это чьи-то деньги, и человек должен увидеть его до конца месяца.
+
+ds.save_courier_profile(user_id=21, username="mismatch", city="Новосибирск",
+                        retailcrm_courier_id=777, active=True, updated_by="test")
+
+# Живая бронь, а оператор поставил в CRM кого-то другого
+add_order(6040)
+ds.claim_order(6040, courier_user_id=21, courier_name="Иван", city="Новосибирск")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 888, courier_name = 'Пётр' "
+                 " WHERE retailcrm_order_id = 6040")
+
+# Совпадает — в список попасть не должен
+add_order(6041)
+ds.claim_order(6041, courier_user_id=21, courier_name="Иван", city="Новосибирск")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 777, courier_name = 'Иван' "
+                 " WHERE retailcrm_order_id = 6041")
+
+found = ds.courier_mismatches(TODAY.isoformat(), TODAY.isoformat(), "Новосибирск")
+ids = {row["retailcrm_order_id"]: row for row in found}
+check("чужой курьер в CRM замечен", 6040 in ids, f"({sorted(ids)})")
+check("причина названа", ids.get(6040, {}).get("kind") == "other_courier",
+      f"({ids.get(6040, {}).get('kind')})")
+check("видно обоих: нашего и того, кто в CRM",
+      ids.get(6040, {}).get("our_courier_name") == "Иван"
+      and ids.get(6040, {}).get("crm_courier_name") == "Пётр", f"({ids.get(6040)})")
+check("совпадающий курьер не считается расхождением", 6041 not in ids,
+      f"({sorted(ids)})")
+
+# Курьера поставили МЫ, потом бронь сняли — в CRM он остался
+add_order(6042)
+ds.claim_order(6042, courier_user_id=21, courier_name="Иван", city="Новосибирск")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 777, courier_name = 'Иван' "
+                 " WHERE retailcrm_order_id = 6042")
+    conn.execute(
+        "INSERT INTO crm_status_outbox "
+        "  (retailcrm_order_id, action, target_status, courier_crm_id, site_code, "
+        "   state, sent_at, created_at) "
+        "VALUES (6042, 'claim', '', 777, 'site-a', 'sent', datetime('now'), datetime('now'))")
+ds.release_order(6042, courier_user_id=21, reason=ds.RELEASE_SELF)
+
+found = ds.courier_mismatches(TODAY.isoformat(), TODAY.isoformat(), "Новосибирск")
+stale = {row["retailcrm_order_id"]: row for row in found}
+check("снятая бронь с нашим курьером в CRM замечена", 6042 in stale, f"({sorted(stale)})")
+check("причина отличается от «чужой курьер»",
+      stale.get(6042, {}).get("kind") == "stale_courier",
+      f"({stale.get(6042, {}).get('kind')})")
+
+# Курьер, которого поставил оператор сам, нашей проблемой не является
+add_order(6043)
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 999, courier_name = 'Чужой' "
+                 " WHERE retailcrm_order_id = 6043")
+found = ds.courier_mismatches(TODAY.isoformat(), TODAY.isoformat(), "Новосибирск")
+check("курьер оператора без нашей брони не тревожит",
+      6043 not in {row["retailcrm_order_id"] for row in found},
+      f"({[row['retailcrm_order_id'] for row in found]})")
+
+# Ничего не чиним автоматически: снять бронь из-за опечатки оператора значит
+# отдать букет второму курьеру
+with cs.get_db() as conn:
+    state_6040 = conn.execute(
+        "SELECT state FROM delivery_assignments WHERE retailcrm_order_id = 6040"
+    ).fetchone()["state"]
+check("бронь из-за расхождения не снимается сама", state_6040 == "claimed",
+      f"({state_6040})")
+
+r = manager.get("/api/courier/overview")
+payload = (r.get_json() or {}).get("data") or {}
+check("расхождения приходят вместе с обзором", "mismatches" in payload,
+      f"({sorted(payload)})")
+check("расхождения показаны на экране", "mismatches" in js and "В CRM другой курьер" in js)
+
+
+# ============================================================================
 print()
 if failures:
     print(f"=== ПРОВАЛОВ: {len(failures)} ===")

@@ -1518,6 +1518,103 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
     }
 
 
+def courier_mismatches(date_from: str, date_to: str,
+                       city: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Заказы, где курьер в CRM разошёлся с нашей бронью.
+
+    Курьера в CRM ставит не только модуль: оператор назначает его руками (68
+    правок за день по разведке), и по этому же полю модуль «Оплата курьерам»
+    считает выплаты. Значит расхождение — это чьи-то деньги, и увидеть его
+    человек должен раньше, чем закроется месяц.
+
+    Два случая, и они требуют разных действий, поэтому различаются явно:
+
+    * `other_courier` — бронь живая, а в CRM стоит кто-то другой. Либо
+      оператор переназначил заказ, либо ошибся строкой. Наш курьер об этом
+      не знает и продолжает везти.
+    * `stale_courier` — бронь снята (сама сгорела, отказался, снял
+      управляющий), а курьер, которого поставили МЫ, в CRM остался. Заказ
+      повезёт другой человек, а выплата уйдёт первому.
+
+    Автоматически не чиним ни то, ни другое. Снять бронь из-за правки
+    оператора — значит отдать букет второму курьеру из-за возможной опечатки;
+    стереть курьера в CRM — значит затереть решение человека. Модуль
+    показывает, человек решает (§7-бис плана).
+
+    Окно дат обязательно: это экран, а не диагностика, и полный скан витрины
+    на сетевом /data стоит секунды (CLAUDE.md).
+    """
+    live = f"('{STATE_CLAIMED}', '{STATE_PICKED_UP}')"
+    params_a: List[Any] = [date_from, date_to]
+    city_a = ""
+    if city:
+        city_a = " AND o.city = ?"
+        params_a.append(city)
+
+    with get_db() as conn:
+        # 1. Живая бронь, а в CRM другой курьер.
+        #    Курьеры без связки с CRM сюда не попадают: у них своё, более
+        #    раннее предупреждение («не сопоставлен»), и дублировать его
+        #    второй строкой про то же самое незачем.
+        rows = [dict(row) for row in conn.execute(f"""
+            SELECT o.retailcrm_order_id, o.order_number, o.city, o.delivery_date,
+                   o.delivery_time_from, o.courier_id AS crm_courier_id,
+                   o.courier_name AS crm_courier_name,
+                   a.courier_name AS our_courier_name, a.state
+              FROM delivery_assignments a
+              JOIN courier_orders o ON o.retailcrm_order_id = a.retailcrm_order_id
+              JOIN courier_profiles p ON p.user_id = a.courier_user_id
+             WHERE a.state IN {live}
+               AND o.delivery_date >= ? AND o.delivery_date <= ?
+               AND o.courier_id IS NOT NULL
+               AND p.retailcrm_courier_id IS NOT NULL
+               AND o.courier_id != p.retailcrm_courier_id{city_a}
+             ORDER BY o.delivery_date, o.delivery_time_from
+        """, params_a).fetchall()]
+        for row in rows:
+            row["kind"] = "other_courier"
+
+        # 2. Брони больше нет, а наш курьер в CRM остался.
+        #    «Поставили мы» — это запись в журнале отправок с тем же курьером:
+        #    без такой проверки сюда попал бы любой заказ, которому оператор
+        #    сам назначил курьера, а бронь у нас просто сгорела.
+        params_b: List[Any] = [date_from, date_to]
+        city_b = ""
+        if city:
+            city_b = " AND o.city = ?"
+            params_b.append(city)
+
+        stale = [dict(row) for row in conn.execute(f"""
+            SELECT o.retailcrm_order_id, o.order_number, o.city, o.delivery_date,
+                   o.delivery_time_from, o.courier_id AS crm_courier_id,
+                   o.courier_name AS crm_courier_name,
+                   a.courier_name AS our_courier_name, a.state, a.release_reason
+              FROM courier_orders o
+              JOIN crm_status_outbox b
+                    ON b.retailcrm_order_id = o.retailcrm_order_id
+                   AND b.state = '{OUTBOX_SENT}'
+                   AND b.courier_crm_id IS NOT NULL
+                   AND b.courier_crm_id = o.courier_id
+              LEFT JOIN delivery_assignments a ON a.id = (
+                    SELECT MAX(x.id) FROM delivery_assignments x
+                     WHERE x.retailcrm_order_id = o.retailcrm_order_id)
+             WHERE o.delivery_date >= ? AND o.delivery_date <= ?
+               AND o.courier_id IS NOT NULL
+               AND NOT EXISTS (
+                     SELECT 1 FROM delivery_assignments y
+                      WHERE y.retailcrm_order_id = o.retailcrm_order_id
+                        AND y.state IN ('{STATE_CLAIMED}', '{STATE_PICKED_UP}',
+                                        '{STATE_DELIVERED}')){city_b}
+             GROUP BY o.retailcrm_order_id
+             ORDER BY o.delivery_date, o.delivery_time_from
+        """, params_b).fetchall()]
+        for row in stale:
+            row["kind"] = "stale_courier"
+
+    return rows + stale
+
+
 def delivery_metrics(date_from: str, date_to: str,
                      city: Optional[str] = None) -> Dict[str, Any]:
     """

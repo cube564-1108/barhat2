@@ -395,12 +395,19 @@ def get_overview():
     if not (_valid_date(date_from) and _valid_date(date_to)):
         date_from, date_to = _default_period()
 
-    return success_response(ds.dispatch_overview(
-        city=request.args.get("city") or None,
+    city = request.args.get("city") or None
+    overview = ds.dispatch_overview(
+        city=city,
         date_from=date_from,
         date_to=date_to,
         courier_delivery_codes=_courier_delivery_codes(),
-    ), {"date_from": date_from, "date_to": date_to})
+    )
+    # Расхождения по курьеру — тем же вызовом, что и вся картина: это две
+    # стороны одного вопроса «где сейчас заказ», и второй поход на экран за
+    # ними означал бы второе обращение к общему медленному диску.
+    overview["mismatches"] = ds.courier_mismatches(date_from, date_to, city)
+    return success_response(overview,
+                            {"date_from": date_from, "date_to": date_to})
 
 
 @delivery_bp.route("/metrics", methods=["GET"])

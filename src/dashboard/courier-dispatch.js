@@ -182,9 +182,47 @@
 
         return '<div class="cdisp-tiles">' + tiles + '</div>'
             + alarm
+            + mismatchHtml()
             + '<h3>Заказы</h3>'
             + orderTable(state.overview.orders || [])
             + metricsHtml();
+    }
+
+    /**
+     * Курьер в CRM разошёлся с нашей бронью.
+     *
+     * По полю «курьер» в CRM считают выплаты, и правит его не только модуль —
+     * оператор назначает курьера руками. Расхождение это чьи-то деньги, и
+     * увидеть его надо раньше, чем закроется месяц.
+     *
+     * Ни бронь, ни поле в CRM модуль сам не трогает: снять бронь из-за
+     * возможной опечатки оператора значит отдать букет второму курьеру,
+     * а стереть курьера в CRM — затереть решение человека.
+     */
+    function mismatchHtml() {
+        var list = (state.overview && state.overview.mismatches) || [];
+        if (!list.length) return '';
+
+        var rows = list.map(function (item) {
+            var what = item.kind === 'stale_courier'
+                ? 'Бронь снята, курьер в CRM остался'
+                : 'В CRM другой курьер';
+            return '<tr>'
+                + '<td>' + esc(item.order_number || item.retailcrm_order_id) + '</td>'
+                + '<td>' + esc(item.delivery_date || '') + '</td>'
+                + '<td>' + esc(item.our_courier_name || '—') + '</td>'
+                + '<td>' + esc(item.crm_courier_name || item.crm_courier_id || '—') + '</td>'
+                + '<td>' + esc(what) + '</td>'
+                + '</tr>';
+        }).join('');
+
+        return '<div class="cdisp-alarm">'
+            + '<h3>Курьер в CRM не совпадает: ' + list.length + '</h3>'
+            + '<p class="section-description">Выплаты считают по полю «курьер» в CRM. '
+            + 'Модуль сюда не вмешивается — поправьте в CRM или снимите бронь.</p>'
+            + '<table class="cdisp-table"><thead><tr>'
+            + '<th>Заказ</th><th>Дата</th><th>У нас</th><th>В CRM</th><th>Что не так</th>'
+            + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
     }
 
     function orderTable(orders) {
