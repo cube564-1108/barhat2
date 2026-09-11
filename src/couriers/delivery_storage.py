@@ -567,6 +567,27 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
             f"o.delivery_code IN ({','.join('?' * len(courier_delivery_codes))})")
         params.extend(courier_delivery_codes)
 
+    # Заказ, у которого в поле «курьер» стоит служба доставки, уехал аутсорсу.
+    #
+    # Оператор передаёт невзятый заказ Яндексу двумя способами: меняет тип
+    # доставки (это лента ловила и раньше) или просто ставит службу курьером,
+    # не трогая тип. Второй путь до 11.09.2026 не обрабатывался вовсе — заказ
+    # оставался свободным, и наш курьер мог поехать за букетом, который уже
+    # везёт Яндекс.
+    #
+    # Признак берётся из справочника (`couriers.is_service`), где его правит
+    # человек, а не из разбора названия: агрегаторов заводят новых, и
+    # регулярка сломается молча (CLAUDE.md).
+    #
+    # Своя бронь — исключение: заказ, уже забранный курьером, обязан остаться
+    # у него на экране вместе с адресом. Бронь снимет уборка ленты, и курьер
+    # узнает об этом пушем, а не исчезнувшей карточкой.
+    outsourced_condition = "COALESCE(c.is_service, 0) = 0"
+    if courier_user_id is not None:
+        outsourced_condition = f"({outsourced_condition} OR a.courier_user_id = ?)"
+        params.append(courier_user_id)
+    conditions.append(outsourced_condition)
+
     sql = f"""
         SELECT o.*, s.name AS site_name, s.utc_offset,
                a.id AS assignment_id, a.state AS assignment_state,
@@ -574,6 +595,7 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
                a.courier_name AS assignment_courier_name
         FROM courier_orders o
         LEFT JOIN courier_sites s ON s.code = o.site_code
+        LEFT JOIN couriers c ON c.id = o.courier_id
         LEFT JOIN delivery_assignments a
                ON a.retailcrm_order_id = o.retailcrm_order_id
               AND a.state IN ('{STATE_CLAIMED}', '{STATE_PICKED_UP}')
@@ -600,6 +622,10 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
             # Имя того, кто взял заказ: «Забронирован (Иван)» вместо глухого
             # «Занят». Курьер видит, что происходит со всеми заказами города
             "assignment_courier_name": row.get("assignment_courier_name"),
+            # Кто именно держит бронь. Не для экрана, а для рассылки:
+            # уведомление «ваш заказ собран» адресуется владельцу брони, и без
+            # этого поля оно не уходило вовсе — адресат получался пустым.
+            "assignment_user_id": row.get("assignment_user_id"),
         })
         # Контакты — только по своей брони либо управляющему.
         if with_private or mine:
@@ -1366,6 +1392,31 @@ def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None
                 victim["release_reason"] = RELEASE_OUTSOURCED
             released.extend(victims)
 
+        # Второй путь передачи аутсорсу: тип доставки оператор не трогал, а в
+        # поле «курьер» поставил службу (решение владельца 2026-09-11 — снимать
+        # бронь, а не только показывать). Заказ уже везёт Яндекс, и наш курьер
+        # поехал бы за букетом, которого в салоне нет.
+        #
+        # Только из состояния `claimed`, как и остальные снятия: забранный
+        # заказ физически у курьера, и отбирать его кнопкой нельзя.
+        service_where = (
+            " WHERE state = ? AND retailcrm_order_id IN ("
+            "     SELECT o.retailcrm_order_id FROM courier_orders o "
+            "       JOIN couriers c ON c.id = o.courier_id "
+            "      WHERE COALESCE(c.is_service, 0) = 1)")
+        victims = [dict(row) for row in conn.execute(
+            "SELECT id, retailcrm_order_id, courier_user_id "
+            "  FROM delivery_assignments" + service_where,
+            (STATE_CLAIMED,)).fetchall()]
+        conn.execute(
+            "UPDATE delivery_assignments "
+            "   SET state = ?, released_at = ?, release_reason = ?" + service_where,
+            (STATE_RELEASED, now, RELEASE_OUTSOURCED, STATE_CLAIMED),
+        )
+        for victim in victims:
+            victim["release_reason"] = RELEASE_OUTSOURCED
+        released.extend(victims)
+
         # «Заказ пропал» — это исчез из витрины или отменён, а НЕ «статус ушёл
         # из видимых».
         #
@@ -1477,10 +1528,13 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
             SELECT o.retailcrm_order_id, o.order_number, o.city, o.status,
                    o.delivery_date, o.delivery_time_from, o.delivery_time_to,
                    o.net_cost, s.name AS site_name, s.utc_offset,
+                   o.courier_name AS crm_courier_name,
+                   COALESCE(c.is_service, 0) AS crm_courier_is_service,
                    a.state AS assignment_state, a.courier_name, a.courier_user_id,
                    a.claimed_at, a.picked_up_at, a.expires_at
               FROM courier_orders o
               LEFT JOIN courier_sites s ON s.code = o.site_code
+              LEFT JOIN couriers c ON c.id = o.courier_id
               LEFT JOIN delivery_assignments a
                      ON a.retailcrm_order_id = o.retailcrm_order_id
                     AND a.state IN ('{STATE_CLAIMED}', '{STATE_PICKED_UP}', '{STATE_DELIVERED}')
@@ -1498,11 +1552,19 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
         row["state"] = state
         row["is_ready"] = row.get("status") in ready
         totals[state] = totals.get(state, 0) + 1
+        # Заказ уже отдали службе доставки — тип доставки при этом оператор
+        # мог и не менять, признак здесь именно поле «курьер»
+        row["outsourced"] = bool(row.get("crm_courier_is_service"))
 
         # Порог тревоги свой в каждом городе: города различаются размером и
-        # числом курьеров, одно число на сеть будет либо шуметь, либо опаздывать
+        # числом курьеров, одно число на сеть будет либо шуметь, либо опаздывать.
+        #
+        # Отданный аутсорсу заказ не тревожит: он «свободен» только в наших
+        # глазах, а решение по нему человек уже принял. Иначе список «никто не
+        # взял» каждый вечер наполнялся бы заказами, которые давно везёт Яндекс,
+        # и его перестали бы читать.
         row["unclaimed_alert"] = False
-        if state == "free" and row.get("utc_offset") is not None:
+        if state == "free" and not row["outsourced"] and row.get("utc_offset") is not None:
             minutes = city_settings(row.get("city"))["unclaimed_alert_minutes"]
             alert_at = salon_time.unclaimed_alert_at(
                 row["delivery_date"], row.get("delivery_time_from"),

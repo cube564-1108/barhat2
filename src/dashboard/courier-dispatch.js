@@ -233,14 +233,21 @@
             var who = order.courier_name || '';
             var overdue = order.state === 'claimed' && order.expires_at
                 && order.expires_at <= new Date().toISOString().slice(0, 19).replace('T', ' ');
+            // Заказ отдали службе доставки: в CRM в поле «курьер» стоит
+            // агрегатор. Свободным он выглядит только в наших глазах —
+            // показывать его так значило бы звать человека решать решённое
+            var state = order.outsourced && order.state === 'free'
+                ? 'Передан службе'
+                : (STATE_TITLES[order.state] || order.state);
             return '<tr>'
                 + '<td>' + esc(order.order_number || order.retailcrm_order_id) + '</td>'
                 + '<td>' + esc(order.site_name || order.city || '') + '</td>'
                 + '<td>' + esc(slot || 'время уточняется') + '</td>'
-                + '<td>' + esc(STATE_TITLES[order.state] || order.state)
+                + '<td>' + esc(state)
                 + (overdue ? ' <span class="cdisp-bad">просрочена</span>' : '') + '</td>'
                 + '<td>' + esc(order.is_ready ? 'Готов' : 'Собирают') + '</td>'
-                + '<td>' + esc(who) + '</td>'
+                + '<td>' + esc(who || (order.outsourced ? order.crm_courier_name || '' : ''))
+                + '</td>'
                 + '<td>' + (order.state === 'claimed' || order.state === 'picked_up'
                     ? '<button class="btn btn-secondary" data-release-order="'
                         + esc(order.retailcrm_order_id) + '">Снять бронь</button>'

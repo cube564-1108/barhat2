@@ -436,6 +436,108 @@ check("расхождения показаны на экране", "mismatches" 
 
 
 # ============================================================================
+print("\n7. Заказ отдали службе доставки через поле «курьер»")
+# ============================================================================
+# Оператор передаёт невзятый заказ агрегатору двумя способами: меняет тип
+# доставки либо просто ставит службу курьером. Второй путь не обрабатывался
+# вовсе — заказ оставался свободным, и курьер мог поехать за букетом, который
+# уже везёт Яндекс.
+
+with cs.get_db() as conn:
+    conn.execute("INSERT OR REPLACE INTO couriers (id, name, is_service, active) "
+                 "VALUES (901, 'Яндекс Доставка', 1, 1)")
+    conn.execute("INSERT OR REPLACE INTO couriers (id, name, is_service, active) "
+                 "VALUES (902, 'Иван Петров', 0, 1)")
+
+# Заказ на 6 утра: до доставки меньше порога, то есть он бы тревожил
+# как «никто не взял», если бы не был отдан службе
+add_order(6050, time_from="00:01")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 901, "
+                 "       courier_name = 'Яндекс Доставка' "
+                 " WHERE retailcrm_order_id = 6050")
+
+feed = ds.list_orders_for_courier("Новосибирск", TODAY.isoformat(), TODAY.isoformat(),
+                                  courier_delivery_codes=CODES)
+check("отданный службе заказ не показывается курьеру",
+      6050 not in {row["retailcrm_order_id"] for row in feed},
+      f"({[row['retailcrm_order_id'] for row in feed]})")
+
+overview = ds.dispatch_overview("Новосибирск", TODAY.isoformat(), TODAY.isoformat(),
+                                courier_delivery_codes=CODES)
+by_id = {row["retailcrm_order_id"]: row for row in overview["orders"]}
+check("управляющему заказ виден", 6050 in by_id, f"({sorted(by_id)})")
+check("и помечен как отданный службе", by_id.get(6050, {}).get("outsourced") is True,
+      f"({by_id.get(6050, {}).get('outsourced')})")
+check("но не тревожит как «никто не взял»",
+      6050 not in {row["retailcrm_order_id"] for row in overview["unclaimed"]},
+      f"({[row['retailcrm_order_id'] for row in overview['unclaimed']]})")
+
+# Живая бронь снимается: букета в салоне уже нет
+add_order(6051)
+ds.claim_order(6051, courier_user_id=21, courier_name="Иван", city="Новосибирск")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 901, "
+                 "       courier_name = 'Яндекс Доставка' "
+                 " WHERE retailcrm_order_id = 6051")
+released = ds.release_orphan_claims(CODES)
+check("бронь снята, когда заказ ушёл службе",
+      6051 in {row["retailcrm_order_id"] for row in released},
+      f"({[row['retailcrm_order_id'] for row in released]})")
+check("причина — передача службе, а не «заказ пропал»",
+      all(row["release_reason"] == "outsourced" for row in released
+          if row["retailcrm_order_id"] == 6051),
+      f"({released})")
+
+# Штатный курьер в том же поле ничего не ломает
+add_order(6052)
+ds.claim_order(6052, courier_user_id=21, courier_name="Иван", city="Новосибирск")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 902, courier_name = 'Иван Петров' "
+                 " WHERE retailcrm_order_id = 6052")
+ds.release_orphan_claims(CODES)
+with cs.get_db() as conn:
+    still = conn.execute("SELECT state FROM delivery_assignments "
+                         " WHERE retailcrm_order_id = 6052").fetchone()["state"]
+check("свой курьер в поле CRM бронь не снимает", still == "claimed", f"({still})")
+
+feed = ds.list_orders_for_courier("Новосибирск", TODAY.isoformat(), TODAY.isoformat(),
+                                  courier_delivery_codes=CODES)
+check("заказ со штатным курьером остаётся в ленте",
+      6052 in {row["retailcrm_order_id"] for row in feed},
+      f"({[row['retailcrm_order_id'] for row in feed]})")
+
+# Забранный заказ у курьера не отбираем: букет физически у него, и карточка
+# с адресом обязана остаться
+add_order(6053)
+# Другой курьер: у Ивана к этому моменту выбран лимит одновременных броней
+ds.save_courier_profile(user_id=22, username="vezet", city="Новосибирск",
+                        retailcrm_courier_id=902, active=True, updated_by="test")
+ds.claim_order(6053, courier_user_id=22, courier_name="Пётр", city="Новосибирск")
+ds.set_action_status(ds.ACTION_PICKUP, "send-to-delivery", "admin")
+ds.advance_assignment(6053, courier_user_id=22, action=ds.ACTION_PICKUP,
+                      username="petr", force_not_ready=True)
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET courier_id = 901, "
+                 "       courier_name = 'Яндекс Доставка' "
+                 " WHERE retailcrm_order_id = 6053")
+ds.release_orphan_claims(CODES)
+with cs.get_db() as conn:
+    picked = conn.execute("SELECT state FROM delivery_assignments "
+                          " WHERE retailcrm_order_id = 6053").fetchone()["state"]
+check("забранный заказ не отбирается", picked == "picked_up", f"({picked})")
+
+mine = ds.list_orders_for_courier("Новосибирск", TODAY.isoformat(), TODAY.isoformat(),
+                                  courier_user_id=22, courier_delivery_codes=CODES)
+check("и остаётся на экране у того, кто его везёт",
+      6053 in {row["retailcrm_order_id"] for row in mine},
+      f"({[row['retailcrm_order_id'] for row in mine]})")
+
+check("адресат уведомления «заказ собран» есть в ленте",
+      all("assignment_user_id" in row for row in mine), f"({mine[:1]})")
+
+
+# ============================================================================
 print()
 if failures:
     print(f"=== ПРОВАЛОВ: {len(failures)} ===")
