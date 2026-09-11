@@ -1885,6 +1885,52 @@ def save_courier_profile(user_id: int, username: Optional[str],
         raise
 
 
+def delete_courier_profile(user_id: int) -> None:
+    """
+    Убрать профиль курьера.
+
+    **Профиль с живыми бронями не удаляется.** Заказы остались бы без
+    владельца: записи брони живут своей таблицей и о профиле ничего не знают,
+    а курьер без профиля не видит ленту — то есть заказ висел бы забронированным
+    и недоступным никому, пока кто-нибудь не заметит. Сначала брони снимают.
+
+    Учётную запись это не трогает: человек остаётся в системе, перестаёт быть
+    курьером. История его доставок тоже остаётся — имя лежит рядом с бронью
+    (`delivery_assignments.courier_name`), а не подтягивается отсюда.
+    """
+    with get_db() as conn:
+        live = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM delivery_assignments "
+            " WHERE courier_user_id = ? AND state IN (?, ?)",
+            (user_id, STATE_CLAIMED, STATE_PICKED_UP),
+        ).fetchone()["cnt"]
+        if live:
+            raise ValueError(
+                f"У курьера {live} заказ(а) в работе. Снимите брони на экране "
+                f"«Доставка сегодня», потом удаляйте профиль.")
+
+        conn.execute("DELETE FROM courier_profiles WHERE user_id = ?", (user_id,))
+        # Подписки на пуши тоже убираем: без профиля адресатом он всё равно
+        # не станет, а мёртвые записи копят ошибки отправки
+        conn.execute("DELETE FROM push_subscriptions WHERE user_id = ?", (user_id,))
+
+
+def set_profile_active(user_id: int, active: bool, username: str) -> None:
+    """
+    Временно отключить курьера, не удаляя профиль.
+
+    Отпуск и болезнь — не повод терять город и связку с CRM, которые заводили
+    руками. Отключённый курьер не получает уведомлений и не считается
+    адресатом, но настройки его ждут.
+    """
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE courier_profiles SET active = ?, updated_by = ?, "
+            "       updated_at = datetime('now') WHERE user_id = ?",
+            (1 if active else 0, username, user_id),
+        )
+
+
 def profiles_without_crm_link(city: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Активные курьеры без связки с CRM — их работа не попадёт в выплаты.

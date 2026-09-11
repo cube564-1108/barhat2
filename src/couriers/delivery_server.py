@@ -531,6 +531,36 @@ def save_profile(user_id: int):
     return success_response(ds.get_courier_profile(user_id))
 
 
+@delivery_bp.route("/profiles/<int:user_id>", methods=["DELETE"])
+@role_required("admin")
+@require_ajax_header
+def delete_profile(user_id: int):
+    """
+    Убрать профиль курьера. Учётную запись это не трогает.
+
+    Профиль с живыми бронями не удаляется: заказы остались бы без владельца
+    и висели бы забронированными, недоступные никому.
+    """
+    try:
+        ds.delete_courier_profile(user_id)
+    except ValueError as e:
+        return error_response(str(e), 409)
+    log_action(current_user.username, "courier_profile_delete", f"user_id={user_id}")
+    return success_response({"deleted": user_id})
+
+
+@delivery_bp.route("/profiles/<int:user_id>/active", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def toggle_profile_active(user_id: int):
+    """Отключить курьера на время (отпуск, болезнь), не теряя настройки."""
+    payload = request.get_json(silent=True) or {}
+    ds.set_profile_active(user_id, bool(payload.get("active")), current_user.username)
+    log_action(current_user.username, "courier_profile_active",
+               f"user_id={user_id} -> {bool(payload.get('active'))}")
+    return success_response(ds.get_courier_profile(user_id))
+
+
 @delivery_bp.route("/city-settings", methods=["GET"])
 @section_required(DISPATCH_SECTION)
 def get_city_settings():

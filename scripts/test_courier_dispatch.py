@@ -275,6 +275,52 @@ check("управляющий профиль не правит — это адм
 
 
 # ============================================================================
+print("\n4-бис. Удаление и отключение курьера")
+# ============================================================================
+# «Отключить» и «удалить» — разные действия. Отпуск не повод терять город и
+# связку с CRM, которые заводили руками.
+
+ds.save_courier_profile(user_id=11, username="kurier", city="Новосибирск",
+                        retailcrm_courier_id=None, active=True, updated_by="test")
+ds.save_courier_profile(user_id=12, username="zapas", city="Новосибирск",
+                        retailcrm_courier_id=None, active=True, updated_by="test")
+
+ds.set_profile_active(12, False, "admin")
+check("отключённый курьер сохраняет город",
+      ds.get_courier_profile(12)["city"] == "Новосибирск")
+check("и помечен неактивным", ds.get_courier_profile(12)["active"] == 0)
+check("отключённый не попадает в адресаты уведомлений",
+      12 not in ds.courier_user_ids("Новосибирск"),
+      f"({ds.courier_user_ids('Новосибирск')})")
+
+ds.set_profile_active(12, True, "admin")
+check("включается обратно", ds.get_courier_profile(12)["active"] == 1)
+
+# Живую бронь заводим здесь же, а не полагаемся на разделы выше: там
+# управляющий её как раз снимал, и проверка молча превращалась в пустую
+add_order(6030)
+ds.claim_order(6030, courier_user_id=11, courier_name="Иван", city="Новосибирск")
+
+try:
+    ds.delete_courier_profile(11)
+    check("профиль с живыми бронями не удаляется", False, "(удалился)")
+except ValueError as e:
+    check("профиль с живыми бронями не удаляется", "в работе" in str(e), f"({e})")
+
+ds.save_push_subscription(12, "https://push.test/del", "k", "a", "Android")
+ds.delete_courier_profile(12)
+check("свободный профиль удаляется", ds.get_courier_profile(12) is None)
+check("подписки на пуши убраны вместе с ним",
+      not ds.push_subscriptions_for([12]), f"({ds.push_subscriptions_for([12])})")
+
+r = manager.delete("/api/courier/profiles/11", headers=AJAX)
+check("управляющий профиль не удаляет — это админское", r.status_code == 403,
+      f"({r.status_code})")
+r = courier.delete("/api/courier/profiles/11", headers=AJAX)
+check("курьер тем более", r.status_code == 403, f"({r.status_code})")
+
+
+# ============================================================================
 print("\n5. Разметка, стили и подключение раздела")
 # ============================================================================
 

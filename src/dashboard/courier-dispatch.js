@@ -91,6 +91,18 @@
         });
     }
 
+    function del(url) {
+        return fetch(url, { method: 'DELETE', credentials: 'same-origin', headers: AJAX })
+            .then(function (r) {
+                return r.json().catch(function () { return {}; }).then(function (payload) {
+                    if (!r.ok || payload.success !== true) {
+                        throw new Error(payload.error || ('HTTP ' + r.status));
+                    }
+                    return payload.data;
+                });
+            });
+    }
+
     // === Загрузка ===========================================================
 
     function loadTab() {
@@ -244,7 +256,10 @@
                 + '<td>' + esc(profile.username || profile.user_id) + '</td>'
                 + '<td>' + citySelect(profile) + '</td>'
                 + '<td>' + crmSelect(profile) + '</td>'
-                + '<td>' + esc(profile.active ? 'работает' : 'отключён') + '</td>'
+                + '<td>' + (profile.active
+                    ? '<span class="cdisp-ok">работает</span>'
+                    : '<span class="cdisp-note">отключён</span>') + '</td>'
+                + '<td>' + (state.isAdmin ? profileActions(profile) : '') + '</td>'
                 + '</tr>';
         }).join('');
 
@@ -254,10 +269,29 @@
             + 'кому уходят уведомления о новых. Связка с CRM решает, попадёт ли '
             + 'его работа в выплаты.</p>'
             + '<table class="cdisp-table"><thead><tr>'
-            + '<th>Учётная запись</th><th>Город</th><th>Курьер в CRM</th><th>Состояние</th>'
-            + '</tr></thead><tbody>' + (rows || '<tr><td colspan="4">Профилей пока нет</td></tr>')
+            + '<th>Учётная запись</th><th>Город</th><th>Курьер в CRM</th>'
+            + '<th>Состояние</th><th></th>'
+            + '</tr></thead><tbody>' + (rows || '<tr><td colspan="5">Профилей пока нет</td></tr>')
             + '</tbody></table>'
             + (state.isAdmin ? addProfileHtml() : '');
+    }
+
+    /**
+     * Отключить и удалить — разные действия, и обе кнопки нужны.
+     *
+     * Отпуск и болезнь не повод терять город и связку с CRM, которые заводили
+     * руками: для этого «отключить». «Удалить» — когда человек перестал быть
+     * курьером совсем.
+     */
+    function profileActions(profile) {
+        return '<div class="cdisp-form" style="margin:0">'
+            + '<button class="btn btn-secondary" data-profile-toggle="'
+            + esc(profile.user_id) + '" data-active="' + (profile.active ? '1' : '0') + '">'
+            + (profile.active ? 'Отключить' : 'Включить') + '</button>'
+            + '<button class="btn btn-danger" data-profile-delete="'
+            + esc(profile.user_id) + '" data-name="'
+            + esc(profile.username || profile.user_id) + '">Удалить</button>'
+            + '</div>';
     }
 
     function citySelect(profile) {
@@ -420,6 +454,54 @@
                     .catch(function (error) {
                         toast(error.message, 'error');
                         release.disabled = false;
+                    });
+            });
+            return;
+        }
+
+        var toggle = event.target.closest('[data-profile-toggle]');
+        if (toggle) {
+            var turnOn = toggle.getAttribute('data-active') !== '1';
+            toggle.disabled = true;
+            post('/api/courier/profiles/'
+                 + encodeURIComponent(toggle.getAttribute('data-profile-toggle')) + '/active',
+                 { active: turnOn })
+                .then(function () {
+                    toast(turnOn ? 'Курьер включён' : 'Курьер отключён', 'success');
+                    state.profiles = null;
+                    return loadTab();
+                })
+                .catch(function (error) {
+                    toast(error.message, 'error');
+                    toggle.disabled = false;
+                });
+            return;
+        }
+
+        var remove = event.target.closest('[data-profile-delete]');
+        if (remove) {
+            var userId = remove.getAttribute('data-profile-delete');
+            remove.disabled = true;
+            // Удаление профиля необратимо, и подтверждение тут не формальность:
+            // город и связку с CRM заводили руками
+            window.BarhatUI.confirm(
+                'Убрать ' + remove.getAttribute('data-name') + ' из курьеров? '
+                + 'Учётная запись останется, город и связка с CRM пропадут.',
+                { title: 'Удалить профиль курьера', confirmText: 'Удалить',
+                  cancelText: 'Отмена' }
+            ).then(function (ok) {
+                if (!ok) { remove.disabled = false; return; }
+                return del('/api/courier/profiles/' + encodeURIComponent(userId))
+                    .then(function () {
+                        toast('Профиль удалён', 'success');
+                        state.profiles = null;
+                        return loadTab();
+                    })
+                    .catch(function (error) {
+                        // Живые брони — штатный отказ с внятным текстом,
+                        // а не сбой: заказы остались бы без владельца
+                        toast(error.message, 'error');
+                        remove.disabled = false;
                     });
             });
             return;
