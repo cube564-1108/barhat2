@@ -306,7 +306,6 @@ def order_action(order_id: int):
             username=current_user.username,
             courier_crm_id=profile.get("retailcrm_courier_id"),
             problem_note=(payload.get("note") or None),
-            force_not_ready=bool(payload.get("force_not_ready")),
         )
     except ds.ClaimError as e:
         return _claim_failed(e)

@@ -766,8 +766,18 @@
             parts.push('<button type="button" class="cd-btn cd-btn--ghost" data-problem-open="'
                 + id + '">Проблема</button>');
         } else if (order.is_mine) {
-            parts.push('<button type="button" class="cd-btn cd-btn--accent" data-pickup="'
-                + id + '">Забрал заказ</button>');
+            // Несобранный заказ забрать нельзя (решение владельца 2026-09-11).
+            // Кнопка при этом видна, но неактивна и говорит, чего ждём: живая
+            // кнопка, отвечающая отказом, читается как поломка приложения.
+            if (order.is_ready) {
+                parts.push('<button type="button" class="cd-btn cd-btn--accent" data-pickup="'
+                    + id + '">Забрал заказ</button>');
+            } else {
+                parts.push('<button type="button" class="cd-btn cd-btn--accent" disabled>'
+                    + 'Ждём отметки «Готов»</button>');
+                parts.push('<p class="cd-note">Забрать можно, когда флорист отметит '
+                    + 'заказ собранным. Список обновляется сам.</p>');
+            }
             parts.push('<div class="cd-btn-row">'
                 + '<button type="button" class="cd-btn cd-btn--ghost" data-release="'
                 + id + '">Отказаться</button>'
@@ -909,30 +919,14 @@
                 return loadFeed();
             })
             .catch(function (error) {
-                if (error.code === 'not_ready') {
-                    // Не запрет, а предупреждение: статус «Заказ готов» ставят
-                    // в момент начала окна доставки, а у трети заказов позже.
-                    // Запретить забирать — значит заставить курьера стоять в
-                    // салоне и ждать, пока флорист щёлкнет статус.
-                    return confirmNotReady(orderId, button);
-                }
+                // «Заказ не готов» — обычный отказ с внятным текстом
+                // (решение владельца 2026-09-11: забирать несобранное
+                // нельзя). Список перечитываем: отметка готовности могла
+                // появиться минуту назад, и тогда повтор уже пройдёт.
                 toast(error.message, 'error');
                 if (button) { button.disabled = false; }
                 loadFeed();
             });
-    }
-
-    function confirmNotReady(orderId, button) {
-        return window.BarhatUI.confirm(
-            'Заказ ещё не отмечен готовым. Всё равно забираете?',
-            { title: 'Заказ не готов', confirmText: 'Забираю', cancelText: 'Отмена' }
-        ).then(function (ok) {
-            if (!ok) {
-                if (button) { button.disabled = false; button.textContent = 'Забрал заказ'; }
-                return;
-            }
-            return sendAction(orderId, 'pickup', { force_not_ready: true }, button);
-        });
     }
 
     function askProblem(orderId) {

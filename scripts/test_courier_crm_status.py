@@ -148,28 +148,36 @@ check("ненастроенные действия видны как пусты�
 # ============================================================================
 print("\n3. «Забрал» у неготового заказа: предупреждение, а не запрет")
 # ============================================================================
-# Разведка показала: статус «Заказ готов» ставят в момент начала окна
-# доставки, а у трети заказов уже после него. Запрет заставил бы курьера
-# стоять в салоне и ждать, пока флорист щёлкнет статус.
+# Решение владельца 2026-09-11: забирать несобранный заказ нельзя совсем
+# (раньше это проходило через подтверждение «всё равно забираю»).
+# Цена решения известна: по замеру 2026-09-08 у 34% заказов статус «Заказ
+# готов» ставят уже после начала окна доставки, то есть курьер будет ждать
+# отметки флориста. Это вопрос дисциплины, а не кода.
 
 try:
     ds.advance_assignment(7001, courier_user_id=10, action=ds.ACTION_PICKUP,
                           username="ivan")
-    check("неготовый заказ требует подтверждения", False, "(прошло без спроса)")
+    check("неготовый заказ забрать нельзя", False, "(прошло)")
 except ds.ClaimError as e:
-    check("неготовый заказ требует подтверждения", e.code == "not_ready", f"({e.code})")
+    check("неготовый заказ забрать нельзя", e.code == "not_ready", f"({e.code})")
+    check("текст объясняет, чего ждать", "флорист" in str(e), f"({e})")
 
+check("отказ ничего не положил в очередь",
+      not [t for t in ds.take_outbox_batch() if t["retailcrm_order_id"] == 7001],
+      f"({ds.take_outbox_batch()})")
+
+# Флорист отметил сборку — теперь можно
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET status = 'order-complete' "
+                 " WHERE retailcrm_order_id = 7001")
 ds.advance_assignment(7001, courier_user_id=10, action=ds.ACTION_PICKUP,
-                      username="ivan", force_not_ready=True)
+                      username="ivan")
 
 with cs.get_db() as conn:
     row = conn.execute(
         "SELECT state, picked_up_at, problem_note FROM delivery_assignments "
         " WHERE retailcrm_order_id = 7001").fetchone()
-check("после подтверждения заказ забран", row["state"] == "picked_up",
-      f"({dict(row)})")
-check("забор до готовности отмечен в журнале",
-      row["problem_note"] and "готов" in row["problem_note"], f"({dict(row)})")
+check("готовый заказ забирается", row["state"] == "picked_up", f"({dict(row)})")
 
 
 # ============================================================================
@@ -274,10 +282,10 @@ print("\n7. Упавшая отправка: отсрочка, предел по
 
 delivery_feed.push_status_outbox(client)      # разобрать очередь доставки
 
-add_order(7003)
+add_order(7003, status="order-complete")
 ds.claim_order(7003, courier_user_id=10, courier_name="Иван", city="Новосибирск")
 ds.advance_assignment(7003, courier_user_id=10, action=ds.ACTION_PICKUP,
-                      username="ivan", force_not_ready=True)
+                      username="ivan")
 
 network = Exception("CRM не отвечает")
 client.fail_with[7003] = network
@@ -297,10 +305,10 @@ check("текст ответа CRM сохранён",
       f"({failed_row['error_message']})")
 
 # 4xx повторять бессмысленно: заказ удалён, статус переименован, ключ отозван
-add_order(7004)
+add_order(7004, status="order-complete")
 ds.claim_order(7004, courier_user_id=10, courier_name="Иван", city="Новосибирск")
 ds.advance_assignment(7004, courier_user_id=10, action=ds.ACTION_PICKUP,
-                      username="ivan", force_not_ready=True)
+                      username="ivan")
 bad_request = Exception("Заказ не найден")
 bad_request.status_code = 404
 client.fail_with[7004] = bad_request

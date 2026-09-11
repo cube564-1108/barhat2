@@ -509,14 +509,14 @@ check("заказ со штатным курьером остаётся в ле�
 
 # Забранный заказ у курьера не отбираем: букет физически у него, и карточка
 # с адресом обязана остаться
-add_order(6053)
+add_order(6053, status="order-complete")
 # Другой курьер: у Ивана к этому моменту выбран лимит одновременных броней
 ds.save_courier_profile(user_id=22, username="vezet", city="Новосибирск",
                         retailcrm_courier_id=902, active=True, updated_by="test")
 ds.claim_order(6053, courier_user_id=22, courier_name="Пётр", city="Новосибирск")
 ds.set_action_status(ds.ACTION_PICKUP, "send-to-delivery", "admin")
 ds.advance_assignment(6053, courier_user_id=22, action=ds.ACTION_PICKUP,
-                      username="petr", force_not_ready=True)
+                      username="petr")
 with cs.get_db() as conn:
     conn.execute("UPDATE courier_orders SET courier_id = 901, "
                  "       courier_name = 'Яндекс Доставка' "

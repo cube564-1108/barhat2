@@ -159,6 +159,13 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     border-radius: var(--bx-r-lg); font-size: 13px; line-height: 1.4;
 }
 
+/* Подпись под недоступной кнопкой: почему действие сейчас нельзя. Без неё
+   заблокированная кнопка читается как поломка приложения. */
+.cd-note {
+    margin: 8px 0 0; color: var(--bx-muted);
+    font-size: 13px; line-height: 1.4; text-align: center;
+}
+
 /* ===== Фильтры =========================================================== */
 
 .cd-tabs {

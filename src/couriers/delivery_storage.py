@@ -1101,8 +1101,7 @@ def _enqueue_locked(conn, order_id: int, assignment_id: Optional[int], action: s
 
 def advance_assignment(order_id: int, courier_user_id: int, action: str,
                        username: str, courier_crm_id: Optional[int] = None,
-                       problem_note: Optional[str] = None,
-                       force_not_ready: bool = False) -> Dict[str, Any]:
+                       problem_note: Optional[str] = None) -> Dict[str, Any]:
     """
     Отметка курьера: «Забрал», «Доставил» или проблема.
 
@@ -1131,10 +1130,17 @@ def advance_assignment(order_id: int, courier_user_id: int, action: str,
         if action == ACTION_PICKUP:
             if row["state"] != STATE_CLAIMED:
                 raise ClaimError("Заказ уже забран", "already")
-            # «Забрал» у неготового заказа не блокируем — предупреждаем.
-            # Разведка показала: статус «Заказ готов» ставят в момент начала
-            # окна доставки, а у трети заказов уже после него. Запрет заставил
-            # бы курьера стоять в салоне и ждать, пока флорист щёлкнет статус.
+            # Забрать можно только собранный заказ (решение владельца
+            # 2026-09-11). До этого забор у неготового заказа проходил через
+            # подтверждение «всё равно забираю» — теперь он запрещён совсем.
+            #
+            # Чем это грозит, знать полезно: по замеру 2026-09-08 статус
+            # «Заказ готов» ставят в момент начала окна доставки, а у 34%
+            # заказов уже после него. То есть запрет упирается не в курьера,
+            # а в дисциплину отметки: пока флорист не щёлкнул статус, курьер
+            # стоит в салоне. Доля таких случаев видна в метриках — если
+            # окажется высокой, лечится это дисциплиной или настройкой, а не
+            # возвратом к подтверждению.
             ready = {code["status_code"] for code in conn.execute(
                 "SELECT status_code FROM courier_visible_statuses WHERE role = ?",
                 (ROLE_READY,))}
@@ -1142,13 +1148,14 @@ def advance_assignment(order_id: int, courier_user_id: int, action: str,
                 "SELECT status FROM courier_orders WHERE retailcrm_order_id = ?",
                 (order_id,)).fetchone()
             is_ready = bool(order_status and order_status["status"] in ready)
-            if not is_ready and not force_not_ready:
-                raise ClaimError("Заказ не отмечен готовым", "not_ready")
+            if not is_ready:
+                raise ClaimError(
+                    "Заказ ещё не отмечен готовым — забрать его нельзя. "
+                    "Дождитесь, пока флорист отметит сборку.", "not_ready")
             conn.execute(
-                "UPDATE delivery_assignments SET state = ?, picked_up_at = ?, "
-                "       problem_note = COALESCE(?, problem_note) WHERE id = ?",
-                (STATE_PICKED_UP, now,
-                 None if is_ready else "забран до отметки «Заказ готов»", row["id"]),
+                "UPDATE delivery_assignments SET state = ?, picked_up_at = ? "
+                " WHERE id = ?",
+                (STATE_PICKED_UP, now, row["id"]),
             )
         elif action == ACTION_DELIVER:
             if row["state"] != STATE_PICKED_UP:
