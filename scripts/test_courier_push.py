@@ -11,8 +11,9 @@
    угодно через плечо. Имя и телефон получателя туда попадать не должны
    (§10.5 плана), а проверить это глазами один раз — значит проверить один
    раз.
-3. **Ночной звонок.** Тихие часы свои у каждого города и считаются по
-   стенным часам САЛОНА: в UTC+5 и UTC+7 «22:00» наступает в разные моменты.
+3. **Выключение должно выключать.** Кнопка «выключить уведомления» обязана
+   убирать подписку и в браузере, и у нас: оставшаяся запись означает, что
+   мы шлём в мёртвый endpoint и копим ошибки.
 4. **Протухшие подписки.** Push-сервис отвечает 410 на выброшенный телефон.
    Если такую подписку не снимать, очередь копится и тратит время тика.
 5. **Отсутствие ключей не должно ронять модуль.** Пока VAPID не заведён,
@@ -190,23 +191,14 @@ check("другое событие по тому же заказу проход�
 
 
 # ============================================================================
-print("\n4. Тихие часы считаются по стенным часам салона")
+print("\n4. Тишиной управляет человек, а не расписание")
 # ============================================================================
+# Тихие часы здесь были и убраны по решению владельца 2026-09-10: молчание
+# по расписанию неотличимо от поломки, и первый же вопрос «почему не
+# приходят» пришлось разбирать именно так. Курьер, включивший уведомления,
+# уже согласился их получать; не хочет ночью — выключает кнопкой.
 
-with cs.get_db() as conn:
-    conn.execute(
-        "INSERT OR REPLACE INTO courier_city_settings "
-        "  (city, quiet_hours_from, quiet_hours_to) VALUES ('Новосибирск', '22:00', '08:00')")
-
-check("ночь по салону распознана",
-      push.in_quiet_hours("Новосибирск", 7, NIGHT) is True)
-check("день по салону распознан",
-      push.in_quiet_hours("Новосибирск", 7, DAY) is False)
-check("тот же момент в другом поясе — уже не ночь",
-      push.in_quiet_hours("Новосибирск", 2, NIGHT) is False,
-      "(20:00 по салону при UTC+2)")
-check("пояс не задан — не молчим: пропущенный заказ хуже позднего звонка",
-      push.in_quiet_hours("Новосибирск", None, NIGHT) is False)
+check("расписания тишины в коде нет", not hasattr(push, "in_quiet_hours"))
 
 sent.clear()
 freeze(NIGHT)
@@ -215,10 +207,9 @@ try:
         conn.execute("UPDATE courier_orders SET retailcrm_order_id = 8002 "
                      " WHERE retailcrm_order_id = 8001")
     night_order = dict(order, retailcrm_order_id=8002)
-    check("ночью уведомление не уходит",
-          push.notify_new_order(night_order) is False)
-    check("и право на событие не тратится — утром напомним",
-          ds.claim_push_event(8002, ds.EVENT_NEW_ORDER) is True)
+    check("ночью уведомление уходит так же, как днём",
+          push.notify_new_order(night_order) is True)
+    check("и адресат тот же", sent and sent[0]["users"] == [501], f"({sent})")
 finally:
     push_module.datetime = REAL_DATETIME
 
@@ -292,6 +283,13 @@ check("без ajax-заголовка подписка не проходит", r
 r = client.post("/api/courier/push/unsubscribe", headers=AJAX,
                 json={"endpoint": "https://push.test/http"})
 check("отписка работает", r.status_code == 200, f"({r.status_code})")
+
+with cs.get_db() as conn:
+    left = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM push_subscriptions WHERE endpoint = ?",
+        ("https://push.test/http",)).fetchone()["cnt"]
+check("после выключения записи не остаётся — иначе шлём в мёртвый endpoint",
+      left == 0, f"({left})")
 
 anon = app.test_client()
 check("без входа ключ не отдаётся",

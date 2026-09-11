@@ -1161,29 +1161,69 @@
             return navigator.serviceWorker.ready.then(function (registration) {
                 return registration.pushManager.getSubscription();
             }).then(function (existing) {
+                state.pushOn = !!existing;
+                renderPushButton();
+                render();
                 if (existing) {
                     // Подписка могла быть выдана до перезапуска сервера —
                     // пересохраняем, чтобы она точно лежала в базе
-                    state.pushOn = true;
-                    render();
                     return sendSubscription(existing);
                 }
-                renderPushButton();
             });
         }).catch(function () { /* пуши — усиление, а не условие работы */ });
     }
 
+    /**
+     * Кнопка уведомлений: включить или выключить.
+     *
+     * Одна кнопка с двумя состояниями, а не расписание тихих часов. Тихие
+     * часы здесь были и убраны: молчание по часам неотличимо от поломки, а
+     * курьер и так знает лучше, когда его можно беспокоить.
+     */
     function renderPushButton() {
-        if (document.getElementById('cdPushBtn')) return;
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.id = 'cdPushBtn';
-        button.className = 'cd-btn cd-btn--ghost';
-        button.style.margin = '12px 16px 0';
-        button.style.width = 'calc(100% - 32px)';
-        button.textContent = 'Включить уведомления о новых заказах';
-        button.addEventListener('click', subscribePush);
-        el.feed.parentNode.insertBefore(button, el.feed);
+        var button = document.getElementById('cdPushBtn');
+        if (!button) {
+            button = document.createElement('button');
+            button.type = 'button';
+            button.id = 'cdPushBtn';
+            button.className = 'cd-btn cd-btn--ghost';
+            button.style.margin = '12px 16px 0';
+            button.style.width = 'calc(100% - 32px)';
+            button.addEventListener('click', function () {
+                if (state.pushOn) unsubscribePush();
+                else subscribePush();
+            });
+            el.feed.parentNode.insertBefore(button, el.feed);
+        }
+        button.disabled = false;
+        button.textContent = state.pushOn
+            ? 'Выключить уведомления'
+            : 'Включить уведомления о новых заказах';
+    }
+
+    function unsubscribePush() {
+        var button = document.getElementById('cdPushBtn');
+        if (button) { button.disabled = true; button.textContent = 'Выключаем…'; }
+
+        navigator.serviceWorker.ready.then(function (registration) {
+            return registration.pushManager.getSubscription();
+        }).then(function (subscription) {
+            if (!subscription) return null;
+            var endpoint = subscription.endpoint;
+            // Сначала снимаем подписку в браузере, потом убираем её у себя:
+            // если оставить запись в базе, мы будем слать в мёртвый endpoint
+            return subscription.unsubscribe().then(function () {
+                return apiPost('/api/courier/push/unsubscribe', { endpoint: endpoint });
+            });
+        }).then(function () {
+            state.pushOn = false;
+            toast('Уведомления выключены', 'info');
+            renderPushButton();
+            render();
+        }).catch(function (error) {
+            toast('Не удалось выключить: ' + error.message, 'error');
+            renderPushButton();
+        });
     }
 
     function subscribePush() {
@@ -1193,7 +1233,7 @@
         Notification.requestPermission().then(function (permission) {
             if (permission !== 'granted') {
                 toast('Уведомления запрещены в настройках браузера', 'error');
-                if (button) { button.disabled = false; button.textContent = 'Включить уведомления о новых заказах'; }
+                renderPushButton();
                 return;
             }
             return navigator.serviceWorker.ready.then(function (registration) {
@@ -1204,12 +1244,12 @@
             }).then(sendSubscription).then(function () {
                 toast('Уведомления включены', 'success');
                 state.pushOn = true;
-                if (button) button.remove();
+                renderPushButton();
                 render();
             });
         }).catch(function (error) {
             toast('Не удалось включить уведомления: ' + error.message, 'error');
-            if (button) { button.disabled = false; button.textContent = 'Включить уведомления о новых заказах'; }
+            renderPushButton();
         });
     }
 

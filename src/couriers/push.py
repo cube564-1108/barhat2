@@ -12,8 +12,13 @@ Push-уведомления курьерам (Фаза 6 плана «Курье
 3. **Пуш — усиление, а не единственный канал.** Android гасит фон, iOS
    требует установленной PWA. Лента обновляется сама каждые 30 секунд, и
    молчание пушей не должно приводить к потерянному заказу.
-4. **Ночью не будим.** Тихие часы свои у каждого города и считаются по
-   стенным часам салона, а не по времени сервера.
+4. **Тишиной управляет человек, а не расписание.** Тихие часы здесь были и
+   убраны 2026-09-10 по решению владельца: курьер, включивший уведомления,
+   уже согласился их получать, а не хочет ночью — выключает кнопкой. Цена
+   расписания оказалась выше пользы: молчание по часам неотличимо от
+   поломки, и первый же вопрос «почему не приходят» пришлось разбирать
+   именно так. Колонки `quiet_hours_*` в `courier_city_settings` остались
+   неиспользуемыми — сносить их отдельной миграцией ради этого не стоит.
 
 Библиотека `pywebpush` импортируется ЛЕНИВО, внутри отправки: без ключей
 VAPID пуши выключены целиком, и ни отсутствие библиотеки, ни отсутствие
@@ -78,31 +83,6 @@ def _short_address(address: Optional[str]) -> str:
     return ", ".join(useful[-2:])
 
 
-def in_quiet_hours(city: Optional[str], utc_offset: Optional[int],
-                   now: Optional[datetime] = None) -> bool:
-    """
-    Ночь ли сейчас в этом городе.
-
-    По стенным часам САЛОНА: в UTC+7 и UTC+5 «22:00» наступает в разные
-    моменты, и одно правило по времени сервера будило бы половину курьеров.
-    Пояс не задан — не молчим: пропущенный заказ хуже позднего звонка.
-    """
-    if utc_offset is None:
-        return False
-    settings = ds.city_settings(city)
-    start = settings.get("quiet_hours_from")
-    end = settings.get("quiet_hours_to")
-    if not start or not end:
-        return False
-
-    local = salon_time.utc_to_local(now or datetime.utcnow(), utc_offset)
-    current = local.strftime("%H:%M")
-    if start <= end:
-        return start <= current < end
-    # Окно через полночь: 22:00 → 08:00
-    return current >= start or current < end
-
-
 def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int]:
     """
     Отправить уведомление устройствам этих пользователей.
@@ -159,8 +139,6 @@ def _notify(order: Dict[str, Any], event_type: str, title: str, body: str,
             user_ids: List[int]) -> bool:
     """Одно событие: занять право на отправку и отправить."""
     if not is_configured() or not user_ids:
-        return False
-    if in_quiet_hours(order.get("city"), order.get("utc_offset")):
         return False
     if not ds.claim_push_event(order["retailcrm_order_id"], event_type):
         return False
