@@ -85,6 +85,7 @@ with cs.get_db() as conn:
                  "VALUES ('site-a', 'Восход', 'Новосибирск', 7)")
     for code, name in (("send-to-florist", "Передан флористу"),
                        ("order-complete", "Заказ готов"),
+                       ("call-courier", "Вызван курьер"),
                        ("send-to-delivery", "Передан курьеру"),
                        ("order-delivery-complete", "Заказ доставлен"),
                        ("order-delivery-fail", "Заказ НЕ доставлен")):
@@ -441,24 +442,61 @@ claim_task = [row for row in ds.list_outbox()
 check("бронь положила задачу в очередь", len(claim_task) == 1, f"({claim_task})")
 check("в задаче брони есть курьер", claim_task and claim_task[0]["courier_crm_id"] == 42,
       f"({claim_task[:1]})")
-check("бронь не отправляет статус",
+check("пока статус брони не выбран — он не отправляется",
       claim_task and not (claim_task[0]["target_status"] or ""),
       f"({claim_task[:1]})")
 check("бронь названа в журнале по-человечески",
-      claim_task and "курьер" in claim_task[0]["action_title"].lower(),
+      claim_task and "бронир" in claim_task[0]["action_title"].lower(),
       f"({claim_task[:1]})")
 
 before = len(client.calls)
 delivery_feed.push_status_outbox(client)
 claim_call = [call for call in client.calls[before:] if call["order_id"] == 7008]
-check("в CRM ушёл только курьер, без статуса",
+check("без выбранного статуса в CRM уходит только курьер",
       claim_call and claim_call[0]["courier_id"] == 42
       and claim_call[0]["status"] is None, f"({claim_call})")
 
-# Без связки с CRM отправлять нечего — пустая задача только занимала бы очередь.
-# Бронь 7008 отпускаем: у курьера выбран лимит одновременных броней, и следующая
-# упёрлась бы в него вместо проверяемого поведения
+# Владелец выбрал статус для брони — теперь она меняет и его
+check("бронь есть в справочнике действий",
+      any(row["action"] == "claim" for row in ds.list_action_statuses()),
+      f"({[r['action'] for r in ds.list_action_statuses()]})")
+check("но пустой статус её не блокирует",
+      all(row["blocks_when_empty"] is False for row in ds.list_action_statuses()
+          if row["action"] == "claim"),
+      f"({[r for r in ds.list_action_statuses() if r['action'] == 'claim']})")
+
+ds.set_action_status(ds.ACTION_CLAIM, "call-courier", "admin")
+# Бронь 7008 отпускаем: у курьера выбран лимит одновременных броней, и
+# следующая упёрлась бы в него вместо проверяемого поведения
 ds.release_order(7008, courier_user_id=user_id, reason=ds.RELEASE_SELF)
+add_order(7010, status="order-complete")
+r = client_http.post("/api/courier/orders/7010/claim", headers=AJAX)
+check("бронь со статусом проходит", r.status_code == 200, f"({r.status_code})")
+
+with_status = [row for row in ds.list_outbox()
+               if row["retailcrm_order_id"] == 7010 and row["action"] == "claim"]
+check("выбранный статус попал в задачу брони",
+      with_status and with_status[0]["target_status"] == "call-courier",
+      f"({with_status[:1]})")
+
+before = len(client.calls)
+delivery_feed.push_status_outbox(client)
+sent = [call for call in client.calls[before:] if call["order_id"] == 7010]
+check("в CRM ушли и статус, и курьер",
+      sent and sent[0]["status"] == "call-courier" and sent[0]["courier_id"] == 42,
+      f"({sent})")
+
+# Бронь ставится только через /claim: в ручке отметок ей делать нечего
+r = client_http.post("/api/courier/orders/7010/action", headers=AJAX,
+                     json={"action": "claim"})
+check("бронь нельзя провести как отметку курьера", r.status_code == 400,
+      f"({r.status_code})")
+
+ds.set_action_status(ds.ACTION_CLAIM, None, "admin")
+
+# Без связки с CRM отправлять нечего — пустая задача только занимала бы очередь.
+# Бронь 7010 отпускаем: лимит одновременных броней у курьера уже выбран
+ds.release_order(7010, courier_user_id=user_id, reason=ds.RELEASE_SELF)
 ds.save_courier_profile(user_id=user_id, username="kurier", city="Новосибирск",
                         retailcrm_courier_id=None, active=True, updated_by="test")
 add_order(7009, status="order-complete")

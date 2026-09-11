@@ -400,17 +400,25 @@
     }
 
     function statusesHtml() {
-        var blocked = state.actions.filter(function (a) { return !a.status_code; }).length;
+        // Пустой статус блокирует не всякое действие: бронь без него просто
+        // не меняет статус в CRM, а курьера проставляет. Считать её
+        // «незаконченной настройкой» значило бы звать чинить исправное
+        var blocked = state.actions.filter(function (a) {
+            return !a.status_code && a.blocks_when_empty !== false;
+        }).length;
         var rows = state.actions.map(function (item) {
+            var state_cell;
+            if (item.status_code) state_cell = '<span class="cdisp-ok">настроено</span>';
+            else if (item.blocks_when_empty === false) {
+                state_cell = '<span style="color:#6F6F6F">статус не меняем</span>';
+            } else state_cell = '<span class="cdisp-bad">действие заблокировано</span>';
             return '<tr>'
                 + '<td>' + esc(item.title) + '</td>'
                 + '<td>' + (state.isAdmin
                     ? '<select class="form-input" data-action-status="' + esc(item.action)
                         + '" style="min-width:280px">' + statusOptions(item.status_code) + '</select>'
                     : esc(item.status_code || '— не задан —')) + '</td>'
-                + '<td>' + (item.status_code
-                    ? '<span class="cdisp-ok">настроено</span>'
-                    : '<span class="cdisp-bad">действие заблокировано</span>') + '</td>'
+                + '<td>' + state_cell + '</td>'
                 + '<td>' + esc(item.updated_by || '') + '</td>'
                 + '</tr>';
         }).join('');
@@ -420,7 +428,9 @@
                 + blocked + '. Пока статус не выбран, курьер не сможет отметить это действие.</p>'
             : '')
             + '<p class="section-description">Статус выбирается из справочника CRM. '
-            + 'Выводить его из названия нельзя: названия меняют, и отправка сломается молча.</p>'
+            + 'Выводить его из названия нельзя: названия меняют, и отправка сломается молча. '
+            + 'У брони статус необязателен: пока он не выбран, бронь проставляет в CRM '
+            + 'только курьера.</p>'
             + '<table class="cdisp-table"><thead><tr>'
             + '<th>Действие курьера</th><th>Статус в CRM</th><th>Состояние</th><th>Кто менял</th>'
             + '</tr></thead><tbody>' + rows + '</tbody></table>';

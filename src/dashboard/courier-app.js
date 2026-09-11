@@ -857,8 +857,13 @@
         button.textContent = 'Бронируем…';
 
         apiPost('/api/courier/orders/' + encodeURIComponent(orderId) + '/claim')
-            .then(function () {
-                toast('Заказ ваш', 'success');
+            .then(function (payload) {
+                // Учётка не связана с курьером в CRM — значит в CRM ничего не
+                // ушло и доставка может не попасть в расчёт оплаты. Сервер об
+                // этом говорит, и молчать здесь нельзя: это деньги курьера,
+                // а узнать о них в конце месяца поздно.
+                var warning = (payload && payload.data && payload.data.warning) || null;
+                toast(warning || 'Заказ ваш', warning ? 'error' : 'success');
                 return loadFeed();
             })
             .catch(function (error) {

@@ -291,7 +291,9 @@ def order_action(order_id: int):
     """
     payload = request.get_json(silent=True) or {}
     action = payload.get("action")
-    if action not in ds.ALL_ACTIONS:
+    # Бронь есть в справочнике статусов, но не в этой ручке: её ставит и
+    # снимает /claim и /release, и попасть сюда она может только по ошибке
+    if action not in ds.ALL_ACTIONS or action == ds.ACTION_CLAIM:
         return error_response(f"Неизвестное действие: {action}")
 
     profile = ds.get_courier_profile(int(current_user.id)) or {}
