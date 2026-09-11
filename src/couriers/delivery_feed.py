@@ -226,8 +226,16 @@ def push_status_outbox(client, deadline: Optional[float] = None) -> Dict[str, in
         try:
             client.edit_order(
                 order_id=task["retailcrm_order_id"],
-                status=task["target_status"],
+                # Пустой статус — это бронь: она отправляет только курьера и
+                # в поле статуса не пишет вовсе (там работают флорист и
+                # оператор). Пустую строку наружу отдавать нельзя — CRM
+                # поняла бы её как «статус с пустым кодом».
+                status=task["target_status"] or None,
                 courier_id=task["courier_crm_id"],
+                # Обязателен в аккаунте с несколькими магазинами: без него
+                # CRM отвечает 400 «Parameter 'site' is missing», и отметка
+                # курьера молча не доезжает (разбор 11.09.2026).
+                site=task.get("site_code"),
             )
             mark_outbox_sent(task["id"])
             result["sent"] += 1

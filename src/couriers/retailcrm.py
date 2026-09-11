@@ -465,6 +465,12 @@ class CourierOrdersClient:
 
         `by=id` обязателен: без него CRM ищет заказ по externalId и отвечает
         «не найден» на совершенно живой заказ.
+
+        `site` тоже обязателен — в аккаунте с несколькими магазинами (у нас их
+        десять) CRM отвечает 400 «Parameter 'site' is missing». Проверка стоит
+        здесь, на самой отправке, а не только у вызывающего: ручку зовут и
+        очередь, и повтор из журнала, и следующий вызывающий, которого ещё нет
+        (CLAUDE.md, параметры внешних систем).
         """
         order: Dict[str, Any] = {}
         if status:
@@ -473,10 +479,13 @@ class CourierOrdersClient:
             order["delivery"] = {"data": {"courierId": int(courier_id)}}
         if not order:
             raise RetailCRMError("Нечего отправлять: не задан ни статус, ни курьер")
+        if not site:
+            raise RetailCRMError(
+                f"Не указан магазин заказа {order_id} — CRM отклонит правку "
+                f"без параметра site")
 
-        data = {"by": "id", "order": json.dumps(order, ensure_ascii=False)}
-        if site:
-            data["site"] = site
+        data = {"by": "id", "order": json.dumps(order, ensure_ascii=False),
+                "site": site}
         return self._post(f"api/v5/orders/{order_id}/edit", data)
 
     def get_product_images(self, offer_ids: List[int]) -> Dict[int, Optional[str]]:

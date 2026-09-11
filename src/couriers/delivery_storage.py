@@ -268,6 +268,18 @@ def init_delivery_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_outbox_pending "
             "ON crm_status_outbox(state, next_attempt_at)"
         )
+        # Магазин заказа в CRM. Не косметика: в аккаунте с несколькими
+        # магазинами (у нас их десять) RetailCRM отклоняет orders/{id}/edit
+        # без этого параметра — «Parameter 'site' is missing», 400. До
+        # 11.09.2026 наружу не уходила НИ ОДНА отметка курьера, и снаружи это
+        # выглядело как «модуль не меняет статус»: очередь наполнялась,
+        # экран работал, ошибка жила только в журнале отправок.
+        #
+        # Колонка, а не JOIN на витрину в момент отправки: что именно ушло во
+        # внешнюю систему, обязано остаться в журнале (CLAUDE.md, история с
+        # НДС в банк). Витрину синк перезаписывает кусками — через полчаса
+        # ответа на вопрос «с каким site мы отправляли» уже не будет.
+        _add_column_if_missing(conn, "crm_status_outbox", "site_code", "TEXT")
 
         # ====================================================================
         # Подписки на push. Одна строка на устройство: у курьера их бывает две
@@ -692,7 +704,9 @@ def _assignment_row(conn, order_id: int):
 
 
 def claim_order(order_id: int, courier_user_id: int, courier_name: str,
-                city: Optional[str], allow_any_city: bool = False) -> Dict[str, Any]:
+                city: Optional[str], allow_any_city: bool = False,
+                courier_crm_id: Optional[int] = None,
+                username: Optional[str] = None) -> Dict[str, Any]:
     """
     Забронировать заказ за курьером.
 
@@ -761,7 +775,7 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
             order["delivery_date"], order["delivery_time_from"], order["utc_offset"]
         ) if order["utc_offset"] is not None else None
 
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO delivery_assignments "
             "  (retailcrm_order_id, courier_user_id, courier_name, state, "
             "   claimed_at, expires_at) "
@@ -770,6 +784,20 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
              now.isoformat(sep=" ", timespec="seconds"),
              expires_at.isoformat(sep=" ", timespec="seconds") if expires_at else None),
         )
+
+        # Курьер уходит в CRM уже при брони (решение владельца 2026-09-11):
+        # оператор должен видеть, кто повезёт заказ, не дожидаясь забора.
+        # Той же транзакцией — иначе бывает бронь, о которой CRM не узнает.
+        #
+        # Статус при этом не трогаем вовсе: бронь живёт только у нас, а в поле
+        # статуса пишут флорист и оператор (§4 плана).
+        #
+        # Без связки учётки с курьером CRM отправлять нечего — задача не
+        # создаётся. Курьер об этом предупреждён в ручке: это его деньги.
+        if courier_crm_id:
+            _enqueue_locked(conn, order_id, cursor.lastrowid, ACTION_CLAIM,
+                            None, int(courier_crm_id), username or courier_name)
+
         conn.execute("COMMIT")
         return {
             "retailcrm_order_id": order_id,
@@ -884,6 +912,16 @@ def release_order(order_id: int, courier_user_id: int,
 
 
 # --- действия курьера, уходящие в CRM --------------------------------------
+# Бронь стоит особняком: она отправляет в CRM ТОЛЬКО курьера и не трогает
+# статус (решение владельца 2026-09-11 поверх §7-тер плана — курьер должен
+# быть виден в CRM сразу, а не после забора). Статус бронь не пишет намеренно:
+# в это поле пишут ещё флорист и оператор, и наша отметка затёрла бы их
+# работу (§4, У2 плана).
+#
+# Поэтому claim не входит в ALL_ACTIONS: справочник «действие → статус CRM»
+# описывает действия, которые без статуса выполнять нельзя, а бронь без
+# связки с курьером CRM просто не отправляет ничего.
+ACTION_CLAIM = "claim"
 ACTION_PICKUP = "pickup"
 ACTION_DELIVER = "deliver"
 ACTION_NO_ANSWER = "no_answer"
@@ -905,6 +943,11 @@ ALL_ACTIONS = {
     ACTION_DELIVER: "Доставил",
     **PROBLEM_ACTIONS,
 }
+
+# Заголовки для журнала отправок. Шире ALL_ACTIONS ровно на бронь: её в
+# справочнике статусов нет, но в журнале она обязана называться по-человечески,
+# иначе строка выглядит как «claim» и требует чтения кода.
+OUTBOX_ACTION_TITLES = {**ALL_ACTIONS, ACTION_CLAIM: "Бронь: курьер в CRM"}
 
 OUTBOX_PENDING = "pending"
 OUTBOX_SENT = "sent"
@@ -975,16 +1018,42 @@ def _action_status_locked(conn, action: str) -> str:
 
 
 def _enqueue_locked(conn, order_id: int, assignment_id: Optional[int], action: str,
-                    status_code: str, courier_crm_id: Optional[int],
+                    status_code: Optional[str], courier_crm_id: Optional[int],
                     username: str) -> None:
-    """Положить отправку в очередь тем же соединением, что и смену состояния."""
+    """
+    Положить отправку в очередь тем же соединением, что и смену состояния.
+
+    Магазин заказа читается здесь же, а не передаётся вызывающим: параметр
+    обязателен для RetailCRM, и место, где о нём можно забыть, должно быть
+    ровно одно. Тем же соединением — второе соединение под открытым
+    write-локом здесь уже дважды вешало запись.
+
+    Заказ без магазина наружу не уходит вовсе: задача сразу помечается
+    неудачной с внятным текстом. Отправить запрос, который заведомо отклонят,
+    — это занятый воркер и пустая трата попытки (CLAUDE.md про параметры
+    внешних систем).
+    """
+    row = conn.execute(
+        "SELECT site_code FROM courier_orders WHERE retailcrm_order_id = ?",
+        (order_id,)).fetchone()
+    site_code = ((row["site_code"] if row else None) or "").strip() or None
+
+    state = OUTBOX_PENDING if site_code else OUTBOX_FAILED
+    error = None if site_code else (
+        "У заказа не определён магазин в CRM — отправка остановлена. "
+        "Дождитесь синхронизации заказа и повторите.")
+
     conn.execute(
         "INSERT INTO crm_status_outbox "
         "  (retailcrm_order_id, assignment_id, action, target_status, "
-        "   courier_crm_id, state, next_attempt_at, created_by, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, datetime('now'))",
-        (order_id, assignment_id, action, status_code, courier_crm_id,
-         OUTBOX_PENDING, username),
+        "   courier_crm_id, site_code, state, next_attempt_at, error_message, "
+        "   created_by, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, datetime('now'))",
+        # Пустая строка, а не NULL: колонка заведена NOT NULL, а задача без
+        # статуса — штатный случай (бронь отправляет только курьера).
+        # При отправке пустая строка снова становится «статус не трогаем».
+        (order_id, assignment_id, action, status_code or "", courier_crm_id,
+         site_code, state, error, username),
     )
 
 
@@ -1122,6 +1191,49 @@ def mark_outbox_failed(outbox_id: int, message: str,
         )
 
 
+def retry_outbox(outbox_id: int) -> Dict[str, Any]:
+    """
+    Вернуть задачу в очередь после того, как человек починил причину.
+
+    4xx намеренно не повторяется сам: заказ удалён, статус переименован, ключ
+    отозван — повтор такой задачи это вечный кандидат в очереди, которым
+    выжигают лимиты внешнего API. Значит отсрочку снимает тот, кто устранил
+    причину, и делает это явным жестом — правило CLAUDE.md про квоты.
+
+    Счётчик попыток обнуляется: предел в 8 попыток защищает от долбёжки по
+    одной и той же причине, а причина теперь другая.
+
+    Магазин перечитывается из витрины: ровно его отсутствие и было причиной
+    отказа 11.09.2026, а к моменту повтора заказ уже мог досинхронизироваться.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM crm_status_outbox WHERE id = ?", (outbox_id,)).fetchone()
+        if row is None:
+            raise ValueError("Отправка не найдена")
+        if row["state"] == OUTBOX_SENT:
+            raise ValueError("Эта отметка уже принята CRM — повторять нечего")
+
+        site = conn.execute(
+            "SELECT site_code FROM courier_orders WHERE retailcrm_order_id = ?",
+            (row["retailcrm_order_id"],)).fetchone()
+        site_code = (((site["site_code"] if site else None) or "").strip()
+                     or (row["site_code"] or "").strip() or None)
+        if not site_code:
+            raise ValueError(
+                "У заказа не определён магазин в CRM — отправлять нечем. "
+                "Дождитесь синхронизации заказа.")
+
+        conn.execute(
+            "UPDATE crm_status_outbox "
+            "   SET state = ?, attempts = 0, next_attempt_at = datetime('now'), "
+            "       error_message = NULL, response_code = NULL, site_code = ? "
+            " WHERE id = ?",
+            (OUTBOX_PENDING, site_code, outbox_id),
+        )
+    return {"id": outbox_id, "state": OUTBOX_PENDING, "site_code": site_code}
+
+
 def list_outbox(limit: int = 100, state: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Журнал отправок: что мы отправили и что CRM ответила.
@@ -1141,7 +1253,7 @@ def list_outbox(limit: int = 100, state: Optional[str] = None) -> List[Dict[str,
     with get_db() as conn:
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
     for row in rows:
-        row["action_title"] = ALL_ACTIONS.get(row["action"], row["action"])
+        row["action_title"] = OUTBOX_ACTION_TITLES.get(row["action"], row["action"])
     return rows
 
 

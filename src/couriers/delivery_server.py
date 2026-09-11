@@ -229,6 +229,8 @@ def claim_order(order_id: int):
     if not dispatch and not city:
         return error_response("Вам не назначен город", 403)
 
+    profile = ds.get_courier_profile(int(current_user.id)) or {}
+
     try:
         result = ds.claim_order(
             order_id=order_id,
@@ -236,12 +238,23 @@ def claim_order(order_id: int):
             courier_name=current_user.display_name or current_user.username,
             city=city,
             allow_any_city=dispatch,
+            # Курьер проставляется в CRM уже при брони (решение владельца
+            # 2026-09-11): оператор видит, кто повезёт заказ, не дожидаясь
+            # отметки «Забрал». Статус при этом не меняется.
+            courier_crm_id=profile.get("retailcrm_courier_id"),
+            username=current_user.username,
         )
     except ds.ClaimError as e:
         return _claim_failed(e)
 
     log_action(current_user.username, "courier_claim",
                f"Заказ {result.get('order_number') or order_id}")
+
+    # Связки нет — в CRM ничего не ушло, и знать об этом надо сразу, а не в
+    # конце месяца по недостающей выплате (§7-тер плана).
+    if not profile.get("retailcrm_courier_id"):
+        result["warning"] = ("Ваша учётная запись не связана с курьером в CRM — "
+                             "эта доставка может не попасть в расчёт оплаты")
     return success_response(result)
 
 
@@ -494,6 +507,26 @@ def get_outbox():
         limit=min(int(request.args.get("limit", 100)), 500),
         state=request.args.get("state") or None,
     ))
+
+
+@delivery_bp.route("/outbox/<int:outbox_id>/retry", methods=["POST"])
+@section_required(DISPATCH_SECTION)
+@require_ajax_header
+def retry_outbox(outbox_id: int):
+    """
+    Повторить отправку, застрявшую на 4xx.
+
+    Сама она не повторится намеренно: заказ удалён, статус переименован, ключ
+    отозван — такая задача ходила бы наружу вечно. Отсрочку снимает человек,
+    починивший причину, и этот жест — кнопка в журнале.
+    """
+    try:
+        result = ds.retry_outbox(outbox_id)
+    except ValueError as e:
+        return error_response(str(e))
+
+    log_action(current_user.username, "courier_outbox_retry", f"Отправка {outbox_id}")
+    return success_response(result)
 
 
 @delivery_bp.route("/profiles", methods=["GET"])

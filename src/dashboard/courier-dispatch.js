@@ -388,22 +388,34 @@
                 : (item.state === 'failed' ? '#c0322f' : '#6F6F6F');
             var label = item.state === 'sent' ? 'отправлено'
                 : (item.state === 'failed' ? 'не ушло' : 'в очереди');
+            // Пустой статус — это бронь: она отправляет только курьера и в
+            // поле статуса не пишет вовсе. Прочерк честнее пустой ячейки,
+            // которая читается как «потеряли значение».
+            var target = item.target_status ? esc(item.target_status)
+                : '<span style="color:#6F6F6F">статус не меняем</span>';
+            // Повтор — только у застрявших: отправленное повторять нечего, а
+            // ждущее очереди уедет само ближайшим тиком.
+            var retry = item.state === 'sent' ? ''
+                : '<button class="btn btn-secondary btn-sm" data-outbox-retry="'
+                  + esc(item.id) + '">Повторить</button>';
             return '<tr>'
                 + '<td>' + esc(item.order_number || item.retailcrm_order_id) + '</td>'
                 + '<td>' + esc(item.action_title) + '</td>'
-                + '<td>' + esc(item.target_status) + '</td>'
+                + '<td>' + target + '</td>'
                 + '<td style="color:' + color + '">' + esc(label) + '</td>'
                 + '<td>' + esc(item.attempts) + '</td>'
                 + '<td>' + esc(item.error_message || '') + '</td>'
                 + '<td>' + esc(item.sent_at || item.created_at) + '</td>'
+                + '<td>' + retry + '</td>'
                 + '</tr>';
         }).join('');
 
         return '<p class="section-description">Что мы отправили и что ответила CRM. '
-            + 'Отметка курьера сохраняется сразу, наружу уходит фоном.</p>'
+            + 'Отметка курьера сохраняется сразу, наружу уходит фоном. '
+            + 'Отказ CRM сам не повторяется — нажмите «Повторить», когда причина устранена.</p>'
             + '<table class="cdisp-table"><thead><tr>'
             + '<th>Заказ</th><th>Действие</th><th>Статус CRM</th><th>Итог</th>'
-            + '<th>Попыток</th><th>Ответ</th><th>Когда</th>'
+            + '<th>Попыток</th><th>Ответ</th><th>Когда</th><th></th>'
             + '</tr></thead><tbody>' + rows + '</tbody></table>';
     }
 
@@ -456,6 +468,24 @@
                         release.disabled = false;
                     });
             });
+            return;
+        }
+
+        var retry = event.target.closest('[data-outbox-retry]');
+        if (retry) {
+            // Блокируем на время запроса: медленный клик иначе превращается в
+            // три отправки, а кнопка всё это время выглядит живой
+            retry.disabled = true;
+            post('/api/courier/outbox/'
+                 + encodeURIComponent(retry.getAttribute('data-outbox-retry')) + '/retry')
+                .then(function () {
+                    toast('Отправка вернулась в очередь — уйдёт в течение минуты', 'success');
+                    return loadTab();
+                })
+                .catch(function (error) {
+                    toast(error.message, 'error');
+                    retry.disabled = false;
+                });
             return;
         }
 

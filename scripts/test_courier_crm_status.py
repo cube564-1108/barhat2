@@ -184,7 +184,15 @@ check("состояние курьера уже изменилось, CRM не �
 
 
 class FakeClient:
-    """Клиент CRM, который считает вызовы и умеет падать по заказу."""
+    """
+    Клиент CRM, который считает вызовы и умеет падать по заказу.
+
+    Заглушка обязана требовать то же, что настоящая CRM. 11.09.2026 сторож был
+    зелёным, а наружу не уходила ни одна отметка курьера: боевая RetailCRM
+    отвечала «Parameter 'site' is missing» (400), потому что в аккаунте десять
+    магазинов, а заглушка принимала вызов без магазина и отвечала успехом.
+    Тест с заглушкой проверяет ровно тот контракт, который в неё заложили.
+    """
 
     def __init__(self):
         self.calls = []
@@ -192,7 +200,13 @@ class FakeClient:
 
     def edit_order(self, order_id, status=None, courier_id=None, site=None):
         self.calls.append({"order_id": order_id, "status": status,
-                           "courier_id": courier_id})
+                           "courier_id": courier_id, "site": site})
+        if not site:
+            error = Exception(
+                f"RetailCRM отклонил api/v5/orders/{order_id}/edit: "
+                f"Parameter 'site' is missing")
+            error.status_code = 400
+            raise error
         error = self.fail_with.get(order_id)
         if error:
             raise error
@@ -354,14 +368,149 @@ client_http.post("/api/courier/orders/7006/claim", headers=AJAX)
 client_http.post("/api/courier/orders/7006/action", headers=AJAX,
                  json={"action": "pickup"})
 with cs.get_db() as conn:
+    # Именно задача забора: с 11.09.2026 бронь кладёт в очередь свою запись,
+    # и без уточнения по действию проверка смотрела бы на неё
     sent_crm_id = conn.execute(
         "SELECT courier_crm_id FROM crm_status_outbox "
-        " WHERE retailcrm_order_id = 7006").fetchone()["courier_crm_id"]
+        " WHERE retailcrm_order_id = 7006 AND action = 'pickup'").fetchone()["courier_crm_id"]
 check("со связкой курьер уходит в CRM вместе со статусом", sent_crm_id == 42,
       f"({sent_crm_id})")
 
 r = client_http.get("/api/courier/outbox")
 check("журнал отправок курьеру не отдаётся", r.status_code == 403, f"({r.status_code})")
+
+
+# ============================================================================
+print("\n9. Магазин заказа уходит в CRM (иначе 400 «Parameter 'site' is missing»)")
+# ============================================================================
+# Разбор 11.09.2026: в аккаунте десять магазинов, и без site CRM отклоняет
+# любую правку заказа. Наружу не уходила ни одна отметка курьера, при этом
+# экран работал, очередь наполнялась, а ошибка жила только в журнале.
+
+with cs.get_db() as conn:
+    task_site = conn.execute(
+        "SELECT site_code FROM crm_status_outbox "
+        " WHERE retailcrm_order_id = 7006 AND action = 'pickup'").fetchone()["site_code"]
+check("магазин заказа сохранён в очереди", task_site == "site-a", f"({task_site})")
+
+before = len(client.calls)
+result = delivery_feed.push_status_outbox(client)
+sent_calls = [call for call in client.calls[before:] if call["order_id"] == 7006]
+check("в CRM ушёл магазин заказа",
+      sent_calls and sent_calls[0]["site"] == "site-a", f"({sent_calls})")
+
+# Заказ, который лента ещё не донесла целиком: магазина нет, отправлять нечем
+with cs.get_db() as conn:
+    conn.execute(
+        "INSERT OR REPLACE INTO courier_orders "
+        "  (retailcrm_order_id, order_number, delivery_date, delivery_time_from, "
+        "   site_code, city, status, delivery_code) "
+        "VALUES (7007, '7007', ?, '18:00', NULL, 'Новосибирск', 'order-complete', "
+        "        'dostavka-kurerom')",
+        (TODAY.isoformat(),))
+# Другой курьер: у Ивана к этому моменту выбран лимит одновременных броней
+ds.claim_order(7007, courier_user_id=11, courier_name="Пётр", city="Новосибирск")
+ds.advance_assignment(7007, courier_user_id=11, action=ds.ACTION_PICKUP,
+                      username="petr")
+
+no_site = [row for row in ds.list_outbox() if row["retailcrm_order_id"] == 7007][0]
+check("без магазина задача не уходит наружу", no_site["state"] == "failed",
+      f"({no_site['state']})")
+check("причина названа человеческим языком",
+      "магазин" in (no_site["error_message"] or ""), f"({no_site['error_message']})")
+
+before = len(client.calls)
+delivery_feed.push_status_outbox(client)
+check("заведомо отклоняемый запрос в CRM не отправляется",
+      len(client.calls) == before, f"({client.calls[before:]})")
+
+
+# ============================================================================
+print("\n10. Бронь проставляет курьера в CRM, но не трогает статус")
+# ============================================================================
+# Решение владельца 2026-09-11: оператор должен видеть, кто повезёт заказ,
+# не дожидаясь отметки «Забрал». Статус при этом наш модуль не пишет — в это
+# поле пишут флорист и оператор, и наша отметка затёрла бы их работу.
+
+add_order(7008, status="order-complete")
+r = client_http.post("/api/courier/orders/7008/claim", headers=AJAX)
+check("бронь через API прошла", r.status_code == 200, f"({r.status_code})")
+
+claim_task = [row for row in ds.list_outbox()
+              if row["retailcrm_order_id"] == 7008 and row["action"] == "claim"]
+check("бронь положила задачу в очередь", len(claim_task) == 1, f"({claim_task})")
+check("в задаче брони есть курьер", claim_task and claim_task[0]["courier_crm_id"] == 42,
+      f"({claim_task[:1]})")
+check("бронь не отправляет статус",
+      claim_task and not (claim_task[0]["target_status"] or ""),
+      f"({claim_task[:1]})")
+check("бронь названа в журнале по-человечески",
+      claim_task and "курьер" in claim_task[0]["action_title"].lower(),
+      f"({claim_task[:1]})")
+
+before = len(client.calls)
+delivery_feed.push_status_outbox(client)
+claim_call = [call for call in client.calls[before:] if call["order_id"] == 7008]
+check("в CRM ушёл только курьер, без статуса",
+      claim_call and claim_call[0]["courier_id"] == 42
+      and claim_call[0]["status"] is None, f"({claim_call})")
+
+# Без связки с CRM отправлять нечего — пустая задача только занимала бы очередь.
+# Бронь 7008 отпускаем: у курьера выбран лимит одновременных броней, и следующая
+# упёрлась бы в него вместо проверяемого поведения
+ds.release_order(7008, courier_user_id=user_id, reason=ds.RELEASE_SELF)
+ds.save_courier_profile(user_id=user_id, username="kurier", city="Новосибирск",
+                        retailcrm_courier_id=None, active=True, updated_by="test")
+add_order(7009, status="order-complete")
+r = client_http.post("/api/courier/orders/7009/claim", headers=AJAX)
+body = r.get_json() or {}
+check("без связки бронь всё равно проходит", r.status_code == 200, f"({r.status_code})")
+check("без связки курьера предупреждают про выплату",
+      "оплаты" in ((body.get("data") or {}).get("warning") or ""),
+      f"({(body.get('data') or {}).get('warning')})")
+check("без связки задача брони не создаётся",
+      not [row for row in ds.list_outbox()
+           if row["retailcrm_order_id"] == 7009 and row["action"] == "claim"],
+      "(задача есть)")
+
+ds.save_courier_profile(user_id=user_id, username="kurier", city="Новосибирск",
+                        retailcrm_courier_id=42, active=True, updated_by="test")
+
+
+# ============================================================================
+print("\n11. Повтор застрявшей отправки — жест человека, а не таймер")
+# ============================================================================
+# 4xx намеренно не повторяется сам: вечный кандидат в очереди — тот самый
+# механизм, которым выжгли месячную квоту ПланФакта. Значит отсрочку снимает
+# тот, кто починил причину.
+
+stuck = [row for row in ds.list_outbox() if row["retailcrm_order_id"] == 7004][0]
+check("застрявшая задача сама не повторяется",
+      stuck["state"] == "failed" and stuck["next_attempt_at"] is None,
+      f"({stuck['state']}, {stuck['next_attempt_at']})")
+
+client.fail_with.pop(7004, None)          # причину устранили
+ds.retry_outbox(stuck["id"])
+
+retried = [row for row in ds.list_outbox() if row["id"] == stuck["id"]][0]
+check("повтор вернул задачу в очередь", retried["state"] == "pending",
+      f"({retried['state']})")
+check("счётчик попыток обнулён", retried["attempts"] == 0, f"({retried['attempts']})")
+check("прошлая ошибка стёрта", not retried["error_message"],
+      f"({retried['error_message']})")
+
+delivery_feed.push_status_outbox(client)
+done = [row for row in ds.list_outbox() if row["id"] == stuck["id"]][0]
+check("после повтора отметка ушла в CRM", done["state"] == "sent", f"({done['state']})")
+
+try:
+    ds.retry_outbox(stuck["id"])
+    check("отправленное повторить нельзя", False, "(прошло)")
+except ValueError as e:
+    check("отправленное повторить нельзя", "уже принята" in str(e), f"({e})")
+
+r = client_http.post(f"/api/courier/outbox/{stuck['id']}/retry", headers=AJAX)
+check("повтор курьеру не разрешён", r.status_code == 403, f"({r.status_code})")
 
 
 # ============================================================================
