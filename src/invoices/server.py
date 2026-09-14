@@ -1035,59 +1035,17 @@ INVOICE_KINDS = ("invoice", "card_expense", "card_topup")
 CARD_KINDS = ("card_expense", "card_topup")
 
 
-# Кто может развести трату на салон за пределами города карты. Решение
-# владельца 14.09.2026 по обращению управляющего: карта барнаульская, а
-# купить для соседнего города иногда надо, и «сходить к админу» — это ручной
-# труд там, где человек должен принимать решение сам.
+# Распределение траты НЕ привязано к салонам карты. Карта отвечает только за
+# то, ОТКУДА ушли деньги (и кто за них отчитывается), а распределение — за то,
+# на какие проекты отнести расход. Это разные вопросы: трата с челябинской
+# карты вполне покрывает несколько салонов, в том числе другого города, и
+# каждый рубль должен лечь в свой проект (решение владельца 14.09.2026).
 #
-# Ограничение при этом не снято, а переведено из запрета в осознанный выбор:
-# по умолчанию в форме видны только салоны карты, чужой город открывается
-# галочкой. Смысл исходной защиты (Барнаул не уедет в проект Челябинска
-# случайно) держится этим умолчанием, а не стеной.
-_CROSS_CARD_STORE_ROLES = ("admin", "manager")
-
-
-def _card_stores_error(card_id, line_items, role=None):
-    """
-    Проверить салоны в распределении траты против салонов карты.
-
-    Карта привязана к городу. Салон другого города — не ошибка сама по себе,
-    но и не рядовой случай: разрешаем его ролям из
-    _CROSS_CARD_STORE_ROLES, остальным по-прежнему отказываем.
-
-    `role=None` означает «строго» — такой вызов не знает, кто пришёл, и
-    подставлять вместо него самую широкую роль нельзя.
-
-    Возвращает текст ошибки или None. Сам факт траты на чужой город виден в
-    карточке заявки (салон рядом с картой) — отдельного поля в схеме под это
-    не заводим: признак целиком выводится из распределения и карты, а
-    дублирующая колонка разъехалась бы с ними при первой же правке.
-    """
-    card = get_card_by_id(card_id)
-    if not card:
-        return "Карта не найдена"
-    allowed = set(card["store_ids"])
-    if not allowed:
-        return (f"У карты «{card['title']}» не отмечены салоны — "
-                "заполните их в справочнике рабочих карт")
-
-    foreign = [item for item in line_items if item.get("store_id") not in allowed]
-    if not foreign:
-        return None
-
-    names = []
-    for item in foreign:
-        store = get_store_by_id(item.get("store_id"))
-        names.append(store["name"] if store else str(item.get("store_id")))
-
-    if role not in _CROSS_CARD_STORE_ROLES:
-        return (f"Салон «{names[0]}» не обслуживается картой «{card['title']}»")
-
-    # Разрешено — но не молча: по логу видно, кто и куда развёл трату, если
-    # по итогам месяца цифры города окажутся неожиданными.
-    logger.info("Трата с карты «%s» разведена на салоны другого города: %s",
-                card["title"], ", ".join(names))
-    return None
+# Раньше здесь стояла проверка «салон обязан принадлежать карте». Она смешивала
+# источник денег с адресатом расхода и делала обычный случай невозможным.
+# Контроль денег остался там, где ему место: user_can_use_card решает, с какой
+# карты человек вправе списывать. Обычные счета (kind='invoice') распределялись
+# по любым салонам всегда — теперь траты с картой ведут себя так же.
 
 
 def _validate_line_items(line_items):
@@ -1297,12 +1255,7 @@ def edit_invoice(invoice_id):
         if invoice["is_archived"] and current_user.role != "admin":
             return jsonify({"error": "Счёт в архиве — распределение изменить нельзя"}), 409
 
-        if invoice.get("kind") == "card_expense":
-            error = _card_stores_error(changes.get("card_id", invoice["card_id"]), line_items,
-                                       current_user.role)
-            if error:
-                return jsonify({"error": error}), 400
-        elif invoice.get("kind") == "card_topup" and line_items:
+        if invoice.get("kind") == "card_topup" and line_items:
             return jsonify({
                 "error": "У пополнения карты нет распределения по статьям — "
                          "расход появится, когда деньги потратят"
@@ -1499,11 +1452,6 @@ def add_invoice():
             }), 400
         return _finish_add_invoice(data, kind, amount, payment_purpose, city_id, payer_id,
                                    vat_id, due_date, card_id, spent_at, [])
-
-    if kind == "card_expense":
-        error = _card_stores_error(card_id, line_items, current_user.role)
-        if error:
-            return jsonify({"error": error}), 400
 
     # Распределение обязательно (решение №15 плана, включено владельцем
     # 2026-08-25). Проверка стоит на сервере, а не только в форме нового
@@ -2346,15 +2294,6 @@ def update_line_items(invoice_id):
             return jsonify({"error": "Некорректная статья расхода"}), 400
         if not isinstance(item.get("amount"), (int, float)) or item["amount"] <= 0:
             return jsonify({"error": "Сумма строки должна быть положительным числом"}), 400
-
-    # Салоны карты проверяем и здесь. У инварианта три входа (создание, правка
-    # счёта и эта ручка), и проверка, стоящая не на всех, — это не проверка:
-    # ограничение для ролей вне _CROSS_CARD_STORE_ROLES обходилось бы одним
-    # запросом мимо формы.
-    if invoice.get("kind") == "card_expense" and items:
-        error = _card_stores_error(invoice["card_id"], items, current_user.role)
-        if error:
-            return jsonify({"error": error}), 400
 
     # Та же обязательность, что в создании и правке счёта: через эту ручку
     # распределение иначе можно было бы просто обнулить, и требование

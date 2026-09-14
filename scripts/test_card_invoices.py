@@ -7,7 +7,8 @@ Flask-приложении на временной базе), что:
   * трата с карты и пополнение карты создаются по своим правилам,
   * карточные заявки не уходят в банк и не попадают в старый REF-синк
     (иначе пополнение легло бы расходом и рубль учёлся бы дважды),
-  * управляющий не может списать с чужой карты и отправить расход в чужой салон,
+  * управляющий не может списать с чужой карты (а вот распределить трату по
+    салонам любых городов — может: карта это источник денег, а не адресат),
   * платёжные KPI-плитки не засоряются тратами с карты,
   * остаток подотчёта считается верно, а фильтры по типу и карте работают,
   * пополнение без распределения видно в списке всем управляющим своего города.
@@ -124,9 +125,8 @@ def main():
     make_user('admin_test', 'admin', ['invoices_v2'])
     make_user('nsk_manager', 'manager', ['invoices_v2'], store_ids=[nsk_store])
     make_user('chlb_manager', 'manager', ['invoices_v2'], store_ids=[chlb_store])
-    # Роль вне _CROSS_CARD_STORE_ROLES: салон чужого города ей по-прежнему
-    # закрыт, и это надо проверять отдельной учёткой — у менеджера с
-    # 14.09.2026 ветка отказа больше не исполняется вовсе.
+    # Роль без особых прав: распределение траты на салон другого города должно
+    # работать и у неё — ограничение снято для всех, а не выдано избранным.
     make_user('nsk_florist', 'florist', ['invoices_v2'], store_ids=[nsk_store])
 
     app = make_app()
@@ -178,19 +178,6 @@ def main():
             'line_items': [{'store_id': chlb_store, 'expense_category_id': category_id, 'amount': 100}],
         })
         check(response.status_code == 403, "с чужой карты списать нельзя даже подменив card_id")
-
-    # Проверка, что роли вне _CROSS_CARD_STORE_ROLES салон другого города
-    # по-прежнему закрыт. Стоит здесь, а не в конце: отказ ничего не создаёт и
-    # счётчики следующих разделов не сдвигает (сам разрешённый случай — в §13).
-    with app.test_client() as client:
-        login(client, 'nsk_florist')
-        response = client.post('/api/invoices', json={
-            'kind': 'card_expense', 'card_id': nsk_card['id'], 'spent_at': '2026-08-25',
-            'amount': 100, 'payment_purpose': 'чужой салон',
-            'line_items': [{'store_id': chlb_store, 'expense_category_id': category_id, 'amount': 100}],
-        })
-        check(response.status_code == 400 and 'не обслуживается' in response.get_json()['error'],
-              "роли вне списка салон другого города по-прежнему закрыт")
 
     print("\n3. Пополнение карты")
     with app.test_client() as client:
@@ -318,7 +305,7 @@ def main():
         check(not any(row['id'] == topup['id'] for row in rows),
               "управляющему другого города чужое пополнение в списке не показывается")
 
-    print("\n13. Салон другого города в трате с карты")
+    print("\n13. Распределение траты не зависит от карты")
     # Последним разделом сознательно: создаёт ещё одну заявку, а разделы 7,
     # 10 и 11 считают счета и остаток по карте — вставленный выше, он сдвигал
     # их все сразу и выглядел бы шестью разными поломками.
@@ -346,8 +333,7 @@ def main():
         check(response.status_code == 200,
               "заведённую трату на чужой город можно поправить")
 
-        # Ручка распределения — третий вход в тот же инвариант. Без проверки
-        # ролевое ограничение обходилось бы одним запросом мимо формы.
+        # Ручка распределения — третий вход, и вести себя должна так же.
         response = client.put('/api/invoices/' + str(cross['id']) + '/line-items', json={
             'items': [{'store_id': chlb_store,
                        'expense_category_id': category_id, 'amount': 120}],
@@ -355,14 +341,38 @@ def main():
         check(response.status_code == 200,
               "менеджер меняет распределение траты на чужой город через /line-items")
 
+        # Случай владельца целиком: одна покупка с карты одного города
+        # закрывает салоны нескольких городов, и каждый рубль ложится в свой
+        # проект. Ради этого ограничение и снималось.
+        response = client.post('/api/invoices', json={
+            'kind': 'card_expense', 'card_id': nsk_card['id'], 'spent_at': '2026-08-26',
+            'amount': 300, 'payment_purpose': 'покупка на два города',
+            'line_items': [
+                {'store_id': nsk_store, 'expense_category_id': category_id, 'amount': 100},
+                {'store_id': chlb_store, 'expense_category_id': category_id, 'amount': 200},
+            ],
+        })
+        check(response.status_code == 201,
+              "одна трата делится между салонами разных городов")
+        split = response.get_json().get('invoice', {})
+        split_items = get_invoice_line_items(split['id']) if split.get('id') else []
+        by_store = {item['store_id']: item['amount'] for item in split_items}
+        check(by_store.get(nsk_store) == 100 and by_store.get(chlb_store) == 200,
+              "каждый салон получает свою сумму, а не сумму карты")
+
+    # Ограничение снято для всех, а не выдано избранным ролям. Проверяем на
+    # СВОЕЙ заявке флориста: чужую он не правит по другой причине (право
+    # редактировать чужой счёт), и та ветка увела бы проверку не туда.
     with app.test_client() as client:
         login(client, 'nsk_florist')
-        response = client.put('/api/invoices/' + str(cross['id']) + '/line-items', json={
-            'items': [{'store_id': chlb_store,
-                       'expense_category_id': category_id, 'amount': 120}],
+        response = client.post('/api/invoices', json={
+            'kind': 'card_expense', 'card_id': nsk_card['id'], 'spent_at': '2026-08-26',
+            'amount': 50, 'payment_purpose': 'флорист, чужой город',
+            'line_items': [{'store_id': chlb_store,
+                            'expense_category_id': category_id, 'amount': 50}],
         })
-        check(response.status_code in (400, 403, 409),
-              "через /line-items роль вне списка чужой город не обходит")
+        check(response.status_code == 201,
+              "распределение на другой город не упирается в роль")
 
     # Управляющий принимающего города видит трату по своей строке
     # распределения, но чужой картой не владеет. Правка не должна упираться в
