@@ -28,6 +28,11 @@ ATTACHMENTS_DIR = resolve_data_path("WRITEOFF_ATTACHMENTS_DIR", "writeoff_attach
 ALLOWED_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 MAX_ATTACHMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ
 
+# Ключ разовой миграции «фото с позиций -> на заявку» в writeoff_migrations.
+# Версия в имени: если понадобится перепрогон по другим правилам — заводится
+# новый ключ, а не сбрасывается старый.
+PHOTOS_BACKFILL_KEY = "photos_from_position_attachments_v1"
+
 
 def get_db():
     """
@@ -66,9 +71,23 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dd
 
 
 def init_writeoffs_tables():
-    """Инициализация таблиц модуля списаний (вызывается при старте приложения)."""
+    """
+    Инициализация таблиц модуля списаний (вызывается при старте приложения).
 
+    Соединение закрывается в finally: упавший CREATE/ALTER оставлял бы открытое
+    соединение с неоткатанной транзакцией, а оно держит write-лок общей barhat.db
+    до перезапуска воркера — вместе с авторизацией (см. CLAUDE.md).
+    """
     conn = get_db()
+    try:
+        _create_writeoffs_tables(conn)
+        _backfill_writeoff_photos(conn)
+    finally:
+        conn.close()
+
+
+def _create_writeoffs_tables(conn: sqlite3.Connection) -> None:
+    """Создание и миграция таблиц модуля. Соединением владеет вызывающий."""
 
     # ========================================================================
     # Таблица-связка: склад МойСклад (UUID) <-> точка продаж (cashshifts.stores)
@@ -167,7 +186,11 @@ def init_writeoffs_tables():
     _add_column_if_missing(conn, "writeoff_positions", "uom_name", "TEXT")
 
     # ========================================================================
-    # Фото списанного товара — по одной позиции, а не по заявке в целом
+    # УСТАРЕЛО: фото по одной позиции.
+    #
+    # Таблица остаётся только как источник для бэкфилла и как архив — новый код
+    # в неё не пишет и из неё не читает (см. writeoff_photos ниже). Не удаляем:
+    # в ней лежат имена файлов, уже лежащих на диске.
     # ========================================================================
     conn.execute("""
         CREATE TABLE IF NOT EXISTS writeoff_attachments (
@@ -184,8 +207,101 @@ def init_writeoffs_tables():
         ON writeoff_attachments(position_id)
     """)
 
+    # ========================================================================
+    # Фото списанного товара — на ЗАЯВКУ целиком.
+    #
+    # Флористы снимают несколько позиций одним кадром, а привязка фото к позиции
+    # заставляла крепить один и тот же файл к каждой строке: шесть позиций —
+    # шесть загрузок по 3-5 МБ и шесть копий на медленном /data (обращение 90-700 мс).
+    # Обращение #7 от 2026-09-06.
+    #
+    # position_id — необязательный след бэкфилла (из какой позиции приехало старое
+    # фото). Новый код его не заполняет и по нему не ищет.
+    #
+    # UNIQUE(stored_filename) — не украшение, а защита бэкфилла: его выполняют оба
+    # воркера gunicorn на старте одновременно, и без уникальности каждый вставил бы
+    # свою копию. Имена новых файлов — uuid4, столкнуться не могут.
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS writeoff_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            writeoff_id INTEGER NOT NULL REFERENCES writeoffs(id),
+            position_id INTEGER,
+            original_filename TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            uploaded_by TEXT NOT NULL,
+            uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(stored_filename)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_writeoff_photos_writeoff
+        ON writeoff_photos(writeoff_id)
+    """)
+
+    # ========================================================================
+    # Отметки разовых миграций данных модуля.
+    #
+    # Нужна там, где «выполнено» нельзя вычислить по самим данным: бэкфилл фото
+    # схлопывает дубли, поэтому часть исходных строк не имеет и не должна иметь
+    # пары в writeoff_photos. Без отметки INSERT гонялся бы на старте каждого
+    # воркера при каждом деплое.
+    # ========================================================================
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS writeoff_migrations (
+            key TEXT PRIMARY KEY,
+            done_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
     conn.commit()
-    conn.close()
+
+
+def _backfill_writeoff_photos(conn: sqlite3.Connection) -> None:
+    """
+    Перенести старые фото из writeoff_attachments (привязка к позиции) в
+    writeoff_photos (привязка к заявке). Разово, но идемпотентно: вызывается
+    на старте каждого воркера и после первого раза не делает ничего.
+
+    Один и тот же снимок, прикреплённый к шести позициям, лежит в старой таблице
+    шестью записями с РАЗНЫМИ stored_filename (uuid на каждую загрузку) и
+    ОДИНАКОВЫМ original_filename. Схлопываем по (writeoff_id, original_filename),
+    оставляя запись с наименьшим id. Файлы-дубли на диске не трогаем — их разбор
+    отдельной задачей, удалять без подтверждения нельзя.
+
+    Отметка о выполнении — строкой в writeoff_migrations, а не вычислением
+    «остались ли неперенесённые файлы». Такое вычисление здесь невозможно в
+    принципе: пять свёрнутых копий из шести НИКОГДА не появятся в writeoff_photos,
+    и признак «перенести нечего» не наступил бы никогда — INSERT гонялся бы на
+    старте каждого воркера вечно.
+    """
+    if conn.execute(
+        "SELECT 1 FROM writeoff_migrations WHERE key = ?", (PHOTOS_BACKFILL_KEY,)
+    ).fetchone():
+        return
+
+    # OR IGNORE, а не NOT EXISTS в WHERE: оба воркера стартуют одновременно и
+    # могут пройти проверку одновременно. Гонку разруливает UNIQUE в схеме.
+    cursor = conn.execute("""
+        INSERT OR IGNORE INTO writeoff_photos
+            (writeoff_id, position_id, original_filename, stored_filename, uploaded_by, uploaded_at)
+        SELECT p.writeoff_id, a.position_id, a.original_filename, a.stored_filename,
+               a.uploaded_by, a.uploaded_at
+        FROM writeoff_attachments a
+        JOIN writeoff_positions p ON p.id = a.position_id
+        WHERE a.id = (
+            SELECT MIN(a2.id)
+            FROM writeoff_attachments a2
+            JOIN writeoff_positions p2 ON p2.id = a2.position_id
+            WHERE p2.writeoff_id = p.writeoff_id
+              AND a2.original_filename = a.original_filename
+        )
+    """)
+    conn.execute(
+        "INSERT OR IGNORE INTO writeoff_migrations (key) VALUES (?)", (PHOTOS_BACKFILL_KEY,)
+    )
+    conn.commit()
+    logger.info("Бэкфилл фото списаний: перенесено записей — %s", cursor.rowcount)
 
 
 # ============================================================================
@@ -329,32 +445,78 @@ def create_writeoff(store_id: int, created_by: str, positions: List[Dict[str, An
     return get_writeoff_by_id(writeoff_id)
 
 
-def get_writeoff_by_id(writeoff_id: int) -> Optional[Dict[str, Any]]:
-    """Заявка с вложенными позициями (и вложениями к каждой позиции)."""
+def get_writeoff_store_id(writeoff_id: int) -> Optional[int]:
+    """
+    Только точка заявки — для проверки доступа.
+
+    Отдельная функция, потому что ручкам вложений нужен ровно этот один столбец,
+    а get_writeoff_by_id ради него вычитывает все позиции и все фото заявки.
+    На сетевом /data (90-700 мс за обращение) это разница между одним запросом
+    по первичному ключу и десятком (см. CLAUDE.md, «экран не зависит от диагностики»).
+    """
     conn = get_db()
-    row = conn.execute("SELECT * FROM writeoffs WHERE id = ?", (writeoff_id,)).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT store_id FROM writeoffs WHERE id = ?", (writeoff_id,)
+        ).fetchone()
+    finally:
         conn.close()
-        return None
+    return row["store_id"] if row else None
 
-    writeoff = dict(row)
-    position_rows = conn.execute(
-        "SELECT * FROM writeoff_positions WHERE writeoff_id = ? ORDER BY id",
-        (writeoff_id,),
-    ).fetchall()
 
-    positions = []
-    for prow in position_rows:
-        position = dict(prow)
-        attachment_rows = conn.execute(
-            "SELECT * FROM writeoff_attachments WHERE position_id = ? ORDER BY uploaded_at",
-            (position["id"],),
+def get_writeoff_photos(writeoff_id: int) -> List[Dict[str, Any]]:
+    """Фото заявки (одно на весь документ, но их может быть несколько)."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM writeoff_photos WHERE writeoff_id = ? ORDER BY uploaded_at, id",
+            (writeoff_id,),
         ).fetchall()
-        position["attachments"] = [dict(a) for a in attachment_rows]
-        positions.append(position)
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
 
-    writeoff["positions"] = positions
-    conn.close()
+
+def get_writeoff_by_id(writeoff_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Заявка с вложенными позициями и фото документа.
+
+    Ключ positions[].attachments пока сохранён: на него ещё смотрит проверка
+    в approve(). Уберётся вместе с переводом ручек на writeoff_photos (фаза 2),
+    и тогда же исчезнет запрос-на-позицию.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM writeoffs WHERE id = ?", (writeoff_id,)).fetchone()
+        if not row:
+            return None
+
+        writeoff = dict(row)
+        position_rows = conn.execute(
+            "SELECT * FROM writeoff_positions WHERE writeoff_id = ? ORDER BY id",
+            (writeoff_id,),
+        ).fetchall()
+
+        positions = []
+        for prow in position_rows:
+            position = dict(prow)
+            attachment_rows = conn.execute(
+                "SELECT * FROM writeoff_attachments WHERE position_id = ? ORDER BY uploaded_at",
+                (position["id"],),
+            ).fetchall()
+            position["attachments"] = [dict(a) for a in attachment_rows]
+            positions.append(position)
+
+        writeoff["positions"] = positions
+
+        photo_rows = conn.execute(
+            "SELECT * FROM writeoff_photos WHERE writeoff_id = ? ORDER BY uploaded_at, id",
+            (writeoff_id,),
+        ).fetchall()
+        writeoff["photos"] = [dict(p) for p in photo_rows]
+    finally:
+        conn.close()
+
     return writeoff
 
 
