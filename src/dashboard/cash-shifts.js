@@ -1070,21 +1070,32 @@
         if (collections.length === 0) {
             elements.collectionsTbody.innerHTML = `
                 <tr>
-                    <td colspan="5" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
+                    <td colspan="6" style="text-align: center; color: var(--barkhat-gray); padding: 20px;">
                         Нет инкассаций за выбранный период
                     </td>
                 </tr>
             `;
         } else {
-            elements.collectionsTbody.innerHTML = collections.map(c => `
-                <tr>
-                    <td>${formatDateTime(c.date)}</td>
-                    <td>${escapeHtml(c.store_name || '—')}</td>
-                    <td>${formatMoney(c.amount)}</td>
-                    <td>${escapeHtml(c.category_name || '—')}</td>
-                    <td>${escapeHtml(c.created_by_full_name || c.created_by || '—')}</td>
-                </tr>
-            `).join('');
+            elements.collectionsTbody.innerHTML = collections.map(c => {
+                // Комментарий флориста пишется свободным текстом и бывает длинным:
+                // в ячейке он обрезается, целиком показывается по наведению
+                const comment = c.custom_comment || '';
+                const commentCell = comment
+                    ? `<td style="max-width: 280px; overflow: hidden; text-overflow: ellipsis;
+                                  white-space: nowrap;" title="${escapeHtml(comment)}">${escapeHtml(comment)}</td>`
+                    : `<td style="color: var(--barkhat-gray);">—</td>`;
+
+                return `
+                    <tr>
+                        <td>${formatDateTime(c.date)}</td>
+                        <td>${escapeHtml(c.store_name || '—')}</td>
+                        <td>${formatMoney(c.amount)}</td>
+                        <td>${escapeHtml(c.category_name || '—')}</td>
+                        <td>${escapeHtml(c.created_by_full_name || c.created_by || '—')}</td>
+                        ${commentCell}
+                    </tr>
+                `;
+            }).join('');
         }
 
         // Итоги по салонам считает бэкенд по всему периоду, а не по показанным

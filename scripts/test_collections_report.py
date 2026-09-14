@@ -144,6 +144,11 @@ def main():
         "статья инкассации подтянута из справочника"
     )
     check(rows[0]["date"] >= rows[-1]["date"], "сортировка по дате: свежие сверху")
+    # Комментарий флориста — отдельная колонка таблицы по салонам: без него
+    # непонятно, за что ушли деньги, когда статья общая («Прочее»)
+    with_comment = next(r for r in rows if r["custom_comment"])
+    check(with_comment["custom_comment"] == "сдача в банк",
+          "комментарий флориста попал в выборку")
 
     print("\n3. Фильтр по салонам")
     only_a = list_collections(store_ids=[store_a["id"]])
@@ -190,6 +195,10 @@ def main():
     check(len(data["by_store"]) == 2, "итоги по обоим салонам")
     author = next(c for c in data["collections"] if c["created_by"] == "florist_a")
     check(author["created_by_full_name"] == "Анна Иванова", "ФИО автора подставлено")
+    check(
+        any(c["custom_comment"] == "сдача в банк" for c in data["collections"]),
+        "комментарий флориста доезжает до фронта через эндпоинт"
+    )
     unknown = next(c for c in data["collections"] if c["created_by"] == "florist_b")
     check(unknown["created_by_full_name"] is None,
           "автор без учётки не ломает выборку (фронт покажет username)")
