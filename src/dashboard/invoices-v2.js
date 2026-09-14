@@ -3033,12 +3033,26 @@
         // Пополнение карты распределения не имеет вовсе, поэтому блока у него
         // нет — ни строк, ни заголовка, ни «не распределён»
         const hasAllocation = invoice.kind !== 'card_topup';
+        // Салоны карты — чтобы отметить строки, ушедшие в другой город. Это
+        // разрешённый случай, но согласующий должен видеть его сразу: трата
+        // лежит на карте одного города, а расход уходит в проект другого.
+        // Признак выводим из справочника карт, отдельного поля под него нет.
+        const expenseCard = invoice.kind === 'card_expense' && invoice.card_id
+            ? (state.refs.workCards || []).find(card => String(card.id) === String(invoice.card_id))
+            : null;
+        const cardStoreIds = new Set(((expenseCard && expenseCard.store_ids) || []).map(String));
+
         const allocRows = items.length
-            ? items.map(item => `
+            ? items.map(item => {
+                const foreign = expenseCard && cardStoreIds.size
+                    && !cardStoreIds.has(String(item.store_id));
+                return `
                 <div class="iv2-alloc__row">
-                    <span>${escapeHtml(item.store_name || '—')} · ${escapeHtml(item.category_name || '—')}</span>
+                    <span>${escapeHtml(item.store_name || '—')} · ${escapeHtml(item.category_name || '—')}${
+                        foreign ? ' <span class="bx-badge b-warn">другой город</span>' : ''}</span>
                     <span>${escapeHtml(money(item.amount))}</span>
-                </div>`).join('')
+                </div>`;
+            }).join('')
             : '<div class="iv2-alloc__row"><span class="iv2-hint">не распределён</span><span></span></div>';
 
         const requisiteRows = [
