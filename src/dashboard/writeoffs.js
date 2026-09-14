@@ -66,6 +66,7 @@
         elements.detailsTitle = document.getElementById('writeoff-details-title');
         elements.detailsInfo = document.getElementById('writeoff-details-info');
         elements.detailsPositions = document.getElementById('writeoff-details-positions');
+        elements.detailsPhotos = document.getElementById('writeoff-details-photos');
         elements.detailsActions = document.getElementById('writeoff-details-actions');
 
         elements.mappingModal = document.getElementById('writeoff-mapping-modal');
@@ -651,7 +652,8 @@
         const photoLabel = document.createElement('label');
         photoLabel.className = 'form-hint';
         photoLabel.style.margin = '0';
-        photoLabel.textContent = 'Фото *:';
+        // Не «Фото *» на каждой строке: одного кадра хватает на всю заявку.
+        photoLabel.textContent = 'Фото:';
 
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
@@ -729,8 +731,12 @@
                 return;
             }
             if (!pos.quantity || pos.quantity <= 0) { alert('Укажите корректное количество во всех позициях'); return; }
-            if (!pos.file) { alert('Приложите фото для каждой позиции — это подтверждение списания'); return; }
         }
+
+        // Фото теперь на заявку целиком: достаточно одного кадра на все позиции.
+        // Поле фото уедет из строки позиции в отдельный блок формы следующей правкой.
+        const files = uniqueFiles(positions);
+        if (!files.length) { alert('Приложите фото — это подтверждение списания'); return; }
 
         try {
             elements.confirmBtn.disabled = true;
@@ -752,11 +758,8 @@
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Ошибка создания заявки'); return; }
 
-            const createdPositions = data.writeoff.positions;
-            for (let i = 0; i < positions.length && i < createdPositions.length; i++) {
-                if (positions[i].file) {
-                    await uploadPositionPhoto(createdPositions[i].id, positions[i].file);
-                }
+            for (const file of files) {
+                await uploadWriteoffPhoto(data.writeoff.id, file);
             }
 
             closeCreateModal();
@@ -769,11 +772,29 @@
         }
     }
 
-    async function uploadPositionPhoto(positionId, file) {
+    /**
+     * Один и тот же кадр, выбранный в нескольких строках, — это один файл.
+     * Раньше он уезжал на сервер столько раз, сколько было позиций: шесть
+     * загрузок по 3-5 МБ вместо одной (обращение #7).
+     */
+    function uniqueFiles(positions) {
+        const seen = new Set();
+        const files = [];
+        for (const pos of positions) {
+            if (!pos.file) continue;
+            const key = `${pos.file.name}|${pos.file.size}|${pos.file.lastModified}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            files.push(pos.file);
+        }
+        return files;
+    }
+
+    async function uploadWriteoffPhoto(writeoffId, file) {
         const formData = new FormData();
         formData.append('file', file);
         try {
-            const res = await fetch(`/api/writeoffs/positions/${positionId}/attachments`, {
+            const res = await fetch(`/api/writeoffs/${writeoffId}/photos`, {
                 method: 'POST',
                 credentials: 'include',
                 body: formData,
@@ -829,17 +850,37 @@
             `<div style="display:flex; gap:8px; padding:2px 0;"><strong style="min-width:180px;">${escapeHtml(label)}:</strong><span>${escapeHtml(String(value))}</span></div>`
         ).join('');
 
+        // Позиции без фото: снимок теперь общий на всю заявку и показан отдельным
+        // блоком ниже — флористы снимают несколько позиций одним кадром.
         elements.detailsPositions.innerHTML = (writeoff.positions || []).map(pos => `
             <div style="border-top:1px solid #eee; padding:8px 0;">
                 <div><strong>${escapeHtml(pos.product_name)}</strong> — ${pos.quantity}${unitSuffix(pos.uom_name)}</div>
                 ${pos.reason ? `<div class="form-hint">Причина: ${escapeHtml(pos.reason)}</div>` : ''}
-                <div style="display:flex; gap:8px; margin-top:4px; flex-wrap:wrap;">
-                    ${(pos.attachments || []).map(a => `
-                        <a href="/api/writeoffs/attachments/${a.id}/download" target="_blank">${escapeHtml(a.original_filename)}</a>
-                    `).join('') || '<span class="form-hint">Фото нет</span>'}
-                </div>
             </div>
         `).join('');
+
+        renderDetailsPhotos(writeoff);
+    }
+
+    /**
+     * Фото заявки. Пока — только просмотр; кнопка «Добавить фото» и удаление
+     * приезжают следующей правкой вместе с клиентским сжатием.
+     */
+    function renderDetailsPhotos(writeoff) {
+        const photos = writeoff.photos || [];
+        if (!photos.length) {
+            elements.detailsPhotos.innerHTML =
+                '<div class="form-hint">Фото не приложено — согласовать нельзя.</div>';
+            return;
+        }
+        elements.detailsPhotos.innerHTML = `
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                ${photos.map(p => `
+                    <a href="/api/writeoffs/photos/${p.id}/download" target="_blank" rel="noopener">
+                        ${escapeHtml(p.original_filename)}
+                    </a>
+                `).join('')}
+            </div>`;
 
         renderDetailsActions(writeoff);
     }

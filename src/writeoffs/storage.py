@@ -25,7 +25,14 @@ DB_PATH = os.environ.get("BARHAT_DB_PATH", "barhat.db")
 # см. комментарий там: относительный дефолт означал потерю файлов на каждой сборке.
 ATTACHMENTS_DIR = resolve_data_path("WRITEOFF_ATTACHMENTS_DIR", "writeoff_attachments")
 
-ALLOWED_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+# Каталог создаётся один раз при импорте, а не на каждую загрузку: /data сетевой,
+# и лишний syscall к нему стоит столько же, сколько запрос к базе.
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+
+# .heic/.heif — формат камеры iPhone по умолчанию. Клиент жмёт фото в JPEG перед
+# отправкой, но если сжатие не отработало (старый браузер, отказ canvas), файл
+# должен доехать оригиналом, а не упереться в «недопустимый тип».
+ALLOWED_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
 MAX_ATTACHMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ
 
 # Ключ разовой миграции «фото с позиций -> на заявку» в writeoff_migrations.
@@ -445,23 +452,24 @@ def create_writeoff(store_id: int, created_by: str, positions: List[Dict[str, An
     return get_writeoff_by_id(writeoff_id)
 
 
-def get_writeoff_store_id(writeoff_id: int) -> Optional[int]:
+def get_writeoff_head(writeoff_id: int) -> Optional[Dict[str, Any]]:
     """
-    Только точка заявки — для проверки доступа.
+    Скалярные поля заявки — точка, статус, автор — без позиций и фото.
 
-    Отдельная функция, потому что ручкам вложений нужен ровно этот один столбец,
-    а get_writeoff_by_id ради него вычитывает все позиции и все фото заявки.
-    На сетевом /data (90-700 мс за обращение) это разница между одним запросом
-    по первичному ключу и десятком (см. CLAUDE.md, «экран не зависит от диагностики»).
+    Этого хватает на все три проверки ручек фото (доступ к точке, допустимость
+    статуса, «своя ли заявка»), и стоит это одного запроса по первичному ключу
+    вместо девяти у get_writeoff_by_id, который ради одного столбца вычитывал бы
+    все позиции и все фото (см. CLAUDE.md, «экран не зависит от диагностики»).
     """
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT store_id FROM writeoffs WHERE id = ?", (writeoff_id,)
+            "SELECT id, store_id, status, created_by FROM writeoffs WHERE id = ?",
+            (writeoff_id,),
         ).fetchone()
     finally:
         conn.close()
-    return row["store_id"] if row else None
+    return dict(row) if row else None
 
 
 def get_writeoff_photos(writeoff_id: int) -> List[Dict[str, Any]]:
@@ -481,9 +489,9 @@ def get_writeoff_by_id(writeoff_id: int) -> Optional[Dict[str, Any]]:
     """
     Заявка с вложенными позициями и фото документа.
 
-    Ключ positions[].attachments пока сохранён: на него ещё смотрит проверка
-    в approve(). Уберётся вместе с переводом ручек на writeoff_photos (фаза 2),
-    и тогда же исчезнет запрос-на-позицию.
+    Позиции больше не тянут за собой вложения: раньше здесь был отдельный запрос
+    НА КАЖДУЮ позицию, то есть открытие заявки из шести строк стоило девяти
+    обращений к сетевому /data вместо трёх.
     """
     conn = get_db()
     try:
@@ -496,18 +504,7 @@ def get_writeoff_by_id(writeoff_id: int) -> Optional[Dict[str, Any]]:
             "SELECT * FROM writeoff_positions WHERE writeoff_id = ? ORDER BY id",
             (writeoff_id,),
         ).fetchall()
-
-        positions = []
-        for prow in position_rows:
-            position = dict(prow)
-            attachment_rows = conn.execute(
-                "SELECT * FROM writeoff_attachments WHERE position_id = ? ORDER BY uploaded_at",
-                (position["id"],),
-            ).fetchall()
-            position["attachments"] = [dict(a) for a in attachment_rows]
-            positions.append(position)
-
-        writeoff["positions"] = positions
+        writeoff["positions"] = [dict(p) for p in position_rows]
 
         photo_rows = conn.execute(
             "SELECT * FROM writeoff_photos WHERE writeoff_id = ? ORDER BY uploaded_at, id",
@@ -688,60 +685,116 @@ def reject_writeoff(writeoff_id: int, rejected_by: str, reason: Optional[str] = 
 
 
 # ============================================================================
-# Вложения (фото списанного товара) — паттерн 1:1 с invoices/invoice_attachments,
-# но привязаны к позиции заявки, а не к заявке целиком.
+# Фото списания — на заявку целиком.
+#
+# Паттерн хранения тот же, что у invoices/invoice_attachments: файл на диск в
+# ATTACHMENTS_DIR под uuid-именем, запись в БД. Отличие — привязка к документу,
+# а не к строке: флористы снимают несколько позиций одним кадром (обращение #7).
 # ============================================================================
 
-def add_writeoff_attachment(
-    position_id: int, original_filename: str, file_bytes: bytes, uploaded_by: str
+class LastPhotoError(Exception):
+    """Попытка удалить единственное фото заявки — заявка станет непроводимой."""
+
+
+def add_writeoff_photo(
+    writeoff_id: int, original_filename: str, file_bytes: bytes, uploaded_by: str
 ) -> Dict[str, Any]:
-    """Сохранить файл на диск и запись о нём в БД. Возвращает {"ok", "error", "attachment"}."""
+    """Сохранить файл на диск и запись о нём в БД. Возвращает {"ok", "error", "photo"}."""
     ext = os.path.splitext(original_filename)[1].lower()
     if ext not in ALLOWED_ATTACHMENT_EXTENSIONS:
-        return {"ok": False, "error": f"Недопустимый тип файла: {ext}", "attachment": None}
+        return {"ok": False, "error": f"Недопустимый тип файла: {ext}", "photo": None}
+    if not file_bytes:
+        # Пустой файл доезжает при обрыве загрузки и выглядит как успешная
+        # отправка: запись есть, фото нет, а согласование проходит.
+        return {"ok": False, "error": "Файл пустой — загрузите фото заново", "photo": None}
     if len(file_bytes) > MAX_ATTACHMENT_SIZE_BYTES:
-        return {"ok": False, "error": "Файл слишком большой (максимум 15 МБ)", "attachment": None}
+        return {"ok": False, "error": "Файл слишком большой (максимум 15 МБ)", "photo": None}
 
-    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
     stored_filename = f"{uuid.uuid4().hex}{ext}"
     with open(os.path.join(ATTACHMENTS_DIR, stored_filename), "wb") as f:
         f.write(file_bytes)
 
     conn = get_db()
-    cursor = conn.execute(
-        """
-        INSERT INTO writeoff_attachments (position_id, original_filename, stored_filename, uploaded_by)
-        VALUES (?, ?, ?, ?)
-        """,
-        (position_id, original_filename, stored_filename, uploaded_by),
-    )
-    attachment_id = cursor.lastrowid
-    conn.commit()
-    row = conn.execute("SELECT * FROM writeoff_attachments WHERE id = ?", (attachment_id,)).fetchone()
-    conn.close()
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO writeoff_photos (writeoff_id, original_filename, stored_filename, uploaded_by)
+            VALUES (?, ?, ?, ?)
+            """,
+            (writeoff_id, original_filename, stored_filename, uploaded_by),
+        )
+        photo_id = cursor.lastrowid
+        conn.commit()
+        row = conn.execute("SELECT * FROM writeoff_photos WHERE id = ?", (photo_id,)).fetchone()
+    finally:
+        conn.close()
 
-    return {"ok": True, "error": None, "attachment": dict(row)}
+    return {"ok": True, "error": None, "photo": dict(row)}
 
 
-def get_writeoff_attachments(position_id: int) -> List[Dict[str, Any]]:
+def get_writeoff_photo_by_id(photo_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Фото вместе с точкой, статусом и автором его заявки — ОДНИМ запросом.
+
+    Ручкам скачивания и удаления нужно и то, и другое; отдельный поход за
+    заявкой удваивал бы число обращений к сетевому /data на каждую картинку
+    в карточке.
+    """
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM writeoff_attachments WHERE position_id = ? ORDER BY uploaded_at",
-        (position_id,),
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-
-def get_writeoff_attachment_by_id(attachment_id: int) -> Optional[Dict[str, Any]]:
-    conn = get_db()
-    row = conn.execute("SELECT * FROM writeoff_attachments WHERE id = ?", (attachment_id,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute(
+            """
+            SELECT ph.*,
+                   w.store_id   AS writeoff_store_id,
+                   w.status     AS writeoff_status,
+                   w.created_by AS writeoff_created_by
+            FROM writeoff_photos ph
+            JOIN writeoffs w ON w.id = ph.writeoff_id
+            WHERE ph.id = ?
+            """,
+            (photo_id,),
+        ).fetchone()
+    finally:
+        conn.close()
     return dict(row) if row else None
 
 
-def get_writeoff_position_by_id(position_id: int) -> Optional[Dict[str, Any]]:
+def delete_writeoff_photo(photo_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Удалить запись о фото. Возвращает удалённую запись или None, если её уже нет.
+    Поднимает LastPhotoError, если это единственное фото заявки.
+
+    Проверка «не последнее» и удаление — ОДНА транзакция под BEGIN IMMEDIATE.
+    На проде до 16 параллельных обработчиков, а запрос к базе стоит 90-700 мс:
+    два клика по крестикам разных фото прочитали бы «их двое, удалять можно» и
+    снесли бы оба, оставив заявку без фото и без возможности её согласовать
+    (см. CLAUDE.md, «проверил -> записал — это одна транзакция»).
+
+    Файл с диска НЕ удаляем: это единственное подтверждение списания, а разбор
+    осиротевших файлов идёт отдельной задачей и под подтверждением.
+    """
     conn = get_db()
-    row = conn.execute("SELECT * FROM writeoff_positions WHERE id = ?", (position_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    conn.isolation_level = None  # транзакцией управляем сами
+    try:
+        conn.execute("BEGIN IMMEDIATE")  # write-лок ДО чтения
+        row = conn.execute("SELECT * FROM writeoff_photos WHERE id = ?", (photo_id,)).fetchone()
+        if not row:
+            conn.execute("ROLLBACK")
+            return None
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM writeoff_photos WHERE writeoff_id = ?", (row["writeoff_id"],)
+        ).fetchone()[0]
+        if remaining <= 1:
+            conn.execute("ROLLBACK")
+            raise LastPhotoError(
+                "Это единственное фото заявки. Сначала загрузите другое — без фото "
+                "заявку нельзя согласовать."
+            )
+
+        conn.execute("DELETE FROM writeoff_photos WHERE id = ?", (photo_id,))
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    return dict(row)

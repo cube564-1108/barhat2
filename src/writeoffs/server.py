@@ -44,10 +44,12 @@ from .storage import (
     mark_writeoff_sent,
     mark_writeoff_failed,
     reject_writeoff,
-    add_writeoff_attachment,
-    get_writeoff_attachments,
-    get_writeoff_attachment_by_id,
-    get_writeoff_position_by_id,
+    LastPhotoError,
+    add_writeoff_photo,
+    get_writeoff_head,
+    get_writeoff_photos,
+    get_writeoff_photo_by_id,
+    delete_writeoff_photo,
 )
 
 logger = logging.getLogger(__name__)
@@ -627,10 +629,12 @@ def approve(writeoff_id):
     if not _require_store_access(writeoff["store_id"]):
         return jsonify({"error": "Нет доступа к этой точке"}), 403
 
-    positions_without_photo = [p for p in writeoff["positions"] if not p["attachments"]]
-    if positions_without_photo:
-        names = ", ".join(p["product_name"] for p in positions_without_photo)
-        return jsonify({"error": f"Нет фото у позиций: {names}. Согласовать нельзя."}), 400
+    # Фото — подтверждение списания, поэтому проверка остаётся. Но теперь из неё
+    # есть выход: фото дозаливается в существующую заявку (POST /<id>/photos).
+    if not writeoff["photos"]:
+        return jsonify({
+            "error": "К заявке не приложено фото. Добавьте фото и повторите согласование."
+        }), 400
 
     if not lock_writeoff_for_sending(writeoff_id, current_user.username):
         return jsonify({"error": "Заявку уже обрабатывает кто-то другой или она уже рассмотрена"}), 409
@@ -679,75 +683,121 @@ def retry(writeoff_id):
 
 
 # =============================================================================
-# ВЛОЖЕНИЯ (фото списанного товара)
+# ФОТО СПИСАНИЯ — на заявку целиком
+#
+# Раньше фото крепилось к позиции, и один кадр на шесть строк означал шесть
+# загрузок одного файла (обращение #7). Здесь же закрыт главный тупик: фото
+# можно ДОЗАЛИТЬ в уже созданную заявку. Без этого любой обрыв сети делал
+# заявку непроводимой навсегда — проверка при согласовании требовала фото,
+# а добавить его было нечем.
 # =============================================================================
 
-def _writeoff_for_position(position_id: int):
-    position = get_writeoff_position_by_id(position_id)
-    if not position:
-        return None, None
-    writeoff = get_writeoff_by_id(position["writeoff_id"])
-    return position, writeoff
+# Статусы, в которых состав фото ещё можно менять. В 'sent' поздно (документ уже
+# в МойСклад), в 'processing' идёт отправка, в 'rejected'/'cancelled' — незачем.
+PHOTO_EDITABLE_STATUSES = ("on_approval", "failed")
 
 
-@writeoffs_bp.route("/positions/<int:position_id>/attachments", methods=["POST"])
+def _may_edit_photos(writeoff) -> bool:
+    """Фото заявки правит её автор или тот, кто эту заявку согласует."""
+    return (
+        writeoff["created_by"] == current_user.username
+        or current_user.role in APPROVER_ROLES
+    )
+
+
+@writeoffs_bp.route("/<int:writeoff_id>/photos", methods=["POST"])
 @section_required("writeoffs")
-def upload_attachment(position_id):
-    """Загрузить фото списанного товара. multipart/form-data, поле 'file'."""
-    position, writeoff = _writeoff_for_position(position_id)
-    if not position:
-        return jsonify({"error": "Позиция не найдена"}), 404
+def upload_photo(writeoff_id):
+    """Загрузить фото списания. multipart/form-data, поле 'file'."""
+    writeoff = get_writeoff_head(writeoff_id)
+    if not writeoff:
+        return jsonify({"error": "Заявка не найдена"}), 404
     if not _require_store_access(writeoff["store_id"]):
         return jsonify({"error": "Нет доступа к этой точке"}), 403
+    if not _may_edit_photos(writeoff):
+        return jsonify({"error": "Фото может добавить автор заявки или согласующий"}), 403
+    if writeoff["status"] not in PHOTO_EDITABLE_STATUSES:
+        return jsonify({
+            "error": f"Заявка в статусе «{writeoff['status']}» — фото уже не изменить"
+        }), 409
 
     file = request.files.get("file")
     if not file or not file.filename:
         return jsonify({"error": "Файл не передан"}), 400
 
-    result = add_writeoff_attachment(position_id, file.filename, file.read(), current_user.username)
+    result = add_writeoff_photo(writeoff_id, file.filename, file.read(), current_user.username)
     if not result["ok"]:
         return jsonify({"error": result["error"]}), 400
 
-    log_action(current_user.username, "upload_writeoff_attachment", f"{position_id}: {file.filename}")
-    return jsonify({"ok": True, "attachment": result["attachment"]}), 201
+    log_action(current_user.username, "upload_writeoff_photo", f"{writeoff_id}: {file.filename}")
+    return jsonify({"ok": True, "photo": result["photo"]}), 201
 
 
-@writeoffs_bp.route("/positions/<int:position_id>/attachments", methods=["GET"])
+@writeoffs_bp.route("/<int:writeoff_id>/photos", methods=["GET"])
 @section_required("writeoffs")
-def list_attachments(position_id):
-    position, writeoff = _writeoff_for_position(position_id)
-    if not position:
-        return jsonify({"error": "Позиция не найдена"}), 404
+def list_photos(writeoff_id):
+    writeoff = get_writeoff_head(writeoff_id)
+    if not writeoff:
+        return jsonify({"error": "Заявка не найдена"}), 404
     if not _require_store_access(writeoff["store_id"]):
         return jsonify({"error": "Нет доступа к этой точке"}), 403
-    return jsonify({"attachments": get_writeoff_attachments(position_id)})
+    return jsonify({"photos": get_writeoff_photos(writeoff_id)})
 
 
-@writeoffs_bp.route("/attachments/<int:attachment_id>/download", methods=["GET"])
+@writeoffs_bp.route("/photos/<int:photo_id>", methods=["DELETE"])
 @section_required("writeoffs")
-def download_attachment(attachment_id):
-    attachment = get_writeoff_attachment_by_id(attachment_id)
-    if not attachment:
-        return jsonify({"error": "Вложение не найдено"}), 404
-    _, writeoff = _writeoff_for_position(attachment["position_id"])
-    if not writeoff or not _require_store_access(writeoff["store_id"]):
+def delete_photo(photo_id):
+    """
+    Удалить фото заявки. Последнее удалить нельзя: заявка без фото не проходит
+    согласование, а это ровно то состояние, из которого раньше не было выхода.
+    """
+    photo = get_writeoff_photo_by_id(photo_id)
+    if not photo:
+        return jsonify({"error": "Фото не найдено"}), 404
+    if not _require_store_access(photo["writeoff_store_id"]):
+        return jsonify({"error": "Нет доступа к этой точке"}), 403
+    if not _may_edit_photos({"created_by": photo["writeoff_created_by"]}):
+        return jsonify({"error": "Фото может удалить автор заявки или согласующий"}), 403
+    if photo["writeoff_status"] != "on_approval":
+        return jsonify({
+            "error": f"Заявка в статусе «{photo['writeoff_status']}» — фото уже не изменить"
+        }), 409
+
+    try:
+        removed = delete_writeoff_photo(photo_id)
+    except LastPhotoError as e:
+        return jsonify({"error": str(e)}), 409
+    if not removed:
+        return jsonify({"error": "Фото уже удалено"}), 404
+
+    log_action(current_user.username, "delete_writeoff_photo", f"{photo['writeoff_id']}: {photo_id}")
+    return jsonify({"ok": True})
+
+
+@writeoffs_bp.route("/photos/<int:photo_id>/download", methods=["GET"])
+@section_required("writeoffs")
+def download_photo(photo_id):
+    photo = get_writeoff_photo_by_id(photo_id)
+    if not photo:
+        return jsonify({"error": "Фото не найдено"}), 404
+    if not _require_store_access(photo["writeoff_store_id"]):
         return jsonify({"error": "Нет доступа к этой точке"}), 403
 
     directory = os.path.abspath(ATTACHMENTS_DIR)
     # См. такую же проверку в invoices/server.py: файла может не быть, если он
     # попал на эфемерный диск сборки. Без неё общий обработчик 404 отвечает
     # "Endpoint not found", и это читается как сломанный маршрут.
-    if not os.path.exists(os.path.join(directory, attachment["stored_filename"])):
+    if not os.path.exists(os.path.join(directory, photo["stored_filename"])):
         logger.error(
-            "Вложение %s (%s) есть в БД, но файла нет в %s",
-            attachment_id, attachment["original_filename"], directory
+            "Фото %s (%s) есть в БД, но файла нет в %s",
+            photo_id, photo["original_filename"], directory
         )
         return jsonify({
-            "error": "Файл вложения не найден на диске — загрузите его заново"
+            "error": "Файл фото не найден на диске — загрузите его заново"
         }), 404
 
     return send_from_directory(
         directory,
-        attachment["stored_filename"],
-        download_name=attachment["original_filename"],
+        photo["stored_filename"],
+        download_name=photo["original_filename"],
     )
