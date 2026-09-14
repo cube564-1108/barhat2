@@ -1222,13 +1222,46 @@ def get_collections_by_store(
         conn.close()
 
 
-def update_collection(collection_id: int, amount: float) -> bool:
-    """Обновить сумму инкассации."""
+def update_collection(
+    collection_id: int,
+    amount: Optional[float] = None,
+    expense_category_id: Optional[int] = None
+) -> bool:
+    """
+    Обновить сумму и/или статью инкассации.
+
+    Статью правят задним числом (админ из истории смен): по ней строится
+    разбивка расходов в «Инкассациях по салонам», и ошибочно выбранная статья
+    искажает её до тех пор, пока её не поправят.
+
+    Оба поля пишутся одним UPDATE: диск /data сетевой, и два запроса по
+    90–700 мс вместо одного — это цена, которую платит каждое сохранение
+    смены с несколькими инкассациями.
+
+    Returns:
+        False, если обновлять нечего (оба поля None).
+    """
+    updates: List[str] = []
+    params: List[Any] = []
+
+    if amount is not None:
+        updates.append("amount = ?")
+        params.append(amount)
+
+    if expense_category_id is not None:
+        updates.append("expense_category_id = ?")
+        params.append(expense_category_id)
+
+    if not updates:
+        return False
+
+    params.append(collection_id)
+
     conn = get_db()
     try:
         conn.execute(
-            "UPDATE cash_collections SET amount = ? WHERE id = ?",
-            (amount, collection_id)
+            f"UPDATE cash_collections SET {', '.join(updates)} WHERE id = ?",
+            params
         )
         conn.commit()
         return True

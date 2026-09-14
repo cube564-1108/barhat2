@@ -725,6 +725,98 @@ def close_shift(shift_id: int):
 # ЭНДПОИНТЫ: РЕДАКТИРОВАНИЕ И ПОВТОРНОЕ ЗАКРЫТИЕ (ТОЛЬКО АДМИН)
 # =============================================================================
 
+def _apply_collection_edits(shift_id: int, collections: list):
+    """
+    Применить правки инкассаций смены: суммы и статьи.
+
+    Одна функция на оба пути (открытая смена и закрытая): правила «сумма
+    приводится к числу» и «статью меняет только админ» обязаны работать
+    одинаково, а две копии расходятся на первой же доработке.
+
+    Статью правит только админ. Флорист может исправить свою последнюю
+    закрытую смену — но это правка своих же цифр, а статья определяет, в какой
+    расход попадут деньги в отчёте по салонам; переназначать её задним числом —
+    решение учёта, а не кассы.
+
+    Args:
+        shift_id: Смена, которой должны принадлежать все переданные инкассации
+        collections: [{id, amount, expense_category_id (опционально)}, ...]
+
+    Returns:
+        None — правки применены. Иначе готовый error_response.
+    """
+    existing = {c["id"]: c for c in get_shift_collections(shift_id)}
+    is_admin = get_current_user_role() == "admin"
+
+    # Сначала проверяем все строки, пишем только потом: иначе ошибка на второй
+    # инкассации оставит первую уже изменённой, и админ не поймёт, что сохранилось
+    planned = []
+
+    for item in collections:
+        collection_id = item.get("id")
+        current = existing.get(collection_id)
+        if current is None:
+            return error_response(
+                f"Инкассация {collection_id} не принадлежит смене {shift_id}", 404
+            )
+
+        amount = item.get("amount")
+        if amount is None:
+            return error_response(f"Не указана сумма для инкассации {collection_id}")
+        # SQLite не приводит типы насильно: строка из JSON легла бы в денежную
+        # колонку текстом и сломала бы все последующие расчёты остатка
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return error_response(f"Сумма инкассации {collection_id} должна быть числом")
+
+        category_id = item.get("expense_category_id")
+        category = None
+        if category_id is not None:
+            try:
+                category_id = int(category_id)
+            except (TypeError, ValueError):
+                return error_response(f"Статья инкассации {collection_id} задана неверно")
+
+            if category_id == current["expense_category_id"]:
+                category_id = None  # статью не трогали
+            else:
+                if not is_admin:
+                    return error_response(
+                        "Статью инкассации может менять только администратор", 403
+                    )
+                # get_category_by_id отдаёт только активные: переставить
+                # инкассацию на удалённую из справочника статью нельзя
+                category = get_category_by_id(category_id)
+                if not category:
+                    return error_response(
+                        f"Статья {category_id} не найдена или удалена из справочника", 404
+                    )
+
+        planned.append((collection_id, amount, category_id, current, category))
+
+    for collection_id, amount, category_id, current, category in planned:
+        update_collection(
+            collection_id,
+            amount=amount,
+            expense_category_id=category_id
+        )
+        if category_id is not None:
+            old_name = current.get("category_name") or current["expense_category_id"]
+            log_action(
+                get_current_username(),
+                "update_collection_category",
+                f"инкассация {collection_id} (смена {shift_id}): "
+                f"«{old_name}» → «{category['name']}»"
+            )
+            logger.info(
+                f"Статья инкассации изменена: ID={collection_id}, смена={shift_id}, "
+                f"«{old_name}» → «{category['name']}»"
+            )
+
+    return None
+
+
 def _edit_open_shift(shift: dict):
     """
     Поправить открытую смену: начальный остаток и суммы уже внесённых инкассаций.
@@ -738,7 +830,8 @@ def _edit_open_shift(shift: dict):
 
     Body:
         - opening_balance (float, опционально): новый начальный остаток
-        - collections (list, опционально): [{id, amount}, ...] — правки сумм инкассаций
+        - collections (list, опционально): [{id, amount, expense_category_id?}, ...]
+          — правки сумм инкассаций; статью меняет только админ
     """
     shift_id = shift["id"]
     require_open_shift_edit_access(shift)
@@ -765,19 +858,9 @@ def _edit_open_shift(shift: dict):
             return error_response("Начальный остаток должен быть числом")
 
     if collections:
-        existing_ids = {c["id"] for c in get_shift_collections(shift_id)}
-        for item in collections:
-            collection_id = item.get("id")
-            amount = item.get("amount")
-            if collection_id not in existing_ids:
-                return error_response(f"Инкассация {collection_id} не принадлежит смене {shift_id}", 404)
-            if amount is None:
-                return error_response(f"Не указана сумма для инкассации {collection_id}")
-            try:
-                amount = float(amount)
-            except (TypeError, ValueError):
-                return error_response(f"Сумма инкассации {collection_id} должна быть числом")
-            update_collection(collection_id, amount)
+        error = _apply_collection_edits(shift_id, collections)
+        if error:
+            return error
 
     collections_total = get_collections_total(shift_id)
     final_opening_balance = (
@@ -820,7 +903,9 @@ def edit_shift(shift_id: int):
     Закрытая смена (админ — любую; флорист — только последнюю закрытую смену
     своей точки):
         - actual_balance (float, опционально): новый фактический остаток
-        - collections (list, опционально): [{id, amount}, ...] — правки сумм инкассаций
+        - collections (list, опционально): [{id, amount, expense_category_id?}, ...]
+          — правки сумм инкассаций; статью меняет только админ, и она сразу
+          видна в сводной таблице «Инкассации по салонам»
 
     Discrepancy пересчитывается от уже сохранённого cash_orders_total. Если нужно
     учесть новые данные из CRM (например, заказ добавили в CRM задним числом) —
@@ -848,17 +933,11 @@ def edit_shift(shift_id: int):
         if actual_balance is None and not collections:
             return error_response("Нечего обновлять: укажите actual_balance и/или collections")
 
-        # Правим суммы инкассаций
+        # Правим суммы и статьи инкассаций
         if collections:
-            existing_ids = {c["id"] for c in get_shift_collections(shift_id)}
-            for item in collections:
-                collection_id = item.get("id")
-                amount = item.get("amount")
-                if collection_id not in existing_ids:
-                    return error_response(f"Инкассация {collection_id} не принадлежит смене {shift_id}", 404)
-                if amount is None:
-                    return error_response(f"Не указана сумма для инкассации {collection_id}")
-                update_collection(collection_id, amount)
+            error = _apply_collection_edits(shift_id, collections)
+            if error:
+                return error
 
         # Пересчитываем итоги
         collections_total = get_collections_total(shift_id)

@@ -1518,12 +1518,18 @@
             }
 
             if (elements.editShiftCollections) {
+                // Статью правит только админ — бэкенд откажет остальным, поэтому
+                // им она и показывается текстом, а не редактируемым селектом
+                const canEditCategory = (currentUserData && currentUserData.role) === 'admin';
+
                 if (collections.length === 0) {
                     elements.editShiftCollections.innerHTML = `<p class="form-hint">У смены нет инкассаций</p>`;
                 } else {
                     elements.editShiftCollections.innerHTML = collections.map(c => `
                         <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
-                            <span style="flex: 1;">${c.category_name || '—'}</span>
+                            ${canEditCategory
+                                ? renderCollectionCategorySelect(c)
+                                : `<span style="flex: 1;">${escapeHtml(c.category_name || '—')}</span>`}
                             <input type="number" class="form-input" style="width: 140px;"
                                    min="0" step="0.01"
                                    data-collection-id="${c.id}"
@@ -1549,6 +1555,30 @@
         } catch (error) {
             console.error('[CashShifts] Ошибка загрузки смены для исправления:', error);
         }
+    }
+
+    // === Селект статьи инкассации в модалке исправления (только админ) ===
+    function renderCollectionCategorySelect(collection) {
+        const currentId = collection.expense_category_id;
+
+        const options = categoryList.map(cat => `
+            <option value="${cat.id}"${cat.id === currentId ? ' selected' : ''}>${escapeHtml(cat.name)}</option>
+        `);
+
+        // Статью инкассации могли удалить из справочника (мягкое удаление):
+        // в categoryList её уже нет, и без этой строки селект молча показал бы
+        // чужую статью, а сохранение переписало бы её на неё же
+        if (!categoryList.some(cat => cat.id === currentId)) {
+            options.unshift(`
+                <option value="${currentId}" selected>${escapeHtml(collection.category_name || 'Статья ' + currentId)} (удалена из справочника)</option>
+            `);
+        }
+
+        return `
+            <select class="form-input" style="flex: 1; min-width: 0;"
+                    data-collection-category-id="${collection.id}"
+                    data-initial-category-id="${currentId}">${options.join('')}</select>
+        `;
     }
 
     // === Закрытие модального окна исправления смены ===
@@ -1675,10 +1705,23 @@
         const collections = [];
         if (elements.editShiftCollections) {
             elements.editShiftCollections.querySelectorAll('[data-collection-id]').forEach(input => {
-                collections.push({
-                    id: parseInt(input.dataset.collectionId, 10),
+                const collectionId = parseInt(input.dataset.collectionId, 10);
+                const item = {
+                    id: collectionId,
                     amount: parseFloat(input.value)
-                });
+                };
+
+                // Статью шлём, только если её реально поменяли: у инкассации со
+                // статьёй, удалённой из справочника, отправка «как есть» вернула
+                // бы ошибку на ровном месте
+                const select = elements.editShiftCollections.querySelector(
+                    `[data-collection-category-id="${collectionId}"]`
+                );
+                if (select && select.value !== select.dataset.initialCategoryId) {
+                    item.expense_category_id = parseInt(select.value, 10);
+                }
+
+                collections.push(item);
             });
         }
 
