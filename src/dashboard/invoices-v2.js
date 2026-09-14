@@ -380,10 +380,34 @@
         }[c]));
     }
 
-    const RUB = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
+    /**
+     * Деньги показываем в двух видах, и путать их нельзя.
+     *
+     * `money` — суммы документов: копейки ВСЕГДА, даже нулевые. Это то, чем
+     * сверяют счёт с выпиской, и «10 234 ₽» вместо «10 234,56 ₽» — разница
+     * между «сошлось» и «не сошлось» (обращение владельца 04.09.2026).
+     * Округление до рубля вдобавок ломало саму арифметику на экране: счёт на
+     * 1000 ₽ на три салона показывал строки 333 + 333 + 333 при итоге
+     * «распределено 1000 из 1000» — данные верные, врал показ.
+     *
+     * `moneyShort` — агрегаты, по которым не сверяют, а ориентируются
+     * (KPI-плитки, «найдено N счетов на X»). Там копейки от сотни счетов —
+     * шум. Ставить его на сумму конкретного счёта нельзя.
+     *
+     * Два знака всегда, а не «только когда есть»: иначе столбец сумм прыгает
+     * и глазами его уже не сверить (в CSS к нему идёт tabular-nums).
+     */
+    const RUB_EXACT = new Intl.NumberFormat('ru-RU', {
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+    const RUB_SHORT = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
 
     function money(value) {
-        return RUB.format(Math.round(Number(value) || 0)) + ' ₽';
+        return RUB_EXACT.format(Number(value) || 0) + ' ₽';
+    }
+
+    function moneyShort(value) {
+        return RUB_SHORT.format(Math.round(Number(value) || 0)) + ' ₽';
     }
 
     function plural(n, one, few, many) {
@@ -878,7 +902,7 @@
             return `
                 <button class="iv2-kpi${active}" data-kpi="${tile.key}"${clickable ? '' : ' disabled'}>
                     <span class="iv2-kpi__label">${escapeHtml(tile.label)}</span>
-                    <span class="iv2-kpi__value">${data.count}<span class="iv2-kpi__unit">${escapeHtml(money(data.amount))}</span></span>
+                    <span class="iv2-kpi__value">${data.count}<span class="iv2-kpi__unit">${escapeHtml(moneyShort(data.amount))}</span></span>
                     <span class="iv2-kpi__sub ${kpiSubClass(tile.key, data)}">${kpiSubText(tile.key, data)}</span>
                 </button>`;
         }).join('');
@@ -2100,8 +2124,8 @@
         host.innerHTML = `
             <div class="iv2-tbl-wrap">
                 <div class="iv2-tbl-sum">
-                    <span>Найдено: <b>${state.total}</b> на <b>${escapeHtml(money(state.totalAmount))}</b></span>
-                    <span>Показано: <b>${state.rows.length}</b> на <b>${escapeHtml(money(shownAmount))}</b></span>
+                    <span>Найдено: <b>${state.total}</b> на <b>${escapeHtml(moneyShort(state.totalAmount))}</b></span>
+                    <span>Показано: <b>${state.rows.length}</b> на <b>${escapeHtml(moneyShort(shownAmount))}</b></span>
                     <span class="iv2-hint">Сортировка: ${escapeHtml(currentSortLabel())}</span>
                     ${selectAllHtml}
                 </div>
@@ -2196,7 +2220,7 @@
             if (state.filterError) count.textContent = state.filterError;
             else count.textContent = state.loading && !state.rows.length
                 ? 'Считаем…'
-                : `Найдено ${withCount(state.total, 'счёт', 'счёта', 'счетов')} на ${money(state.totalAmount)}`;
+                : `Найдено ${withCount(state.total, 'счёт', 'счёта', 'счетов')} на ${moneyShort(state.totalAmount)}`;
         }
     }
 

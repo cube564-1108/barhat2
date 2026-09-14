@@ -736,7 +736,10 @@
 .iv2 .iv2-tbl tr.iv2-arch td { background: #fbf8fa; color: var(--bx-text-2); }
 
 .iv2 .iv2-tbl .iv2-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.iv2 .iv2-tbl .iv2-right { text-align: right; }
+/* Выравнивание вправо — всегда вместе с tabular-nums: колонка сумм читается
+   сверху вниз, а с копейками (money() показывает их всегда) пропорциональные
+   цифры разъезжают, и сверять её глазами уже нельзя. */
+.iv2 .iv2-tbl .iv2-right { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .iv2 .iv2-tbl .iv2-tbl-empty { text-align: center; padding: 28px 12px; color: var(--bx-muted); }
 .iv2 .iv2-due-badge { margin-top: 3px; }
 
@@ -757,7 +760,7 @@
 }
 
 .iv2 .iv2-alloc-table th { color: var(--bx-muted); font-weight: 600; }
-.iv2 .iv2-alloc-table .iv2-right { text-align: right; }
+.iv2 .iv2-alloc-table .iv2-right { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .iv2 .iv2-linkish {
     color: var(--bx-pink-deep);
