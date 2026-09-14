@@ -2365,12 +2365,23 @@
 
                                 <div class="form-group">
                                     <label class="form-label">Позиции *</label>
-                                    <p class="form-hint">Товар, количество, причина и фото списанного — на каждую позицию своё фото.</p>
+                                    <p class="form-hint">Товар, количество и причина списания.</p>
                                     <div id="writeoff-positions-rows"></div>
                                     <button type="button" id="writeoff-add-position-btn" class="btn btn-secondary btn-sm">+ Добавить позицию</button>
                                 </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Фото списания *</label>
+                                    <p class="form-hint">Одного кадра хватает на всю заявку — можно снять несколько позиций разом. Фото уменьшается перед отправкой, поэтому грузится быстро.</p>
+                                    <input type="file" id="writeoff-photo-input" accept="image/*" multiple hidden>
+                                    <button type="button" id="writeoff-add-photo-btn" class="btn btn-secondary btn-sm">Выбрать фото</button>
+                                    <div id="writeoff-photo-previews"></div>
+                                </div>
+
+                                <div id="writeoff-create-recovery" hidden></div>
                             </div>
                             <div class="modal-footer">
+                                <span id="writeoff-create-progress" class="form-hint" style="margin-right:auto;"></span>
                                 <button id="cancel-create-writeoff-btn" class="btn btn-secondary">Отмена</button>
                                 <button id="confirm-create-writeoff-btn" class="btn btn-success">Отправить на согласование</button>
                             </div>

@@ -59,6 +59,11 @@
         elements.storeSelect = document.getElementById('writeoff-store');
         elements.positionsRows = document.getElementById('writeoff-positions-rows');
         elements.addPositionBtn = document.getElementById('writeoff-add-position-btn');
+        elements.photoInput = document.getElementById('writeoff-photo-input');
+        elements.addPhotoBtn = document.getElementById('writeoff-add-photo-btn');
+        elements.photoPreviews = document.getElementById('writeoff-photo-previews');
+        elements.createRecovery = document.getElementById('writeoff-create-recovery');
+        elements.createProgress = document.getElementById('writeoff-create-progress');
 
         elements.detailsModal = document.getElementById('writeoff-details-modal');
         elements.detailsOverlay = document.getElementById('writeoff-details-overlay');
@@ -90,6 +95,8 @@
         elements.addPositionBtn?.addEventListener('click', () => {
             elements.positionsRows.appendChild(createPositionRow());
         });
+        elements.addPhotoBtn?.addEventListener('click', () => elements.photoInput?.click());
+        elements.photoInput?.addEventListener('change', () => addPickedPhotos(elements.photoInput.files));
         elements.storeSelect?.addEventListener('change', async () => {
             await loadCatalogForStore(parseInt(elements.storeSelect.value, 10));
             elements.positionsRows.querySelectorAll('.writeoff-position-product').forEach(refreshProductInput);
@@ -649,20 +656,6 @@
         reasonInput.style.width = '180px';
         reasonInput.placeholder = 'Причина (брак, порча...)';
 
-        const photoLabel = document.createElement('label');
-        photoLabel.className = 'form-hint';
-        photoLabel.style.margin = '0';
-        // Не «Фото *» на каждой строке: одного кадра хватает на всю заявку.
-        photoLabel.textContent = 'Фото:';
-
-        const fileInput = document.createElement('input');
-        fileInput.type = 'file';
-        // image/* вместо списка расширений: iPhone снимает в HEIC, и белый список
-        // просто не давал выбрать такой файл в диалоге. До сервера всё равно
-        // доедет JPEG — window.BarhatImage жмёт кадр перед отправкой.
-        fileInput.accept = 'image/*';
-        fileInput.className = 'writeoff-position-photo';
-
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
         removeBtn.className = 'btn btn-sm btn-danger';
@@ -677,16 +670,99 @@
         row.appendChild(qtyInput);
         row.appendChild(uomLabel);
         row.appendChild(reasonInput);
-        row.appendChild(photoLabel);
-        row.appendChild(fileInput);
         row.appendChild(removeBtn);
         return row;
+    }
+
+    // =========================================================================
+    // ФОТО ЗАЯВКИ В ФОРМЕ СОЗДАНИЯ
+    //
+    // Файлы держим в массиве, а не в самом <input type=file>: FileList только
+    // для чтения, и убрать из неё один кадр (крестиком на превью) нельзя —
+    // пришлось бы заставлять человека выбирать всю пачку заново.
+    // =========================================================================
+
+    let pendingPhotos = [];
+
+    function resetPhotoPicker() {
+        pendingPhotos = [];
+        if (elements.photoInput) elements.photoInput.value = '';
+        renderPhotoPreviews();
+    }
+
+    function addPickedPhotos(fileList) {
+        for (const file of Array.from(fileList || [])) {
+            const key = `${file.name}|${file.size}|${file.lastModified}`;
+            if (pendingPhotos.some(p => p.key === key)) continue;
+            pendingPhotos.push({ key, file, url: URL.createObjectURL(file) });
+        }
+        // Значение сбрасываем, иначе повторный выбор того же файла не даст
+        // события change и кнопка будет выглядеть сломанной.
+        if (elements.photoInput) elements.photoInput.value = '';
+        renderPhotoPreviews();
+    }
+
+    function removePendingPhoto(key) {
+        const idx = pendingPhotos.findIndex(p => p.key === key);
+        if (idx === -1) return;
+        URL.revokeObjectURL(pendingPhotos[idx].url);
+        pendingPhotos.splice(idx, 1);
+        renderPhotoPreviews();
+    }
+
+    function renderPhotoPreviews() {
+        if (!elements.photoPreviews) return;
+        if (!pendingPhotos.length) {
+            elements.photoPreviews.innerHTML = '';
+            return;
+        }
+
+        const sizeOf = (file) => (window.BarhatImage
+            ? window.BarhatImage.formatBytes(file.size)
+            : `${Math.round(file.size / 1024)} КБ`);
+
+        elements.photoPreviews.innerHTML = `
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+                ${pendingPhotos.map(p => `
+                    <figure style="margin:0; width:104px;">
+                        <div style="position:relative;">
+                            <img src="${p.url}" alt=""
+                                 style="width:104px; height:104px; object-fit:cover;
+                                        border-radius:8px; border:1px solid var(--bx-border, #eee2ea);
+                                        display:block;">
+                            <button type="button" class="writeoff-photo-remove"
+                                    data-key="${escapeHtml(p.key)}"
+                                    title="Убрать фото" aria-label="Убрать фото"
+                                    style="position:absolute; top:4px; right:4px; width:22px; height:22px;
+                                           display:flex; align-items:center; justify-content:center;
+                                           padding:0; border:none; border-radius:9999px; cursor:pointer;
+                                           background:rgba(65,19,48,0.78); color:#fff;">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                                     stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+                                     aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                            </button>
+                        </div>
+                        <figcaption style="font-size:11px; color:var(--bx-muted, #9b8f97);
+                                           margin-top:4px; overflow:hidden; text-overflow:ellipsis;
+                                           white-space:nowrap;" title="${escapeHtml(p.file.name)}">
+                            ${escapeHtml(p.file.name)} · ${sizeOf(p.file)}
+                        </figcaption>
+                    </figure>
+                `).join('')}
+            </div>`;
+
+        elements.photoPreviews.querySelectorAll('.writeoff-photo-remove').forEach(btn => {
+            btn.addEventListener('click', () => removePendingPhoto(btn.getAttribute('data-key')));
+        });
     }
 
     function openCreateModal() {
         const defaultStoreId = storeList.length ? storeList[0].id : null;
         elements.storeSelect.value = defaultStoreId || '';
         elements.positionsRows.innerHTML = '';
+        resetPhotoPicker();
+        setCreateProgress('');
+        hideCreateRecovery();
 
         elements.modal.classList.add('active');
         elements.overlay.classList.add('active');
@@ -698,8 +774,63 @@
 
     function closeCreateModal() {
         closeSuggestions();
+        pendingPhotos.forEach(p => URL.revokeObjectURL(p.url));
+        pendingPhotos = [];
         elements.modal.classList.remove('active');
         elements.overlay.classList.remove('active');
+    }
+
+    function setCreateProgress(text) {
+        if (elements.createProgress) elements.createProgress.textContent = text || '';
+    }
+
+    function hideCreateRecovery() {
+        if (!elements.createRecovery) return;
+        elements.createRecovery.hidden = true;
+        elements.createRecovery.innerHTML = '';
+    }
+
+    /**
+     * Заявка уже создана, а фото не доехало. Модалку НЕ закрываем: без фото
+     * заявку не согласовать, и раньше это был тупик — оставалось завести её
+     * заново. Здесь же даём дозалить в ту же заявку.
+     */
+    function showCreateRecovery(writeoffId, files) {
+        if (!elements.createRecovery) return;
+        elements.createRecovery.hidden = false;
+        elements.createRecovery.innerHTML = `
+            <div style="border:1px solid #fde68a; background:#fffbeb; color:#b45309;
+                        border-radius:12px; padding:12px 14px; margin-top:12px;">
+                <div style="font-weight:600; margin-bottom:4px;">
+                    Заявка №${writeoffId} создана, но фото не загрузилось
+                </div>
+                <div style="font-size:13px; margin-bottom:10px;">
+                    Без фото её нельзя согласовать. Повторите загрузку — заявка та же,
+                    дубля не появится. Или закройте окно и добавьте фото позже
+                    в карточке заявки.
+                </div>
+                <button type="button" id="writeoff-retry-photos" class="btn btn-sm btn-secondary">
+                    Повторить загрузку
+                </button>
+            </div>`;
+
+        elements.createRecovery.querySelector('#writeoff-retry-photos')
+            .addEventListener('click', () => retryPhotoUpload(writeoffId, files));
+    }
+
+    async function retryPhotoUpload(writeoffId, files) {
+        const btn = elements.createRecovery.querySelector('#writeoff-retry-photos');
+        if (btn) btn.disabled = true;
+        const failed = await uploadPhotosWithProgress(writeoffId, files);
+        if (!failed.length) {
+            hideCreateRecovery();
+            setCreateProgress('');
+            closeCreateModal();
+            await loadWriteoffs();
+            return;
+        }
+        if (btn) btn.disabled = false;
+        showCreateRecovery(writeoffId, failed);
     }
 
     function readPositions() {
@@ -713,7 +844,6 @@
                 inputEl: input,
                 quantity: parseFloat(row.querySelector('.writeoff-position-qty').value),
                 reason: row.querySelector('.writeoff-position-reason').value.trim() || null,
-                file: row.querySelector('.writeoff-position-photo').files[0] || null,
             };
         });
     }
@@ -736,13 +866,12 @@
             if (!pos.quantity || pos.quantity <= 0) { alert('Укажите корректное количество во всех позициях'); return; }
         }
 
-        // Фото теперь на заявку целиком: достаточно одного кадра на все позиции.
-        // Поле фото уедет из строки позиции в отдельный блок формы следующей правкой.
-        const files = uniqueFiles(positions);
-        if (!files.length) { alert('Приложите фото — это подтверждение списания'); return; }
+        if (!pendingPhotos.length) { alert('Приложите фото — это подтверждение списания'); return; }
+        const files = pendingPhotos.map(p => p.file);
 
+        hideCreateRecovery();
+        elements.confirmBtn.disabled = true;
         try {
-            elements.confirmBtn.disabled = true;
             const res = await fetch('/api/writeoffs', {
                 method: 'POST',
                 credentials: 'include',
@@ -761,8 +890,13 @@
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Ошибка создания заявки'); return; }
 
-            for (const file of files) {
-                await uploadWriteoffPhoto(data.writeoff.id, file);
+            const failed = await uploadPhotosWithProgress(data.writeoff.id, files);
+            if (failed.length) {
+                // Заявка создана — закрывать окно нельзя, иначе человек уходит с
+                // непроводимой заявкой и без понимания, что произошло.
+                showCreateRecovery(data.writeoff.id, failed);
+                await loadWriteoffs();
+                return;
             }
 
             closeCreateModal();
@@ -772,49 +906,81 @@
             alert('Ошибка создания заявки');
         } finally {
             elements.confirmBtn.disabled = false;
+            setCreateProgress('');
         }
     }
 
     /**
-     * Один и тот же кадр, выбранный в нескольких строках, — это один файл.
-     * Раньше он уезжал на сервер столько раз, сколько было позиций: шесть
-     * загрузок по 3-5 МБ вместо одной (обращение #7).
+     * Загрузить фото по очереди, показывая прогресс. Возвращает список файлов,
+     * которые НЕ доехали, — вызывающий решает, что с ними делать.
+     *
+     * Последовательно, а не Promise.all: интернет в салоне узкий, а параллельные
+     * отправки делят его и растягивают каждую.
      */
-    function uniqueFiles(positions) {
-        const seen = new Set();
-        const files = [];
-        for (const pos of positions) {
-            if (!pos.file) continue;
-            const key = `${pos.file.name}|${pos.file.size}|${pos.file.lastModified}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            files.push(pos.file);
+    async function uploadPhotosWithProgress(writeoffId, files) {
+        const failed = [];
+        for (let i = 0; i < files.length; i++) {
+            const label = files.length > 1 ? `Фото ${i + 1} из ${files.length}` : 'Фото';
+            setCreateProgress(`${label}: подготовка…`);
+            const ok = await uploadWriteoffPhoto(writeoffId, files[i], (percent) => {
+                setCreateProgress(`${label}: загрузка ${percent}%`);
+            });
+            if (!ok) failed.push(files[i]);
         }
-        return files;
+        setCreateProgress(failed.length ? '' : 'Готово');
+        return failed;
     }
 
-    async function uploadWriteoffPhoto(writeoffId, rawFile) {
+    /**
+     * Загрузка одного фото. Возвращает true/false вместо того, чтобы молча
+     * проглотить ошибку: раньше сбой заканчивался тостом, а форма всё равно
+     * закрывалась — и заявка оставалась без фото (обращение #7).
+     *
+     * XMLHttpRequest, а не fetch: нужен upload.onprogress. У fetch прогресса
+     * отправки нет до сих пор, а на 3-5 МБ по салонному интернету «висящая
+     * кнопка без признаков жизни» — половина жалобы.
+     */
+    async function uploadWriteoffPhoto(writeoffId, rawFile, onProgress) {
         // Жмём здесь, а не в форме: через эту функцию идут все загрузки фото,
-        // включая дозаливку из карточки заявки. Снимок с телефона 3-5 МБ
-        // превращается в 200-400 КБ, HEIC с айфона — в JPEG.
-        const file = window.BarhatImage
-            ? await window.BarhatImage.compress(rawFile)
-            : rawFile;
+        // включая дозаливку из карточки заявки.
+        let file = rawFile;
+        try {
+            if (window.BarhatImage) file = await window.BarhatImage.compress(rawFile);
+        } catch (e) {
+            console.error('Не удалось сжать фото, отправляем оригинал:', e);
+        }
 
         const formData = new FormData();
         formData.append('file', file);
-        try {
-            const res = await fetch(`/api/writeoffs/${writeoffId}/photos`, {
-                method: 'POST',
-                credentials: 'include',
-                body: formData,
-            });
-            const data = await res.json();
-            if (!res.ok) alert(`${file.name}: ${data.error || 'Ошибка загрузки фото'}`);
-        } catch (e) {
-            console.error('Ошибка загрузки фото:', e);
-            alert(`${file.name}: ошибка загрузки фото`);
-        }
+
+        return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', `/api/writeoffs/${writeoffId}/photos`, true);
+            xhr.withCredentials = true;
+
+            if (xhr.upload && typeof onProgress === 'function') {
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+                };
+            }
+
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) { resolve(true); return; }
+                let message = 'Ошибка загрузки фото';
+                try {
+                    message = JSON.parse(xhr.responseText).error || message;
+                } catch (e) { /* сервер ответил не JSON — оставляем общий текст */ }
+                alert(`${file.name}: ${message}`);
+                resolve(false);
+            };
+            xhr.onerror = () => {
+                alert(`${file.name}: не удалось отправить фото — проверьте связь`);
+                resolve(false);
+            };
+            xhr.onabort = () => resolve(false);
+
+            xhr.send(formData);
+        });
     }
 
     // =========================================================================
