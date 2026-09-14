@@ -1014,13 +1014,33 @@ INVOICE_KINDS = ("invoice", "card_expense", "card_topup")
 CARD_KINDS = ("card_expense", "card_topup")
 
 
-def _card_stores_error(card_id, line_items):
-    """
-    Салоны в распределении траты должны принадлежать карте.
+# Кто может развести трату на салон за пределами города карты. Решение
+# владельца 14.09.2026 по обращению управляющего: карта барнаульская, а
+# купить для соседнего города иногда надо, и «сходить к админу» — это ручной
+# труд там, где человек должен принимать решение сам.
+#
+# Ограничение при этом не снято, а переведено из запрета в осознанный выбор:
+# по умолчанию в форме видны только салоны карты, чужой город открывается
+# галочкой. Смысл исходной защиты (Барнаул не уедет в проект Челябинска
+# случайно) держится этим умолчанием, а не стеной.
+_CROSS_CARD_STORE_ROLES = ("admin", "manager")
 
-    Карта привязана к городу, и без этой проверки управляющий из Барнаула
-    отправил бы расход в проект Челябинска — в ПланФакте это выглядело бы как
-    трата чужого салона, а разбираться пришлось бы уже по итогам месяца.
+
+def _card_stores_error(card_id, line_items, role=None):
+    """
+    Проверить салоны в распределении траты против салонов карты.
+
+    Карта привязана к городу. Салон другого города — не ошибка сама по себе,
+    но и не рядовой случай: разрешаем его ролям из
+    _CROSS_CARD_STORE_ROLES, остальным по-прежнему отказываем.
+
+    `role=None` означает «строго» — такой вызов не знает, кто пришёл, и
+    подставлять вместо него самую широкую роль нельзя.
+
+    Возвращает текст ошибки или None. Сам факт траты на чужой город виден в
+    карточке заявки (салон рядом с картой) — отдельного поля в схеме под это
+    не заводим: признак целиком выводится из распределения и карты, а
+    дублирующая колонка разъехалась бы с ними при первой же правке.
     """
     card = get_card_by_id(card_id)
     if not card:
@@ -1030,11 +1050,22 @@ def _card_stores_error(card_id, line_items):
         return (f"У карты «{card['title']}» не отмечены салоны — "
                 "заполните их в справочнике рабочих карт")
 
-    for item in line_items:
-        if item.get("store_id") not in allowed:
-            store = get_store_by_id(item.get("store_id"))
-            return (f"Салон «{store['name'] if store else item.get('store_id')}» "
-                    f"не обслуживается картой «{card['title']}»")
+    foreign = [item for item in line_items if item.get("store_id") not in allowed]
+    if not foreign:
+        return None
+
+    names = []
+    for item in foreign:
+        store = get_store_by_id(item.get("store_id"))
+        names.append(store["name"] if store else str(item.get("store_id")))
+
+    if role not in _CROSS_CARD_STORE_ROLES:
+        return (f"Салон «{names[0]}» не обслуживается картой «{card['title']}»")
+
+    # Разрешено — но не молча: по логу видно, кто и куда развёл трату, если
+    # по итогам месяца цифры города окажутся неожиданными.
+    logger.info("Трата с карты «%s» разведена на салоны другого города: %s",
+                card["title"], ", ".join(names))
     return None
 
 
@@ -1233,7 +1264,8 @@ def edit_invoice(invoice_id):
             return jsonify({"error": "Счёт в архиве — распределение изменить нельзя"}), 409
 
         if invoice.get("kind") == "card_expense":
-            error = _card_stores_error(changes.get("card_id", invoice["card_id"]), line_items)
+            error = _card_stores_error(changes.get("card_id", invoice["card_id"]), line_items,
+                                       current_user.role)
             if error:
                 return jsonify({"error": error}), 400
         elif invoice.get("kind") == "card_topup" and line_items:
@@ -1435,7 +1467,7 @@ def add_invoice():
                                    vat_id, due_date, card_id, spent_at, [])
 
     if kind == "card_expense":
-        error = _card_stores_error(card_id, line_items)
+        error = _card_stores_error(card_id, line_items, current_user.role)
         if error:
             return jsonify({"error": error}), 400
 
