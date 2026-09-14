@@ -346,6 +346,42 @@ def main():
         check(response.status_code == 200,
               "заведённую трату на чужой город можно поправить")
 
+        # Ручка распределения — третий вход в тот же инвариант. Без проверки
+        # ролевое ограничение обходилось бы одним запросом мимо формы.
+        response = client.put('/api/invoices/' + str(cross['id']) + '/line-items', json={
+            'items': [{'store_id': chlb_store,
+                       'expense_category_id': category_id, 'amount': 120}],
+        })
+        check(response.status_code == 200,
+              "менеджер меняет распределение траты на чужой город через /line-items")
+
+    with app.test_client() as client:
+        login(client, 'nsk_florist')
+        response = client.put('/api/invoices/' + str(cross['id']) + '/line-items', json={
+            'items': [{'store_id': chlb_store,
+                       'expense_category_id': category_id, 'amount': 120}],
+        })
+        check(response.status_code in (400, 403, 409),
+              "через /line-items роль вне списка чужой город не обходит")
+
+    # Управляющий принимающего города видит трату по своей строке
+    # распределения, но чужой картой не владеет. Правка не должна упираться в
+    # «Нет доступа к этой карте»: карта нужна, чтобы её сменить, а не чтобы
+    # сохранить форму с той же самой.
+    with app.test_client() as client:
+        login(client, 'chlb_manager')
+        response = client.put('/api/invoices/' + str(cross['id']), json={
+            'card_id': nsk_card['id'], 'payment_purpose': 'уточнил назначение',
+        })
+        check(response.status_code == 200,
+              "управляющий принимающего города правит трату, не владея её картой")
+
+        response = client.put('/api/invoices/' + str(cross['id']), json={
+            'card_id': chlb_card['id'],
+        })
+        check(response.status_code == 403,
+              "но переставить трату на свою карту он всё равно не может")
+
     print("\n" + "=" * 60)
     if failures:
         print(f"ПРОВАЛОВ: {len(failures)}")

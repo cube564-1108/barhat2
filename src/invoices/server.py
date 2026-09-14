@@ -253,8 +253,29 @@ def _register_reference_crud(name, get_all, get_by_id, create, update, delete, r
 @invoices_bp.route("/stores", methods=["GET"])
 @section_required(*INVOICE_SECTIONS)
 def get_stores():
-    """Список салонов (=проектов ПланФакт) для распределения (переиспользуем cashshifts.stores)."""
-    return jsonify({"stores": get_all_stores()})
+    """
+    Список салонов (=проектов ПланФакт) для распределения (переиспользуем
+    cashshifts.stores).
+
+    К каждому салону добавляем его рабочую карту. Карта — это город салона, а
+    города отдельным полем у салона нет, и выводить его из названия нельзя
+    (см. CLAUDE.md). Клиенту эта привязка нужна целиком: справочник карт он
+    получает урезанным до своих (get_cards_for_user), и группировать по нему
+    чужие города — значит показывать их «без карты». Сама привязка не
+    чувствительна: это ответ на вопрос «в каком городе салон».
+    """
+    cards_by_store = {}
+    for card in list_cards():
+        for store_id in card["store_ids"]:
+            cards_by_store[store_id] = card
+
+    stores = []
+    for store in get_all_stores():
+        card = cards_by_store.get(store["id"])
+        stores.append(dict(store,
+                           card_id=card["id"] if card else None,
+                           card_title=card["title"] if card else None))
+    return jsonify({"stores": stores})
 
 
 _register_reference_crud("categories", get_all_expense_categories, get_expense_category_by_id,
@@ -1204,8 +1225,21 @@ def edit_invoice(invoice_id):
         card_id = data["card_id"]
         if not isinstance(card_id, int) or not get_card_by_id(card_id):
             return jsonify({"error": "Выберите рабочую карту"}), 400
-        if not user_can_use_card(card_id, current_user.username, current_user.role):
-            return jsonify({"error": "Нет доступа к этой карте"}), 403
+        # Доступ к карте нужен, чтобы её СМЕНИТЬ, а не чтобы сохранить форму с
+        # той же картой: форма шлёт card_id всегда. С появлением траты на салон
+        # другого города это перестало быть одним и тем же — управляющий
+        # принимающего города видит заявку по своей строке распределения, но
+        # чужой картой не владеет, и правка сломалась бы у него 403-й.
+        #
+        # Смена карты меняет подотчёт СРАЗУ ДВУХ человек: с одной карты трата
+        # уходит, на другую приходит. Поэтому владеть надо обеими, иначе
+        # управляющий принимающего города мог бы перевесить чужую трату на
+        # себя — или, что хуже, свою на соседа.
+        if card_id != invoice.get("card_id"):
+            for check_id in (invoice.get("card_id"), card_id):
+                if check_id and not user_can_use_card(
+                        check_id, current_user.username, current_user.role):
+                    return jsonify({"error": "Нет доступа к этой карте"}), 403
         changes["card_id"] = card_id
         # Плательщик пополнения — свойство карты, поэтому переставить карту
         # значит переставить и его. Иначе заявка осталась бы с юрлицом от
@@ -2312,6 +2346,15 @@ def update_line_items(invoice_id):
             return jsonify({"error": "Некорректная статья расхода"}), 400
         if not isinstance(item.get("amount"), (int, float)) or item["amount"] <= 0:
             return jsonify({"error": "Сумма строки должна быть положительным числом"}), 400
+
+    # Салоны карты проверяем и здесь. У инварианта три входа (создание, правка
+    # счёта и эта ручка), и проверка, стоящая не на всех, — это не проверка:
+    # ограничение для ролей вне _CROSS_CARD_STORE_ROLES обходилось бы одним
+    # запросом мимо формы.
+    if invoice.get("kind") == "card_expense" and items:
+        error = _card_stores_error(invoice["card_id"], items, current_user.role)
+        if error:
+            return jsonify({"error": error}), 400
 
     # Та же обязательность, что в создании и правке счёта: через эту ручку
     # распределение иначе можно было бы просто обнулить, и требование

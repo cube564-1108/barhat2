@@ -3033,19 +3033,23 @@
         // Пополнение карты распределения не имеет вовсе, поэтому блока у него
         // нет — ни строк, ни заголовка, ни «не распределён»
         const hasAllocation = invoice.kind !== 'card_topup';
-        // Салоны карты — чтобы отметить строки, ушедшие в другой город. Это
-        // разрешённый случай, но согласующий должен видеть его сразу: трата
-        // лежит на карте одного города, а расход уходит в проект другого.
-        // Признак выводим из справочника карт, отдельного поля под него нет.
-        const expenseCard = invoice.kind === 'card_expense' && invoice.card_id
-            ? (state.refs.workCards || []).find(card => String(card.id) === String(invoice.card_id))
-            : null;
-        const cardStoreIds = new Set(((expenseCard && expenseCard.store_ids) || []).map(String));
+        // Строки, ушедшие в другой город. Случай разрешённый, но согласующий
+        // должен видеть его сразу: трата лежит на карте одного города, а
+        // расход уходит в проект другого.
+        //
+        // Сравниваем карту заявки с картой САЛОНА (card_id приходит со
+        // справочником салонов), а не ищем заявку в state.refs.workCards: там
+        // у управляющего только свои карты, и на чужой заявке бейдж не
+        // нарисовался бы вовсе — видел бы его один админ.
+        const isCardExpense = invoice.kind === 'card_expense' && Boolean(invoice.card_id);
+        const storeCard = new Map(
+            (state.refs.stores || []).map(store => [String(store.id), store.card_id]));
 
         const allocRows = items.length
             ? items.map(item => {
-                const foreign = expenseCard && cardStoreIds.size
-                    && !cardStoreIds.has(String(item.store_id));
+                const cardOfStore = storeCard.get(String(item.store_id));
+                const foreign = isCardExpense && cardOfStore
+                    && String(cardOfStore) !== String(invoice.card_id);
                 return `
                 <div class="iv2-alloc__row">
                     <span>${escapeHtml(item.store_name || '—')} · ${escapeHtml(item.category_name || '—')}${
@@ -4434,19 +4438,23 @@
         const ownIds = new Set(own.map(store => String(store.id)));
         const groups = [{ label: 'Салоны этой карты', items: own }];
 
-        (state.refs.workCards || []).forEach(card => {
-            if (String(card.id) === String(state.form.values.card_id)) return;
-            const items = (state.refs.stores || []).filter(store =>
-                !ownIds.has(String(store.id))
-                && (card.store_ids || []).map(String).indexOf(String(store.id)) !== -1);
-            if (items.length) groups.push({ label: card.title, items });
+        // Группируем по card_title, который приходит вместе с салоном, а НЕ по
+        // state.refs.workCards: справочник карт у управляющего урезан до своих,
+        // и по нему все чужие города оказались бы «без карты» — ровно у того,
+        // для кого эта галочка и сделана.
+        const rest = (state.refs.stores || []).filter(store => !ownIds.has(String(store.id)));
+        const byCard = new Map();
+        rest.forEach(store => {
+            const label = store.card_title || 'Без рабочей карты';
+            if (!byCard.has(label)) byCard.set(label, []);
+            byCard.get(label).push(store);
         });
-
-        // Салон, не привязанный ни к одной карте, иначе исчез бы из списка
-        // совсем — а это как раз новая точка, которую ещё не завели в карту.
-        const grouped = new Set(groups.reduce((all, g) => all.concat(g.items.map(s => String(s.id))), []));
-        const orphans = (state.refs.stores || []).filter(store => !grouped.has(String(store.id)));
-        if (orphans.length) groups.push({ label: 'Без рабочей карты', items: orphans });
+        // «Без рабочей карты» — последней группой: это не город, а салон,
+        // который ещё не завели в справочник карт.
+        Array.from(byCard.keys())
+            .sort((a, b) => (a === 'Без рабочей карты') - (b === 'Без рабочей карты')
+                || a.localeCompare(b, 'ru'))
+            .forEach(label => groups.push({ label, items: byCard.get(label) }));
 
         return `<option value="">Салон / проект</option>` + groups.map(group => `
             <optgroup label="${escapeHtml(group.label)}">
@@ -4910,13 +4918,14 @@
             const field = input.getAttribute('data-item-field');
             const handler = () => {
                 // Предупреждение о чужом городе живёт вне блока итогов, и
-                // updateAllocationSummary до него не достаёт. Перерисовываем
-                // форму только когда оно реально появляется или пропадает —
-                // на каждую смену салона это было бы лишним морганием.
-                const hadForeign = crossCityItems().length > 0;
+                // updateAllocationSummary до него не достаёт. Сравниваем ЧИСЛО
+                // таких строк, а не «есть или нет»: во втором случае вторая
+                // чужая строка не меняла булев признак, и предупреждение
+                // продолжало говорить «1 строка».
+                const foreignBefore = crossCityItems().length;
                 state.form.items[index][field] = input.value;
                 if (field === 'amount') updateAllocationSummary(host);
-                if (field === 'store_id' && hadForeign !== (crossCityItems().length > 0)) renderForm();
+                if (field === 'store_id' && foreignBefore !== crossCityItems().length) renderForm();
             };
             input.addEventListener('input', handler);
             input.addEventListener('change', handler);
