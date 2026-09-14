@@ -1309,6 +1309,12 @@ def serve_ui_dialog():
     которые браузер игнорирует внутри iframe Пульса."""
     return send_from_directory(DASHBOARD_DIR, 'ui-dialog.js')
 
+@app.route('/image-compress.js')
+def serve_image_compress():
+    """Отдаёт сжатие фото перед отправкой (window.BarhatImage): снимок с телефона
+    3-5 МБ ужимается до 200-400 КБ, а HEIC с айфона превращается в JPEG."""
+    return send_from_directory(DASHBOARD_DIR, 'image-compress.js')
+
 @app.route('/datetime.js')
 def serve_datetime():
     """Отдаёт утилиты форматирования дат (window.BarhatTime)"""

@@ -657,7 +657,10 @@
 
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
-        fileInput.accept = '.png,.jpg,.jpeg,.webp';
+        // image/* вместо списка расширений: iPhone снимает в HEIC, и белый список
+        // просто не давал выбрать такой файл в диалоге. До сервера всё равно
+        // доедет JPEG — window.BarhatImage жмёт кадр перед отправкой.
+        fileInput.accept = 'image/*';
         fileInput.className = 'writeoff-position-photo';
 
         const removeBtn = document.createElement('button');
@@ -790,7 +793,14 @@
         return files;
     }
 
-    async function uploadWriteoffPhoto(writeoffId, file) {
+    async function uploadWriteoffPhoto(writeoffId, rawFile) {
+        // Жмём здесь, а не в форме: через эту функцию идут все загрузки фото,
+        // включая дозаливку из карточки заявки. Снимок с телефона 3-5 МБ
+        // превращается в 200-400 КБ, HEIC с айфона — в JPEG.
+        const file = window.BarhatImage
+            ? await window.BarhatImage.compress(rawFile)
+            : rawFile;
+
         const formData = new FormData();
         formData.append('file', file);
         try {
