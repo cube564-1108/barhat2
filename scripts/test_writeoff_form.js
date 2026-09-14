@@ -1,11 +1,16 @@
 /**
- * Прогон формы создания списания в Node с заглушкой DOM.
+ * Прогон формы и карточки списания в Node с заглушкой DOM.
  *
  * Проверяется поведение, из-за которого и написано обращение #7. Раньше форма
  * закрывалась НЕЗАВИСИМО от того, доехало фото или нет: uploadPositionPhoto
  * гасил ошибку внутри себя, а submitWriteoff всё равно звал closeCreateModal().
  * Человек оставался с созданной заявкой без фото — согласовать её было нельзя,
  * а дозалить фото было нечем.
+ *
+ * Разделы 1-7 — форма создания, 8-9 — карточка заявки. Заглушка разбирает
+ * innerHTML в дерево элементов: модули дашборда рисуют разметку строкой и
+ * сразу вешают на неё обработчики, и без разбора потерянная кнопка выглядела
+ * бы как зелёный тест. Так здесь и всплыла потерянная renderDetailsActions.
  *
  * Запуск: node scripts/test_writeoff_form.js
  */
@@ -26,10 +31,68 @@ function check(name, condition, detail) {
 
 // --- Заглушка DOM ------------------------------------------------------------
 
+/**
+ * Разбор селекторов вида `.class`, `#id`, `tag`, `tag[attr]`, `[attr="v"]`.
+ * Атрибутные нужны по-настоящему: модуль вешает обработчики через
+ * `querySelectorAll('button[data-action]')` по разметке из innerHTML, и без
+ * этого потерянный обработчик тест бы не заметил.
+ */
 function matches(el, selector) {
+    const attrMatch = selector.match(/^([^[]*)\[([^\]=]+)(?:="([^"]*)")?\]$/);
+    if (attrMatch) {
+        const [, head, attr, value] = attrMatch;
+        if (head && !matches(el, head)) return false;
+        const actual = el.getAttribute(attr);
+        if (actual === null) return false;
+        return value === undefined || actual === value;
+    }
     if (selector.startsWith('.')) return el.classList.contains(selector.slice(1));
     if (selector.startsWith('#')) return el.id === selector.slice(1);
     return el.tagName === selector.toUpperCase();
+}
+
+/**
+ * Мини-разбор HTML в дерево элементов. Нужен, чтобы innerHTML не был «чёрным
+ * ящиком»: модули дашборда рисуют разметку строкой и сразу вешают на неё
+ * обработчики — именно там теряются кнопки (см. CLAUDE.md и историю правок).
+ * Текстовые узлы не заводим, атрибуты берём только в двойных кавычках — этого
+ * хватает на нашу разметку.
+ */
+const VOID_TAGS = new Set(['img', 'input', 'br', 'hr', 'meta', 'link']);
+
+function parseHtml(html, makeElement) {
+    const root = { children: [] };
+    const stack = [root];
+    const tagRe = /<(\/?)([a-zA-Z][\w-]*)((?:\s+[^\s=/>]+(?:="[^"]*")?)*)\s*(\/?)>/g;
+    let m;
+    while ((m = tagRe.exec(html)) !== null) {
+        const [, closing, tag, rawAttrs, selfClose] = m;
+        if (closing) {
+            if (stack.length > 1) stack.pop();
+            continue;
+        }
+        const el = makeElement(tag);
+        const attrRe = /([^\s=/>]+)(?:="([^"]*)")?/g;
+        let a;
+        while ((a = attrRe.exec(rawAttrs || '')) !== null) {
+            const name = a[1];
+            const value = a[2] === undefined ? '' : a[2];
+            el.setAttribute(name, value);
+            if (name === 'class') el.className = value;
+            else if (name === 'id') el.id = value;
+            else if (name === 'hidden') el.hidden = true;
+            else if (name === 'disabled') el.disabled = true;
+            else if (name.startsWith('data-')) {
+                const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+                el.dataset[key] = value;
+            }
+        }
+        const parent = stack[stack.length - 1];
+        (parent.children = parent.children || []).push(el);
+        el.parentElement = parent === root ? null : parent;
+        if (!selfClose && !VOID_TAGS.has(tag.toLowerCase())) stack.push(el);
+    }
+    return root.children;
 }
 
 function makeEl(tagName) {
@@ -60,7 +123,11 @@ function makeEl(tagName) {
             String(v).split(/\s+/).filter(Boolean).forEach(c => classes.add(c));
         },
         get innerHTML() { return el._html; },
-        set innerHTML(v) { el._html = String(v); el.children = []; },
+        set innerHTML(v) {
+            el._html = String(v);
+            el.children = parseHtml(el._html, makeEl);
+            el.children.forEach(c => { c.parentElement = el; });
+        },
         appendChild(child) { el.children.push(child); child.parentElement = el; return child; },
         removeChild(child) { el.children = el.children.filter(c => c !== child); },
         remove() { if (el.parentElement) el.parentElement.removeChild(el); },
@@ -130,7 +197,10 @@ function makeSandbox(fetchImpl, xhrImpl) {
         fetch: fetchImpl,
         alert: (m) => alerts.push(String(m)),
         document: doc,
-        BarhatTime: { formatDateTimeLong: () => '', formatDate: () => '' },
+        BarhatTime: {
+            formatDateTimeLong: () => '', formatDate: () => '', formatDateTime: () => '',
+            dayStartUtc: () => '', dayEndUtc: () => '',
+        },
     };
     sandbox.window = sandbox;
     sandbox.self = sandbox;
@@ -221,6 +291,60 @@ async function settle(env, timeoutMs = 2000) {
 }
 
 const flush = () => new Promise(r => setTimeout(r, 5));
+
+/**
+ * Открыть карточку заявки тем же путём, что и человек: активировать страницу,
+ * дождаться таблицы и нажать «Детали». Прямого вызова у модуля нет — и хорошо:
+ * так проверяется вся цепочка, включая привязку обработчиков к разметке,
+ * собранной строкой.
+ */
+async function openCard(writeoff, FakeXHR) {
+    let photosServed = false;
+    const env = makeSandbox(
+        async (url) => {
+            if (url === `/api/writeoffs/${writeoff.id}`) {
+                return { ok: true, status: 200, json: async () => ({ writeoff }) };
+            }
+            if (url === `/api/writeoffs/${writeoff.id}/photos`) {
+                photosServed = true;
+                // После дозаливки список отдаёт уже загруженный кадр
+                return { ok: true, status: 200, json: async () => ({
+                    photos: writeoff.photos.length
+                        ? writeoff.photos
+                        : [{ id: 5, original_filename: 'spasenie.jpg' }],
+                }) };
+            }
+            if (url === '/api/writeoffs/stores') {
+                return { ok: true, status: 200, json: async () => ({
+                    stores: [{ id: 1, name: 'Тестовая точка' }],
+                    user: { username: 'manager_wo', role: 'manager' },
+                }) };
+            }
+            if (url.startsWith('/api/writeoffs?')) {
+                return { ok: true, status: 200, json: async () => ({
+                    writeoffs: [Object.assign({}, writeoff, { positions_count: 1 })],
+                }) };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+        },
+        FakeXHR
+    );
+    env.sandbox.BarhatUI = { confirm: async () => true, prompt: async () => '', toast() {} };
+
+    // onPageActivated принимает учётку — без неё canApprove/mayEditPhotos
+    // молча решат, что прав нет, и кнопок в карточке не будет
+    await env.sandbox.WriteoffsModule.onPageActivated({ username: 'manager_wo', role: 'manager' });
+    await flush();
+
+    const detailsBtn = env.byId['writeoffs-tbody']
+        .querySelector('button[data-action="details"]');
+    if (!detailsBtn) throw new Error('В таблице нет кнопки «Детали» — сломана отрисовка списка');
+    detailsBtn.fire('click');
+    await flush();
+
+    env.photosServed = () => photosServed;
+    return env;
+}
 
 // --- Тесты -------------------------------------------------------------------
 
@@ -385,6 +509,84 @@ const flush = () => new Promise(r => setTimeout(r, 5));
 
         check('Фото всё равно ушло — оригиналом', sent.length === 1, `запросов: ${sent.length}`);
         check('Форма закрылась', !env.byId['create-writeoff-modal'].classList.contains('active'));
+    }
+
+    console.log('\n=== 8. Карточка застрявшей заявки ===');
+    {
+        // Заявка БЕЗ фото — то самое состояние, из которого раньше не было выхода
+        const writeoff = {
+            id: 90, store_id: 1, status: 'on_approval', created_by: 'manager_wo',
+            created_at: '2026-09-14T10:00:00', positions: [], photos: [],
+        };
+        const { FakeXHR, sent } = makeXhr(() => 201);
+        const env = await openCard(writeoff, FakeXHR);
+
+        const photosHost = env.byId['writeoff-details-photos'];
+        const actionsHost = env.byId['writeoff-details-actions'];
+
+        check('Сказано, что согласовать нельзя',
+            /согласовать заявку нельзя/i.test(photosHost.innerHTML));
+        check('Есть кнопка «Добавить фото» — выход из тупика',
+            !!photosHost.querySelector('.writeoff-details-add-photo'));
+        check('Кнопки действий отрисованы',
+            actionsHost.querySelectorAll('button[data-action]').length > 0,
+            `кнопок: ${actionsHost.querySelectorAll('button[data-action]').length}`);
+        check('Среди них «Согласовать»',
+            !!actionsHost.querySelector('button[data-action="approve"]'));
+
+        // Дозаливаем фото прямо из карточки
+        const input = photosHost.querySelector('.writeoff-details-photo-input');
+        input.files = [fakeFile('spasenie.jpg', 200000, 7)];
+        input.fire('change');
+        await flush();
+        await flush();
+
+        check('Фото ушло в ту же заявку', sent.length === 1 && sent[0] === '/api/writeoffs/90/photos',
+            sent.join(', '));
+        check('Карточка перерисована с фото',
+            /photos\/5\/download/.test(env.byId['writeoff-details-photos'].innerHTML));
+        check('Плашки «согласовать нельзя» больше нет',
+            !/согласовать заявку нельзя/i.test(env.byId['writeoff-details-photos'].innerHTML));
+    }
+
+    console.log('\n=== 9. Права и статусы в карточке ===');
+    {
+        const { FakeXHR } = makeXhr(() => 201);
+        const sent_ = await openCard({
+            id: 91, store_id: 1, status: 'sent', created_by: 'manager_wo',
+            created_at: '2026-09-14T10:00:00', positions: [],
+            photos: [{ id: 5, original_filename: 'kadr.jpg' }],
+        }, FakeXHR);
+        const host = sent_.byId['writeoff-details-photos'];
+        check('У согласованной заявки фото видно',
+            /photos\/5\/download/.test(host.innerHTML));
+        check('Но добавить нельзя', !host.querySelector('.writeoff-details-add-photo'));
+        check('И удалить нельзя', !host.querySelector('.writeoff-photo-delete'));
+    }
+    {
+        const { FakeXHR } = makeXhr(() => 201);
+        const failed = await openCard({
+            id: 92, store_id: 1, status: 'failed', created_by: 'manager_wo',
+            created_at: '2026-09-14T10:00:00', positions: [],
+            photos: [{ id: 6, original_filename: 'kadr.jpg' }],
+        }, FakeXHR);
+        const host = failed.byId['writeoff-details-photos'];
+        check('У упавшей отправки фото ещё можно добавить',
+            !!host.querySelector('.writeoff-details-add-photo'));
+        check('Но удалять уже нельзя — документ на полпути',
+            !host.querySelector('.writeoff-photo-delete'));
+    }
+    {
+        const { FakeXHR } = makeXhr(() => 201);
+        const own = await openCard({
+            id: 93, store_id: 1, status: 'on_approval', created_by: 'manager_wo',
+            created_at: '2026-09-14T10:00:00', positions: [],
+            photos: [{ id: 7, original_filename: 'a.jpg' }, { id: 8, original_filename: 'b.jpg' }],
+        }, FakeXHR);
+        const host = own.byId['writeoff-details-photos'];
+        check('На согласовании крестики есть у каждого фото',
+            host.querySelectorAll('.writeoff-photo-delete').length === 2,
+            `крестиков: ${host.querySelectorAll('.writeoff-photo-delete').length}`);
     }
 
     console.log('\n' + '='.repeat(60));

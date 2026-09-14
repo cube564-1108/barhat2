@@ -1036,29 +1036,178 @@
         `).join('');
 
         renderDetailsPhotos(writeoff);
+        renderDetailsActions(writeoff);
+    }
+
+    // Совпадает с PHOTO_EDITABLE_STATUSES в src/writeoffs/server.py
+    const PHOTO_EDITABLE_STATUSES = ['on_approval', 'failed'];
+
+    /** Фото правит автор заявки или тот, кто её согласует — как на сервере. */
+    function mayEditPhotos(writeoff) {
+        return writeoff.created_by === currentUserData?.username
+            || APPROVER_ROLES.includes(currentUserData?.role);
     }
 
     /**
-     * Фото заявки. Пока — только просмотр; кнопка «Добавить фото» и удаление
-     * приезжают следующей правкой вместе с клиентским сжатием.
+     * Запомнить прокрутку карточки и вернуть функцию, которая её восстановит.
+     * Дозагрузка и удаление фото перерисовывают блок, а он живёт в прокручиваемом
+     * теле модалки: без этого человек после третьего фото оказывается в шапке
+     * (см. CLAUDE.md, «перерисовка через innerHTML теряет прокрутку»).
+     */
+    function keepDetailsScroll() {
+        const body = elements.detailsModal?.querySelector('.modal-body');
+        const outer = elements.detailsModal?.querySelector('.modal-content');
+        const bodyTop = body ? body.scrollTop : 0;
+        const outerTop = outer ? outer.scrollTop : 0;
+        return () => {
+            if (bodyTop && body) body.scrollTop = bodyTop;
+            if (outerTop && outer) outer.scrollTop = outerTop;
+        };
+    }
+
+    /**
+     * Фото заявки: просмотр, дозагрузка и удаление.
+     *
+     * Кнопка «Добавить фото» — не удобство, а условие того, что проверка
+     * «без фото не согласовать» вообще имеет право существовать. До неё
+     * единственным выходом из заявки без фото было завести её заново.
      */
     function renderDetailsPhotos(writeoff) {
         const photos = writeoff.photos || [];
-        if (!photos.length) {
-            elements.detailsPhotos.innerHTML =
-                '<div class="form-hint">Фото не приложено — согласовать нельзя.</div>';
-            return;
-        }
-        elements.detailsPhotos.innerHTML = `
-            <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                ${photos.map(p => `
-                    <a href="/api/writeoffs/photos/${p.id}/download" target="_blank" rel="noopener">
-                        ${escapeHtml(p.original_filename)}
-                    </a>
-                `).join('')}
-            </div>`;
+        const editable = PHOTO_EDITABLE_STATUSES.includes(writeoff.status)
+            && mayEditPhotos(writeoff);
+        const removable = writeoff.status === 'on_approval' && mayEditPhotos(writeoff);
 
-        renderDetailsActions(writeoff);
+        let html = '';
+
+        if (!photos.length) {
+            html += `
+                <div style="border:1px solid #fde68a; background:#fffbeb; color:#b45309;
+                            border-radius:12px; padding:10px 12px; font-size:13px;">
+                    Фото не приложено — согласовать заявку нельзя.${
+                        editable ? ' Добавьте фото кнопкой ниже.' : ''}
+                </div>`;
+        } else {
+            html += `
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    ${photos.map(p => `
+                        <figure style="margin:0; width:96px;">
+                            <div style="position:relative;">
+                                <a href="/api/writeoffs/photos/${p.id}/download" target="_blank"
+                                   rel="noopener" title="Открыть оригинал">
+                                    <img src="/api/writeoffs/photos/${p.id}/download" alt=""
+                                         style="width:96px; height:96px; object-fit:cover; display:block;
+                                                border-radius:8px; border:1px solid var(--bx-border, #eee2ea);">
+                                </a>
+                                ${removable ? `
+                                <button type="button" class="writeoff-photo-delete" data-id="${p.id}"
+                                        title="Удалить фото" aria-label="Удалить фото"
+                                        style="position:absolute; top:4px; right:4px; width:22px; height:22px;
+                                               display:flex; align-items:center; justify-content:center;
+                                               padding:0; border:none; border-radius:9999px; cursor:pointer;
+                                               background:rgba(65,19,48,0.78); color:#fff;">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                                         stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+                                         aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                                </button>` : ''}
+                            </div>
+                            <figcaption style="font-size:11px; color:var(--bx-muted, #9b8f97);
+                                               margin-top:4px; overflow:hidden; text-overflow:ellipsis;
+                                               white-space:nowrap;" title="${escapeHtml(p.original_filename)}">
+                                ${escapeHtml(p.original_filename)}
+                            </figcaption>
+                        </figure>
+                    `).join('')}
+                </div>`;
+        }
+
+        if (editable) {
+            html += `
+                <div style="margin-top:10px; display:flex; align-items:center; gap:10px;">
+                    <input type="file" class="writeoff-details-photo-input" accept="image/*" multiple hidden>
+                    <button type="button" class="btn btn-secondary btn-sm writeoff-details-add-photo">
+                        Добавить фото
+                    </button>
+                    <span class="form-hint writeoff-details-photo-progress" style="margin:0;"></span>
+                </div>`;
+        }
+
+        elements.detailsPhotos.innerHTML = html;
+        bindDetailsPhotos(writeoff);
+    }
+
+    function bindDetailsPhotos(writeoff) {
+        const host = elements.detailsPhotos;
+        const input = host.querySelector('.writeoff-details-photo-input');
+        const addBtn = host.querySelector('.writeoff-details-add-photo');
+        const progress = host.querySelector('.writeoff-details-photo-progress');
+
+        addBtn?.addEventListener('click', () => input?.click());
+        input?.addEventListener('change', async () => {
+            const files = Array.from(input.files || []);
+            input.value = '';
+            if (!files.length) return;
+
+            addBtn.disabled = true;
+            let failed = 0;
+            for (let i = 0; i < files.length; i++) {
+                const label = files.length > 1 ? `Фото ${i + 1} из ${files.length}` : 'Фото';
+                if (progress) progress.textContent = `${label}: подготовка…`;
+                const ok = await uploadWriteoffPhoto(writeoff.id, files[i], (percent) => {
+                    if (progress) progress.textContent = `${label}: загрузка ${percent}%`;
+                });
+                if (!ok) failed += 1;
+            }
+            addBtn.disabled = false;
+            if (progress) progress.textContent = '';
+
+            await refreshDetailsPhotos(writeoff);
+            if (!failed) await loadWriteoffs();
+        });
+
+        host.querySelectorAll('.writeoff-photo-delete').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const ok = await window.BarhatUI.confirm(
+                    'Фото будет удалено из заявки.',
+                    { title: 'Удалить фото?', confirmText: 'Удалить', danger: true }
+                );
+                if (!ok) return;
+                btn.disabled = true;
+                try {
+                    const res = await fetch(`/api/writeoffs/photos/${btn.getAttribute('data-id')}`, {
+                        method: 'DELETE',
+                        credentials: 'include',
+                    });
+                    const data = await res.json();
+                    if (!res.ok) { alert(data.error || 'Ошибка удаления фото'); btn.disabled = false; return; }
+                } catch (e) {
+                    console.error('Ошибка удаления фото:', e);
+                    alert('Ошибка удаления фото');
+                    btn.disabled = false;
+                    return;
+                }
+                await refreshDetailsPhotos(writeoff);
+            });
+        });
+    }
+
+    /**
+     * Перечитать только фото, а не всю заявку: список фото — единственное, что
+     * изменилось, а get_writeoff_by_id на сервере стоит трёх запросов.
+     */
+    async function refreshDetailsPhotos(writeoff) {
+        const restoreScroll = keepDetailsScroll();
+        try {
+            const res = await fetch(`/api/writeoffs/${writeoff.id}/photos`, { credentials: 'include' });
+            const data = await res.json();
+            if (res.ok) writeoff.photos = data.photos || [];
+        } catch (e) {
+            console.error('Ошибка обновления списка фото:', e);
+        }
+        // Кнопки действий перерисовывать не нужно: они зависят от статуса, а он
+        // при правке фото не меняется.
+        renderDetailsPhotos(writeoff);
+        restoreScroll();
     }
 
     function renderDetailsActions(writeoff) {
