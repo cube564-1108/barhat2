@@ -743,6 +743,10 @@
 .iv2 .iv2-tbl .iv2-tbl-empty { text-align: center; padding: 28px 12px; color: var(--bx-muted); }
 .iv2 .iv2-due-badge { margin-top: 3px; }
 
+/* Галочка «Салон другого города» под строками распределения: отбиваем от
+   кнопки «Добавить строку», чтобы её не нажимали вместо неё. */
+.iv2 .iv2-alloc-cross { margin-top: 10px; }
+
 .iv2 .iv2-alloc-row td { background: var(--bx-bg); }
 
 .iv2 .iv2-alloc-table {

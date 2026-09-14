@@ -4180,6 +4180,9 @@
             // обязательно освобождать (см. releaseFormFiles).
             files: [],
             openSections: { main: true, documents: true, requisites: false, allocation: true },
+            // Открыт ли в распределении траты салон за пределами города карты.
+            // Осознанное расширение, а не умолчание — см. allocationStores.
+            crossCity: false,
             suggestions: [],
             source: '',
             // Расхождение реквизитов шаблона со справочником (см. applyTemplate)
@@ -4278,6 +4281,17 @@
                 }));
             }
             if (!form.items.length) form.items = [{ store_id: '', expense_category_id: '', amount: '' }];
+
+            // Трата уже разведена на салон другого города — открываем список
+            // сразу расширенным. Иначе select не нашёл бы выбранное значение,
+            // показал пустое место, и сохранение стёрло бы салон в строке.
+            if (form.kind === 'card_expense' && form.values.card_id) {
+                const card = (state.refs.workCards || []).find(
+                    item => String(item.id) === String(form.values.card_id));
+                const own = new Set(((card && card.store_ids) || []).map(String));
+                form.crossCity = form.items.some(
+                    item => item.store_id && !own.has(String(item.store_id)));
+            }
         }
 
         state.form = form;
@@ -4345,27 +4359,122 @@
         ).join('');
     }
 
-    /**
-     * Салоны, доступные в распределении. У траты с карты — только салоны этой
-     * карты: карта привязана к городу, и без сужения управляющий из Барнаула
-     * отправил бы расход в проект Челябинска. Сервер это тоже проверяет, но
-     * ошибку лучше не показывать вовсе, чем показывать после нажатия кнопки.
-     */
-    function allocationStores() {
-        if (formKind() !== 'card_expense') return state.refs.stores;
+    /** Кому открыт салон за пределами города карты (то же, что на сервере). */
+    function canUseCrossCityStore() {
+        return Boolean(state.user && (state.user.role === 'admin' || state.user.role === 'manager'));
+    }
+
+    /** Салоны выбранной карты. Пусто, если карта не выбрана. */
+    function cardOwnStores() {
         const card = selectedFormCard();
         if (!card) return [];
         const allowed = new Set((card.store_ids || []).map(String));
         return (state.refs.stores || []).filter(store => allowed.has(String(store.id)));
     }
 
-    function allocationRowsHtml() {
+    /**
+     * Салоны, доступные в распределении.
+     *
+     * У траты с карты по умолчанию — только салоны этой карты: карта привязана
+     * к городу, и без сужения управляющий из Барнаула отправил бы расход в
+     * проект Челябинска случайно. Но покупка для соседнего города бывает, и
+     * раньше она упиралась в стену, поэтому сужение — умолчание, а не запрет:
+     * галочка `crossCity` открывает остальные салоны (см. crossCityToggleHtml).
+     *
+     * Правку уже заведённой траты это тоже держит: openForm поднимает флаг,
+     * если в распределении уже есть чужой салон, иначе select показал бы
+     * пустое место и строка молча потеряла бы салон при сохранении.
+     */
+    function allocationStores() {
+        if (formKind() !== 'card_expense') return state.refs.stores;
+        if (!selectedFormCard()) return [];
+        if (state.form.crossCity) return state.refs.stores || [];
+        return cardOwnStores();
+    }
+
+    /**
+     * Салоны в распределении, которые карта не обслуживает.
+     * Считаем по данным (work_card_stores из справочника карт), а не по
+     * названию салона: разбирать город из названия запрещено — см. CLAUDE.md.
+     */
+    function crossCityItems() {
+        if (formKind() !== 'card_expense' || !selectedFormCard()) return [];
+        const own = new Set(cardOwnStores().map(store => String(store.id)));
+        return state.form.items.filter(item => item.store_id && !own.has(String(item.store_id)));
+    }
+
+    /**
+     * Опции салона с разбивкой по картам: «Салоны этой карты» первой группой,
+     * остальные — под названием своей карты. Группируем по картам, а не по
+     * городам, потому что города у салона в данных нет (city_id — поле счёта),
+     * а карта и есть город.
+     */
+    function allocationStoreOptions(current) {
         const stores = allocationStores();
+        if (formKind() !== 'card_expense' || !state.form.crossCity) {
+            return selectOptions(stores, current,
+                stores.length ? 'Салон / проект' : 'Сначала выберите карту');
+        }
+
+        const own = cardOwnStores();
+        const ownIds = new Set(own.map(store => String(store.id)));
+        const groups = [{ label: 'Салоны этой карты', items: own }];
+
+        (state.refs.workCards || []).forEach(card => {
+            if (String(card.id) === String(state.form.values.card_id)) return;
+            const items = (state.refs.stores || []).filter(store =>
+                !ownIds.has(String(store.id))
+                && (card.store_ids || []).map(String).indexOf(String(store.id)) !== -1);
+            if (items.length) groups.push({ label: card.title, items });
+        });
+
+        // Салон, не привязанный ни к одной карте, иначе исчез бы из списка
+        // совсем — а это как раз новая точка, которую ещё не завели в карту.
+        const grouped = new Set(groups.reduce((all, g) => all.concat(g.items.map(s => String(s.id))), []));
+        const orphans = (state.refs.stores || []).filter(store => !grouped.has(String(store.id)));
+        if (orphans.length) groups.push({ label: 'Без рабочей карты', items: orphans });
+
+        return `<option value="">Салон / проект</option>` + groups.map(group => `
+            <optgroup label="${escapeHtml(group.label)}">
+                ${group.items.map(store =>
+                    `<option value="${escapeHtml(store.id)}"${
+                        String(store.id) === String(current) ? ' selected' : ''
+                    }>${escapeHtml(store.name)}</option>`).join('')}
+            </optgroup>`).join('');
+    }
+
+    /**
+     * Галочка «Салон другого города» и предупреждение о её последствиях.
+     *
+     * Показываем только когда карта уже выбрана: до этого списка салонов нет
+     * вовсе и расширять нечего. Роль сверяем и здесь, и на сервере — сервер
+     * защищает от подмены запроса, интерфейс избавляет от ошибки, которую
+     * иначе увидишь только после нажатия «Сохранить».
+     */
+    function crossCityToggleHtml() {
+        if (formKind() !== 'card_expense' || !canUseCrossCityStore()) return '';
+        const card = selectedFormCard();
+        if (!card) return '';
+        const foreign = crossCityItems();
+        const warn = foreign.length
+            ? `<div class="iv2-hint iv2-hint--warn">Трата останется на карте «${escapeHtml(card.title)}»,
+                   а расход уйдёт в проект салона другого города —
+                   ${withCount(foreign.length, 'строка', 'строки', 'строк')} в распределении.</div>`
+            : '';
+        return `
+            <label class="iv2-switch iv2-alloc-cross">
+                <input type="checkbox" class="iv2-cbx" data-form-act="cross-city"${
+                    state.form.crossCity ? ' checked' : ''}>
+                Салон другого города
+            </label>
+            ${warn}`;
+    }
+
+    function allocationRowsHtml() {
         return state.form.items.map((item, index) => `
             <div class="iv2-arow">
                 <select class="iv2-select" data-item="${index}" data-item-field="store_id">
-                    ${selectOptions(stores, item.store_id,
-                        stores.length ? 'Салон / проект' : 'Сначала выберите карту')}
+                    ${allocationStoreOptions(item.store_id)}
                 </select>
                 <select class="iv2-select" data-item="${index}" data-item-field="expense_category_id">
                     ${selectOptions(state.refs.categories, item.expense_category_id, 'Статья расхода')}
@@ -4682,6 +4791,7 @@
         const allocationBody = `
             ${allocationRowsHtml()}
             <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" data-form-act="alloc-add">Добавить строку</button>
+            ${crossCityToggleHtml()}
             ${allocationSummaryHtml()}`;
 
         const allocationBadge = Math.abs(formAmount() - formAllocated()) < 0.01 && formAmount() > 0
@@ -4758,6 +4868,9 @@
                     // Смена карты меняет и остаток над суммой, и набор салонов
                     // в распределении — тут перерисовка нужна целиком
                     if (field === 'card_id') {
+                        // Карту сняли — расширение списка теряет смысл и не
+                        // должно всплыть само на следующей выбранной карте.
+                        if (!input.value) state.form.crossCity = false;
                         const allowed = new Set(allocationStores().map(store => String(store.id)));
                         state.form.items.forEach(item => {
                             if (item.store_id && !allowed.has(String(item.store_id))) item.store_id = '';
@@ -4782,8 +4895,14 @@
             const index = Number(input.getAttribute('data-item'));
             const field = input.getAttribute('data-item-field');
             const handler = () => {
+                // Предупреждение о чужом городе живёт вне блока итогов, и
+                // updateAllocationSummary до него не достаёт. Перерисовываем
+                // форму только когда оно реально появляется или пропадает —
+                // на каждую смену салона это было бы лишним морганием.
+                const hadForeign = crossCityItems().length > 0;
                 state.form.items[index][field] = input.value;
                 if (field === 'amount') updateAllocationSummary(host);
+                if (field === 'store_id' && hadForeign !== (crossCityItems().length > 0)) renderForm();
             };
             input.addEventListener('input', handler);
             input.addEventListener('change', handler);
@@ -5032,6 +5151,20 @@
             state.form.openSections[key] = !state.form.openSections[key];
             const section = sourceElement.closest('[data-section]');
             if (section) section.classList.toggle('iv2-sect--open', state.form.openSections[key]);
+            return;
+        }
+        if (action === 'cross-city') {
+            state.form.crossCity = Boolean(sourceElement.checked);
+            // Сузили обратно — салоны чужого города из строк убираем сразу, а
+            // не оставляем висеть выбранными в списке, где их больше нет:
+            // сохранение иначе упало бы ошибкой сервера на скрытом значении.
+            if (!state.form.crossCity) {
+                const own = new Set(cardOwnStores().map(store => String(store.id)));
+                state.form.items.forEach(item => {
+                    if (item.store_id && !own.has(String(item.store_id))) item.store_id = '';
+                });
+            }
+            renderForm();
             return;
         }
         if (action === 'alloc-add') {

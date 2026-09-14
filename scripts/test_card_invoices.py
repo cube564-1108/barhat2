@@ -53,7 +53,7 @@ from cashshifts.storage import init_cashshifts_tables, get_all_stores  # noqa: E
 from invoices.storage import (  # noqa: E402
     init_invoices_tables, get_all_expense_categories, create_city, create_payer,
     get_invoice_by_id, get_invoices_summary, approve_invoice, user_can_access_invoice,
-    mark_invoice_paid,
+    mark_invoice_paid, get_invoice_line_items,
 )
 from invoices.server import invoices_bp, _send_invoice_to_bank, _match_planfact_operation  # noqa: E402
 from invoices.cards import list_cards, get_cards_balances  # noqa: E402
@@ -124,6 +124,10 @@ def main():
     make_user('admin_test', 'admin', ['invoices_v2'])
     make_user('nsk_manager', 'manager', ['invoices_v2'], store_ids=[nsk_store])
     make_user('chlb_manager', 'manager', ['invoices_v2'], store_ids=[chlb_store])
+    # Роль вне _CROSS_CARD_STORE_ROLES: салон чужого города ей по-прежнему
+    # закрыт, и это надо проверять отдельной учёткой — у менеджера с
+    # 14.09.2026 ветка отказа больше не исполняется вовсе.
+    make_user('nsk_florist', 'florist', ['invoices_v2'], store_ids=[nsk_store])
 
     app = make_app()
 
@@ -175,13 +179,18 @@ def main():
         })
         check(response.status_code == 403, "с чужой карты списать нельзя даже подменив card_id")
 
+    # Проверка, что роли вне _CROSS_CARD_STORE_ROLES салон другого города
+    # по-прежнему закрыт. Стоит здесь, а не в конце: отказ ничего не создаёт и
+    # счётчики следующих разделов не сдвигает (сам разрешённый случай — в §13).
+    with app.test_client() as client:
+        login(client, 'nsk_florist')
         response = client.post('/api/invoices', json={
             'kind': 'card_expense', 'card_id': nsk_card['id'], 'spent_at': '2026-08-25',
             'amount': 100, 'payment_purpose': 'чужой салон',
             'line_items': [{'store_id': chlb_store, 'expense_category_id': category_id, 'amount': 100}],
         })
         check(response.status_code == 400 and 'не обслуживается' in response.get_json()['error'],
-              "расход нельзя отправить в салон, который карта не обслуживает")
+              "роли вне списка салон другого города по-прежнему закрыт")
 
     print("\n3. Пополнение карты")
     with app.test_client() as client:
@@ -308,6 +317,34 @@ def main():
         rows = client.get('/api/invoices').get_json()['invoices']
         check(not any(row['id'] == topup['id'] for row in rows),
               "управляющему другого города чужое пополнение в списке не показывается")
+
+    print("\n13. Салон другого города в трате с карты")
+    # Последним разделом сознательно: создаёт ещё одну заявку, а разделы 7,
+    # 10 и 11 считают счета и остаток по карте — вставленный выше, он сдвигал
+    # их все сразу и выглядел бы шестью разными поломками.
+    with app.test_client() as client:
+        login(client, 'nsk_manager')
+        response = client.post('/api/invoices', json={
+            'kind': 'card_expense', 'card_id': nsk_card['id'], 'spent_at': '2026-08-25',
+            'amount': 100, 'payment_purpose': 'салон другого города',
+            'line_items': [{'store_id': chlb_store, 'expense_category_id': category_id, 'amount': 100}],
+        })
+        check(response.status_code == 201,
+              "менеджер может развести трату с карты НСК на салон Челябинска")
+        cross = response.get_json().get('invoice', {})
+        cross_items = get_invoice_line_items(cross['id']) if cross.get('id') else []
+        check(any(item['store_id'] == chlb_store for item in cross_items),
+              "салон другого города сохраняется в распределении, а не теряется по пути")
+
+        # Правка такой заявки не должна упираться в ту же проверку: иначе
+        # трату можно завести, но нельзя поправить в ней сумму.
+        response = client.put('/api/invoices/' + str(cross['id']), json={
+            'line_items': [{'store_id': chlb_store,
+                            'expense_category_id': category_id, 'amount': 120}],
+            'amount': 120,
+        })
+        check(response.status_code == 200,
+              "заведённую трату на чужой город можно поправить")
 
     print("\n" + "=" * 60)
     if failures:
