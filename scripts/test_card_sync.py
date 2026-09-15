@@ -264,6 +264,50 @@ def main():
     check(fixed['planfact_synced_at'] is not None and not fixed['planfact_error'],
           "починили сопоставление — заявка уехала, ошибка снята")
 
+    print("\n9. Заявка с ненаступившей датой ждёт срока, а не числится сломанной")
+    # 15.09.2026: СЧ-000287 и СЧ-000323 завели с датой оплаты 16 сентября.
+    # ПланФакт отверг их: «Нельзя создать часть операции с подтвержденной в
+    # будущем датой начисления (40)» — мы шлём isCalculationCommitted: true
+    # всегда. Заявки висели красными «Ошибка разноски», хотя чинить было
+    # нечего, и каждый прогон бился в тот же отказ.
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    tomorrow = (_dt.now(_tz.utc) + _td(days=1)).strftime('%Y-%m-%d')
+    future = make_expense(1500, tomorrow)
+
+    # Ошибка, записанная прошлым прогоном (до того, как мы научились ждать
+    # даты), обязана сняться сразу, а не через шесть часов отсрочки: заявка с
+    # ошибкой в обычную выборку кандидатов не попадает вовсе.
+    sync.set_invoice_planfact_error(
+        future['id'], 'ПланФакт не принял операцию: Нельзя создать часть операции '
+                      'с подтвержденной в будущем датой начисления (40)')
+    check(get_invoice_by_id(future['id'])['planfact_error'], "ошибка на заявке есть — как было на проде")
+
+    calls_before = len(fake.calls)
+    result = sync.run_card_sync(force=True)
+    ids_touched = {item['invoice_id'] for group in ('created', 'exists', 'failed')
+                   for item in result.get(group, [])}
+    check(future['id'] not in ids_touched, "заявка завтрашним днём в прогон не берётся")
+    check(len(fake.calls) == calls_before, "и наружу из-за неё не ходим — отказ гарантирован")
+
+    stored = get_invoice_by_id(future['id'])
+    check(not stored['planfact_error'],
+          f"красной ошибки на ней нет: {stored['planfact_error']}")
+    check(stored['planfact_synced_at'] is None, "и разнесённой она не считается")
+
+    # Наступил день — заявка уходит обычным порядком, без вмешательства
+    conn = __import__('invoices.storage', fromlist=['get_db']).get_db()
+    try:
+        conn.execute("UPDATE invoices SET spent_at = ? WHERE id = ?",
+                     (_dt.now(_tz.utc).strftime('%Y-%m-%d'), future['id']))
+        conn.commit()
+    finally:
+        conn.close()
+
+    sync.run_card_sync(force=True)
+    arrived = get_invoice_by_id(future['id'])
+    check(arrived['planfact_synced_at'] is not None,
+          "когда день наступил — уехала сама, без человека")
+
     print("\n" + "=" * 60)
     if failures:
         print(f"ПРОВАЛОВ: {len(failures)}")

@@ -1430,6 +1430,17 @@
     margin-bottom: 14px;
 }
 
+/* «Ещё рано» — не ошибка: дата операции не наступила, чинить нечего. */
+.iv2 .iv2-syncwait {
+    padding: 10px 12px;
+    border-radius: var(--bx-r-xl);
+    background: var(--bx-bg-soft, #f8f7f5);
+    border: 1px solid var(--bx-border);
+    color: var(--bx-text-2);
+    font-size: 12.5px;
+    margin-bottom: 14px;
+}
+
 .iv2 .iv2-syncerr__head { font-weight: 600; margin-bottom: 4px; }
 .iv2 .iv2-syncerr__hint { margin-top: 6px; color: var(--bx-text-2); font-size: 11.5px; }
 

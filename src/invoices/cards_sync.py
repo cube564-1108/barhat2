@@ -26,6 +26,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from planfact import quota as planfact_quota
@@ -99,6 +100,41 @@ def _operation_date(value: Optional[str]) -> str:
     return f"{date}T00:00:00" if date else ""
 
 
+def invoice_operation_day(invoice: Dict[str, Any]) -> str:
+    """
+    День, которым операция ляжет в ПланФакт: у траты — день траты, у пополнения
+    — день перевода. Пустая строка, если дата не заполнена.
+    """
+    source = (invoice.get("spent_at") if invoice.get("kind") == "card_expense"
+              else (invoice.get("paid_at") or invoice.get("due_date")))
+    return (source or "")[:10]
+
+
+def is_future_operation(invoice: Dict[str, Any], today: Optional[str] = None) -> bool:
+    """
+    Дата операции ещё не наступила — отправлять рано.
+
+    ПланФакт отказывается принимать подтверждённое начисление будущим днём:
+    «Нельзя создать часть операции с подтвержденной в будущем датой начисления
+    (40)». Мы шлём `isCalculationCommitted: true` всегда, поэтому заявка с
+    завтрашней датой отвергается гарантированно — и не один раз, а каждый
+    прогон, пока день не наступит.
+
+    Это не ошибка настройки, а «ещё рано»: 15.09.2026 так упали СЧ-000287 и
+    СЧ-000323, созданные с датой оплаты 16 сентября. Красная плашка «Ошибка
+    разноски» в такой ситуации врёт — чинить нечего, надо подождать.
+
+    Сравниваем по UTC, как живёт прод. Салоны в UTC+5 и UTC+7, то есть день у
+    них наступает раньше — заявка уедет на несколько часов позже, чем могла бы.
+    Для разноски это несущественно, а обратная ошибка (отправить раньше срока)
+    снова упёрлась бы в отказ ПланФакта.
+    """
+    day = invoice_operation_day(invoice)
+    if not day:
+        return False
+    return day > (today or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+
+
 def set_invoice_planfact_error(invoice_id: int, error: Optional[str]) -> None:
     """
     Записать (или снять) причину, по которой заявка не уехала в ПланФакт, и
@@ -133,6 +169,25 @@ def collect_candidates(force: bool = False) -> List[Dict[str, Any]]:
     """
     conn = get_db()
     try:
+        # Ложную ошибку снимаем отдельной командой, а не внутри цикла по
+        # кандидатам: заявка с ошибкой в выборку не попадает целых
+        # FAILED_RETRY_SECONDS, и красная плашка висела бы ещё шесть часов
+        # после того, как причина признана несуществующей.
+        conn.execute(
+            """
+            UPDATE invoices SET planfact_error = NULL
+            WHERE planfact_synced_at IS NULL
+              AND is_archived = 0
+              AND planfact_error IS NOT NULL
+              AND (
+                    (kind = 'card_expense' AND substr(spent_at, 1, 10) > date('now'))
+                 OR (kind = 'card_topup'
+                     AND substr(COALESCE(paid_at, due_date), 1, 10) > date('now'))
+              )
+            """
+        )
+        conn.commit()
+
         rows = conn.execute(
             f"""
             SELECT * FROM invoices
@@ -152,9 +207,14 @@ def collect_candidates(force: bool = False) -> List[Dict[str, Any]]:
             """,
             () if force else (f"-{FAILED_RETRY_SECONDS} seconds",),
         ).fetchall()
-        return [dict(row) for row in rows]
+        candidates = [dict(row) for row in rows]
     finally:
         conn.close()
+
+    # Заявку с ещё не наступившей датой ПланФакт отвергнет гарантированно, и
+    # так каждый прогон. Не отправляем вовсе: это экономит запросы и, главное,
+    # не выставляет «ошибкой» то, что ошибкой не является.
+    return [invoice for invoice in candidates if not is_future_operation(invoice)]
 
 
 def _known_markers(client, date_start: str) -> Dict[str, str]:

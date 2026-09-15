@@ -1934,10 +1934,16 @@
         const waitsSync = kind === 'card_expense'
             ? invoice.status === 'approved'
             : invoice.status === 'paid';
+        // Заявка с ненаступившей датой операции ждёт срока, а не сломана:
+        // называть это ошибкой — заставлять чинить то, что исправно.
+        const waitingDay = operationDay(invoice);
+        const tooEarly = waitingDay && waitingDay > new Date().toISOString().slice(0, 10);
         const unsynced = waitsSync && !invoice.planfact_synced_at
-            ? ` <span class="bx-badge b-warn" title="${escapeHtml(invoice.planfact_error
-                    || 'Операция в ПланФакт ещё не разнесена')}">${
-                invoice.planfact_error ? 'Ошибка разноски' : 'Не разнесён'}</span>`
+            ? (tooEarly
+                ? ` <span class="bx-badge b-warn" title="Дата операции ещё не наступила">Уедет ${escapeHtml(fmtDue(waitingDay))}</span>`
+                : ` <span class="bx-badge b-warn" title="${escapeHtml(invoice.planfact_error
+                        || 'Операция в ПланФакт ещё не разнесена')}">${
+                    invoice.planfact_error ? 'Ошибка разноски' : 'Не разнесён'}</span>`)
             : '';
         return `<span class="bx-badge ${meta.cls}">${escapeHtml(meta.label)}</span>${clarification}${unsynced}${archived}`;
     }
@@ -3034,8 +3040,33 @@
      * а в карточке счёта не было ни слова. Счёт висел «с ошибкой разноски», и
      * что чинить — сопоставление, счёт карты, дату — узнать было неоткуда.
      */
+    /**
+     * День, которым операция ляжет в ПланФакт. Тот же выбор поля, что и на
+     * сервере (cards_sync.invoice_operation_day) — расходятся они молча.
+     */
+    function operationDay(invoice) {
+        const source = invoice.kind === 'card_expense'
+            ? invoice.spent_at
+            : (invoice.paid_at || invoice.due_date);
+        return (source || '').slice(0, 10);
+    }
+
     function syncErrorHtml(invoice) {
-        if (!invoice.planfact_error || invoice.planfact_synced_at) return '';
+        if (invoice.planfact_synced_at) return '';
+
+        // Дата ещё не наступила — это не ошибка, а «рано»: подтверждённое
+        // начисление будущим днём ПланФакт не принимает, и сервер такую заявку
+        // намеренно не отправляет. Плашка нейтральная, чтобы её не чинили.
+        const day = operationDay(invoice);
+        if (day && day > new Date().toISOString().slice(0, 10)) {
+            return `
+                <div class="iv2-syncwait">
+                    Уедет в ПланФакт ${escapeHtml(fmtDue(day))} — дата операции ещё не наступила.
+                    Подтверждённое начисление будущим днём ПланФакт не принимает.
+                </div>`;
+        }
+
+        if (!invoice.planfact_error) return '';
         const attempted = invoice.planfact_attempted_at
             ? ` · последняя попытка ${escapeHtml(fmtCreated(invoice.planfact_attempted_at))}`
             : '';
