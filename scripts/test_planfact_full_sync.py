@@ -114,12 +114,27 @@ def install(client):
     return client
 
 
+def clear_quota():
+    """
+    Полный сброс квоты: и память процесса, и общее хранилище.
+
+    reset_for_tests() чистит только память, а состояние квоты переживает
+    перезапуск — оно лежит в invoice_sync_state, чтобы оба воркера знали об
+    исчерпании. Без очистки хранилища следующий же вызов подтянет «исчерпано»
+    обратно, и прогон тихо не сделает ничего.
+    """
+    import invoices.cards as cards_module
+    planfact_quota.reset_for_tests()
+    cards_module.write_sync_state('planfact_quota', '')
+    planfact_quota.reset_for_tests()
+
+
 def main():
     print("=== Объединённый прогон синхронизации с ПланФактом ===\n")
 
     init_cashshifts_tables()
     init_invoices_tables()
-    planfact_quota.reset_for_tests()
+    clear_quota()
 
     stores = {s['name']: s['id'] for s in get_all_stores()}
     store_id = stores['НСК Восход, 3']
@@ -225,7 +240,50 @@ def main():
           f"прогон объясняет, почему отложен: {result.get('skipped')}")
     check(not quiet.list_calls and not quiet.created,
           "наружу не ходили ни на одном этапе")
-    planfact_quota.reset_for_tests()
+    clear_quota()
+
+    # ------------------------------------------------------------------
+    print("\n6. Историю ведёт сам прогон, и в ней оба этапа")
+    # Раньше лог писала кнопка, поэтому запуски по расписанию нигде не
+    # отражались, а итогов этапа карт в логе не было вовсе.
+    from invoices.storage import get_latest_planfact_sync_log
+
+    install(FakeClient(pages=[[]]))
+    make_expense(1300)
+    logged_run = planfact_run.run_full_sync()
+
+    entry = get_latest_planfact_sync_log()
+    check(entry is not None and entry['status'] == 'completed',
+          f"запись закрыта: {entry and entry['status']}")
+    check(entry['finished_at'], "со временем окончания")
+    # Сверяем с фактическим итогом этого прогона, а не с числом из головы:
+    # в очереди могли остаться заявки от прошлых разделов.
+    created_now = len(logged_run['cards']['created'])
+    check(created_now >= 1 and entry['cards_created'] == created_now,
+          f"итог этапа карт записан: в логе {entry['cards_created']}, создано {created_now}")
+    check('matched_count' in entry.keys() and entry['matched_count'] == 0,
+          "итог этапа счетов записан отдельным числом")
+
+    # Прогон, который не начался, тоже обязан оставить след — иначе «почему
+    # ничего не произошло» выясняется только чтением логов сервера.
+    planfact_quota.record_response(
+        {'X-Quota-Limit': '2500', 'X-Quota-Used': '2500', 'X-Quota-Remaining': '0',
+         'X-Quota-Reset': str(int(datetime.now(timezone.utc).timestamp()) + 86400)},
+        status_code=403, body='лимит запросов',
+    )
+    planfact_run.run_full_sync()
+    skipped_entry = get_latest_planfact_sync_log()
+    check('лимит' in (skipped_entry['skipped_reason'] or '').lower(),
+          f"причина, по которой прогон не состоялся, в логе: {skipped_entry['skipped_reason']}")
+    clear_quota()
+
+    # ------------------------------------------------------------------
+    print("\n7. Превью не пишет в историю")
+    before = get_latest_planfact_sync_log()['id']
+    install(FakeClient(pages=[[]]))
+    planfact_run.run_full_sync(dry_run=True)
+    check(get_latest_planfact_sync_log()['id'] == before,
+          "dry_run ничего не меняет, в том числе в логе")
 
     print("\n" + "=" * 60)
     if failures:

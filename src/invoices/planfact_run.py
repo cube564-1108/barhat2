@@ -25,6 +25,7 @@ from planfact import quota as planfact_quota
 from .cards import try_acquire_sync_lock, renew_sync_lock, release_sync_lock
 from . import cards_sync
 from .planfact_sync import _run_planfact_sync
+from .storage import start_planfact_sync_log, finish_planfact_sync_log
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,57 @@ def run_full_sync(dry_run: bool = False, force: bool = True) -> Dict[str, Any]:
         return {"cards": _empty_cards_result(), "invoices": None,
                 "skipped": "Синхронизация уже идёт", "quota": planfact_quota.snapshot()}
 
+    # Историю ведёт сам прогон, а не кнопка: иначе запуски по расписанию нигде
+    # не отражаются, и на вопрос «а когда оно вообще последний раз работало»
+    # ответить нечем. Превью (dry_run) не пишем — оно ничего не меняет.
+    log_id = None
+    if not dry_run:
+        try:
+            log_id = start_planfact_sync_log(dry_run=False)
+        except Exception:
+            # Прогон важнее своей летописи: не смогли завести запись — работаем
+            # молча, но работаем.
+            logger.exception("Не удалось завести запись лога прогона ПланФакта")
+
     try:
-        return _run_both_stages(dry_run=dry_run, force=force)
+        result = _run_both_stages(dry_run=dry_run, force=force)
+    except Exception as error:
+        _close_log(log_id, None, status="failed", error=str(error))
+        raise
+    else:
+        _close_log(log_id, result)
+        return result
     finally:
         release_sync_lock(FULL_SYNC_LOCK)
+
+
+def _close_log(log_id: Optional[int], result: Optional[Dict[str, Any]],
+               status: str = "completed", error: Optional[str] = None) -> None:
+    """Закрыть запись прогона. Сбой самой записи не должен ронять прогон."""
+    if log_id is None:
+        return
+
+    counts = summarize(result or {})
+    stage_error = error
+    if stage_error is None and result:
+        # Этап мог упасть, не уронив прогон целиком — в логе это тоже ошибка,
+        # иначе «completed» скрывает, что половина работы не сделана.
+        stage_error = ((result.get("cards") or {}).get("error")
+                       or (result.get("invoices") or {}).get("error"))
+
+    try:
+        finish_planfact_sync_log(
+            log_id,
+            matched_count=counts["invoices_matched"],
+            unmatched_count=counts["invoices_unmatched"],
+            status="failed" if stage_error else status,
+            error_message=stage_error,
+            cards={"created": counts["cards_created"], "exists": counts["cards_exists"],
+                   "failed": counts["cards_failed"]},
+            skipped_reason=(result or {}).get("skipped"),
+        )
+    except Exception:
+        logger.exception("Не удалось закрыть запись лога прогона ПланФакта")
 
 
 def _run_both_stages(dry_run: bool, force: bool) -> Dict[str, Any]:

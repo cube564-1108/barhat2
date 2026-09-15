@@ -511,6 +511,7 @@ def init_invoices_tables():
     conn = get_db()
     try:
         _ensure_card_invoice_columns(conn)
+        _ensure_sync_log_card_columns(conn)
     finally:
         conn.close()
 
@@ -869,6 +870,48 @@ def _ensure_planfact_sync_columns(conn: sqlite3.Connection):
 
     global _HAS_PLANFACT_SYNC_COLUMNS
     _HAS_PLANFACT_SYNC_COLUMNS = True
+
+
+def _ensure_sync_log_card_columns(conn: sqlite3.Connection):
+    """
+    Итоги этапа карт в логе прогона (фаза 2 плана 2026-09-15).
+
+    Раньше лог знал только про разноску счетов (matched/unmatched), а у
+    разноски карт состояния в базе не было вовсе: кнопка запускала поток и
+    сразу отвечала, результат можно было увидеть только по бейджам в списке.
+    После объединения прогон один, и отчёт обязан показывать оба этапа.
+
+    Добавляем, не ломая: старые записи остаются с нулями, и это честно — тогда
+    этап карт в прогон не входил.
+
+    Блокировка как в остальных миграциях модуля: два gunicorn-воркера стартуют
+    параллельно и без BEGIN IMMEDIATE падают на "duplicate column".
+    """
+    if not _table_exists(conn, "invoice_planfact_sync_log"):
+        return
+
+    columns = {
+        "cards_created": "INTEGER NOT NULL DEFAULT 0",
+        "cards_exists": "INTEGER NOT NULL DEFAULT 0",
+        "cards_failed": "INTEGER NOT NULL DEFAULT 0",
+        # Чем прогон был отложен целиком: исчерпанная квота, занятый лок.
+        # Отдельно от error_message — это не поломка, а причина не начинать.
+        "skipped_reason": "TEXT",
+    }
+    if all(_column_exists(conn, "invoice_planfact_sync_log", column) for column in columns):
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for column, definition in columns.items():
+            if not _column_exists(conn, "invoice_planfact_sync_log", column):
+                conn.execute(
+                    f"ALTER TABLE invoice_planfact_sync_log ADD COLUMN {column} {definition}"
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # Виды заявок, которые живут на рабочих картах. Константа лежит здесь, рядом с
@@ -1424,19 +1467,36 @@ def start_planfact_sync_log(dry_run: bool = False) -> int:
 
 
 def finish_planfact_sync_log(log_id: int, matched_count: int, unmatched_count: int,
-                              status: str = "completed", error_message: Optional[str] = None) -> None:
+                              status: str = "completed", error_message: Optional[str] = None,
+                              cards: Optional[Dict[str, int]] = None,
+                              skipped_reason: Optional[str] = None) -> None:
+    """
+    Закрыть запись прогона.
+
+    cards — итоги этапа карт {"created", "exists", "failed"}. Необязательны:
+    старые вызовы (только счета) остаются рабочими и пишут нули.
+    skipped_reason — почему прогон не состоялся вовсе (квота, занятый лок).
+    Это не ошибка, поэтому поле отдельное от error_message.
+    """
+    cards = cards or {}
     conn = get_db()
-    conn.execute(
-        """
-        UPDATE invoice_planfact_sync_log
-        SET finished_at = datetime('now'), status = ?, matched_count = ?,
-            unmatched_count = ?, error_message = ?
-        WHERE id = ?
-        """,
-        (status, matched_count, unmatched_count, error_message, log_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            """
+            UPDATE invoice_planfact_sync_log
+            SET finished_at = datetime('now'), status = ?, matched_count = ?,
+                unmatched_count = ?, error_message = ?,
+                cards_created = ?, cards_exists = ?, cards_failed = ?,
+                skipped_reason = ?
+            WHERE id = ?
+            """,
+            (status, matched_count, unmatched_count, error_message,
+             int(cards.get("created") or 0), int(cards.get("exists") or 0),
+             int(cards.get("failed") or 0), skipped_reason, log_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # Через сколько считать прогон, числящийся идущим, оборванным.

@@ -143,6 +143,7 @@ from .cards import (
     get_cards_balances,
     get_planfact_balances,
     empty_accountable,
+    is_sync_lock_held,
 )
 from .banks import (
     is_valid_bic,
@@ -2643,6 +2644,7 @@ from .planfact_sync import (  # noqa: E402
     _match_planfact_operation,
     _run_planfact_sync,
 )
+from .planfact_run import FULL_SYNC_LOCK, run_full_sync  # noqa: E402
 
 
 @invoices_bp.route("/planfact/sync", methods=["POST"])
@@ -2659,42 +2661,39 @@ def trigger_planfact_sync():
 
     if dry_run:
         try:
-            result = _run_planfact_sync(dry_run=True)
+            result = run_full_sync(dry_run=True)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         except Exception as e:
             logger.exception("Ошибка dry-run синхронизации с ПланФакт")
             return jsonify({"error": str(e)}), 502
-        return jsonify({"ok": True, "dry_run": True, **result})
+        # Ключи matched/unmatched оставляем на верхнем уровне: на них смотрит
+        # уже написанный разбор ответа в интерфейсе.
+        invoices = result.get("invoices") or {"matched": [], "unmatched": []}
+        return jsonify({"ok": True, "dry_run": True, "cards": result.get("cards"),
+                        "skipped": result.get("skipped"), **invoices})
 
-    # Сначала снимаем зависшие прогоны: фоновый поток умирает вместе с
-    # воркером, и без этого запись 'started' блокирует кнопку навсегда.
+    # «Идёт ли прогон» спрашиваем у лока, а не у флага в логе. Флаг залипал
+    # намертво: поток умирает вместе с воркером при деплое, и снять его было
+    # нечем. У лока есть TTL — мёртвый держатель отпускает его сам.
     expired = expire_stale_planfact_sync_logs()
     if expired:
         logger.warning("Закрыто оборванных прогонов синхронизации ПланФакт: %d", expired)
 
-    last_log = get_latest_planfact_sync_log()
-    if last_log and last_log["status"] == "started":
-        # Время запуска — в тексте: иначе непонятно, ждать секунды или что-то
-        # зависло. Запись старше PLANFACT_SYNC_STALE_SECONDS сюда уже не дойдёт.
+    if is_sync_lock_held(FULL_SYNC_LOCK):
+        last_log = get_latest_planfact_sync_log()
         return jsonify({
-            "error": f"Синхронизация уже идёт, запущена {last_log.get('started_at') or '—'} (UTC). "
-                     f"Дождитесь её окончания."
+            "error": f"Синхронизация уже идёт, запущена {(last_log or {}).get('started_at') or '—'} "
+                     f"(UTC). Дождитесь её окончания."
         }), 409
-
-    try:
-        log_id = start_planfact_sync_log(dry_run=False)
-    except Exception:
-        logger.exception("Не удалось создать запись лога синхронизации ПланФакт")
-        return jsonify({"error": "Не удалось запустить синхронизацию"}), 500
 
     def run_in_background():
         try:
-            result = _run_planfact_sync(dry_run=False)
-            finish_planfact_sync_log(log_id, len(result["matched"]), len(result["unmatched"]), status="completed")
-        except Exception as e:
+            # Лог прогон ведёт сам — и когда его запустила кнопка, и когда
+            # расписание. Здесь остаётся только запустить.
+            run_full_sync(dry_run=False, force=True)
+        except Exception:
             logger.exception("Ошибка синхронизации с ПланФакт")
-            finish_planfact_sync_log(log_id, 0, 0, status="failed", error_message=str(e))
 
     thread = threading.Thread(target=run_in_background, daemon=True)
     thread.start()
@@ -2706,7 +2705,18 @@ def trigger_planfact_sync():
 @invoices_bp.route("/planfact/sync-status", methods=["GET"])
 @role_required("admin")
 def planfact_sync_status():
-    return jsonify({"status": get_latest_planfact_sync_log()})
+    """
+    Последний прогон и признак «идёт прямо сейчас».
+
+    running считается по локу, а не по статусу записи: запись со статусом
+    'started' может остаться от прогона, умершего вместе с воркером, — у лока
+    для этого есть TTL. В самой записи теперь итоги ОБОИХ этапов: cards_* по
+    заявкам с карт, matched/unmatched по счетам.
+    """
+    return jsonify({
+        "status": get_latest_planfact_sync_log(),
+        "running": is_sync_lock_held(FULL_SYNC_LOCK),
+    })
 
 
 @invoices_bp.route("/planfact/unmatched", methods=["GET"])

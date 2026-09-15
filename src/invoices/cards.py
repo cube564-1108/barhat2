@@ -376,6 +376,32 @@ def try_acquire_sync_lock(name: str, ttl_seconds: int) -> bool:
         conn.close()
 
 
+def is_sync_lock_held(name: str) -> bool:
+    """
+    Держит ли кто-то лок прямо сейчас — БЕЗ попытки его захватить.
+
+    Нужно ручке, которая запускает прогон фоновым потоком: ответить человеку
+    «уже идёт» она обязана сразу, а взять лок не может — держать его будет
+    поток. Гонка здесь безобидна: если лок успели взять между проверкой и
+    стартом потока, поток просто не захватит его и тихо завершится.
+
+    Раньше эту роль играл флаг `started` в логе прогона, и он залипал намертво:
+    поток умирал вместе с воркером при деплое, флаг снять было нечем. У лока
+    есть TTL, поэтому мёртвый держатель отпускает его сам.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT value FROM invoice_sync_state WHERE key = ?", (f"lock:{name}",)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return False
+    until = (row["value"] or "").strip()
+    return bool(until) and until > _now_text()
+
+
 def renew_sync_lock(name: str, ttl_seconds: int) -> None:
     """Продлить свой лок. Долгий прогон обязан это делать — иначе TTL отдаст лок соседу."""
     conn = get_db()
