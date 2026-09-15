@@ -871,6 +871,13 @@ def _ensure_planfact_sync_columns(conn: sqlite3.Connection):
     _HAS_PLANFACT_SYNC_COLUMNS = True
 
 
+# Виды заявок, которые живут на рабочих картах. Константа лежит здесь, рядом с
+# описанием поля `kind`, а не в server.py: её спрашивают и разноска счетов
+# (planfact_sync), и обработчики. Из server.py её импортировать нельзя — он сам
+# импортирует оба этих модуля, получился бы круг.
+CARD_KINDS = ("card_expense", "card_topup")
+
+
 def _ensure_card_invoice_columns(conn: sqlite3.Connection):
     """
     Три типа заявки в одной таблице (план 2026-08-29, Фаза 1):
