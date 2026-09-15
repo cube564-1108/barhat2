@@ -3076,10 +3076,9 @@
                 <div>${escapeHtml(invoice.planfact_error)}</div>
                 <div class="iv2-syncerr__hint">Заявка уже падала, поэтому сама она
                     повторится нескоро — фоновый прогон откладывает такие на несколько
-                    часов, чтобы не жечь лимит запросов впустую. Чтобы попробовать
-                    сейчас: вкладка «Рабочие карты» — «Разнести сейчас» (она отсрочку
-                    не соблюдает). Кнопка «Синхронизировать» на вкладке «Синхронизация»
-                    здесь не поможет — она разносит оплаченные счета, а не карты.</div>
+                    часов, чтобы не жечь лимит запросов впустую. Починили причину и
+                    хотите сейчас: вкладка «Синхронизация» — «Синхронизировать с
+                    ПланФактом» (она отсрочку не соблюдает).</div>
             </div>`;
     }
 
@@ -3276,7 +3275,16 @@
         const response = await fetch(path, {
             method: 'POST',
             credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
+            // X-Requested-With — парная половина require_ajax_header на сервере.
+            // CSRF-токенов в проекте нет, а сессиям из Пульса кука выдаётся с
+            // SameSite=None (иначе Chrome режет её в чужом iframe), то есть у
+            // большинства сотрудников SameSite не защищает. Заголовок шлём на
+            // все POST модуля разом: ручкам без декоратора он не мешает, а
+            // забыть его на новой — уже нельзя.
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'barhat-dashboard',
+            },
             body: JSON.stringify(body || {}),
         });
         const data = await response.json().catch(() => ({}));
@@ -6565,37 +6573,31 @@
         return `<p class="iv2-tools-note">Карта — подотчётный счёт в ПланФакте. Пополнение
                     приходит на неё перемещением с указанного счёта, траты списываются с неё.
                     Одна карта обслуживает все салоны своего города.</p>
+                <p class="iv2-tools-note">Разноска запускается на вкладке «Синхронизация» —
+                    одной кнопкой вместе со счетами. Здесь можно посмотреть, что уедет,
+                    ничего не записывая.</p>
                 <div class="iv2-tools-add">
                     <button class="bx-btn bx-btn--sm" type="button" id="iv2CardAdd">Добавить карту</button>
                     <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2CardSyncPreview">Что уедет в ПланФакт</button>
-                    <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2CardSync">Разнести сейчас</button>
                 </div>
                 <div id="iv2CardSyncResult"></div>
                 <div id="iv2CardList">${cardsListHtml()}</div>`;
     }
 
     /**
-     * Разноска идёт фоновым потоком раз в час — кнопка только просит не ждать
-     * очередного тика (и, в отличие от него, берёт даже заявки, падавшие
-     * только что: человек жмёт её сразу после правки сопоставления). Живой
-     * вызов ПланФакта прямо из обработчика уже дважды забирал оба воркера и
-     * клал сайт, поэтому сервер отвечает сразу, а результат виден по бейджам
-     * в списке.
+     * Только превью: запуск разноски живёт в одном месте — на вкладке
+     * «Синхронизация», и делает сразу оба этапа. Две кнопки в разных разделах,
+     * делавшие разное под похожими названиями, стоили владельцу половины
+     * рабочего дня 15.09.2026.
+     *
+     * Превью здесь осталось намеренно: оно синхронное, ничего не пишет и
+     * показывает причины отказов за секунды — не дожидаясь фонового прогона.
      */
-    async function runCardSync(preview) {
+    async function runCardSync() {
         const host = $('iv2CardSyncResult');
         if (host) host.innerHTML = '<p class="iv2-tools-note">Проверяем…</p>';
         try {
-            const data = await apiPost('/api/invoices/work-cards/sync' + (preview ? '?dry_run=true' : ''), {});
-            if (!preview) {
-                if (host) {
-                    host.innerHTML = `<p class="iv2-tools-note">Разноска запущена. Заявки,
-                        которые не уехали, останутся с бейджем «Ошибка разноски» — причина в подсказке
-                        к бейджу.</p>`;
-                }
-                toast('Разноска запущена', 'success');
-                return;
-            }
+            const data = await apiPost('/api/invoices/work-cards/sync?dry_run=true', {});
             const result = data.result || {};
             const failed = (result.failed || []).map(item =>
                 `<li>#${escapeHtml(item.invoice_id)} — ${escapeHtml(item.error || '')}</li>`).join('');
@@ -6758,9 +6760,7 @@
             });
         }
         const previewButton = $('iv2CardSyncPreview');
-        if (previewButton) previewButton.addEventListener('click', () => runCardSync(true));
-        const syncButton = $('iv2CardSync');
-        if (syncButton) syncButton.addEventListener('click', () => runCardSync(false));
+        if (previewButton) previewButton.addEventListener('click', () => runCardSync());
         bindCardListActions();
     }
 
@@ -7216,36 +7216,71 @@
         const pf = state.tools.pf;
         return `
             <p class="iv2-tools-note">
-                Ищет в ПланФакт операции с кодом счёта (REF-000123) в назначении платежа и разносит их
-                по проекту и статье из распределения счёта. «Проверить» ничего не меняет — только
-                показывает, что будет сделано.
+                Одна кнопка делает обе разноски. <b>Заявки по картам</b> — создаёт по ним операции
+                в ПланФакте. <b>Оплаченные счета</b> — ищет операции с кодом счёта (REF-000123)
+                в назначении платежа и проставляет им проект и статью из распределения.
+                Обе идут и сами: карты раз в час, счета раз в сутки ночью — кнопка нужна,
+                чтобы не ждать.
             </p>
             <div class="iv2-tools-bank__btns">
                 <button class="bx-btn bx-btn--ghost bx-btn--sm" type="button" id="iv2PfDryRun"
                         ${pf.busy ? 'disabled' : ''}>Проверить (без записи)</button>
                 <button class="bx-btn bx-btn--sm" type="button" id="iv2PfRun"
-                        ${pf.busy ? 'disabled' : ''}>Синхронизировать</button>
+                        ${pf.busy ? 'disabled' : ''}>Синхронизировать с ПланФактом</button>
             </div>
             ${pf.status ? `<p class="iv2-hint iv2-pf-status">${escapeHtml(pf.status)}</p>` : ''}
             ${pf.result ? planfactResultHtml(pf.result) : ''}`;
     }
 
+    /**
+     * Отчёт по обоим этапам. Итоги НЕ складываются в одну цифру: «создано
+     * операций по картам» и «разнесено счетов» — разные действия, и сумма
+     * сказала бы читателю ровно ничего.
+     */
     function planfactResultHtml(result) {
         const matched = result.matched || [];
         const unmatched = result.unmatched || [];
-        if (!matched.length && !unmatched.length) {
-            return '<p class="iv2-tools-empty">Подходящих операций не найдено</p>';
+        const cards = result.cards || null;
+
+        const cardsBlock = cards ? cardsStageHtml(cards) : '';
+        const invoicesBlock = (!matched.length && !unmatched.length)
+            ? '<p class="iv2-tools-empty">Счетов к разноске не найдено</p>'
+            : reportSection('Счета: будут разнесены', matched.map(item => ({
+                id: item.invoice_id,
+                label: (item.invoice_number || item.match_code || ''),
+                amount: item.operation_amount,
+            })), true)
+                + reportSection('Счета: требуют внимания', unmatched.map(item => ({
+                    id: item.operation_id,
+                    label: item.match_code || item.operation_id,
+                    reason: item.reason,
+                })));
+
+        return cardsBlock + invoicesBlock;
+    }
+
+    /** Итог этапа карт. Причины отказа показываем — они и есть руководство к действию. */
+    function cardsStageHtml(cards) {
+        if (cards.error) {
+            return `<div class="iv2-syncerr"><div class="iv2-syncerr__head">Заявки по картам</div>
+                        ${escapeHtml(cards.error)}</div>`;
         }
-        return reportSection('Будут разнесены', matched.map(item => ({
-            id: item.invoice_id,
-            label: (item.invoice_number || item.match_code || ''),
-            amount: item.operation_amount,
-        })), true)
-            + reportSection('Требуют внимания', unmatched.map(item => ({
-                id: item.operation_id,
-                label: item.match_code || item.operation_id,
-                reason: item.reason,
-            })));
+        const created = (cards.created || []).length;
+        const exists = (cards.exists || []).length;
+        const failed = cards.failed || [];
+        if (!created && !exists && !failed.length) {
+            return '<p class="iv2-tools-empty">Заявок по картам к разноске нет</p>';
+        }
+        const failedList = failed.length
+            ? reportSection('Карты: с ошибкой', failed.map(item => ({
+                id: item.invoice_id,
+                label: item.invoice_number || ('#' + item.invoice_id),
+                reason: item.error,
+            })))
+            : '';
+        return `<p class="iv2-tools-note">Заявки по картам: создано <b>${created}</b>,
+                    уже было в ПланФакте <b>${exists}</b>, с ошибкой <b>${failed.length}</b>.</p>`
+            + failedList;
     }
 
     async function runPlanfactSync(dryRun) {
@@ -7273,6 +7308,19 @@
     }
 
     /**
+     * Итоги прогона одной строкой — по этапам, без общей суммы: сложить
+     * «создано операций» и «разнесено счетов» значит получить число, которое
+     * ничего не значит.
+     */
+    function syncTotalsText(status) {
+        const cards = `карты — создано ${status.cards_created || 0}`
+            + ((status.cards_failed || 0) ? `, с ошибкой ${status.cards_failed}` : '');
+        const invoices = `счета — разнесено ${status.matched_count || 0}`
+            + ((status.unmatched_count || 0) ? `, требует внимания ${status.unmatched_count}` : '');
+        return `${cards}; ${invoices}`;
+    }
+
+    /**
      * Опрос статуса фонового прогона. Прекращается, как только модалку закрыли
      * или ушли с раздела: висящий таймер продолжал бы дёргать сервер и писать
      * в состояние закрытого окна.
@@ -7282,27 +7330,34 @@
             await new Promise(resolve => setTimeout(resolve, PF_POLL_INTERVAL_MS));
             if (state.tools.open !== 'planfact' || !pageIsActive()) return;
 
-            let status;
+            let payload;
             try {
-                status = (await apiGet('/api/invoices/planfact/sync-status')).status;
+                payload = await apiGet('/api/invoices/planfact/sync-status');
             } catch (error) {
                 state.tools.pf.status = 'Статус синхронизации недоступен: ' + error.message;
                 renderTools();
                 return;
             }
+            const status = payload.status;
 
-            if (status && status.status === 'started') continue;
+            // «Идёт ли прогон» спрашиваем у сервера по локу, а не по статусу
+            // записи: запись могла остаться от прогона, умершего вместе с
+            // воркером, и опрос висел бы до конца попыток.
+            if (payload.running) continue;
 
             if (!status) {
                 state.tools.pf.status = 'Статус синхронизации недоступен';
+            } else if (status.skipped_reason) {
+                // Не начали — это не ошибка и не успех, и путать их нельзя:
+                // «расширить тариф» и «повторить» — разные действия.
+                state.tools.pf.status = 'Прогон не состоялся: ' + status.skipped_reason;
             } else if (status.status === 'completed') {
-                state.tools.pf.status = `Готово: разнесено ${status.matched_count}, `
-                    + `требует внимания ${status.unmatched_count}`;
+                state.tools.pf.status = 'Готово. ' + syncTotalsText(status);
                 // Список «требует внимания» мог измениться — перечитаем при
                 // следующем открытии вкладки
                 state.tools.pf.unmatched = null;
             } else {
-                state.tools.pf.status = 'Ошибка: ' + (status.error_message || 'подробности в логах сервера');
+                state.tools.pf.status = 'Ошибка: ' + (status.error_message || 'причина не названа');
             }
             renderTools();
             loadSummary();

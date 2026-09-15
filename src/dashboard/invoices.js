@@ -1578,7 +1578,14 @@
             const res = await fetch('/api/invoices/planfact/sync', {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                // Парная половина require_ajax_header на ручке. Раздел скрыт по
+                // роли и почти не используется, но без заголовка он отвечал бы
+                // 403 — а выясняется это только на проде и только у того, кому
+                // он всё-таки открыт.
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'barhat-dashboard',
+                },
                 body: JSON.stringify({ dry_run: dryRun }),
             });
             const data = await res.json();

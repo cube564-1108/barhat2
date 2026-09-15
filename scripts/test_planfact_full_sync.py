@@ -344,6 +344,69 @@ def main():
     check('planfact-sync' not in authors,
           f"и автор отметки — человек, а не синк: {authors}")
 
+    # ------------------------------------------------------------------
+    print("\n10. Ручки запуска защищены от межсайтовой подделки")
+    # CSRF-токенов в проекте нет, а сессиям из Пульса кука выдаётся с
+    # SameSite=None — у большинства сотрудников SameSite не защищает вовсе.
+    # Обе ручки принимают POST и без JSON-тела, то есть простой формой с чужого
+    # сайта: /planfact/sync разносит деньги, /work-cards/sync создаёт операции.
+    from flask import Flask
+    from werkzeug.security import generate_password_hash
+    from auth import auth_bp, login_manager, init_auth_tables, get_db as auth_db
+    from invoices.server import invoices_bp
+
+    init_auth_tables()
+    conn = auth_db()
+    conn.execute(
+        "INSERT INTO users (username, password_hash, role, full_name, is_active, created_at) "
+        "VALUES (?,?,?,?,1,?)",
+        ('admin_pf', generate_password_hash('pass'), 'admin', 'admin_pf',
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    app = Flask(__name__)
+    app.secret_key = 'test-only'
+    app.config['TESTING'] = True
+    login_manager.init_app(app)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(invoices_bp)
+    http = app.test_client()
+    http.post('/api/auth/login', json={'username': 'admin_pf', 'password': 'pass'})
+
+    install(FakeClient(pages=[[]]))
+    ajax = {'X-Requested-With': 'barhat-dashboard'}
+
+    for path in ('/api/invoices/planfact/sync', '/api/invoices/work-cards/sync'):
+        naked = http.post(path, data={'dry_run': 'false'})
+        check(naked.status_code == 403,
+              f"{path} без заголовка отбивается: {naked.status_code}")
+
+    ok = http.post('/api/invoices/planfact/sync', json={'dry_run': True}, headers=ajax)
+    check(ok.status_code == 200, f"со своим заголовком работает: {ok.status_code}")
+    body = ok.get_json()
+    check('cards' in body and 'matched' in body,
+          f"превью отдаёт оба этапа: ключи {sorted(body.keys())}")
+
+    # ------------------------------------------------------------------
+    print("\n11. «Идёт ли прогон» ручка берёт из лока, а не из статуса записи")
+    taken = try_acquire_sync_lock(planfact_run.FULL_SYNC_LOCK, 60)
+    check(taken, "занимаем лок, как будто прогон идёт")
+
+    busy_http = http.post('/api/invoices/planfact/sync', json={}, headers=ajax)
+    check(busy_http.status_code == 409,
+          f"запуск отбивается с 409: {busy_http.status_code}")
+    check('уже идёт' in (busy_http.get_json().get('error') or ''),
+          f"с внятным текстом: {busy_http.get_json().get('error')}")
+
+    running = http.get('/api/invoices/planfact/sync-status').get_json()
+    check(running.get('running') is True, "статус показывает, что прогон идёт")
+
+    release_sync_lock(planfact_run.FULL_SYNC_LOCK)
+    idle = http.get('/api/invoices/planfact/sync-status').get_json()
+    check(idle.get('running') is False, "лок отпущен — прогон снова можно запустить")
+
     print("\n" + "=" * 60)
     if failures:
         print(f"ПРОВАЛОВ: {len(failures)}")

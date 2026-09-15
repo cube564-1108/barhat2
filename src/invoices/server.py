@@ -26,7 +26,7 @@ from flask_login import current_user, login_required
 # Импортируем модуль авторизации (как в cashshifts/server.py)
 auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
-from auth import role_required, section_required, log_action
+from auth import role_required, section_required, log_action, require_ajax_header
 
 from .storage import (
     STATUSES,
@@ -546,6 +546,7 @@ def remove_work_card(card_id):
 
 @invoices_bp.route("/work-cards/sync", methods=["POST"])
 @role_required("admin")
+@require_ajax_header
 def trigger_card_sync():
     """
     Разнести заявки по картам в ПланФакт, не дожидаясь очередного тика.
@@ -2649,6 +2650,7 @@ from .planfact_run import FULL_SYNC_LOCK, run_full_sync  # noqa: E402
 
 @invoices_bp.route("/planfact/sync", methods=["POST"])
 @role_required("admin")
+@require_ajax_header
 def trigger_planfact_sync():
     """
     Body: {"dry_run": bool}. dry_run=true — синхронный превью-прогон, ничего
