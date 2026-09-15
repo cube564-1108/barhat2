@@ -13,6 +13,7 @@ plans/2026-09-15-единая-синхронизация-планфакт.md): �
 import logging
 import re
 from datetime import datetime, timedelta
+from typing import Callable, Optional
 
 from .storage import (
     CARD_KINDS,
@@ -187,7 +188,19 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
     return preview
 
 
-def _run_planfact_sync(dry_run: bool = False) -> dict:
+def _run_planfact_sync(dry_run: bool = False, renew: Optional[Callable[[], None]] = None) -> dict:
+    """
+    Прогон разноски оплаченных счетов.
+
+    renew — что позвать между страницами операций, чтобы продлить талон лока.
+    Прогон идёт постранично по операциям за 60 дней и может длиться дольше TTL
+    (10 минут). Талон, протухший на ходу, пускает второй воркер в параллельный
+    прогон, и тот обновит те же операции вторично: защиты маркерами, как у
+    заявок по картам, здесь нет — счета матчатся по коду `REF-`.
+
+    Сам модуль про локи ничего не знает намеренно: их держит тот, кто прогон
+    запустил (см. `planfact_run.run_full_sync`). Без `renew` поведение прежнее.
+    """
     from planfact.client import get_client
 
     client = get_client()
@@ -240,6 +253,12 @@ def _run_planfact_sync(dry_run: bool = False) -> dict:
                         operation_amount=op.get("value"),
                         operation_comment=op.get("comment"),
                     )
+
+        # Талон продлеваем на границе страниц: страница из тысячи операций
+        # обрабатывается заметное время, и следующий поход в ПланФакт не должен
+        # случиться с уже протухшим локом.
+        if renew is not None:
+            renew()
 
         if len(ops) < 1000:
             break
