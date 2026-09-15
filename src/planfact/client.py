@@ -44,10 +44,41 @@ class PlanFactClient:
             )
 
         self.api_url = PLANFACT_API_URL
+        # Чем именно ПланФакт объяснил последний отказ. request() возвращает
+        # None на любую неудачу, и раньше объяснение оставалось только в логах
+        # сервера — а консоли на нашем тарифе Amvera нет, то есть «подробности
+        # в логах» на практике значит «подробности нигде». Заявка висела с
+        # текстом «ПланФакт не принял операцию», и что чинить, не знал никто.
+        self.last_error: Optional[str] = None
         self.session = requests.Session()
         self.session.trust_env = False
         self.session.proxies = {"http": None, "https": None, "no_proxy": None}
         trust_russian_ca(self.session)
+
+    @staticmethod
+    def _explain(response) -> str:
+        """
+        Чем ПланФакт объяснил отказ — одной строкой для человека.
+
+        Сначала штатные поля ответа (`errorMessage`/`errorCode`): именно там
+        лежит «Счёт не найден» или «Статья не найдена». Если тело не разбирается
+        — короткий фрагмент как есть, лучше обрывок чужого текста, чем ничего.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+
+        if isinstance(body, dict):
+            message = str(body.get("errorMessage") or "").strip()
+            code = str(body.get("errorCode") or "").strip()
+            if message and code:
+                return f"{message} ({code})"
+            if message or code:
+                return message or code
+
+        snippet = " ".join((response.text or "").split())[:200]
+        return snippet or f"HTTP {response.status_code} без объяснения"
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -93,8 +124,11 @@ class PlanFactClient:
         """
         url = f"{self.api_url.rstrip('/')}/{path.lstrip('/')}"
 
+        self.last_error = None
+
         if quota.is_blocked():
-            logger.warning("Запрос %s %s не отправлен: %s", method, path, quota.error_text())
+            self.last_error = quota.error_text()
+            logger.warning("Запрос %s %s не отправлен: %s", method, path, self.last_error)
             return None
 
         for attempt in range(max_retries_429 + 1):
@@ -119,6 +153,7 @@ class PlanFactClient:
                     response.text if response.status_code >= 400 else "",
                 )
                 if quota.is_blocked():
+                    self.last_error = quota.error_text()
                     logger.error("ПланФакт отказал по квоте на %s %s", method, path)
                     return None
 
@@ -128,21 +163,30 @@ class PlanFactClient:
                     time.sleep(wait)
                     continue
 
-                response.raise_for_status()
+                # Вместо raise_for_status: исключение прятало объяснение
+                # ПланФакта в лог, а наверх уходил безликий None. Текст ответа
+                # нужен вызывающему — он показывает его человеку.
+                if response.status_code >= 400:
+                    self.last_error = self._explain(response)
+                    logger.error("ПланФакт ответил %s на %s %s: %s",
+                                 response.status_code, method, path, self.last_error)
+                    return None
+
                 body = response.json()
 
                 if not body.get("isSuccess", True):
-                    logger.error(f"ПланФакт вернул ошибку на {method} {path}: {body.get('errorCode')} {body.get('errorMessage')}")
+                    self.last_error = self._explain(response)
+                    logger.error("ПланФакт вернул ошибку на %s %s: %s", method, path, self.last_error)
                     return None
 
                 return body.get("data")
 
             except requests.exceptions.RequestException as e:
+                self.last_error = f"не удалось связаться с ПланФактом ({type(e).__name__})"
                 logger.error(f"Ошибка запроса {method} {path} к ПланФакт: {e}")
-                if hasattr(e, "response") and e.response is not None:
-                    logger.error(f"Response: {e.response.text[:500]}")
                 return None
 
+        self.last_error = self.last_error or "ПланФакт не ответил после повторов"
         return None
 
     def list_operations(

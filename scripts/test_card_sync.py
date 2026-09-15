@@ -74,6 +74,9 @@ class FakePlanFact:
         self.calls = []
         self.fail_next = False
         self._next_id = 9000
+        # Настоящий клиент кладёт сюда объяснение отказа от ПланФакта; заявка
+        # обязана показать его человеку, а не отсылку к логам сервера.
+        self.last_error = None
 
     def list_operations(self, operation_type=None, search_string=None, **kwargs):
         self.calls.append(('list', search_string))
@@ -84,7 +87,9 @@ class FakePlanFact:
     def _create(self, kind, comment, **payload):
         if self.fail_next:
             self.fail_next = False
+            self.last_error = 'Статья расходов не найдена (CategoryNotFound)'
             return None
+        self.last_error = None
         self._next_id += 1
         operation = {'operationId': self._next_id, 'comment': comment, '_type': kind, **payload}
         self.operations.append(operation)
@@ -242,8 +247,15 @@ def main():
     result = sync.run_card_sync()
     check(len(result['failed']) >= 1 and get_invoice_by_id(rejected['id'])['planfact_synced_at'] is None,
           "при отказе ПФ признак разноски не ставится")
-    check(get_invoice_by_id(rejected['id'])['planfact_error'],
-          "причина отказа записана в заявку")
+    rejected_error = get_invoice_by_id(rejected['id'])['planfact_error'] or ''
+    check(rejected_error, "причина отказа записана в заявку")
+    # 15.09.2026: СЧ-000287 висел с текстом «ПланФакт не принял операцию
+    # (подробности в логах сервера)». Консоли у контейнера на нашем тарифе
+    # Amvera нет, то есть подробностей не было нигде, и чинить было нечего.
+    check('Статья расходов не найдена' in rejected_error,
+          f"и это объяснение ПланФакта, а не отсылка к логам: {rejected_error}")
+    check('логах сервера' not in rejected_error,
+          "к логам сервера человека не отправляем — он до них не доберётся")
 
     print("\n8. Ошибка снимается после успешной разноски")
     set_store_planfact_project(blucher_store, '5002')

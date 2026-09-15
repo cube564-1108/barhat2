@@ -450,6 +450,39 @@ def main():
     check(planfact_quota.snapshot().get('next_probe_at'),
           "и видно, когда система перепроверит сама")
 
+    # ------------------------------------------------------------------
+    print("\n13. Отказ ПланФакта объясняется словами, а не ссылкой на логи")
+    # 15.09.2026: заявка висела с «ПланФакт не принял операцию (подробности в
+    # логах сервера)». Консоли у контейнера на нашем тарифе Amvera нет —
+    # подробностей не было нигде. Причину называет сам ПланФакт, клиент обязан
+    # её сохранить.
+    clear_quota_state()
+    rejecting = client_with(lambda: FakeResponse(
+        400, quota_headers(used=200),
+        {"isSuccess": False, "errorMessage": "Статья расходов не найдена",
+         "errorCode": "CategoryNotFound"}))
+    check(rejecting.get_projects() is None, "отказ возвращает None, как и раньше")
+    check('Статья расходов не найдена' in (rejecting.last_error or ''),
+          f"объяснение сохранено: {rejecting.last_error}")
+    check('CategoryNotFound' in (rejecting.last_error or ''),
+          "вместе с кодом ошибки — по нему ищут в документации")
+
+    # isSuccess=false на HTTP 200 — у ПланФакта это штатный способ отказать
+    soft_fail = client_with(lambda: FakeResponse(
+        200, quota_headers(used=201),
+        {"isSuccess": False, "errorMessage": "Счёт не найден", "errorCode": "AccountNotFound"}))
+    check(soft_fail.get_projects() is None, "мягкий отказ тоже даёт None")
+    check('Счёт не найден' in (soft_fail.last_error or ''),
+          f"и тоже объяснён: {soft_fail.last_error}")
+
+    # Успех обязан сбрасывать прошлое объяснение, иначе оно приклеится к
+    # следующей заявке в том же прогоне и обвинит её чужой ошибкой.
+    reused = client_with(lambda: FakeResponse(
+        200, quota_headers(used=202), {"isSuccess": True, "data": {"items": []}}))
+    reused.last_error = 'ошибка прошлой заявки'
+    reused.get_projects()
+    check(reused.last_error is None, "успешный запрос стирает прошлое объяснение")
+
     print("\n" + "=" * 60)
     if failures:
         print(f"ПРОВАЛОВ: {len(failures)}")

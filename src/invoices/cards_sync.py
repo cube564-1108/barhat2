@@ -302,7 +302,12 @@ def _push_invoice(invoice: Dict[str, Any], client, store_map, category_map,
         )
 
     if not result:
-        error = "ПланФакт не принял операцию (подробности в логах сервера)"
+        # Отсылка «подробности в логах сервера» на нашем тарифе Amvera
+        # означала «подробности нигде»: консоли у контейнера нет. Причину
+        # отказа называет сам ПланФакт — её сохраняет клиент.
+        detail = getattr(client, "last_error", None)
+        error = (f"ПланФакт не принял операцию: {detail}" if detail
+                 else "ПланФакт не принял операцию и не объяснил причину")
         set_invoice_planfact_error(invoice["id"], error)
         return {"status": "failed", "invoice_id": invoice["id"], "error": error}
 

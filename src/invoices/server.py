@@ -2771,10 +2771,15 @@ def _match_planfact_operation(op, client, store_map, category_map, dry_run):
         items=pf_items,
     )
     if not ok:
+        # Причину отказа называет сам ПланФакт, и она нужна человеку в списке
+        # «Требует внимания»: отсылка к логам сервера бесполезна — консоли у
+        # контейнера на нашем тарифе Amvera нет.
+        detail = getattr(client, "last_error", None)
         return {
             "status": "unmatched", "operation_id": operation_id, "match_code": match_code,
             "invoice_id": invoice["id"],
-            "reason": "Ошибка записи в ПланФакт (подробности в логах сервера)",
+            "reason": (f"ПланФакт не принял запись: {detail}" if detail
+                       else "ПланФакт не принял запись и не объяснил причину"),
         }
 
     # Сначала признак разноски, потом статус: если процесс упадёт между этими
