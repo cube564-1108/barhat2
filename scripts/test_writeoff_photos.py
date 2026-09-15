@@ -459,6 +459,12 @@ def photo_upload(name="kadr.jpg"):
     return {"file": (BytesIO(JPEG), name)}
 
 
+# Заголовок защиты от межсайтовой подделки (require_ajax_header в src/auth.py).
+# Дашборд шлёт его со всех изменяющих запросов — тест обязан вести себя так же,
+# иначе он проверяет не тот путь.
+AJAX = {"X-Requested-With": "barhat-dashboard"}
+
+
 app = Flask(__name__)
 app.secret_key = "test-secret"
 login_manager.init_app(app)
@@ -501,7 +507,7 @@ check("Флорист логинится", login(florist, "florist_wo").status_c
 check("Управляющий логинится", login(manager, "manager_wo").status_code == 200)
 check("Флорист чужой точки логинится", login(stranger, "florist_other").status_code == 200)
 
-no_photo = manager.post("/api/writeoffs/30/approve")
+no_photo = manager.post("/api/writeoffs/30/approve", headers=AJAX)
 check("Заявку без фото согласовать нельзя", no_photo.status_code == 400,
       f"код {no_photo.status_code}")
 check("Текст отказа подсказывает, что делать",
@@ -509,12 +515,27 @@ check("Текст отказа подсказывает, что делать",
       (no_photo.get_json() or {}).get("error", ""))
 
 alien = stranger.post("/api/writeoffs/30/photos", data=photo_upload(),
-                      content_type="multipart/form-data")
+                      content_type="multipart/form-data", headers=AJAX)
 check("Чужой точке загрузка запрещена", alien.status_code == 403, f"код {alien.status_code}")
+
+# Межсайтовая подделка: multipart-POST — «простой» запрос, его отправила бы и
+# чужая форма. У сотрудников из портала Пульс кука с SameSite=None, то есть
+# защиты Lax у них нет вообще (см. require_ajax_header в src/auth.py).
+csrf = florist.post("/api/writeoffs/30/photos", data=photo_upload(),
+                    content_type="multipart/form-data")
+check("Загрузка без заголовка защиты отбита", csrf.status_code == 403,
+      f"код {csrf.status_code}")
+csrf_approve = manager.post("/api/writeoffs/30/approve")
+check("Согласование без заголовка защиты отбито", csrf_approve.status_code == 403,
+      f"код {csrf_approve.status_code}")
+csrf_del = manager.delete("/api/writeoffs/photos/1")
+check("Удаление фото без заголовка защиты отбито", csrf_del.status_code == 403,
+      f"код {csrf_del.status_code}")
+check("И ничего не записалось", not get_writeoff_photos(30), f"фото: {len(get_writeoff_photos(30))}")
 
 # Вот он, выход из тупика: фото доливается в УЖЕ СОЗДАННУЮ заявку
 added = florist.post("/api/writeoffs/30/photos", data=photo_upload(),
-                     content_type="multipart/form-data")
+                     content_type="multipart/form-data", headers=AJAX)
 check("Фото дозаливается в существующую заявку", added.status_code == 201,
       f"код {added.status_code}")
 photo_id = (added.get_json() or {}).get("photo", {}).get("id")
@@ -528,20 +549,20 @@ check("Фото скачивается и это тот же файл",
       download.status_code == 200 and download.data == JPEG,
       f"код {download.status_code}")
 
-only_one = florist.delete(f"/api/writeoffs/photos/{photo_id}")
+only_one = florist.delete(f"/api/writeoffs/photos/{photo_id}", headers=AJAX)
 check("Единственное фото удалить нельзя (409, а не 500)", only_one.status_code == 409,
       f"код {only_one.status_code}")
 
-approved = manager.post("/api/writeoffs/30/approve")
+approved = manager.post("/api/writeoffs/30/approve", headers=AJAX)
 check("С фото согласование проходит", approved.status_code == 200, f"код {approved.status_code}")
 check("Заявка ушла в МойСклад",
       get_writeoff_head(30)["status"] == "sent", get_writeoff_head(30)["status"])
 
 late = florist.post("/api/writeoffs/30/photos", data=photo_upload(),
-                    content_type="multipart/form-data")
+                    content_type="multipart/form-data", headers=AJAX)
 check("В согласованную заявку фото уже не добавить", late.status_code == 409,
       f"код {late.status_code}")
-late_del = manager.delete(f"/api/writeoffs/photos/{photo_id}")
+late_del = manager.delete(f"/api/writeoffs/photos/{photo_id}", headers=AJAX)
 check("И удалить из согласованной нельзя", late_del.status_code == 409,
       f"код {late_del.status_code}")
 
@@ -579,7 +600,7 @@ sqlite_conn_module.sqlite3.connect = counting_connect
 try:
     connects.clear()
     upload = florist.post("/api/writeoffs/40/photos", data=photo_upload("cost.jpg"),
-                          content_type="multipart/form-data")
+                          content_type="multipart/form-data", headers=AJAX)
     upload_connects = len(connects)
 finally:
     sqlite3.connect = _real_sqlite_connect

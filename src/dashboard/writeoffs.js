@@ -17,6 +17,14 @@
     // Совпадает с APPROVER_ROLES в src/writeoffs/server.py — кто согласует заявки
     const APPROVER_ROLES = ['admin', 'manager'];
 
+    // Защита изменяющих ручек от межсайтовой подделки запроса (require_ajax_header
+    // в src/auth.py). CSRF-токенов в проекте нет, а SESSION_COOKIE_SAMESITE="Lax"
+    // не спасает: сессиям из портала Пульс кука выдаётся с SameSite=None, иначе
+    // Chrome режет её внутри чужого iframe. Заголовок работает потому, что
+    // межсайтовый запрос с кастомным заголовком требует CORS-предпроверки,
+    // а её мы не одобряем.
+    const AJAX_HEADERS = { 'X-Requested-With': 'barhat-dashboard' };
+
     const STATUS_LABELS = {
         on_approval: 'На согласовании',
         processing: 'Отправляется…',
@@ -244,7 +252,9 @@
         );
         if (!ok) return;
         try {
-            const res = await fetch(`/api/writeoffs/${id}/approve`, { method: 'POST', credentials: 'include' });
+            const res = await fetch(`/api/writeoffs/${id}/approve`, {
+                method: 'POST', credentials: 'include', headers: AJAX_HEADERS,
+            });
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Ошибка согласования'); return; }
             if (data.writeoff?.status === 'failed') {
@@ -259,7 +269,9 @@
 
     async function retryWriteoff(id) {
         try {
-            const res = await fetch(`/api/writeoffs/${id}/retry`, { method: 'POST', credentials: 'include' });
+            const res = await fetch(`/api/writeoffs/${id}/retry`, {
+                method: 'POST', credentials: 'include', headers: AJAX_HEADERS,
+            });
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Ошибка повтора'); return; }
             if (data.writeoff?.status === 'failed') {
@@ -285,7 +297,7 @@
             const res = await fetch(`/api/writeoffs/${id}/reject`, {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: Object.assign({ 'Content-Type': 'application/json' }, AJAX_HEADERS),
                 body: JSON.stringify({ reason }),
             });
             const data = await res.json();
@@ -306,7 +318,9 @@
         });
         if (!ok) return;
         try {
-            const res = await fetch(`/api/writeoffs/${id}`, { method: 'DELETE', credentials: 'include' });
+            const res = await fetch(`/api/writeoffs/${id}`, {
+                method: 'DELETE', credentials: 'include', headers: AJAX_HEADERS,
+            });
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Ошибка отмены'); return; }
             await loadWriteoffs();
@@ -875,7 +889,7 @@
             const res = await fetch('/api/writeoffs', {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: Object.assign({ 'Content-Type': 'application/json' }, AJAX_HEADERS),
                 body: JSON.stringify({
                     store_id: storeId,
                     positions: positions.map(p => ({
@@ -957,6 +971,9 @@
             const xhr = new XMLHttpRequest();
             xhr.open('POST', `/api/writeoffs/${writeoffId}/photos`, true);
             xhr.withCredentials = true;
+            // Без этого заголовка ручка ответит 403: multipart-POST — «простой»
+            // запрос, его отправила бы и чужая форма (см. AJAX_HEADERS выше).
+            Object.entries(AJAX_HEADERS).forEach(([k, v]) => xhr.setRequestHeader(k, v));
 
             if (xhr.upload && typeof onProgress === 'function') {
                 xhr.upload.onprogress = (e) => {
@@ -1177,6 +1194,7 @@
                     const res = await fetch(`/api/writeoffs/photos/${btn.getAttribute('data-id')}`, {
                         method: 'DELETE',
                         credentials: 'include',
+                        headers: AJAX_HEADERS,
                     });
                     const data = await res.json();
                     if (!res.ok) { alert(data.error || 'Ошибка удаления фото'); btn.disabled = false; return; }
@@ -1321,7 +1339,7 @@
             const res = await fetch('/api/writeoffs/employee-links', {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: Object.assign({ 'Content-Type': 'application/json' }, AJAX_HEADERS),
                 body: JSON.stringify({ links }),
             });
             const data = await res.json();

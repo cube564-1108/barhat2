@@ -227,11 +227,14 @@ function fakeFile(name, size, lastModified) {
 /** XHR, который отдаёт заданный код ответа на загрузку фото. */
 function makeXhr(statusFor) {
     const sent = [];
+    const sentHeaders = [];
     class FakeXHR {
-        constructor() { this.upload = {}; this.status = 0; this.responseText = ''; }
+        constructor() { this.upload = {}; this.status = 0; this.responseText = ''; this.headers = {}; }
         open(method, url) { this.method = method; this.url = url; }
+        setRequestHeader(k, v) { this.headers[k] = v; }
         send() {
             sent.push(this.url);
+            sentHeaders.push(this.headers);
             const status = statusFor(this.url, sent.length);
             this.status = status;
             this.responseText = status >= 400
@@ -243,7 +246,7 @@ function makeXhr(statusFor) {
             setTimeout(() => this.onload(), 0);
         }
     }
-    return { FakeXHR, sent };
+    return { FakeXHR, sent, sentHeaders };
 }
 
 /** Довести форму до состояния «можно отправлять»: точка, позиция, фото. */
@@ -377,7 +380,7 @@ async function openCard(writeoff, FakeXHR) {
 
     console.log('\n=== 2. Успешная загрузка закрывает форму ===');
     {
-        const { FakeXHR, sent } = makeXhr(() => 201);
+        const { FakeXHR, sent, sentHeaders } = makeXhr(() => 201);
         const env = makeSandbox(
             async (url) => ({
                 ok: true, status: 201,
@@ -391,6 +394,11 @@ async function openCard(writeoff, FakeXHR) {
         await settle(env);
 
         check('Фото ушло', sent.length === 1);
+        // Без этого заголовка сервер ответит 403: multipart-POST отправила бы
+        // и чужая форма (require_ajax_header в src/auth.py)
+        check('Заголовок защиты от подделки запроса отправлен',
+            sentHeaders[0] && sentHeaders[0]['X-Requested-With'] === 'barhat-dashboard',
+            JSON.stringify(sentHeaders[0]));
         check('Модалка закрыта', !env.byId['create-writeoff-modal'].classList.contains('active'));
         check('Блок восстановления не показан', env.byId['writeoff-create-recovery'].hidden === true);
         check('Никаких ошибок человеку', env.alerts.length === 0, env.alerts.join('; '));

@@ -20,7 +20,7 @@ from flask_login import current_user, login_required
 # Импортируем модуль авторизации (как в cashshifts/server.py, invoices/server.py)
 auth_path = os.path.join(os.path.dirname(__file__), '../')
 sys.path.insert(0, auth_path)
-from auth import role_required, section_required, log_action
+from auth import role_required, section_required, log_action, require_ajax_header
 
 from cashshifts.storage import get_all_stores, get_store_by_id, get_user_stores, check_store_access, get_users_full_names
 from moysklad.client import get_client, build_entity_href
@@ -621,6 +621,7 @@ def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list, created_
 
 @writeoffs_bp.route("/<int:writeoff_id>/approve", methods=["POST"])
 @role_required(*APPROVER_ROLES)
+@require_ajax_header
 def approve(writeoff_id):
     """Согласовать заявку — сразу отправляет её в МойСклад одним документом."""
     writeoff = get_writeoff_by_id(writeoff_id)
@@ -665,6 +666,7 @@ def reject(writeoff_id):
 
 @writeoffs_bp.route("/<int:writeoff_id>/retry", methods=["POST"])
 @role_required(*APPROVER_ROLES)
+@require_ajax_header
 def retry(writeoff_id):
     """Повторить отправку упавшей заявки (status=failed)."""
     writeoff = get_writeoff_by_id(writeoff_id)
@@ -707,6 +709,7 @@ def _may_edit_photos(writeoff) -> bool:
 
 @writeoffs_bp.route("/<int:writeoff_id>/photos", methods=["POST"])
 @section_required("writeoffs")
+@require_ajax_header
 def upload_photo(writeoff_id):
     """Загрузить фото списания. multipart/form-data, поле 'file'."""
     writeoff = get_writeoff_head(writeoff_id)
@@ -746,6 +749,7 @@ def list_photos(writeoff_id):
 
 @writeoffs_bp.route("/photos/<int:photo_id>", methods=["DELETE"])
 @section_required("writeoffs")
+@require_ajax_header
 def delete_photo(photo_id):
     """
     Удалить фото заявки. Последнее удалить нельзя: заявка без фото не проходит
