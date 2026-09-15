@@ -3025,6 +3025,30 @@
             + (soon.length ? `<div class="iv2-hint iv2-soon">Ещё приедет: ${escapeHtml(soon.join(' · '))}</div>` : '');
     }
 
+    /**
+     * Почему заявка не уехала в ПланФакт.
+     *
+     * Причина писалась в planfact_error с самого начала, но показывалась ровно
+     * в одном месте — атрибуте title у бейджа «Ошибка разноски» в списке. На
+     * телефоне подсказки нет вообще, на десктопе в неё надо попасть курсором,
+     * а в карточке счёта не было ни слова. Счёт висел «с ошибкой разноски», и
+     * что чинить — сопоставление, счёт карты, дату — узнать было неоткуда.
+     */
+    function syncErrorHtml(invoice) {
+        if (!invoice.planfact_error || invoice.planfact_synced_at) return '';
+        const attempted = invoice.planfact_attempted_at
+            ? ` · последняя попытка ${escapeHtml(fmtCreated(invoice.planfact_attempted_at))}`
+            : '';
+        return `
+            <div class="iv2-syncerr">
+                <div class="iv2-syncerr__head">Не уехало в ПланФакт${attempted}</div>
+                <div>${escapeHtml(invoice.planfact_error)}</div>
+                <div class="iv2-syncerr__hint">Разноска повторяется сама раз в час.
+                    Когда причина устранена, дожидаться тика не обязательно: вкладка
+                    «Рабочие карты» — «Разнести сейчас».</div>
+            </div>`;
+    }
+
     function paneHtml(details, compact) {
         const invoice = details.invoice;
         const warnings = requisiteWarnings(invoice);
@@ -3078,6 +3102,8 @@
 
                 <div class="iv2-pane__amount">${escapeHtml(money(invoice.amount))}</div>
                 <div class="iv2-pane__purpose">${escapeHtml(invoice.payment_purpose || '')}</div>
+
+                ${syncErrorHtml(invoice)}
 
                 <dl class="iv2-rows">
                     <dt>Срок оплаты</dt><dd>${escapeHtml(fmtDue(invoice.due_date))} ${dueBadge(invoice)}</dd>

@@ -1417,6 +1417,22 @@
 .iv2 .iv2-field__err { font-size: 11.5px; color: #b45309; margin-top: 4px; }
 .iv2 .iv2-input--bad { border-color: #fbbf24; background: #fffdf5; }
 
+/* Причина, по которой заявка не уехала в ПланФакт. Живёт в карточке счёта:
+   в списке она помещается только в подсказку к бейджу, а подсказки нет ни на
+   телефоне, ни в Пульсе. */
+.iv2 .iv2-syncerr {
+    padding: 10px 12px;
+    border-radius: var(--bx-r-xl);
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    font-size: 12.5px;
+    margin-bottom: 14px;
+}
+
+.iv2 .iv2-syncerr__head { font-weight: 600; margin-bottom: 4px; }
+.iv2 .iv2-syncerr__hint { margin-top: 6px; color: var(--bx-text-2); font-size: 11.5px; }
+
 .iv2 .iv2-form-error {
     padding: 10px 12px;
     border-radius: var(--bx-r-xl);
