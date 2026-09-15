@@ -32,7 +32,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,20 @@ RELOAD_SECONDS = 300
 # писать нельзя: /data на Amvera сетевой и медленный, а смена остатка квоты
 # на единицу того не стоит. Переход в «исчерпано» и обратно пишется сразу.
 SAVE_INTERVAL_SECONDS = 300
+
+# Через сколько после исчерпания тратить ОДИН запрос на перепроверку.
+#
+# Остаток квоты приходит только в заголовке ответа, а запрос не отправляется,
+# пока по сохранённому состоянию квота исчерпана. Получается замкнутый круг:
+# расширение тарифа для нас невидимо. 15.09.2026 лимит подняли с 2500 до 50000,
+# и модуль всё равно остался бы мёртвым до 1 октября — до момента сброса,
+# записанного ещё старым тарифом.
+#
+# Поэтому исчерпание блокирует не навсегда, а до следующей пробы: раз в 6 часов
+# один запрос уходит наружу и перечитывает заголовки. Если тариф расширили —
+# модуль оживает сам, без человека. Если квота действительно кончилась — цена
+# 4 холостых ответа 403 в сутки вместо сотен.
+PROBE_AFTER_SECONDS = 6 * 3600
 
 _lock = threading.Lock()
 _state: Dict[str, Any] = {}
@@ -79,6 +93,21 @@ def _utc_text(moment: datetime) -> str:
 
 def _now_text() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _seconds_since(text: Any) -> float:
+    """
+    Сколько секунд прошло с метки UTC. Пустая или нечитаемая метка — «очень
+    давно»: состояние без даты означает, что мы не знаем, когда проверяли, и
+    проба тут дешевле, чем вечная блокировка по неизвестно чему.
+    """
+    if not text:
+        return float("inf")
+    try:
+        moment = datetime.strptime(str(text), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return float("inf")
+    return (datetime.now(timezone.utc) - moment).total_seconds()
 
 
 def _load_locked() -> None:
@@ -160,6 +189,11 @@ def record_response(headers: Any, status_code: int = 200, body: str = "") -> Non
         state: Dict[str, Any] = dict(_state)
         state["checked_at"] = _now_text()
         state["exhausted"] = exhausted
+        if not exhausted:
+            # Отметка о пробе живёт только внутри исчерпания. Иначе после
+            # возврата к нормальной работе она осталась бы просроченной, и
+            # следующее реальное исчерпание тут же потратило бы холостую пробу.
+            state.pop("probed_at", None)
         if limit is not None:
             state["limit"] = limit
         if used is not None:
@@ -197,6 +231,11 @@ def snapshot(reload: bool = False) -> Dict[str, Any]:
 
     state["known"] = True
     state["blocked"] = _is_blocked(state)
+    if state["blocked"]:
+        # Пробу диагностика не расходует — только показывает, когда сама
+        # система перепроверит лимит. Без этого «исчерпано» выглядит как
+        # состояние до конца месяца, хотя расширение тарифа подхватится раньше.
+        state["next_probe_at"] = _next_probe_text(state)
     return state
 
 
@@ -210,11 +249,69 @@ def _is_blocked(state: Dict[str, Any]) -> bool:
     return True
 
 
+def _next_probe_text(state: Dict[str, Any]) -> Optional[str]:
+    """Когда состоится следующая проба — для /health и интерфейса, UTC."""
+    last = state.get("probed_at") or state.get("checked_at")
+    try:
+        moment = datetime.strptime(str(last), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return _utc_text(moment + timedelta(seconds=PROBE_AFTER_SECONDS))
+
+
+def _probe_due(state: Dict[str, Any]) -> bool:
+    """Пора ли потратить один запрос на перепроверку исчерпанной квоты."""
+    return _seconds_since(state.get("probed_at") or state.get("checked_at")) >= PROBE_AFTER_SECONDS
+
+
+def _mark_probe_locked() -> None:
+    """
+    Отметить, что проба назначена. Вызывать под _lock.
+
+    Отметка отдельным полем, а не через checked_at: checked_at отвечает на
+    вопрос «когда мы в последний раз ЗНАЛИ остаток», и врать в нём нельзя —
+    его показывает интерфейс. Пишется сразу (force), иначе проба повторится на
+    каждом запросе, если ПланФакт не ответит вовсе и record_response не будет
+    вызван.
+
+    Воркеров два, и второй перечитает состояние не сразу (RELOAD_SECONDS),
+    поэтому на одно окно может прийтись две пробы вместо одной. Это осознанно:
+    лишний запрос раз в 6 часов дешевле, чем блокировка на общем локе.
+    """
+    global _state
+
+    state = dict(_state)
+    state["probed_at"] = _now_text()
+    _state = state
+    _save_locked(force=True)
+    logger.info(
+        "Квота ПланФакта числится исчерпанной с %s — тратим один запрос на перепроверку: тариф мог измениться",
+        state.get("checked_at"),
+    )
+
+
+def _blocked_locked(consume_probe: bool) -> bool:
+    """
+    Нельзя ли ходить в API. Вызывать под _lock.
+
+    consume_probe=True — вызов действительно решает, идти ли наружу, и имеет
+    право израсходовать пробу. False — вызов только формулирует текст ошибки,
+    пробу назначать не за что.
+    """
+    if not _is_blocked(_state):
+        return False
+    if not _probe_due(_state):
+        return True
+    if consume_probe:
+        _mark_probe_locked()
+    return False
+
+
 def is_blocked() -> bool:
-    """Нельзя ли ходить в API: квота исчерпана и момент сброса ещё не наступил."""
+    """Нельзя ли ходить в API: квота исчерпана, сброс не наступил и проба не назначена."""
     with _lock:
         _ensure_fresh_locked()
-        return _is_blocked(_state)
+        return _blocked_locked(consume_probe=True)
 
 
 def error_text() -> Optional[str]:
@@ -222,10 +319,16 @@ def error_text() -> Optional[str]:
     Текст для человека, если ходить в ПланФакт нельзя. Дату сброса сюда не
     вписываем: время показывается по поясу устройства, это делает интерфейс
     из поля reset_at (см. DESIGN-SPEC и BarhatTime).
+
+    Пробу этот вызов не расходует (consume_probe=False): он стоит ПЕРЕД походом
+    наружу в нескольких модулях (cards, planfact_refs, cards_sync) и служит там
+    ранним выходом, а сам в API не ходит. Расходует пробу только is_blocked() в
+    client.request() — единственное место, за которым сразу идёт отправка.
+    Иначе проба сгорала бы здесь, и запрос всё равно не уходил.
     """
     with _lock:
         _ensure_fresh_locked()
-        if not _is_blocked(_state):
+        if not _blocked_locked(consume_probe=False):
             return None
         used, limit = _state.get("used"), _state.get("limit")
     if used is not None and limit is not None:

@@ -13,6 +13,9 @@
   * исчерпание названо словами и отличимо от «сервис молчит»;
   * при исчерпанной квоте клиент вообще не ходит в сеть — до момента сброса;
   * момент сброса снимает блокировку сам;
+  * расширение тарифа подхватывается само: раз в 6 часов исчерпанная квота
+    тратит один запрос на перепроверку, иначе новый лимит невидим до сброса
+    (15.09.2026 лимит подняли с 2500 до 50000, а модуль остался мёртвым);
   * состояние переживает перезапуск процесса (общее для обоих воркеров);
   * справочники (счета/проекты/статьи) ходят наружу раз в 6 часов, а не на
     каждое открытие вкладки;
@@ -389,6 +392,63 @@ def main():
     check(not marker_calls, "поиск маркеров не запускался")
     check('лимит' in (outcome.get('skipped') or '').lower(),
           f"прогон объясняет, почему отложен: {outcome.get('skipped')}")
+
+    # ------------------------------------------------------------------
+    print("\n12. Расширение тарифа подхватывается само")
+    # 15.09.2026: лимит подняли с 2500 до 50000, а модуль остался мёртвым.
+    # Остаток приходит только в заголовке ответа, но запрос не отправлялся,
+    # потому что по сохранённому состоянию квота исчерпана — и так до самого
+    # сброса, записанного ещё старым тарифом. Раз в 6 часов пробуем один раз.
+
+    def set_exhausted(hours_ago):
+        """Состояние «квота кончилась столько-то часов назад», как у обоих воркеров."""
+        planfact_quota.reset_for_tests()
+        moment = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        cards_module.write_sync_state('planfact_quota', json.dumps({
+            "checked_at": moment.strftime("%Y-%m-%d %H:%M:%S"),
+            "exhausted": True,
+            "limit": 2500, "used": 2500, "remaining": 0,
+            "reset_at": (datetime.now(timezone.utc) + timedelta(days=15)).strftime("%Y-%m-%d %H:%M:%S"),
+        }))
+        planfact_quota.reset_for_tests()
+
+    set_exhausted(hours_ago=1)
+    fresh_client = client_with(lambda: FakeResponse(
+        200, quota_headers(limit=50000, used=2513), {"isSuccess": True, "data": {"items": []}}))
+    fresh_client.get_projects()
+    check(not fresh_client.session.calls, "сразу после исчерпания наружу не ходим")
+    check(planfact_quota.error_text() is not None, "и говорим человеку про лимит, а не «не ответил»")
+
+    set_exhausted(hours_ago=7)
+    check(planfact_quota.error_text() is None,
+          "через 6 часов ранний выход в модулях пропускает пробу дальше")
+
+    probe_client = client_with(lambda: FakeResponse(
+        200, quota_headers(limit=50000, used=2513), {"isSuccess": True, "data": {"items": [{"id": 1}]}}))
+    result = probe_client.get_projects()
+    check(len(probe_client.session.calls) == 1,
+          f"проба ушла наружу ровно одним запросом (было {len(probe_client.session.calls)})")
+    check(result is not None, "и вернула данные, а не None")
+
+    state = planfact_quota.snapshot()
+    check(state.get('limit') == 50000, f"новый лимит записан: {state.get('limit')}")
+    check(not state.get('blocked'), "блокировка снята без человека и без ожидания сброса")
+    check(not planfact_quota.is_blocked(), "следующие запросы идут как обычно")
+
+    # Обратный случай: квота действительно кончилась — проба это подтверждает
+    # и снова закрывает дорогу, а не открывает её на каждый запрос.
+    set_exhausted(hours_ago=7)
+    denied = client_with(lambda: FakeResponse(
+        403, quota_headers(limit=2500, used=2500, remaining=0),
+        {"isSuccess": False, "errorMessage": "Превышен лимит запросов"}))
+    denied.get_projects()
+    check(len(denied.session.calls) == 1, "проба потрачена ровно одна")
+    denied.get_projects()
+    denied.get_projects()
+    check(len(denied.session.calls) == 1,
+          f"после отказа наружу больше не ходим (походов {len(denied.session.calls)})")
+    check(planfact_quota.snapshot().get('next_probe_at'),
+          "и видно, когда система перепроверит сама")
 
     print("\n" + "=" * 60)
     if failures:
