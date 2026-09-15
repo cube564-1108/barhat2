@@ -125,6 +125,7 @@ from .storage import (
     start_planfact_sync_log,
     finish_planfact_sync_log,
     get_latest_planfact_sync_log,
+    expire_stale_planfact_sync_logs,
     record_planfact_unmatched,
     get_unresolved_planfact_unmatched,
     resolve_planfact_unmatched,
@@ -2874,9 +2875,20 @@ def trigger_planfact_sync():
             return jsonify({"error": str(e)}), 502
         return jsonify({"ok": True, "dry_run": True, **result})
 
+    # Сначала снимаем зависшие прогоны: фоновый поток умирает вместе с
+    # воркером, и без этого запись 'started' блокирует кнопку навсегда.
+    expired = expire_stale_planfact_sync_logs()
+    if expired:
+        logger.warning("Закрыто оборванных прогонов синхронизации ПланФакт: %d", expired)
+
     last_log = get_latest_planfact_sync_log()
     if last_log and last_log["status"] == "started":
-        return jsonify({"error": "Синхронизация уже запущена"}), 409
+        # Время запуска — в тексте: иначе непонятно, ждать секунды или что-то
+        # зависло. Запись старше PLANFACT_SYNC_STALE_SECONDS сюда уже не дойдёт.
+        return jsonify({
+            "error": f"Синхронизация уже идёт, запущена {last_log.get('started_at') or '—'} (UTC). "
+                     f"Дождитесь её окончания."
+        }), 409
 
     try:
         log_id = start_planfact_sync_log(dry_run=False)

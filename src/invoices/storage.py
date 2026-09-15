@@ -1432,6 +1432,48 @@ def finish_planfact_sync_log(log_id: int, matched_count: int, unmatched_count: i
     conn.close()
 
 
+# Через сколько считать прогон, числящийся идущим, оборванным.
+#
+# У этого синка нет лока с TTL: роль «идёт ли прогон» играет последняя запись
+# лога в статусе 'started'. Но прогон живёт в фоновом потоке, а поток умирает
+# вместе с воркером — деплой, перезапуск, падение. finish_planfact_sync_log в
+# этом случае не выполняется никогда, запись остаётся 'started' навсегда, и
+# кнопка синхронизации отвечает «уже запущена» до скончания века. Снять её
+# было нечем: консоли у контейнера нет. 15.09.2026 прогон попал ровно под
+# деплой, и разноска счетов встала намертво.
+PLANFACT_SYNC_STALE_SECONDS = 20 * 60
+
+
+def expire_stale_planfact_sync_logs(stale_seconds: int = PLANFACT_SYNC_STALE_SECONDS) -> int:
+    """
+    Закрыть прогоны, которые числятся идущими дольше разумного. Возвращает
+    число закрытых записей.
+
+    Это и есть недостающий TTL. Зовётся перед проверкой «не идёт ли уже»:
+    саморемонт в момент, когда человек нажал кнопку, а не по расписанию.
+    """
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE invoice_planfact_sync_log
+            SET status = 'failed',
+                finished_at = datetime('now'),
+                error_message = COALESCE(
+                    error_message,
+                    'Прогон оборван — сервис перезапустился во время синхронизации'
+                )
+            WHERE status = 'started'
+              AND started_at < datetime('now', ?)
+            """,
+            (f"-{int(stale_seconds)} seconds",),
+        )
+        conn.commit()
+        return cursor.rowcount or 0
+    finally:
+        conn.close()
+
+
 def get_latest_planfact_sync_log() -> Optional[Dict[str, Any]]:
     conn = get_db()
     row = conn.execute(

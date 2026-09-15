@@ -230,7 +230,51 @@ def test_unmatched_cases():
     print("   ✓ resolve_planfact_unmatched убирает запись из списка «Требует внимания»")
 
 
+def test_stale_run_unblocks_button():
+    """
+    Оборванный прогон не блокирует кнопку навсегда.
+
+    15.09.2026: прогон синхронизации попал под деплой, фоновый поток умер
+    вместе с воркером, finish_planfact_sync_log не выполнился — и запись
+    осталась в статусе 'started'. Кнопка после этого отвечала «Синхронизация
+    уже запущена» бесконечно, снять флаг было нечем: консоли у контейнера нет.
+    """
+    print("\n=== Тест 3: оборванный прогон не блокирует кнопку ===")
+
+    from invoices.storage import (
+        get_db, start_planfact_sync_log, get_latest_planfact_sync_log,
+        expire_stale_planfact_sync_logs,
+    )
+
+    # Свежий прогон трогать нельзя: он действительно идёт
+    fresh_id = start_planfact_sync_log(dry_run=False)
+    assert expire_stale_planfact_sync_logs() == 0, "свежий прогон не должен считаться оборванным"
+    assert get_latest_planfact_sync_log()["status"] == "started"
+    print("   ✓ идущий прогон остаётся идущим")
+
+    # Тот же прогон, но начатый час назад — это не работа, а след от падения
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE invoice_planfact_sync_log SET started_at = datetime('now', '-60 minutes') WHERE id = ?",
+            (fresh_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert expire_stale_planfact_sync_logs() == 1, "зависший прогон должен закрыться"
+    closed = get_latest_planfact_sync_log()
+    assert closed["status"] == "failed", f"статус должен стать failed: {closed['status']}"
+    assert closed["finished_at"], "у закрытого прогона должно быть время окончания"
+    assert "оборван" in (closed["error_message"] or ""), \
+        f"причина должна быть названа словами: {closed['error_message']}"
+    print("   ✓ оборванный прогон закрывается и кнопка снова работает")
+    print(f"   ✓ с внятной причиной: {closed['error_message']}")
+
+
 if __name__ == "__main__":
     test_match_dry_run_then_real()
     test_unmatched_cases()
+    test_stale_run_unblocks_button()
     print("\n=== Все тесты синхронизации с ПланФакт пройдены успешно! ===")
