@@ -285,6 +285,65 @@ def main():
     check(get_latest_planfact_sync_log()['id'] == before,
           "dry_run ничего не меняет, в том числе в логе")
 
+    # ------------------------------------------------------------------
+    print("\n8. Этап счетов в расписании: раз в сутки и ночью")
+    import invoices.cards_sync as cs
+
+    start, end = cs.INVOICE_STAGE_WINDOW_UTC
+    check(cs.INVOICE_STAGE_INTERVAL_SECONDS == 24 * 3600,
+          f"интервал суточный: {cs.INVOICE_STAGE_INTERVAL_SECONDS} с")
+    # Салоны в UTC+5 и UTC+7 — окно обязано быть ночью У НИХ, а не по часам
+    # сервера. Полночь UTC для Новосибирска это 07:00 утра, то есть пик.
+    check(all(0 <= (hour + 5) % 24 <= 6 and 0 <= (hour + 7) % 24 <= 6
+              for hour in range(start, end)),
+          f"окно {start}:00–{end}:00 UTC приходится на ночь в UTC+5 и UTC+7")
+
+    original_hour = cs.datetime
+
+    class FrozenClock:
+        """Часы, которые всегда показывают заданный час UTC."""
+
+        def __init__(self, hour):
+            self.hour = hour
+
+        def now(self, tz=None):
+            return datetime.now(timezone.utc).replace(hour=self.hour)
+
+    cs.datetime = FrozenClock(12)          # день — не время для тяжёлого прогона
+    try:
+        check(cs._invoice_stage_due() is False, "днём этап счетов не запускается")
+    finally:
+        cs.datetime = original_hour
+
+    cs.datetime = FrozenClock(start)
+    try:
+        check(cs._invoice_stage_due() is True, "в окне — запускается")
+        check(cs._invoice_stage_due() is False,
+              "и только один раз за сутки: талон занят, второй тик в том же окне пропускает")
+    finally:
+        cs.datetime = original_hour
+
+    # ------------------------------------------------------------------
+    print("\n9. Автомат ставит «Оплачен», но и человек по-прежнему может")
+    # Решение владельца 15.09.2026: статус ставится автоматом, ручная отметка
+    # обязана остаться. Проверяем, что объединение её не сломало.
+    from invoices.storage import mark_invoice_paid, get_invoice_history
+
+    manual = create_invoice(
+        amount=4200, payment_purpose='Аренда', created_by='admin',
+        kind='invoice', due_date=datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+        line_items=[{'store_id': store_id, 'expense_category_id': category['id'],
+                     'amount': 4200}],
+    )
+    approve_invoice(manual['id'], 'admin')
+    check(mark_invoice_paid(manual['id'], 'admin') is not False,
+          "ручная отметка «Оплачен» работает")
+    check(get_invoice_by_id(manual['id'])['status'] == 'paid',
+          "счёт стал оплаченным")
+    authors = {h['changed_by'] for h in get_invoice_history(manual['id'])}
+    check('planfact-sync' not in authors,
+          f"и автор отметки — человек, а не синк: {authors}")
+
     print("\n" + "=" * 60)
     if failures:
         print(f"ПРОВАЛОВ: {len(failures)}")

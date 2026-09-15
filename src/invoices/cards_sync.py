@@ -74,6 +74,19 @@ SCHEDULER_START_DELAY_SECONDS = 300
 # она игнорирует отсрочку.
 FAILED_RETRY_SECONDS = 6 * 3600
 
+# Разноска оплаченных счетов в том же планировщике: раз в сутки, ночью.
+#
+# До 15.09.2026 автомата у неё не было вообще — только кнопка, и хвост копился
+# молча: с 7 по 15 сентября не разнеслось ничего, и заметили это по жалобе.
+# Час, как у карт, ей не подходит: прогон идёт постранично по операциям за 60
+# дней, тогда как карты при пустой очереди наружу не ходят вовсе.
+#
+# Окно в UTC, потому что в UTC живёт контейнер. Салоны в UTC+5 и UTC+7, у них
+# это 00:00–04:00 и 02:00–06:00 — ночь, как и задумано.
+INVOICE_STAGE_SCHEDULE = "planfact_invoices"
+INVOICE_STAGE_INTERVAL_SECONDS = 24 * 3600
+INVOICE_STAGE_WINDOW_UTC = (19, 23)
+
 # Окно поиска своих операций в ПланФакте. Больше окно — дороже запрос, меньше —
 # риск не увидеть свою операцию по старой заявке и завести её второй раз.
 LOOKUP_WINDOW_DAYS = 180
@@ -443,6 +456,29 @@ def run_card_sync_locked(dry_run: bool = False, force: bool = False) -> Dict[str
         release_sync_lock(SYNC_LOCK)
 
 
+def _invoice_stage_due() -> bool:
+    """
+    Пора ли в этом тике прогнать ещё и разноску оплаченных счетов.
+
+    Она дороже разноски карт: постраничный обход операций ПланФакта за 60 дней
+    против нуля запросов при пустой очереди у карт. Поэтому раз в сутки и
+    ночью, а не каждый час.
+
+    Окно задано в UTC явно. Контейнер живёт в UTC, салоны — в UTC+5 и UTC+7:
+    «ночь» для них это 19:00–23:00 UTC, а не полночь по часам сервера. Тик у
+    планировщика часовой, так что в окно попадает несколько тиков, но талон
+    суточный — прогон случится один раз.
+
+    Талон занимаем ТОЛЬКО убедившись, что окно наступило: try_claim_scheduled_run
+    занимает его атомарно и на сутки вперёд, и занять его вне окна значило бы
+    пропустить день.
+    """
+    hour = datetime.now(timezone.utc).hour
+    if not (INVOICE_STAGE_WINDOW_UTC[0] <= hour < INVOICE_STAGE_WINDOW_UTC[1]):
+        return False
+    return try_claim_scheduled_run(INVOICE_STAGE_SCHEDULE, INVOICE_STAGE_INTERVAL_SECONDS)
+
+
 def _scheduler_loop() -> None:
     time.sleep(SCHEDULER_START_DELAY_SECONDS)
     while True:
@@ -451,13 +487,31 @@ def _scheduler_loop() -> None:
             # воркере, и без талона второй повторял бы прогон через полминуты
             # после первого.
             if try_claim_scheduled_run(SYNC_LOCK, SCHEDULER_INTERVAL_SECONDS):
-                result = run_card_sync_locked()
-                if result.get("candidates"):
+                # Импорт внутри функции намеренно: planfact_run импортирует нас
+                # самих, и на уровне модуля это был бы круг.
+                from .planfact_run import run_full_sync
+
+                if _invoice_stage_due():
+                    # Полный прогон: карты и счета под одним локом. force=False —
+                    # у автомата нет причин игнорировать отсрочку по заявкам,
+                    # которые уже падали; её снимает человек кнопкой.
+                    outcome = run_full_sync(dry_run=False, force=False)
+                    result = outcome.get("cards") or {}
+                    invoices = outcome.get("invoices") or {}
                     logger.info(
-                        "Разноска карт: создано %d, уже было %d, с ошибкой %d",
-                        len(result.get("created", [])), len(result.get("exists", [])),
-                        len(result.get("failed", [])),
+                        "Ночной прогон ПланФакта: карты — создано %d, с ошибкой %d; "
+                        "счета — разнесено %d, требует внимания %d",
+                        len(result.get("created", [])), len(result.get("failed", [])),
+                        len(invoices.get("matched", [])), len(invoices.get("unmatched", [])),
                     )
+                else:
+                    result = run_card_sync_locked()
+                    if result.get("candidates"):
+                        logger.info(
+                            "Разноска карт: создано %d, уже было %d, с ошибкой %d",
+                            len(result.get("created", [])), len(result.get("exists", [])),
+                            len(result.get("failed", [])),
+                        )
         except Exception:
             logger.exception("Планировщик разноски карт упал на тике")
         time.sleep(SCHEDULER_INTERVAL_SECONDS)
