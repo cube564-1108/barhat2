@@ -37,6 +37,7 @@
         loadedAt: null,     // когда лента последний раз пришла с сервера
         stale: false,       // последняя попытка не удалась
         loading: false,
+        reloadWanted: false, // человек попросил обновить, пока шёл запрос
         openOrderId: null,
         pushKey: null,      // публичный VAPID; null = пуши не настроены
         pushOn: false       // подписка этого устройства оформлена
@@ -186,20 +187,44 @@
         });
     }
 
-    function loadFeed() {
-        if (state.loading) return Promise.resolve();
+    /**
+     * Загрузить ленту за выбранный день.
+     *
+     * `force` — это действие человека (переключил день, нажал «обновить»), и
+     * потерять его нельзя. Раньше любой такой запрос, попавший в момент уже
+     * идущего (например, автообновления раз в 30 секунд), молча отбрасывался:
+     * дата в шапке переключалась, а лента оставалась старой до следующего
+     * тика. Снаружи это выглядело как зависание на 20-30 секунд —
+     * ровно то, на что пожаловались 16.09.2026.
+     *
+     * Поэтому: фоновый вызов при занятости пропускаем (он и так повторится),
+     * а вызов человека ставим в очередь и выполняем сразу после текущего.
+     */
+    function loadFeed(force) {
+        if (state.loading) {
+            if (force) state.reloadWanted = true;
+            return Promise.resolve();
+        }
         state.loading = true;
         renderBusy();
 
         // День выбирает курьер, по умолчанию — сегодня. Без даты сервер отдаёт
         // свой период, и лента переставала соответствовать выбранному дню
+        var wanted = state.date;
         var url = '/api/courier/orders';
-        if (state.date) {
-            url += '?date_from=' + encodeURIComponent(state.date)
-                 + '&date_to=' + encodeURIComponent(state.date);
+        if (wanted) {
+            url += '?date_from=' + encodeURIComponent(wanted)
+                 + '&date_to=' + encodeURIComponent(wanted);
         }
 
         return apiGet(url).then(function (payload) {
+            // Ответ на прошлый день не должен затирать уже выбранный: на
+            // медленной сети ответы приходят не в том порядке, в каком их
+            // просили, и лента показывала бы вчерашние заказы под сегодняшней
+            // датой
+            var answered = (payload.meta && payload.meta.date_from) || wanted;
+            if (state.date && answered && answered !== state.date) return;
+
             state.orders = payload.data || [];
             state.loadedAt = new Date();
             state.stale = false;
@@ -217,6 +242,11 @@
             state.loading = false;
             render();
             if (state.openOrderId) refreshOpenCard();
+
+            if (state.reloadWanted) {
+                state.reloadWanted = false;
+                return loadFeed(true);
+            }
         });
     }
 
@@ -347,8 +377,12 @@
     function setDate(iso) {
         if (!iso || iso === state.date) return;
         state.date = iso;
-        renderDateBar();
-        loadFeed();
+        // Лента прошлого дня к новой дате отношения не имеет: очищаем сразу,
+        // иначе на секунду-другую под новой датой висят чужие заказы, и
+        // курьер может нажать «Забронировать» не на том дне
+        state.orders = [];
+        render();
+        loadFeed(true);
     }
 
     function openSites() {
@@ -611,7 +645,9 @@
     }
 
     function emptyText() {
-        if (state.loading && !state.loadedAt) return 'Загружаем заказы…';
+        // Пока идёт запрос, «заказов нет» — враньё: лента очищается при смене
+        // дня, и без этой ветки курьер видит пустой день там, где он не пуст
+        if (state.loading) return 'Загружаем заказы…';
         if (!state.city) return 'Вам не назначен город. Обратитесь к управляющему.';
         // Пустой экран из-за собственного фильтра обязан объяснять себя:
         // иначе это выглядит как «заказов нет» и как сбой приложения.
@@ -622,7 +658,7 @@
         if (state.filter === 'free') return 'Свободных заказов сейчас нет.';
         if (state.filter === 'ready') return 'Готовых заказов сейчас нет.';
         if (state.filter === 'mine') return 'Вы пока не взяли ни одного заказа.';
-        return 'Заказов на сегодня и завтра нет.';
+        return 'На этот день заказов нет.';
     }
 
     function formatClock(date) {
@@ -1242,8 +1278,9 @@
         });
 
         el.refresh.addEventListener('click', function () {
-            if (state.loading) return;
-            loadFeed();
+            // Нажатие человека не теряем даже во время фонового обновления:
+            // кнопка, которая иногда «не работает», хуже медленной
+            loadFeed(true);
         });
 
         el.feed.addEventListener('click', function (event) {
