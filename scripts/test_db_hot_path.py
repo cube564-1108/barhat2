@@ -109,6 +109,10 @@ def make_app():
     login_manager.init_app(app)
     app.register_blueprint(auth_bp)
     app.register_blueprint(cashshifts_bp)
+    # Экран курьера считаем здесь же: его открывают с телефона на ходу, и
+    # цена одного открытия — это число обращений к общей медленной базе
+    from couriers.delivery_server import delivery_bp
+    app.register_blueprint(delivery_bp)
     return app
 
 
@@ -182,7 +186,45 @@ def main():
               f"запись открыла базу {write_connects} раз(а) (потолок 3, аудит уходит в очередь)")
     print()
 
-    print("4. Аудит пишется вне запроса, но не теряется")
+    print("4. Экран курьера: сколько обращений к базе стоит лента")
+    # Этот экран открывают с телефона на ходу и переключают на нём дни.
+    # 16.09.2026 один запрос ленты открывал 5 соединений (город курьера,
+    # справочник типов доставки, видимые статусы, сам список, учётка), а на
+    # сетевом /data каждое стоит 90-700 мс — отсюда полсекунды на 13 заказов.
+    try:
+        from couriers import delivery_storage as courier_ds
+        from couriers import storage as courier_storage
+        courier_storage.init_couriers_tables()
+        courier_ds.init_delivery_tables()
+    except Exception as e:                                    # pragma: no cover
+        check(False, f"модуль доставки не поднялся: {e}")
+        courier_ds = None
+
+    if courier_ds is not None:
+        with app.test_client() as client:
+            client.post('/api/auth/login',
+                        json={'username': 'hot_admin', 'password': 'pass'})
+
+            connect_calls.clear()
+            status = client.get('/api/courier/orders?date_from=2026-09-16'
+                                '&date_to=2026-09-16').status_code
+            feed_connects = len(connect_calls)
+            check(status == 200, f"GET /api/courier/orders -> {status}")
+            # 3 = учётка с правами + контекст курьера + сам список.
+            # Было 5: статусы и справочник доставки открывали своё соединение.
+            check(feed_connects <= 3,
+                  f"лента открыла базу {feed_connects} раз(а) (потолок 3)")
+
+            connect_calls.clear()
+            status = client.get('/api/courier/profile').status_code
+            profile_connects = len(connect_calls)
+            check(status == 200, f"GET /api/courier/profile -> {status}")
+            # 2 = учётка + профиль с настройками и датой салона. Было 4.
+            check(profile_connects <= 2,
+                  f"профиль открыл базу {profile_connects} раз(а) (потолок 2)")
+    print()
+
+    print("5. Аудит пишется вне запроса, но не теряется")
     check(flush_audit_log(timeout=5), "очередь аудита разошлась за 5 секунд")
     conn = get_db()
     actions = [r[0] for r in conn.execute(

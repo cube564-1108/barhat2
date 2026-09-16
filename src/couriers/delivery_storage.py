@@ -383,6 +383,68 @@ def init_delivery_tables() -> None:
         """)
 
 
+def courier_context(user_id: int) -> Dict[str, Any]:
+    """
+    Всё, что ручке нужно знать до запроса ленты, — одним соединением.
+
+    Город курьера, его связка с курьером CRM и коды курьерских типов доставки
+    лежат в одной базе, но читались тремя разными вызовами, и каждый открывал
+    своё соединение. На сетевом /data это 90-700 мс за штуку: замер 16.09.2026
+    показал 5 соединений на один запрос экрана при 13 заказах в ответе.
+
+    Коды типов доставки — из справочника, а не константой в коде: какой тип
+    считать курьерским, решает человек в интерфейсе (тот же справочник, что у
+    выплат).
+    """
+    with get_db() as conn:
+        profile = conn.execute(
+            "SELECT city, retailcrm_courier_id, active FROM courier_profiles "
+            " WHERE user_id = ?", (user_id,)).fetchone()
+        codes = [row["code"] for row in conn.execute(
+            "SELECT code FROM delivery_types WHERE counts_as_courier = 1")]
+
+    return {
+        "city": profile["city"] if profile else None,
+        "retailcrm_courier_id": profile["retailcrm_courier_id"] if profile else None,
+        "delivery_codes": codes,
+    }
+
+
+def courier_profile_view(user_id: int) -> Dict[str, Any]:
+    """
+    Профиль для экрана курьера: город, связка с CRM, настройки и «сегодня».
+
+    Одним соединением по той же причине, что и courier_context: раньше это
+    были три вызова подряд (профиль, настройки города, дата салона), то есть
+    три обращения к общей медленной базе на каждое открытие приложения.
+    """
+    with get_db() as conn:
+        profile = conn.execute(
+            "SELECT city, retailcrm_courier_id FROM courier_profiles WHERE user_id = ?",
+            (user_id,)).fetchone()
+        city = profile["city"] if profile else None
+
+        settings = _city_settings_locked(conn, city)
+
+        offset = None
+        if city:
+            row = conn.execute(
+                "SELECT utc_offset FROM courier_sites "
+                " WHERE city = ? AND utc_offset IS NOT NULL LIMIT 1", (city,)).fetchone()
+            offset = row["utc_offset"] if row else None
+
+    moment = datetime.utcnow()
+    if offset is not None:
+        moment = salon_time.utc_to_local(moment, offset)
+
+    return {
+        "city": city,
+        "retailcrm_courier_id": profile["retailcrm_courier_id"] if profile else None,
+        "settings": settings,
+        "today": moment.date().isoformat(),
+    }
+
+
 def city_today(city: Optional[str]) -> str:
     """
     Какое «сегодня» у курьера этого города.
@@ -623,8 +685,26 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
     with_private=True отдаёт контакты и комментарии. Для курьера это включается
     только по его собственной брони, для управляющего — по секции
     courier_dispatch.
+
+    **Справочник статусов читается ТЕМ ЖЕ соединением**, что и сам список.
+    Отдельный вызов visible_status_codes() открывал второе соединение к той же
+    базе, а на сетевом /data каждое стоит 90-700 мс: это была четверть времени
+    ответа ленты (замер 16.09.2026 — 5 соединений на один запрос экрана).
     """
-    codes = visible_status_codes()
+    with get_db() as conn:
+        return _list_orders_locked(conn, city, date_from, date_to, courier_user_id,
+                                   with_private, courier_delivery_codes)
+
+
+def _list_orders_locked(conn, city: Optional[str], date_from: str, date_to: str,
+                        courier_user_id: Optional[int],
+                        with_private: bool,
+                        courier_delivery_codes: Optional[List[str]]
+                        ) -> List[Dict[str, Any]]:
+    """Тело ленты: работает на уже открытом соединении (см. list_orders_for_courier)."""
+    codes: Dict[str, List[str]] = {ROLE_VISIBLE: [], ROLE_READY: []}
+    for row in conn.execute("SELECT status_code, role FROM courier_visible_statuses"):
+        codes.setdefault(row["role"], []).append(row["status_code"])
     visible = codes.get(ROLE_VISIBLE, []) + codes.get(ROLE_READY, [])
     if not visible:
         # Пустой справочник — это не «показать всё», а «настройка не сделана».
@@ -695,8 +775,7 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         ORDER BY o.delivery_date, o.delivery_time_from IS NULL, o.delivery_time_from
     """
 
-    with get_db() as conn:
-        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
 
     result = []
     for row in rows:
