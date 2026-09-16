@@ -260,6 +260,85 @@ with app.test_client() as client:
           all(row["delivery_date"] == salon_today for row in one_day["data"]),
           f"({[row['delivery_date'] for row in one_day['data']][:5]})")
 
+print("\n10. Цена экрана не растёт вместе с числом заказов")
+# 16.09.2026 приложение «стало тупить»: лента брала последнюю бронь заказа
+# подзапросом, а индекса по retailcrm_order_id для всех состояний не было —
+# SQLite сканировал таблицу броней на КАЖДУЮ строку витрины (395 мс против
+# 33 мс). Экран управляющего читал настройки города своим соединением внутри
+# цикла по заказам — 840 мс на 750 строк.
+#
+# Время на маленькой тестовой базе ничего не покажет, поэтому проверяем
+# причину: план запроса и число обращений к базе.
+
+import sqlite3 as _sqlite3  # noqa: E402
+
+with storage.get_db() as conn:
+    indexes = {row["name"] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' "
+        " AND tbl_name = 'delivery_assignments'")}
+check("есть индекс поиска брони по заказу", "idx_assign_order" in indexes,
+      f"({sorted(indexes)})")
+
+with storage.get_db() as conn:
+    plan = " | ".join(row["detail"] for row in conn.execute(f"""
+        EXPLAIN QUERY PLAN
+        SELECT o.retailcrm_order_id FROM courier_orders o
+        LEFT JOIN delivery_assignments a ON a.id = (
+            SELECT MAX(x.id) FROM delivery_assignments x
+             WHERE x.retailcrm_order_id = o.retailcrm_order_id
+               AND x.state IN ({ds.BLOCKING_STATES_SQL}))
+        WHERE o.delivery_date = ?""", (salon_today,)))
+check("бронь ищется по индексу, а не сканом таблицы",
+      "SCAN delivery_assignments" not in plan and "SCAN x" not in plan, f"({plan})")
+
+# Число обращений к базе не должно зависеть от количества заказов: иначе
+# каждый новый день работы делает экран медленнее
+_real_connect = _sqlite3.connect
+opened = []
+
+
+def _counting_connect(*args, **kwargs):
+    opened.append(args[0] if args else kwargs.get("database"))
+    return _real_connect(*args, **kwargs)
+
+
+def _count_calls(fn):
+    del opened[:]
+    fn()
+    return len(opened)
+
+
+# Пояс салона обязателен: без него ветка «никто не взял» не исполняется
+# вовсе, и сторож проверял бы код, который не работает (тот же класс, что
+# «тестовый менеджер без салонов»).
+with storage.get_db() as conn:
+    conn.execute("UPDATE courier_sites SET utc_offset = 7 WHERE code = 'nsk-voskhod-3'")
+
+_sqlite3.connect = _counting_connect
+try:
+    few = _count_calls(lambda: ds.dispatch_overview(
+        "Новосибирск", salon_today, salon_today, ["dostavka-kurerom"]))
+
+    with storage.get_db() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO courier_orders (retailcrm_order_id, order_number, "
+            "  delivery_date, delivery_time_from, site_code, city, status, delivery_code) "
+            "VALUES (?, ?, ?, '18:00', 'nsk-voskhod-3', 'Новосибирск', 'send-to-florist', "
+            "        'dostavka-kurerom')",
+            [(90000 + i, str(90000 + i), salon_today) for i in range(60)])
+
+    many = _count_calls(lambda: ds.dispatch_overview(
+        "Новосибирск", salon_today, salon_today, ["dostavka-kurerom"]))
+finally:
+    _sqlite3.connect = _real_connect
+
+# Допуск в два соединения — это настройки города (одно на город) и запас на
+# будущие справочники. Шестьдесят новых заказов не должны добавлять шестьдесят
+# обращений: именно так экран и стал медленным.
+check("обзор управляющего не открывает соединение на каждый заказ",
+      many <= few + 2, f"(было {few} на пустом дне, стало {many} на +60 заказов)")
+
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} — {failures}")

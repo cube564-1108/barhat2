@@ -197,6 +197,21 @@ def init_delivery_tables() -> None:
             "ON delivery_assignments(retailcrm_order_id) "
             f"WHERE state IN ('{STATE_CLAIMED}', '{STATE_PICKED_UP}')"
         )
+        # Поиск брони по заказу — для ВСЕХ состояний, а не только живых.
+        #
+        # Лента и карточка берут последнюю блокирующую запись по заказу
+        # (доставлен, проблема — тоже), и без этого индекса SQLite сканировал
+        # таблицу броней целиком на КАЖДУЮ строку витрины. Замер 16.09.2026 на
+        # 15 тыс. заказов и 12 тыс. броней: 395 мс против 33 мс с индексом, а
+        # на сетевом /data это секунды — приложение «тупило» ровно поэтому.
+        #
+        # Существующие индексы тут не помогают: idx_assign_one_active
+        # частичный (только claimed/picked_up), idx_assign_courier_state
+        # начинается с курьера, а не с заказа.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assign_order "
+            "ON delivery_assignments(retailcrm_order_id, state)"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_assign_courier_state "
             "ON delivery_assignments(courier_user_id, state)"
@@ -1692,6 +1707,7 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
     totals = {"free": 0, "claimed": 0, "picked_up": 0, "delivered": 0,
               "unclaimed_alert": 0}
     now = datetime.utcnow()
+    settings_cache: Dict[Optional[str], Dict[str, Any]] = {}
 
     for row in rows:
         state = row.get("assignment_state") or "free"
@@ -1711,7 +1727,14 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
         # и его перестали бы читать.
         row["unclaimed_alert"] = False
         if state == "free" and not row["outsourced"] and row.get("utc_offset") is not None:
-            minutes = city_settings(row.get("city"))["unclaimed_alert_minutes"]
+            # Настройки города читаем один раз на город, а не на заказ.
+            # city_settings() открывает СВОЁ соединение, и в цикле по ленте
+            # это давало сотни обращений к общему медленному /data: замер
+            # 16.09.2026 — 840 мс на 750 заказов против 40 мс с кэшем.
+            city_key = row.get("city")
+            if city_key not in settings_cache:
+                settings_cache[city_key] = city_settings(city_key)
+            minutes = settings_cache[city_key]["unclaimed_alert_minutes"]
             alert_at = salon_time.unclaimed_alert_at(
                 row["delivery_date"], row.get("delivery_time_from"),
                 row["utc_offset"], minutes)
