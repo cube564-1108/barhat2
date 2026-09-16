@@ -121,11 +121,7 @@ def get_orders():
         return error_response("Начало периода позже конца")
 
     dispatch = _has_dispatch()
-    # Город курьера и справочник типов доставки — одним соединением: экран
-    # открывают с телефона на ходу, а на сетевом /data каждое обращение к базе
-    # стоит 90-700 мс (разбор 16.09.2026)
-    context = ds.courier_context(int(current_user.id))
-    city = request.args.get("city") if dispatch else context["city"]
+    city = request.args.get("city") if dispatch else _courier_city()
 
     if not dispatch and not city:
         return success_response([], {
@@ -140,7 +136,7 @@ def get_orders():
         date_to=date_to,
         courier_user_id=int(current_user.id),
         with_private=dispatch,
-        courier_delivery_codes=context["delivery_codes"],
+        courier_delivery_codes=_courier_delivery_codes(),
     )
     return success_response(orders, {
         "city": city,
@@ -185,21 +181,19 @@ def get_order(order_id: int):
 @section_required("courier_app", DISPATCH_SECTION)
 def get_profile():
     """Свой профиль: город и связка с курьером CRM (от неё зависит выплата)."""
-    # Город, настройки и «сегодня» по часам салона — одним соединением.
-    # Тремя вызовами это было три обращения к базе на каждое открытие
-    # приложения, а на сетевом /data каждое стоит 90-700 мс.
-    view = ds.courier_profile_view(int(current_user.id))
+    profile = ds.get_courier_profile(int(current_user.id)) or {}
+    city = profile.get("city")
     return success_response({
-        "city": view["city"],
-        "retailcrm_courier_id": view["retailcrm_courier_id"],
-        "settings": view["settings"],
+        "city": city,
+        "retailcrm_courier_id": profile.get("retailcrm_courier_id"),
+        "settings": ds.city_settings(city),
         # «Сегодня» для выбора даты в приложении — по стенным часам салона.
         # Часы телефона курьера тут не годятся: он может ехать с устройством,
         # настроенным на другой пояс, а окно доставки живёт по салону.
-        "today": view["today"],
+        "today": ds.city_today(city),
         # Курьер должен видеть, что связки нет: это его деньги, и молчать об
         # этом до конца месяца нельзя.
-        "warning": None if view["retailcrm_courier_id"] else
+        "warning": None if profile.get("retailcrm_courier_id") else
                    "Ваша учётная запись не связана с курьером в CRM — "
                    "доставки могут не попасть в расчёт оплаты",
     })
