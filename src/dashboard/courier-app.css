@@ -187,6 +187,31 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
 .cd-tab--active { background: var(--bx-wine); color: #fff; font-weight: 500; }
 .cd-tab__count { opacity: .65; margin-left: 4px; font-variant-numeric: tabular-nums; }
 
+/* ===== День доставки ===================================================== */
+
+/* Три цели в строке: стрелки по краям и подпись между ними. Высота как у
+   остальных кнопок — курьер целится на ходу. */
+.cd-datebar {
+    display: flex; align-items: center; gap: 8px;
+    margin: 12px 16px 0;
+}
+.cd-datebtn {
+    flex: 0 0 auto;
+    min-width: var(--cd-touch); min-height: var(--cd-touch);
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 14px;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    background: var(--bx-white);
+    color: var(--bx-wine); font-family: inherit; font-size: 15px; font-weight: 500;
+    cursor: pointer;
+}
+.cd-datebtn--label { flex: 1 1 auto; }
+/* Выбран не сегодняшний день — видно, не читая подпись: иначе пустая лента
+   выглядит как «заказов нет», хотя смотрят вчера */
+.cd-datebtn--off { background: var(--bx-wine); color: #fff; border-color: var(--bx-wine); }
+.cd-datebtn__hint { opacity: .7; font-weight: 400; font-size: 13px; }
+
 /* ===== Салоны забора (множественный выбор) =============================== */
 
 /* Строка постоянной высоты: что бы ни было выбрано, лента не съезжает вниз */
@@ -265,6 +290,9 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     margin: 8px 0 0; font-size: 14px; color: var(--bx-text-2);
     font-variant-numeric: tabular-nums;
 }
+/* Дата доставки выделена: лента показывает выбранный день, но заказ из неё
+   курьер переоткрывает и в «Моих», где дни перемешаны */
+.cd-card__date { color: var(--bx-text); font-weight: 500; }
 .cd-card__countdown { color: var(--bx-wine); font-weight: 600; }
 .cd-card__countdown--late { color: var(--bx-down); }
 .cd-card__flag {
@@ -351,6 +379,20 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     color: var(--bx-down);
     border-radius: var(--bx-r-2xl);
     display: flex; gap: 12px; align-items: flex-start;
+}
+
+/* «Заказ изменили» — новость, а не запрет: цвет «внимания» из спеки, а не
+   красный. Красным в карточке говорит только «не связываться с получателем»,
+   и размывать этот сигнал нельзя. */
+.cd-alert--info {
+    background: #fffbeb; border-color: #fde68a; color: #b45309;
+}
+
+/* Та же новость в ленте, одной строкой: место на превью дорогое */
+.cd-card__changed {
+    margin: 10px 0 0; padding: 8px 10px;
+    background: #fffbeb; border: 1px solid #fde68a; color: #b45309;
+    border-radius: var(--bx-r-lg); font-size: 13px; line-height: 1.35;
 }
 .cd-alert__icon { flex: 0 0 auto; margin-top: 1px; }
 .cd-alert__title { font-size: 17px; font-weight: 700; line-height: 1.25; }

@@ -335,6 +335,28 @@ def init_delivery_tables() -> None:
             )
         """)
 
+        # ====================================================================
+        # Что поменялось в заказе после того, как его увидел курьер.
+        #
+        # Отдельной таблицей, а не колонками витрины: витрину глубокий синк
+        # перезаписывает кусками по дате доставки (DELETE + INSERT), и отметка
+        # об изменении жила бы до ближайшего прогона — то есть полчаса.
+        #
+        # Зачем вообще: дату, время и адрес правят в CRM уже после того, как
+        # заказ разобрали курьеры. Человек, который видел карточку утром,
+        # поедет по старому адресу и к старому времени — узнать об этом он
+        # обязан из ленты, а не от клиента (просьба владельца 16.09.2026).
+        # ====================================================================
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS order_changes (
+                retailcrm_order_id INTEGER PRIMARY KEY,
+                fields TEXT NOT NULL,          -- date / time / address, через запятую
+                changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                seen_at TEXT,
+                seen_by INTEGER
+            )
+        """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS product_images (
                 -- INTEGER, как offer_id в order_items и crm_offers: SQLite не
@@ -344,6 +366,33 @@ def init_delivery_tables() -> None:
                 checked_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+
+
+def city_today(city: Optional[str]) -> str:
+    """
+    Какое «сегодня» у курьера этого города.
+
+    Дата берётся по стенным часам САЛОНА, а не по UTC и не по часам телефона.
+    В 18:31 UTC в Новосибирске уже следующие сутки, и «сегодняшняя» лента по
+    серверной дате показала бы вчерашние заказы. На этом обжигались трижды —
+    в том числе сами сторожа модуля.
+
+    Пояс не задан — отдаём дату UTC: это честнее, чем угадывать, и сразу видно
+    по ленте, что салон не настроен.
+    """
+    offset = None
+    if city:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT utc_offset FROM courier_sites "
+                " WHERE city = ? AND utc_offset IS NOT NULL LIMIT 1",
+                (city,)).fetchone()
+        offset = row["utc_offset"] if row else None
+
+    moment = datetime.utcnow()
+    if offset is not None:
+        moment = salon_time.utc_to_local(moment, offset)
+    return moment.date().isoformat()
 
 
 def city_settings(city: Optional[str]) -> Dict[str, Any]:
@@ -521,6 +570,13 @@ PRIVATE_ORDER_FIELDS = (
 )
 
 
+def _change_titles(fields: Optional[str]) -> List[str]:
+    """«date,address» → ['дата', 'адрес'] — готовыми словами для экрана."""
+    if not fields:
+        return []
+    return [CHANGE_TITLES[key] for key in fields.split(",") if key in CHANGE_TITLES]
+
+
 def _short_address(address: Optional[str]) -> Optional[str]:
     """
     Улица и дом без квартиры, подъезда и кода домофона.
@@ -608,10 +664,14 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         SELECT o.*, s.name AS site_name, s.utc_offset,
                a.id AS assignment_id, a.state AS assignment_state,
                a.courier_user_id AS assignment_user_id, a.expires_at,
-               a.courier_name AS assignment_courier_name
+               a.courier_name AS assignment_courier_name,
+               ch.fields AS changed_fields, ch.changed_at AS changed_at
         FROM courier_orders o
         LEFT JOIN courier_sites s ON s.code = o.site_code
         LEFT JOIN couriers c ON c.id = o.courier_id
+        LEFT JOIN order_changes ch
+               ON ch.retailcrm_order_id = o.retailcrm_order_id
+              AND ch.seen_at IS NULL
         LEFT JOIN delivery_assignments a
                ON a.id = (SELECT MAX(x.id) FROM delivery_assignments x
                            WHERE x.retailcrm_order_id = o.retailcrm_order_id
@@ -643,6 +703,11 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
             # уведомление «ваш заказ собран» адресуется владельцу брони, и без
             # этого поля оно не уходило вовсе — адресат получался пустым.
             "assignment_user_id": row.get("assignment_user_id"),
+            # Что поменялось в заказе после того, как его увидели: дата, время
+            # или адрес. Курьер планирует по ним ходку, и узнавать о правке от
+            # клиента у двери — поздно.
+            "changed_fields": _change_titles(row.get("changed_fields")),
+            "changed_at": row.get("changed_at"),
         })
         # Контакты — только по своей брони либо управляющему.
         if with_private or mine:
@@ -667,9 +732,13 @@ def order_for_courier(order_id: int, city: Optional[str],
             SELECT o.*, s.name AS site_name, s.utc_offset,
                    a.id AS assignment_id, a.state AS assignment_state,
                    a.courier_user_id AS assignment_user_id, a.expires_at,
-                   a.courier_name AS assignment_courier_name
+                   a.courier_name AS assignment_courier_name,
+                   ch.fields AS changed_fields, ch.changed_at AS changed_at
             FROM courier_orders o
             LEFT JOIN courier_sites s ON s.code = o.site_code
+            LEFT JOIN order_changes ch
+                   ON ch.retailcrm_order_id = o.retailcrm_order_id
+                  AND ch.seen_at IS NULL
             LEFT JOIN delivery_assignments a
                    ON a.id = (SELECT MAX(x.id) FROM delivery_assignments x
                                WHERE x.retailcrm_order_id = o.retailcrm_order_id
@@ -705,6 +774,8 @@ def order_for_courier(order_id: int, city: Optional[str],
         "is_free": row.get("assignment_state") is None,
         "expires_at": row.get("expires_at"),
         "assignment_courier_name": row.get("assignment_courier_name"),
+        "changed_fields": _change_titles(row.get("changed_fields")),
+        "changed_at": row.get("changed_at"),
         "items": items,
         # Себестоимость доставки — это оплата курьеру за ходку. В ленте её
         # нет намеренно: список с ценниками превращает свободный захват в
@@ -2090,6 +2161,11 @@ def upsert_orders_from_crm(rows: List[Dict[str, Any]]) -> int:
     updates = ", ".join(f"{field} = excluded.{field}" for field in FEED_ORDER_FIELDS)
 
     with get_db() as conn:
+        # Что было ДО записи — чтобы поймать правку даты, времени или адреса.
+        # Читаем тем же соединением и одним запросом: это тик ленты, а он
+        # ходит на общий медленный диск каждую минуту.
+        before = _watched_snapshot(conn, [row["retailcrm_order_id"] for row in rows])
+
         conn.executemany(
             f"""
             INSERT INTO courier_orders ({", ".join(columns)}, synced_at)
@@ -2118,7 +2194,90 @@ def upsert_orders_from_crm(rows: List[Dict[str, Any]]) -> int:
                       item.get("product_name"), item.get("article"),
                       float(item.get("quantity") or 0)) for item in items],
                 )
+
+        _record_changes(conn, rows, before)
     return len(rows)
+
+
+# Поля, правку которых курьер обязан заметить: по ним он планирует ходку.
+# Состав и комментарии сюда не входят намеренно — их правят часто, и плашка
+# «заказ изменён» на каждой мелочи перестанет читаться.
+WATCHED_ORDER_FIELDS = {
+    "delivery_date": "date",
+    "delivery_time_from": "time",
+    "delivery_time_to": "time",
+    "address_text": "address",
+}
+
+CHANGE_TITLES = {"date": "дата", "time": "время", "address": "адрес"}
+
+
+def _watched_snapshot(conn, order_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Текущие значения отслеживаемых полей по списку заказов — одним запросом."""
+    if not order_ids:
+        return {}
+    fields = ", ".join(WATCHED_ORDER_FIELDS)
+    placeholders = ",".join("?" * len(order_ids))
+    rows = conn.execute(
+        f"SELECT retailcrm_order_id, {fields} FROM courier_orders "
+        f" WHERE retailcrm_order_id IN ({placeholders})", order_ids).fetchall()
+    return {row["retailcrm_order_id"]: dict(row) for row in rows}
+
+
+def _record_changes(conn, rows: List[Dict[str, Any]],
+                    before: Dict[int, Dict[str, Any]]) -> int:
+    """
+    Отметить заказы, у которых поменялись дата, время или адрес.
+
+    Заказ, которого раньше не было в витрине, изменением не считается: он
+    просто появился, и плашка «изменён» на новом заказе — ложная тревога.
+
+    Отметка перезаписывается целиком: курьеру важно, что именно разошлось с
+    тем, что он видел, а не вся история правок — её видно в самой CRM.
+    """
+    marked = 0
+    for row in rows:
+        order_id = row["retailcrm_order_id"]
+        old = before.get(order_id)
+        if not old:
+            continue
+
+        changed = set()
+        for field, title in WATCHED_ORDER_FIELDS.items():
+            if (old.get(field) or None) != (row.get(field) or None):
+                changed.add(title)
+        if not changed:
+            continue
+
+        # Порядок фиксированный, чтобы текст не прыгал между тиками
+        fields = ",".join(t for t in ("date", "time", "address") if t in changed)
+        conn.execute(
+            "INSERT INTO order_changes (retailcrm_order_id, fields, changed_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(retailcrm_order_id) DO UPDATE SET "
+            "  fields = excluded.fields, changed_at = excluded.changed_at, "
+            "  seen_at = NULL, seen_by = NULL",
+            (order_id, fields),
+        )
+        marked += 1
+    return marked
+
+
+def mark_changes_seen(order_id: int, courier_user_id: Optional[int]) -> None:
+    """
+    Курьер открыл карточку — значит увидел, что изменилось.
+
+    Гасим отметку только тому, кто заказ везёт: для остальных правка адреса
+    остаётся новостью, а «просмотрено» от чужого человека ничего не значит.
+    """
+    if not courier_user_id:
+        return
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE order_changes SET seen_at = datetime('now'), seen_by = ? "
+            " WHERE retailcrm_order_id = ? AND seen_at IS NULL",
+            (courier_user_id, order_id),
+        )
 
 
 def apply_orders_from_crm(rows: List[Dict[str, Any]]) -> Dict[str, Any]:

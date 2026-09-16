@@ -31,6 +31,8 @@
         filter: 'free',
         sites: [],          // коды выбранных салонов; пусто = все
         city: null,
+        today: null,        // «сегодня» по стенным часам салона, с сервера
+        date: null,         // какой день показываем; по умолчанию — сегодня
         profileWarning: null,
         loadedAt: null,     // когда лента последний раз пришла с сервера
         stale: false,       // последняя попытка не удалась
@@ -107,6 +109,42 @@
         };
     }
 
+    var MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн',
+                  'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+    /** «2026-09-16» → «16 сен». */
+    function shortDate(iso) {
+        var p = String(iso || '').split('-');
+        if (p.length !== 3) return '';
+        return String(+p[2]) + ' ' + (MONTHS[+p[1] - 1] || '');
+    }
+
+    /**
+     * Дата доставки словами: «Сегодня», «Завтра» или «18 сен».
+     *
+     * Считается от «сегодня» ПО САЛОНУ (state.today приходит с сервера), а не
+     * от часов телефона: курьер может ехать с устройством в другом поясе, а
+     * окно доставки живёт по стенным часам салона.
+     */
+    function dateLabel(iso) {
+        if (!iso) return '';
+        if (state.today) {
+            if (iso === state.today) return 'Сегодня';
+            if (iso === shiftDate(state.today, 1)) return 'Завтра';
+            if (iso === shiftDate(state.today, -1)) return 'Вчера';
+        }
+        return shortDate(iso);
+    }
+
+    /** Сдвиг даты на N дней без часовых поясов: работаем с календарной датой. */
+    function shiftDate(iso, days) {
+        var p = String(iso || '').split('-');
+        if (p.length !== 3) return iso;
+        var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+        d.setUTCDate(d.getUTCDate() + days);
+        return d.toISOString().slice(0, 10);
+    }
+
     function slotText(order) {
         if (order.delivery_time_from && order.delivery_time_to) {
             return order.delivery_time_from + '–' + order.delivery_time_to;
@@ -139,6 +177,10 @@
         return apiGet('/api/courier/profile').then(function (payload) {
             state.city = payload.data.city;
             state.profileWarning = payload.data.warning;
+            // «Сегодня» приходит с сервера по поясу салона, а не берётся из
+            // часов телефона: курьер может ехать с устройством в другом поясе
+            state.today = payload.data.today || null;
+            if (!state.date) state.date = state.today;
         }).catch(function () {
             // Профиль — не повод не показать ленту: без него просто нет подписи
         });
@@ -149,7 +191,15 @@
         state.loading = true;
         renderBusy();
 
-        return apiGet('/api/courier/orders').then(function (payload) {
+        // День выбирает курьер, по умолчанию — сегодня. Без даты сервер отдаёт
+        // свой период, и лента переставала соответствовать выбранному дню
+        var url = '/api/courier/orders';
+        if (state.date) {
+            url += '?date_from=' + encodeURIComponent(state.date)
+                 + '&date_to=' + encodeURIComponent(state.date);
+        }
+
+        return apiGet(url).then(function (payload) {
             state.orders = payload.data || [];
             state.loadedAt = new Date();
             state.stale = false;
@@ -260,6 +310,45 @@
         el.siteBar.hidden = false;
         el.sitesLabel.textContent = sitesLabel(options);
         el.sitesOpen.classList.toggle('cd-sitebtn--on', state.sites.length > 0);
+    }
+
+    // === День доставки ======================================================
+
+    /**
+     * Строка выбора дня: стрелки по соседним дням, подпись — возврат на сегодня.
+     *
+     * Календаря нет намеренно: курьер работает с сегодня и завтра, а нативный
+     * datepicker на дешёвом Android — мелкая цель и лишний диалог на ходу.
+     */
+    function renderDateBar() {
+        if (!el.dateBar) return;
+        var label = dateLabel(state.date);
+        var extra = (state.date && label !== shortDate(state.date))
+            ? ' <span class="cd-datebtn__hint">' + esc(shortDate(state.date)) + '</span>'
+            : '';
+        var isToday = state.date === state.today;
+
+        el.dateBar.innerHTML =
+            '<button type="button" class="cd-datebtn" data-date-shift="-1"'
+            + ' aria-label="Предыдущий день">'
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+            + ' stroke-linecap="round" stroke-linejoin="round" width="20" height="20"'
+            + ' aria-hidden="true"><path d="M15 18l-6-6 6-6"></path></svg></button>'
+            + '<button type="button" class="cd-datebtn cd-datebtn--label'
+            + (isToday ? '' : ' cd-datebtn--off') + '" data-date-today="1">'
+            + esc(label || 'Дата') + extra + '</button>'
+            + '<button type="button" class="cd-datebtn" data-date-shift="1"'
+            + ' aria-label="Следующий день">'
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+            + ' stroke-linecap="round" stroke-linejoin="round" width="20" height="20"'
+            + ' aria-hidden="true"><path d="M9 18l6-6-6-6"></path></svg></button>';
+    }
+
+    function setDate(iso) {
+        if (!iso || iso === state.date) return;
+        state.date = iso;
+        renderDateBar();
+        loadFeed();
     }
 
     function openSites() {
@@ -392,6 +481,21 @@
             : '<span class="cd-badge cd-badge--cooking">Собирают</span>';
     }
 
+    /**
+     * «Изменились время и адрес» — плашка о правках в CRM.
+     *
+     * Дату, время и адрес правят уже после того, как заказ разобрали: курьер,
+     * видевший карточку утром, поедет по старому адресу. Отметка гаснет, когда
+     * он откроет свой заказ (просьба владельца 16.09.2026).
+     */
+    function changeNotice(order) {
+        var fields = order.changed_fields || [];
+        if (!fields.length) return '';
+        var what = fields.length === 1 ? 'Изменилась ' + fields[0]
+            : 'Изменились: ' + fields.join(', ');
+        return '<p class="cd-card__changed">' + esc(what) + '</p>';
+    }
+
     function cardHtml(order) {
         var tick = countdown(order);
         var classes = ['cd-card'];
@@ -412,7 +516,12 @@
             + '<span class="cd-card__arrow">→</span>'
             + esc(order.address_text || 'адрес не указан') + '</p>');
 
-        parts.push('<p class="cd-card__time">' + esc(slotText(order))
+        // Дата доставки в превью обязательна: лента может показывать любой
+        // день, и «14:00» без даты читается как «сегодня» (просьба владельца
+        // 16.09.2026)
+        parts.push('<p class="cd-card__time">'
+            + '<span class="cd-card__date">' + esc(dateLabel(order.delivery_date))
+            + '</span> · ' + esc(slotText(order))
             + (tick ? ' · <span class="cd-card__countdown'
                 + (tick.late ? ' cd-card__countdown--late' : '') + '">'
                 + esc(tick.text) + '</span>' : '')
@@ -423,6 +532,9 @@
         if (order.do_not_contact_recipient) {
             parts.push('<p class="cd-card__flag">Не связываться с получателем</p>');
         }
+
+        var changed = changeNotice(order);
+        if (changed) parts.push(changed);
 
         parts.push('<div class="cd-card__actions">');
         if (order.is_mine) {
@@ -445,6 +557,7 @@
 
     function render() {
         renderBusy();
+        renderDateBar();
 
         el.subtitle.textContent = state.city
             ? state.city + ' · ' + state.orders.length + ' заказов'
@@ -720,6 +833,21 @@
                 + '<div><div class="cd-alert__title">Не связываться с получателем</div>'
                 + '<div class="cd-alert__text">Сюрприз-доставка. Не звоните и не пишите'
                 + ' получателю — все вопросы через заказчика.</div></div></div>');
+        }
+
+        // Что поменялось в заказе после того, как курьер его видел. Стоит до
+        // самих полей: сначала новость, потом данные, которых она касается.
+        if ((order.changed_fields || []).length) {
+            parts.push('<div class="cd-alert cd-alert--info">'
+                + '<span class="cd-alert__icon">'
+                + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+                + ' stroke-linecap="round" stroke-linejoin="round" width="26" height="26">'
+                + '<circle cx="12" cy="12" r="10"></circle>'
+                + '<path d="M12 8v5"></path><path d="M12 16h.01"></path></svg></span>'
+                + '<div><div class="cd-alert__title">Заказ изменили в CRM</div>'
+                + '<div class="cd-alert__text">Обновились: '
+                + esc((order.changed_fields || []).join(', '))
+                + '. Проверьте данные ниже.</div></div></div>');
         }
 
         var tick = countdown(order);
@@ -1088,6 +1216,18 @@
 
         el.sitesOpen.addEventListener('click', openSites);
 
+        el.dateBar.addEventListener('click', function (event) {
+            var shift = event.target.closest('[data-date-shift]');
+            if (shift) {
+                setDate(shiftDate(state.date || state.today,
+                                  +shift.getAttribute('data-date-shift')));
+                return;
+            }
+            // Тап по подписи — возврат на сегодня: это то, что нужно в
+            // девяти случаях из десяти, и искать эту кнопку курьер не должен
+            if (event.target.closest('[data-date-today]')) setDate(state.today);
+        });
+
         el.sites.addEventListener('click', function (event) {
             if (event.target.closest('[data-sites-close]')) { closeSites(); return; }
             if (event.target.closest('[data-site-reset]')) {
@@ -1302,6 +1442,7 @@
         el.feed = document.getElementById('cdFeed');
         el.filters = document.getElementById('cdFilters');
         el.siteBar = document.getElementById('cdSiteBar');
+        el.dateBar = document.getElementById('cdDateBar');
         el.sitesOpen = document.getElementById('cdSitesOpen');
         el.sitesLabel = document.getElementById('cdSitesLabel');
         el.sites = document.getElementById('cdSites');

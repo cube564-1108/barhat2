@@ -221,6 +221,54 @@ check("нет записей — нет работы", stats["records"] == 0 and
 check("курсор на месте", feed.get_cursor() == 900)
 
 
+print("\n7. Правка даты, времени или адреса заметна курьеру")
+# Их меняют в CRM уже после того, как заказ разобрали. Курьер, видевший
+# карточку утром, поедет по старому адресу и к старому времени — узнать об
+# этом он обязан из ленты (просьба владельца 16.09.2026).
+
+first = retailcrm.parse_order(crm_order(300), storage.get_site_cities())
+ds.apply_orders_from_crm([first])
+check("новый заказ изменением не считается",
+      not (ds.order_for_courier(300, city=None) or {}).get("changed_fields"),
+      f"({(ds.order_for_courier(300, city=None) or {}).get('changed_fields')})")
+
+moved = retailcrm.parse_order(crm_order(300), storage.get_site_cities())
+moved["delivery_time_from"] = "19:00"
+moved["address_text"] = "ул. Новая, 1"
+ds.apply_orders_from_crm([moved])
+
+card = ds.order_for_courier(300, city=None) or {}
+check("правка времени и адреса отмечена",
+      set(card.get("changed_fields") or []) == {"время", "адрес"},
+      f"({card.get('changed_fields')})")
+check("известно, когда изменили", bool(card.get("changed_at")), f"({card.get('changed_at')})")
+
+# Повторная запись тех же значений — не новость: иначе плашка висела бы вечно,
+# обновляясь каждым тиком
+ds.apply_orders_from_crm([moved])
+card = ds.order_for_courier(300, city=None) or {}
+check("запись без изменений отметку не обновляет",
+      set(card.get("changed_fields") or []) == {"время", "адрес"},
+      f"({card.get('changed_fields')})")
+
+# Курьер открыл свой заказ — отметка гаснет
+ds.claim_order(300, courier_user_id=77, courier_name="Иван", city=None,
+               allow_any_city=True)
+ds.mark_changes_seen(300, courier_user_id=77)
+card = ds.order_for_courier(300, city=None, courier_user_id=77) or {}
+check("после просмотра владельцем брони плашки нет",
+      not card.get("changed_fields"), f"({card.get('changed_fields')})")
+
+# А новая правка снова поднимает отметку. Отталкиваемся от того, что уже
+# лежит в витрине, и меняем ровно одно поле — иначе «изменилось всё»
+again = dict(moved)
+again["delivery_date"] = "2026-09-11"
+ds.apply_orders_from_crm([again])
+card = ds.order_for_courier(300, city=None, courier_user_id=77) or {}
+check("следующая правка снова видна", card.get("changed_fields") == ["дата"],
+      f"({card.get('changed_fields')})")
+
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} — {failures}")

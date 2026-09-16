@@ -168,6 +168,12 @@ def get_order(order_id: int):
     if card.get("recipient_phone") or card.get("customer_phone"):
         log_action(current_user.username, "courier_order_view",
                    f"Заказ {card.get('order_number') or order_id}")
+
+    # Курьер открыл свой заказ — значит увидел, что в нём поменялось.
+    # Гасим отметку только владельцу брони: для остальных правка адреса
+    # остаётся новостью.
+    if card.get("changed_fields") and card.get("is_mine"):
+        ds.mark_changes_seen(order_id, int(current_user.id))
     return success_response(card)
 
 
@@ -181,6 +187,10 @@ def get_profile():
         "city": city,
         "retailcrm_courier_id": profile.get("retailcrm_courier_id"),
         "settings": ds.city_settings(city),
+        # «Сегодня» для выбора даты в приложении — по стенным часам салона.
+        # Часы телефона курьера тут не годятся: он может ехать с устройством,
+        # настроенным на другой пояс, а окно доставки живёт по салону.
+        "today": ds.city_today(city),
         # Курьер должен видеть, что связки нет: это его деньги, и молчать об
         # этом до конца месяца нельзя.
         "warning": None if profile.get("retailcrm_courier_id") else

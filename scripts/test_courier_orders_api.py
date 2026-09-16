@@ -20,6 +20,7 @@ import socket
 import ssl  # noqa: F401  — импортировать до патча сокета
 import sys
 import tempfile
+from datetime import datetime, timedelta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "src"))
@@ -239,6 +240,25 @@ with app.test_client() as client:
     profile = client.get("/api/courier/profile").get_json()["data"]
     check("со связкой предупреждения нет", profile["warning"] is None, profile)
     check("настройки города отданы", profile["settings"]["max_active_claims"] >= 1)
+
+    # «Сегодня» для выбора дня в приложении считается по стенным часам САЛОНА.
+    # По серверной дате в 18:31 UTC курьер из Новосибирска получил бы вчера,
+    # то есть пустую ленту в начале рабочего дня.
+    salon_today = (datetime.utcnow() + timedelta(hours=7)).date().isoformat()
+    check("сегодня отдаётся по поясу салона", profile["today"] == salon_today,
+          f"({profile['today']} против {salon_today})")
+
+print("\n9. Лента показывает выбранный день")
+
+with app.test_client() as client:
+    login(client, "kurier-nsk")
+    one_day = client.get(f"/api/courier/orders?date_from={salon_today}"
+                         f"&date_to={salon_today}").get_json()
+    check("период уважается", one_day["meta"]["date_from"] == salon_today
+          and one_day["meta"]["date_to"] == salon_today, one_day.get("meta"))
+    check("в выдаче только этот день",
+          all(row["delivery_date"] == salon_today for row in one_day["data"]),
+          f"({[row['delivery_date'] for row in one_day['data']][:5]})")
 
 print()
 if failures:
