@@ -362,6 +362,16 @@
     }
 
     function availabilityBadge(order) {
+        // Доставленный и проблемный заказ на второй круг не идут: работа по
+        // ним закончена или ждёт человека. Показываем это явно — иначе
+        // «Свободен» на доставленном заказе выглядит как приглашение везти
+        // его снова (разбор 16.09.2026).
+        if (order.assignment_state === 'delivered') {
+            return '<span class="cd-badge cd-badge--done">Доставлен</span>';
+        }
+        if (order.assignment_state === 'problem') {
+            return '<span class="cd-badge cd-badge--taken">Проблема</span>';
+        }
         if (order.is_mine) {
             return order.assignment_state === 'picked_up'
                 ? '<span class="cd-badge cd-badge--mine">У меня</span>'
@@ -754,7 +764,16 @@
             '<div class="cd-block__value">' + esc(order.note_text) + '</div>'));
 
         var id = esc(order.retailcrm_order_id);
-        if (order.is_mine && order.assignment_state === 'picked_up') {
+        if (order.assignment_state === 'delivered') {
+            // Работа по заказу закончена. Кнопок здесь нет вовсе: любая из них
+            // означала бы второй круг по уже доставленному заказу
+            parts.push('<p class="cd-note">Заказ доставлен'
+                + (order.assignment_courier_name && !order.is_mine
+                    ? ': ' + esc(order.assignment_courier_name) : '') + '</p>');
+        } else if (order.assignment_state === 'problem') {
+            parts.push('<p class="cd-note">По заказу отмечена проблема. '
+                + 'Дальше решает управляющий.</p>');
+        } else if (order.is_mine && order.assignment_state === 'picked_up') {
             // Доставка — необратимое действие, и оно не должно висеть на одном
             // тапе: телефон в кармане нажимает сам. Отсюда свайп (§3 плана).
             parts.push('<div class="cd-slide" data-slide-order="' + id + '">'

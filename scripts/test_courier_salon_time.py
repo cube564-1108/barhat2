@@ -12,15 +12,21 @@
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "src"))
 
-from couriers.salon_time import (CLAIM_LEAD_MINUTES, TimezoneUnknownError,
+from couriers.salon_time import (CLAIM_LEAD_MINUTES, CLAIM_MIN_HOLD_MINUTES,
+                                 TimezoneUnknownError,
                                  claim_expires_at, claim_warn_at,
                                  crm_time_to_utc, local_to_utc, minutes_until,
                                  parse_local, unclaimed_alert_at, utc_to_local)
+
+# Момент брони задаём явно: срок не может оказаться раньше, чем через
+# CLAIM_MIN_HOLD_MINUTES после неё, и без фиксации «сейчас» проверки формулы
+# от окна доставки зависели бы от часа запуска.
+CLAIMED_AT = datetime(2026, 9, 7, 0, 0)
 
 failures = []
 
@@ -49,8 +55,8 @@ check("«25:70» → конец дня, а не сдвиг суток",
 
 print("\n2. Два пояса: одно и то же «14:00» — разные моменты")
 
-ekb = claim_expires_at("2026-09-08", "14:00", utc_offset=5)
-nsk = claim_expires_at("2026-09-08", "14:00", utc_offset=7)
+ekb = claim_expires_at("2026-09-08", "14:00", utc_offset=5, claimed_at=CLAIMED_AT)
+nsk = claim_expires_at("2026-09-08", "14:00", utc_offset=7, claimed_at=CLAIMED_AT)
 
 check("Екатеринбург: бронь горит в 08:00 UTC (14:00 местных минус час)",
       ekb == datetime(2026, 9, 8, 8, 0), f"получено {ekb}")
@@ -65,7 +71,7 @@ check("запас до окна доставки — час в обоих поя
 print("\n3. Пояс не задан — считаем честный отказ, а не «наверное, Москва»")
 
 try:
-    claim_expires_at("2026-09-08", "14:00", utc_offset=None)
+    claim_expires_at("2026-09-08", "14:00", utc_offset=None, claimed_at=CLAIMED_AT)
     check("отказ при неизвестном поясе", False, "исключения не было")
 except TimezoneUnknownError:
     check("отказ при неизвестном поясе", True)
@@ -105,10 +111,26 @@ check("туда-обратно без потерь",
 
 print("\n8. Заказ без времени: бронь не сгорает с утра")
 
-no_time = claim_expires_at("2026-09-08", None, utc_offset=7)
+no_time = claim_expires_at("2026-09-08", None, utc_offset=7, claimed_at=CLAIMED_AT)
 check("сгорание считается от конца дня салона",
       no_time == datetime(2026, 9, 8, 15, 59), f"получено {no_time}")
 check("это позже, чем у заказа на 14:00", no_time > nsk)
+
+print("\n9. Бронь заказа «на сейчас» держится хотя бы полчаса")
+# Срок от окна доставки у такого заказа уже в прошлом, и бронь снимал первый
+# же тик ленты: курьер видел заказ снова свободным через минуту (16.09.2026).
+
+late_claim = datetime(2026, 9, 8, 13, 30)          # до окна 14:00 меньше часа
+soon = claim_expires_at("2026-09-08", "14:00", utc_offset=0, claimed_at=late_claim)
+check("бронь живёт не меньше получаса с момента взятия",
+      soon == late_claim + timedelta(minutes=CLAIM_MIN_HOLD_MINUTES),
+      f"получено {soon}")
+check("и это позже самого момента брони", soon > late_claim)
+
+early_claim = datetime(2026, 9, 8, 6, 0)           # до окна ещё далеко
+normal = claim_expires_at("2026-09-08", "14:00", utc_offset=0, claimed_at=early_claim)
+check("у заказа на потом срок считается от окна доставки, как раньше",
+      normal == datetime(2026, 9, 8, 13, 0), f"получено {normal}")
 
 
 print()

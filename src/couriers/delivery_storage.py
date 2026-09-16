@@ -39,6 +39,22 @@ STATE_PROBLEM = "problem"        # недозвон, перенос, отказ
 # Живые состояния: пока бронь в одном из них, заказ другим курьерам не отдаётся.
 ACTIVE_STATES = (STATE_CLAIMED, STATE_PICKED_UP)
 
+# Состояния, в которых работа по заказу ЗАКОНЧЕНА, но заказ всё равно не
+# возвращается в общий список.
+#
+# 16.09.2026: доставленный заказ снова становился свободным и уходил на второй
+# круг «бронь → забор → доставка». Причина — проверки смотрели только на живые
+# состояния, а доставка из них выходит. То же и с проблемой: букет физически у
+# курьера, и пока человек не разобрался, отдавать заказ второму нельзя.
+TERMINAL_STATES = (STATE_DELIVERED, STATE_PROBLEM)
+
+# Всё, что запрещает новую бронь. В общий список заказ возвращают только
+# released и expired — то есть явное решение (отказ, снятие) или сгоревший срок.
+BLOCKING_STATES = ACTIVE_STATES + TERMINAL_STATES
+
+# Те же состояния литералами для запросов, которые собираются f-строкой.
+BLOCKING_STATES_SQL = ", ".join(f"'{state}'" for state in BLOCKING_STATES)
+
 # --- причины снятия брони --------------------------------------------------
 RELEASE_SELF = "self"            # курьер отказался сам
 RELEASE_EXPIRED = "expired"      # сгорела по времени
@@ -597,8 +613,9 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         LEFT JOIN courier_sites s ON s.code = o.site_code
         LEFT JOIN couriers c ON c.id = o.courier_id
         LEFT JOIN delivery_assignments a
-               ON a.retailcrm_order_id = o.retailcrm_order_id
-              AND a.state IN ('{STATE_CLAIMED}', '{STATE_PICKED_UP}')
+               ON a.id = (SELECT MAX(x.id) FROM delivery_assignments x
+                           WHERE x.retailcrm_order_id = o.retailcrm_order_id
+                             AND x.state IN ({BLOCKING_STATES_SQL}))
         WHERE {' AND '.join(conditions)}
         ORDER BY o.delivery_date, o.delivery_time_from IS NULL, o.delivery_time_from
     """
@@ -646,7 +663,7 @@ def order_for_courier(order_id: int, city: Optional[str],
     прямой ссылке, и «фильтр стоит в ленте» не защищает ничего.
     """
     with get_db() as conn:
-        row = conn.execute("""
+        row = conn.execute(f"""
             SELECT o.*, s.name AS site_name, s.utc_offset,
                    a.id AS assignment_id, a.state AS assignment_state,
                    a.courier_user_id AS assignment_user_id, a.expires_at,
@@ -654,10 +671,11 @@ def order_for_courier(order_id: int, city: Optional[str],
             FROM courier_orders o
             LEFT JOIN courier_sites s ON s.code = o.site_code
             LEFT JOIN delivery_assignments a
-                   ON a.retailcrm_order_id = o.retailcrm_order_id
-                  AND a.state IN (?, ?)
+                   ON a.id = (SELECT MAX(x.id) FROM delivery_assignments x
+                               WHERE x.retailcrm_order_id = o.retailcrm_order_id
+                                 AND x.state IN ({BLOCKING_STATES_SQL}))
             WHERE o.retailcrm_order_id = ?
-        """, (STATE_CLAIMED, STATE_PICKED_UP, order_id)).fetchone()
+        """, (order_id,)).fetchone()
         if not row:
             return None
         row = dict(row)
@@ -729,6 +747,26 @@ def _assignment_row(conn, order_id: int):
     ).fetchone()
 
 
+def _blocking_assignment_row(conn, order_id: int):
+    """
+    Запись, из-за которой заказ нельзя забронировать заново.
+
+    Шире живой брони: сюда входят доставленный заказ и заказ с отмеченной
+    проблемой. Иначе заказ уходит на второй круг — 16.09.2026 доставленный
+    заказ снова появлялся свободным в ленте.
+
+    Берём последнюю: у заказа бывает история (взял → отказался → взял другой),
+    и человеку важно последнее состояние, а не первое.
+    """
+    placeholders = ",".join("?" * len(BLOCKING_STATES))
+    return conn.execute(
+        f"SELECT * FROM delivery_assignments "
+        f" WHERE retailcrm_order_id = ? AND state IN ({placeholders}) "
+        f" ORDER BY id DESC LIMIT 1",
+        (order_id, *BLOCKING_STATES),
+    ).fetchone()
+
+
 def claim_order(order_id: int, courier_user_id: int, courier_name: str,
                 city: Optional[str], allow_any_city: bool = False,
                 courier_crm_id: Optional[int] = None,
@@ -779,11 +817,22 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
 
         _check_horizon(order, settings["claim_horizon_days"], now)
 
-        taken = _assignment_row(conn, order_id)
+        taken = _blocking_assignment_row(conn, order_id)
         if taken is not None:
-            if taken["courier_user_id"] == courier_user_id:
-                raise ClaimError("Этот заказ уже ваш", "already_mine")
             who = taken["courier_name"] or "другой курьер"
+            mine = taken["courier_user_id"] == courier_user_id
+            if taken["state"] == STATE_DELIVERED:
+                raise ClaimError(
+                    "Этот заказ уже доставлен" if mine
+                    else f"Заказ уже доставил {who}", "delivered")
+            if taken["state"] == STATE_PROBLEM:
+                # Букет физически у курьера, и пока человек не разобрался,
+                # отдавать заказ второму нельзя
+                raise ClaimError(
+                    "По заказу отмечена проблема — обратитесь к управляющему",
+                    "problem")
+            if mine:
+                raise ClaimError("Этот заказ уже ваш", "already_mine")
             raise ClaimError(f"Заказ уже забрал {who}", "taken")
 
         limit = settings["max_active_claims"]
@@ -797,8 +846,11 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
                 f"У вас уже {active} заказ(а) в работе — это предел для города. "
                 f"Завершите или отпустите один из них.", "limit")
 
+        # claimed_at — чтобы бронь заказа «на сейчас» не сгорела в ту же
+        # минуту: срок от окна доставки у него уже в прошлом
         expires_at = salon_time.claim_expires_at(
-            order["delivery_date"], order["delivery_time_from"], order["utc_offset"]
+            order["delivery_date"], order["delivery_time_from"], order["utc_offset"],
+            claimed_at=now,
         ) if order["utc_offset"] is not None else None
 
         cursor = conn.execute(

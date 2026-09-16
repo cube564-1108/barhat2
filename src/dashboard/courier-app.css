@@ -287,6 +287,9 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
 .cd-badge--free    { background: rgba(228, 194, 221, 0.4); color: var(--bx-wine); }
 .cd-badge--taken   { background: rgba(0, 0, 0, 0.05); color: var(--bx-text-2); }
 .cd-badge--mine    { background: var(--bx-wine); color: #fff; }
+/* Доставлен — работа по заказу закончена. Цвет «успеха» из палитры спеки,
+   тот же, что у готовности: своих оттенков здесь не заводим. */
+.cd-badge--done    { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
 .cd-badge--ready   { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
 .cd-badge--cooking { background: #fffbeb; color: #b45309; border-color: #fde68a; }
 

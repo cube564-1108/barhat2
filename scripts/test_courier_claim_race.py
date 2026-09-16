@@ -470,6 +470,112 @@ check("курьер не видит разбор броней управляющ
 
 
 # ============================================================================
+print("\n8. Доставленный заказ не уходит на второй круг")
+# ============================================================================
+# 16.09.2026: курьер отмечал доставку, и заказ снова появлялся свободным —
+# бронь проверялась только по живым состояниям, а доставка из них выходит.
+
+with cs.get_db() as conn:
+    for code, name in (("send-to-delivery", "Передан курьеру"),
+                       ("order-delivery-complete", "Заказ доставлен"),
+                       ("order-delivery-fail", "Заказ НЕ доставлен")):
+        conn.execute("INSERT OR REPLACE INTO order_statuses (code, name) VALUES (?, ?)",
+                     (code, name))
+
+ds.set_action_status(ds.ACTION_PICKUP, "send-to-delivery", "admin")
+ds.set_action_status(ds.ACTION_DELIVER, "order-delivery-complete", "admin")
+
+add_order(9101, status="order-complete")
+ds.claim_order(9101, courier_user_id=41, courier_name="Иван", city="Новосибирск")
+ds.advance_assignment(9101, courier_user_id=41, action=ds.ACTION_PICKUP, username="ivan")
+ds.advance_assignment(9101, courier_user_id=41, action=ds.ACTION_DELIVER, username="ivan")
+
+feed = ds.list_orders_for_courier("Новосибирск", TODAY.isoformat(), TODAY.isoformat(),
+                                  courier_delivery_codes=["dostavka-kurerom"])
+delivered = [row for row in feed if row["retailcrm_order_id"] == 9101]
+check("доставленный заказ не свободен",
+      delivered and delivered[0]["is_free"] is False, f"({delivered[:1]})")
+check("состояние видно на экране",
+      delivered and delivered[0]["assignment_state"] == "delivered",
+      f"({delivered[:1]})")
+
+try:
+    ds.claim_order(9101, courier_user_id=42, courier_name="Пётр", city="Новосибирск")
+    check("доставленный заказ нельзя забронировать заново", False, "(прошло)")
+except ds.ClaimError as e:
+    check("доставленный заказ нельзя забронировать заново", e.code == "delivered",
+          f"({e.code})")
+
+# Проблема — то же самое: букет физически у курьера, пока человек не разобрался
+add_order(9102, status="order-complete")
+ds.claim_order(9102, courier_user_id=41, courier_name="Иван", city="Новосибирск")
+ds.advance_assignment(9102, courier_user_id=41, action=ds.ACTION_PICKUP, username="ivan")
+ds.set_action_status(ds.ACTION_NO_ANSWER, "order-delivery-fail", "admin")
+ds.advance_assignment(9102, courier_user_id=41, action=ds.ACTION_NO_ANSWER,
+                      username="ivan", problem_note="не берёт трубку")
+try:
+    ds.claim_order(9102, courier_user_id=42, courier_name="Пётр", city="Новосибирск")
+    check("заказ с проблемой не уходит другому курьеру", False, "(прошло)")
+except ds.ClaimError as e:
+    check("заказ с проблемой не уходит другому курьеру", e.code == "problem",
+          f"({e.code})")
+
+# А снятая бронь заказ возвращает — иначе отказ курьера хоронил бы заказ
+add_order(9103, status="order-complete")
+ds.claim_order(9103, courier_user_id=41, courier_name="Иван", city="Новосибирск")
+ds.release_order(9103, courier_user_id=41, reason=ds.RELEASE_SELF)
+ds.claim_order(9103, courier_user_id=42, courier_name="Пётр", city="Новосибирск")
+with cs.get_db() as conn:
+    who = conn.execute(
+        "SELECT courier_user_id FROM delivery_assignments "
+        " WHERE retailcrm_order_id = 9103 AND state = 'claimed'").fetchone()
+check("отпущенный заказ берёт следующий курьер", who and who["courier_user_id"] == 42,
+      f"({dict(who) if who else None})")
+
+
+# ============================================================================
+print("\n9. Бронь заказа «на сейчас» не сгорает в ту же минуту")
+# ============================================================================
+# Срок брони считается от окна доставки минус час. У заказа, до которого
+# меньше часа, этот момент уже в прошлом — и первый же тик ленты снимал бронь
+# как просроченную. Курьер жал «Забронировать» и через минуту видел заказ
+# снова свободным.
+
+salon_now = datetime.utcnow() + timedelta(hours=SALON_UTC_OFFSET)
+soon = (salon_now + timedelta(minutes=20)).strftime("%H:%M")
+with cs.get_db() as conn:
+    conn.execute(
+        "INSERT OR REPLACE INTO courier_orders "
+        "  (retailcrm_order_id, order_number, delivery_date, delivery_time_from, "
+        "   site_code, city, status, delivery_code) "
+        "VALUES (9110, '9110', ?, ?, 'site-a', 'Новосибирск', 'order-complete', "
+        "        'dostavka-kurerom')",
+        (salon_now.date().isoformat(), soon))
+
+ds.claim_order(9110, courier_user_id=43, courier_name="Сергей", city="Новосибирск")
+dropped = ds.expire_stale_claims()
+check("бронь «на сейчас» переживает первый же тик",
+      9110 not in {row["retailcrm_order_id"] for row in dropped},
+      f"({[row['retailcrm_order_id'] for row in dropped]})")
+
+with cs.get_db() as conn:
+    alive = conn.execute(
+        "SELECT state, expires_at FROM delivery_assignments "
+        " WHERE retailcrm_order_id = 9110").fetchone()
+check("бронь осталась живой", alive["state"] == "claimed", f"({dict(alive)})")
+check("срок отодвинут от момента брони, а не от окна доставки",
+      alive["expires_at"] > datetime.utcnow().isoformat(sep=" ", timespec="seconds"),
+      f"({alive['expires_at']})")
+
+feed = ds.list_orders_for_courier("Новосибирск", salon_now.date().isoformat(),
+                                  salon_now.date().isoformat(),
+                                  courier_delivery_codes=["dostavka-kurerom"])
+taken = [row for row in feed if row["retailcrm_order_id"] == 9110]
+check("и заказ не показывается свободным",
+      taken and taken[0]["is_free"] is False, f"({taken[:1]})")
+
+
+# ============================================================================
 print()
 if failures:
     print(f"=== ПРОВАЛОВ: {len(failures)} ===")

@@ -35,6 +35,17 @@ CLAIM_LEAD_MINUTES = 60
 # За сколько минут до сгорания курьеру уходит пуш «подтвердите, что едете».
 CLAIM_WARN_MINUTES = 15
 
+# Сколько бронь живёт минимум — с момента, когда её взяли.
+#
+# Без этого заказ, до окна доставки которого осталось меньше часа, сгорал
+# мгновенно: срок считается от окна, значит уже был в прошлом, и первый же тик
+# ленты снимал бронь. Курьер жал «Забронировать», а через минуту видел заказ
+# снова свободным (разбор 16.09.2026).
+#
+# Заказ «на сейчас» берут осознанно и везут сразу, поэтому отбирать его у
+# курьера раньше, чем он успел дойти до салона, нельзя.
+CLAIM_MIN_HOLD_MINUTES = 30
+
 
 class TimezoneUnknownError(Exception):
     """У салона не задан часовой пояс — считать сроки по нему нельзя."""
@@ -91,7 +102,9 @@ def crm_time_to_utc(crm_stamp: str) -> datetime:
 
 def claim_expires_at(delivery_date: str, time_from: Optional[str],
                      utc_offset: Optional[int],
-                     lead_minutes: int = CLAIM_LEAD_MINUTES) -> datetime:
+                     lead_minutes: int = CLAIM_LEAD_MINUTES,
+                     claimed_at: Optional[datetime] = None,
+                     min_hold_minutes: int = CLAIM_MIN_HOLD_MINUTES) -> datetime:
     """
     Когда сгорит бронь на этот заказ — в UTC.
 
@@ -99,9 +112,17 @@ def claim_expires_at(delivery_date: str, time_from: Optional[str],
     больше 60 минут — держим». Заказ без разобранного времени получает конец
     дня салона (см. parse_local): такой заказ помечается в списке отдельно,
     но не сгорает раньше времени.
+
+    Но не раньше, чем через `min_hold_minutes` после самой брони. Срок от окна
+    у заказа «на сейчас» уже в прошлом, и без этой поправки бронь снимал первый
+    же тик ленты — заказ возвращался в общий список через минуту после того,
+    как его взяли (разбор 16.09.2026).
     """
     local_start = parse_local(delivery_date, time_from)
-    return local_to_utc(local_start, utc_offset) - timedelta(minutes=lead_minutes)
+    from_window = local_to_utc(local_start, utc_offset) - timedelta(minutes=lead_minutes)
+
+    floor = (claimed_at or datetime.utcnow()) + timedelta(minutes=min_hold_minutes)
+    return max(from_window, floor)
 
 
 def claim_warn_at(expires_at: datetime,
