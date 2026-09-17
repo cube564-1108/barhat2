@@ -63,7 +63,8 @@
         loading: false,
         openOrderId: null,
         pushKey: null,      // публичный VAPID; null = пуши не настроены
-        pushOn: false       // подписка этого устройства оформлена
+        pushOn: false,      // подписка этого устройства оформлена
+        pushBlock: null     // почему уведомлений быть не может (см. pushBlockReason)
     };
 
     var el = {};
@@ -1357,6 +1358,7 @@
         });
 
         el.pushBtn.addEventListener('click', function () {
+            if (state.pushBlock) { explainPushBlock(); return; }
             if (state.pushOn) unsubscribePush();
             else subscribePush();
         });
@@ -1472,6 +1474,86 @@
             && 'Notification' in window;
     }
 
+    function isIOS() {
+        var ua = navigator.userAgent || '';
+        // iPad с iPadOS 13+ представляется маком, отличается только тем, что
+        // у него есть тач
+        return /iPad|iPhone|iPod/.test(ua)
+            || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    }
+
+    function isStandalone() {
+        if (window.navigator.standalone === true) return true;   // iOS
+        try {
+            return window.matchMedia('(display-mode: standalone)').matches;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * ПОЧЕМУ уведомлений не будет — или null, если всё в порядке.
+     *
+     * Нужно ради iPhone. Apple отдаёт Push API ТОЛЬКО приложению, добавленному
+     * на экран «Домой», и только с iOS 16.4: в обычном Safari `PushManager` и
+     * `Notification` просто отсутствуют. То есть проверка поддержки честно
+     * отвечает «нельзя», и раньше на этом всё и заканчивалось — кнопка
+     * оставалась спрятанной, а приложение молчало.
+     *
+     * Молчание здесь — худший из ответов. Курьер видит, что у Android-коллеги
+     * кнопка есть, а у него нет, и делает единственный доступный вывод:
+     * приложение сломано. Инструкция «добавьте на Домой» превращает тупик в
+     * два действия (проверено на iPhone владельца 17.09.2026).
+     */
+    function pushBlockReason() {
+        if (pushSupported()) return null;
+        if (!isIOS()) return 'browser';
+        // На «Домой» добавлено, а API всё равно нет — система старее 16.4
+        return isStandalone() ? 'ios-version' : 'ios-home-screen';
+    }
+
+    var PUSH_BLOCK_TEXT = {
+        'ios-home-screen': {
+            title: 'Уведомления на iPhone',
+            message: 'На iPhone уведомления приходят только приложению, '
+                + 'добавленному на экран «Домой». Из вкладки Safari они не работают '
+                + '— это ограничение Apple, а не сбой.\n\n'
+                + '1. Откройте «Доставку» именно в Safari — в Chrome на iPhone '
+                + 'добавить на «Домой» нельзя.\n'
+                + '2. Нажмите «Поделиться» — квадрат со стрелкой вверх.\n'
+                + '3. Выберите «На экран „Домой“».\n'
+                + '4. Запустите «Доставку» с рабочего стола — кнопка появится здесь же.\n\n'
+                + 'Нужен iOS 16.4 или новее.'
+        },
+        'ios-version': {
+            title: 'Нужна версия iOS новее',
+            message: 'Уведомления на iPhone работают начиная с iOS 16.4, '
+                + 'на этом телефоне версия старее.\n\n'
+                + 'Обновиться: Настройки → Основные → Обновление ПО. '
+                + 'Если обновления нет, заказы придётся смотреть, открывая приложение — '
+                + 'лента обновляется сама, пока оно открыто.'
+        },
+        'browser': {
+            title: 'Браузер не умеет уведомления',
+            message: 'Этот браузер не поддерживает уведомления о новых заказах. '
+                + 'Откройте «Доставку» в Chrome и добавьте её на главный экран — '
+                + 'кнопка появится здесь же.'
+        }
+    };
+
+    /** Объяснение вместо спрятанной кнопки. */
+    function explainPushBlock() {
+        var text = PUSH_BLOCK_TEXT[state.pushBlock];
+        if (!text) return;
+        // Одна кнопка: это объяснение, а не выбор. cancelText: null убирает
+        // вторую (см. showDialog в ui-dialog.js).
+        window.BarhatUI.confirm(text.message, {
+            title: text.title,
+            confirmText: 'Понятно',
+            cancelText: null
+        });
+    }
+
     /**
      * Показать кнопку включения уведомлений — или объяснить, почему нельзя.
      *
@@ -1479,7 +1561,13 @@
      * Chrome его блокирует, а курьер не понимает, почему звука нет.
      */
     function setupPush() {
-        if (!pushSupported()) return;
+        state.pushBlock = pushBlockReason();
+        if (state.pushBlock) {
+            // Кнопка ВИДНА и приглушена, а не спрятана: спрятанная кнопка
+            // ничего не объясняет, а эта по тапу говорит, что делать
+            renderPushButton();
+            return;
+        }
 
         apiGet('/api/courier/push/key').then(function (payload) {
             if (!payload.data.configured) return;   // ключи не заведены
@@ -1531,6 +1619,19 @@
         if (!button) return;
         button.hidden = false;
         button.disabled = false;
+
+        // Уведомлений на этом устройстве быть не может. Кнопка остаётся
+        // живой — по тапу она объясняет причину и что делать.
+        if (state.pushBlock) {
+            button.innerHTML = bellIcon(false);
+            button.classList.remove('cd-header__btn--on');
+            button.classList.add('cd-header__btn--off');
+            button.setAttribute('aria-pressed', 'false');
+            button.setAttribute('title', 'Почему нет уведомлений');
+            return;
+        }
+
+        button.classList.remove('cd-header__btn--off');
         button.innerHTML = bellIcon(state.pushOn);
         button.classList.toggle('cd-header__btn--on', state.pushOn);
         button.setAttribute('aria-pressed', state.pushOn ? 'true' : 'false');
