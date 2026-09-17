@@ -169,9 +169,15 @@ login_html = open(os.path.join(REPO, "src", "dashboard", "login.html"),
 check("форма входа читает next", "nextTarget()" in login_html
       and "window.location.href = nextTarget();" in login_html,
       "(иначе параметр отдаётся впустую)")
+# Проверку «свой ли это адрес» держит отдельный сторож, и держит по поведению:
+# node scripts/test_login_next.js. Здесь — только то, что она вообще есть и что
+# сравнивается origin, а не начало строки. Проверка по началу строки выглядит
+# достаточной и обходится одним невидимым символом: парсер адресов выбрасывает
+# табы и переводы строк, поэтому «/<таб>/чужой-домен» проходил её как свой путь
+# (security-review 17.09.2026).
 check("чужой домен через next не пускается",
-      "raw.startsWith('//')" in login_html and "raw.startsWith('/\\\\')" in login_html,
-      "(//site и /\\site браузер читает как чужой адрес)")
+      "url.origin !== window.location.origin" in login_html,
+      "(сравнивать origin после разбора, а не начало строки; см. test_login_next.js)")
 
 courier_js = open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
                   encoding="utf-8").read()
