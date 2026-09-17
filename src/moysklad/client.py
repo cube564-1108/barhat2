@@ -35,6 +35,25 @@ def build_entity_href(entity: str, entity_id: str) -> str:
     return f"{MOYSKLAD_API_URL.rstrip('/')}/entity/{entity}/{entity_id}"
 
 
+def _parse_error(response) -> Dict[str, Any]:
+    """
+    Причина отказа так, как её назвал МойСклад: {"text", "code", "status"}.
+
+    Код сохраняется вместе с текстом — по нему ищут в документации и по нему
+    же вызывающий код отличает поправимое от беспомощного (3006 «нарушено
+    ограничение уникальности» значит «почини номер», а не «повтори позже»).
+    """
+    error = {"text": None, "code": None, "status": response.status_code}
+    try:
+        payload = response.json()
+        first = (payload.get("errors") or [{}])[0]
+        error["text"] = first.get("error")
+        error["code"] = first.get("code")
+    except (ValueError, AttributeError, IndexError):
+        error["text"] = (response.text or "")[:200] or None
+    return error
+
+
 class MoySkladClient:
     """Клиент для работы с МойСклад API remap 1.2"""
 
@@ -71,6 +90,10 @@ class MoySkladClient:
             )
 
         self.api_url = MOYSKLAD_API_URL
+        # Причина последнего отказа, как её назвал МойСклад: {"text", "code"}.
+        # Без неё наверх уходит безликое «не приняли», а лога у контейнера на
+        # нашем тарифе Amvera нет — то есть объяснения нет нигде (см. CLAUDE.md).
+        self.last_error = None
         self.session = requests.Session()
         # Отключаем прокси
         self.session.trust_env = False
@@ -132,6 +155,10 @@ class MoySkladClient:
         if json_data:
             request_kwargs['json'] = json_data
 
+        # Сбрасываем в начале КАЖДОГО запроса: иначе чужая ошибка приклеится
+        # к следующей записи в том же прогоне
+        self.last_error = None
+
         max_retries_429 = 3
         for attempt in range(max_retries_429 + 1):
             try:
@@ -144,6 +171,7 @@ class MoySkladClient:
                 logger.error(f"Ошибка запроса {method} {path}: {e}")
                 if hasattr(e, 'response') and e.response is not None:
                     logger.error(f"Response: {e.response.text}")
+                    self.last_error = _parse_error(e.response)
                     if e.response.status_code == 429 and attempt < max_retries_429:
                         logger.warning(f"Rate limited, retrying after 1s... (попытка {attempt + 1}/{max_retries_429})")
                         import time

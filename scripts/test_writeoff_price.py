@@ -467,6 +467,40 @@ check('pos-3' not in str(paths), 'позиция, где цена уже был�
 check('pos-a' not in str(paths), 'позиция чужого документа не тронута', str(paths))
 check(body.get('documents_updated') == 3, 'починены все три наших документа', str(body))
 
+print('   -- отказ МойСклада объясняется, а не прячется')
+
+
+class RejectingClient(BackfillClient):
+    """МойСклад отвечает 412 «задвоен номер» — реальный отказ 17.09.2026."""
+
+    def request(self, method, path, params=None, json_data=None, **kwargs):
+        if method == 'PUT' and '/positions/' in path:
+            self.last_error = {'text': "Ошибка сохранения объекта: нарушено "
+                                       "ограничение уникальности параметра 'name'",
+                               'code': 3006, 'status': 412}
+            return None
+        return super().request(method, path, params=params, json_data=json_data, **kwargs)
+
+
+rejecting = RejectingClient()
+writeoffs_server.get_client = lambda: rejecting
+resp = admin.post('/api/writeoffs/admin/backfill-prices',
+                  json={'since': '2026-08-01', 'dry_run': False}, headers=AJAX)
+body = resp.get_json() or {}
+first_error = (body.get('errors') or [{}])[0].get('error', '')
+check('задвоен номер' in first_error,
+      'причина отказа названа словами, а не «МойСклад отклонил правку»', first_error)
+check('Переименуйте' in first_error,
+      'сказано, что делать человеку', first_error)
+check(len(body.get('errors') or []) == 3, 'ошибка записана по каждой позиции', str(body.get('errors')))
+
+unknown = writeoffs_server._explain_moysklad_error(
+    {'text': 'Что-то пошло не так', 'code': 1234, 'status': 400})
+check('Что-то пошло не так' in unknown and '1234' in unknown,
+      'незнакомая ошибка отдаётся как есть, с кодом', unknown)
+check('не ответил' in writeoffs_server._explain_moysklad_error(None),
+      'молчание МойСклада отличается от отказа')
+
 print('   -- ограничения и доступ')
 backfill = BackfillClient()
 writeoffs_server.get_client = lambda: backfill
