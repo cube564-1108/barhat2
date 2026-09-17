@@ -488,20 +488,47 @@ def backfill_prices():
     except ValueError as e:
         return jsonify({"error": f"МойСклад не настроен: {e}"}), 500
 
-    # limit=50: при большем МойСклад не разворачивает positions.rows
-    response = client.get("/entity/loss", params={
-        "filter": f"moment>={since} 00:00:00;sum=0",
-        "expand": "positions.assortment,store",
-        "order": "moment,asc",
-        "limit": 50,
-    })
-    if response is None:
-        return jsonify({"error": "МойСклад не ответил на запрос списаний"}), 502
-
-    ours = [doc for doc in response.get("rows", [])
-            if (doc.get("description") or "").startswith("Списание #")]
-
     started = time.monotonic()
+
+    # Отбор по ПОЗИЦИЯМ, а не по сумме документа. Фильтр `sum=0` был бы дешевле
+    # (МойСклад отобрал бы сам), но он теряет документы, починенные наполовину:
+    # как только одна позиция получила цену, сумма документа перестаёт быть
+    # нулевой, и остальные нулевые позиции в нём становятся невидимы навсегда.
+    #
+    # Поэтому листаем документы за период и смотрим внутрь. Листание
+    # прекращается, как только набрана пачка на этот вызов, — полный список за
+    # 60 дней (сотни документов) читать незачем.
+    # limit=50: при большем МойСклад не разворачивает positions.rows
+    ours = []
+    pages_read = 0
+    scanned_to_end = False
+    for page in range(20):
+        if len(ours) >= limit or time.monotonic() - started > BACKFILL_DEADLINE_SECONDS:
+            break
+        response = client.get("/entity/loss", params={
+            "filter": f"moment>={since} 00:00:00",
+            "expand": "positions.assortment,store",
+            "order": "moment,asc",
+            "limit": 50,
+            "offset": page * 50,
+        })
+        if response is None:
+            if pages_read == 0:
+                return jsonify({"error": "МойСклад не ответил на запрос списаний"}), 502
+            break
+
+        pages_read += 1
+        rows = response.get("rows", [])
+        for doc in rows:
+            if not (doc.get("description") or "").startswith("Списание #"):
+                continue
+            positions = (doc.get("positions") or {}).get("rows") or []
+            if any(not (p.get("price") or 0) > 0 for p in positions):
+                ours.append(doc)
+        if len(rows) < 50:
+            scanned_to_end = True
+            break
+
     processed = updated_positions = updated_docs = 0
     without_cost = estimated_positions = 0
     details = []
@@ -582,7 +609,11 @@ def backfill_prices():
         "positions_updated": updated_positions,
         "positions_estimated": estimated_positions,
         "positions_without_cost": without_cost,
+        # Листание могло прерваться на середине периода, поэтому «осталось» —
+        # это «сколько видно отсюда», а не «сколько всего». Точное число стоило
+        # бы чтения всех документов за период на каждый вызов.
         "remaining": max(0, len(ours) - processed),
+        "more_possible": not scanned_to_end or len(ours) > processed,
         "details": details,
         "errors": errors,
     })

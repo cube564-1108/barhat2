@@ -318,6 +318,19 @@ OLD_MOMENT = '2026-08-20 12:07:00.000'
 COSTS_AT_MOMENT = {(STORE_HREF, href_of('rose')): 9900.0}
 
 LOSS_DOCS = [
+    {   # починен наполовину: сумма уже НЕ нулевая, но позиция без цены осталась.
+        # Отбор по sum=0 такой документ терял навсегда — ровно этот случай
+        # вскрылся на проде 17.09.2026 после первого прогона бэкфилла.
+        'id': 'doc-half', 'name': '00210-00061', 'moment': OLD_MOMENT,
+        'description': 'Списание #61 (дашборд БАРХАТ)', 'sum': 15400.0,
+        'store': {'meta': {'href': STORE_HREF}},
+        'positions': {'rows': [
+            {'id': 'pos-done', 'quantity': 1, 'price': 15400.0,
+             'assortment': {'name': 'Гортензия белая', 'meta': {'href': href_of('rose')}}},
+            {'id': 'pos-left', 'quantity': 315, 'price': 0.0,
+             'assortment': {'name': 'Клубника', 'meta': {'href': href_of('rose')}}},
+        ]},
+    },
     {   # наш, нулевой — чинить
         'id': 'doc-ours', 'name': '00196-00046', 'moment': OLD_MOMENT,
         'description': 'Списание #6 (дашборд БАРХАТ)', 'sum': 0.0,
@@ -418,12 +431,15 @@ resp = admin.post('/api/writeoffs/admin/backfill-prices',
 body = resp.get_json() or {}
 check(resp.status_code == 200, 'проверка отработала', f'код {resp.status_code}')
 check(backfill.puts == [], 'при проверке в МойСклад ничего не записано', str(backfill.puts))
-check(body.get('positions_updated') == 2,
-      'к правке намечены 2 позиции (по одной в каждом нашем документе)', str(body))
+check(body.get('positions_updated') == 3,
+      'к правке намечены 3 позиции, включая оставшуюся в починенном наполовину', str(body))
 check(body.get('positions_without_cost') == 1,
       'клубника без себестоимости посчитана отдельно', str(body))
-check(body.get('documents_found') == 2,
+check(body.get('documents_found') == 3,
       'чужой документ «Инвент шары» в работу не взят', str(body.get('documents_found')))
+check(any(d.get('document') == '00210-00061' for d in body.get('details', [])),
+      'документ с НЕнулевой суммой, но нулевой позицией, всё равно найден',
+      '(отбор по sum=0 терял его — баг прода 17.09.2026)')
 
 print('   -- цена берётся на момент документа')
 check(any(call.get('moment', '').startswith('2026-08-20') for call in backfill.stock_calls),
@@ -436,8 +452,12 @@ writeoffs_server.get_client = lambda: backfill
 resp = admin.post('/api/writeoffs/admin/backfill-prices',
                   json={'since': '2026-08-01', 'dry_run': False}, headers=AJAX)
 body = resp.get_json() or {}
-check(len(backfill.puts) == 2, 'ушло 2 правки позиций', str(backfill.puts))
+check(len(backfill.puts) == 3, 'ушло 3 правки позиций', str(backfill.puts))
 paths = [p for p, _ in backfill.puts]
+check(any('pos-left' in p for p in paths),
+      'дочинена позиция в документе с ненулевой суммой', str(paths))
+check(not any('pos-done' in p for p in paths),
+      'позиция, где цена уже стояла, второй раз не правится', str(paths))
 check(all('/entity/loss/' in p and '/positions/' in p for p in paths),
       'правится позиция, а не документ целиком', str(paths))
 check(all(j.get('price') == 9900.0 for _, j in backfill.puts),
@@ -445,7 +465,7 @@ check(all(j.get('price') == 9900.0 for _, j in backfill.puts),
       str(backfill.puts))
 check('pos-3' not in str(paths), 'позиция, где цена уже была, не тронута', str(paths))
 check('pos-a' not in str(paths), 'позиция чужого документа не тронута', str(paths))
-check(body.get('documents_updated') == 2, 'починены оба наших документа', str(body))
+check(body.get('documents_updated') == 3, 'починены все три наших документа', str(body))
 
 print('   -- ограничения и доступ')
 backfill = BackfillClient()
@@ -454,7 +474,8 @@ resp = admin.post('/api/writeoffs/admin/backfill-prices',
                   json={'since': '2026-08-01', 'dry_run': False, 'limit': 1}, headers=AJAX)
 body = resp.get_json() or {}
 check(body.get('documents_processed') == 1, 'за вызов обработан 1 документ', str(body))
-check(body.get('remaining') == 1, 'остаток показан', str(body))
+check(body.get('remaining') == 2 and body.get('more_possible') is True,
+      'остаток показан и видно, что работа не закончена', str(body))
 
 bad_date = admin.post('/api/writeoffs/admin/backfill-prices',
                       json={'since': '20.08.2026'}, headers=AJAX)

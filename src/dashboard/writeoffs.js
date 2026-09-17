@@ -1397,9 +1397,9 @@
         const head = data.dry_run
             ? `Найдено документов: ${data.documents_found}. К правке: ${data.positions_updated} позиций.`
             : `Исправлено документов: ${data.documents_updated}, позиций: ${data.positions_updated}.`;
-        const rest = data.remaining > 0
-            ? `<p class="form-hint">Осталось документов: ${data.remaining} — нажмите ещё раз.</p>`
-            : '<p class="form-hint">Необработанных документов не осталось.</p>';
+        const rest = data.more_possible
+            ? '<p class="form-hint">Обработаны не все документы — нажмите ещё раз.</p>'
+            : '<p class="form-hint">Документов с нулевыми позициями больше нет.</p>';
         const estimated = data.positions_estimated > 0
             ? `<p class="form-hint" style="color:#b8860b;">По цене прихода: ${data.positions_estimated} позиций — `
                 + 'себестоимости нет (товар по учёту в минусе), взята цена последнего '
