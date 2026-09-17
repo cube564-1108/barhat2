@@ -619,9 +619,14 @@
 
         // Дата доставки в превью обязательна: лента может показывать любой
         // день, и «14:00» без даты читается как «сегодня» (просьба владельца
-        // 16.09.2026)
+        // 16.09.2026).
+        //
+        // Числом, а не словом: «Сегодня» и «Завтра» в ленте приходится
+        // сопоставлять с датой в шапке выбора дня, а «17 сен» читается само и
+        // одинаково во всех днях (просьба владельца 17.09.2026). Слова
+        // остались там, где они и полезны, — на переключателе дня.
         parts.push('<p class="cd-card__time">'
-            + '<span class="cd-card__date">' + esc(dateLabel(order.delivery_date))
+            + '<span class="cd-card__date">' + esc(shortDate(order.delivery_date))
             + '</span> · ' + esc(slotText(order))
             + (tick ? ' · <span class="cd-card__countdown'
                 + (tick.late ? ' cd-card__countdown--late' : '') + '">'
@@ -1351,6 +1356,13 @@
             loadFeed(true);
         });
 
+        el.pushBtn.addEventListener('click', function () {
+            if (state.pushOn) unsubscribePush();
+            else subscribePush();
+        });
+
+        el.logout.addEventListener('click', logout);
+
         el.feed.addEventListener('click', function (event) {
             var claim = event.target.closest('[data-claim]');
             if (claim) { claimOrder(claim.getAttribute('data-claim'), claim); return; }
@@ -1390,6 +1402,57 @@
         setInterval(function () {
             if (!document.hidden) loadFeed();
         }, REFRESH_MS);
+    }
+
+    // === Вход и выход =======================================================
+
+    /**
+     * Адрес формы входа с возвратом сюда же.
+     *
+     * Без `next` вход уводил курьера на дашборд — экран, где для него есть
+     * ровно один пункт меню и ссылка обратно в приложение. Лишний шаг на
+     * каждом входе и мигание чужого интерфейса (просьба владельца 17.09.2026).
+     */
+    function loginUrl() {
+        return '/login?next=' + encodeURIComponent(window.location.pathname);
+    }
+
+    /**
+     * Выход из приложения.
+     *
+     * Телефон курьера — личный, но смена заканчивается, и человек должен уметь
+     * отдать приложение сменщику или просто выйти. Раньше выхода не было
+     * вообще: сессия живёт 8 часов и продлевается активностью.
+     */
+    function logout() {
+        window.BarhatUI.confirm(
+            'Заказы пропадут с экрана. Чтобы вернуться, понадобится логин и пароль.',
+            { title: 'Выйти из приложения?', confirmText: 'Выйти', cancelText: 'Остаться' }
+        ).then(function (ok) {
+            if (!ok) return;
+            el.logout.disabled = true;
+
+            // Подписку на пуши снимаем ДО выхода: ручка отписки требует
+            // сессии, а после logout её уже нет. Иначе телефон, с которого
+            // вышли, продолжит получать чужие заказы с адресом и телефоном.
+            removeSubscription().catch(function () {
+                // Не вышло снять подписку — выход всё равно не отменяем:
+                // остаться в приложении из-за сбоя сети хуже
+            }).then(function () {
+                return fetch('/api/auth/logout', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    // Ручка простая (POST без тела), и заголовок здесь —
+                    // та же защита от постороннего сайта, что и в apiPost
+                    headers: { 'X-Requested-With': 'barhat-dashboard' }
+                });
+            }).catch(function () {
+                // Сервер не ответил. Кука могла и не сняться, но показывать
+                // после этого ленту нельзя — уводим на форму входа.
+            }).then(function () {
+                window.location.href = loginUrl();
+            });
+        });
     }
 
     // === Push-уведомления ===================================================
@@ -1436,39 +1499,65 @@
         }).catch(function () { /* пуши — усиление, а не условие работы */ });
     }
 
+    // Колокольчик и перечёркнутый колокольчик (lucide, stroke-width 1.75).
+    var BELL_ON = '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>'
+        + '<path d="M13.73 21a2 2 0 0 1-3.46 0"></path>';
+    var BELL_OFF = '<path d="M13.73 21a2 2 0 0 1-3.46 0"></path>'
+        + '<path d="M18.63 13A17.89 17.89 0 0 1 18 8"></path>'
+        + '<path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"></path>'
+        + '<path d="M18 8a6 6 0 0 0-9.33-5"></path>'
+        + '<path d="M2 2l20 20"></path>';
+
+    function bellIcon(on) {
+        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+            + ' stroke-linecap="round" stroke-linejoin="round" width="22" height="22"'
+            + ' aria-hidden="true">' + (on ? BELL_ON : BELL_OFF) + '</svg>';
+    }
+
     /**
      * Кнопка уведомлений: включить или выключить.
      *
      * Одна кнопка с двумя состояниями, а не расписание тихих часов. Тихие
      * часы здесь были и убраны: молчание по часам неотличимо от поломки, а
      * курьер и так знает лучше, когда его можно беспокоить.
+     *
+     * Значок в шапке, а не строка над лентой (просьба владельца 17.09.2026):
+     * кнопку жмут дважды за всё время работы, а место она занимала постоянно —
+     * ровно там, где должен быть первый заказ. Состояние читается по заливке и
+     * по перечёркнутому колокольчику, для голосового доступа — aria-pressed.
      */
     function renderPushButton() {
-        var button = document.getElementById('cdPushBtn');
-        if (!button) {
-            button = document.createElement('button');
-            button.type = 'button';
-            button.id = 'cdPushBtn';
-            button.className = 'cd-btn cd-btn--ghost';
-            button.style.margin = '12px 16px 0';
-            button.style.width = 'calc(100% - 32px)';
-            button.addEventListener('click', function () {
-                if (state.pushOn) unsubscribePush();
-                else subscribePush();
-            });
-            el.feed.parentNode.insertBefore(button, el.feed);
-        }
+        var button = el.pushBtn;
+        if (!button) return;
+        button.hidden = false;
         button.disabled = false;
-        button.textContent = state.pushOn
-            ? 'Выключить уведомления'
-            : 'Включить уведомления о новых заказах';
+        button.innerHTML = bellIcon(state.pushOn);
+        button.classList.toggle('cd-header__btn--on', state.pushOn);
+        button.setAttribute('aria-pressed', state.pushOn ? 'true' : 'false');
+        button.setAttribute('title', state.pushOn
+            ? 'Уведомления включены — выключить'
+            : 'Включить уведомления о новых заказах');
     }
 
-    function unsubscribePush() {
-        var button = document.getElementById('cdPushBtn');
-        if (button) { button.disabled = true; button.textContent = 'Выключаем…'; }
+    /** Кнопка занята запросом: значок остаётся на месте, но гаснет. */
+    function pushBtnBusy() {
+        var button = el.pushBtn;
+        if (!button) return;
+        button.disabled = true;
+        button.setAttribute('title', 'Подождите…');
+    }
 
-        navigator.serviceWorker.ready.then(function (registration) {
+    /**
+     * Снять подписку этого устройства — и в браузере, и у нас.
+     *
+     * Отдельной функцией, потому что зовётся из двух мест: кнопка «выключить»
+     * и выход из приложения. При выходе это не удобство, а приватность: пуш
+     * несёт номер заказа и адрес, и продолжать слать его на телефон, с
+     * которого человек вышел, нельзя.
+     */
+    function removeSubscription() {
+        if (!pushSupported()) return Promise.resolve();
+        return navigator.serviceWorker.ready.then(function (registration) {
             return registration.pushManager.getSubscription();
         }).then(function (subscription) {
             if (!subscription) return null;
@@ -1478,7 +1567,13 @@
             return subscription.unsubscribe().then(function () {
                 return apiPost('/api/courier/push/unsubscribe', { endpoint: endpoint });
             });
-        }).then(function () {
+        });
+    }
+
+    function unsubscribePush() {
+        pushBtnBusy();
+
+        removeSubscription().then(function () {
             state.pushOn = false;
             toast('Уведомления выключены', 'info');
             renderPushButton();
@@ -1490,8 +1585,7 @@
     }
 
     function subscribePush() {
-        var button = document.getElementById('cdPushBtn');
-        if (button) { button.disabled = true; button.textContent = 'Подключаем…'; }
+        pushBtnBusy();
 
         Notification.requestPermission().then(function (permission) {
             if (permission !== 'granted') {
@@ -1555,6 +1649,8 @@
         el.warning = document.getElementById('cdWarning');
         el.stale = document.getElementById('cdStale');
         el.refresh = document.getElementById('cdRefresh');
+        el.pushBtn = document.getElementById('cdPushBtn');
+        el.logout = document.getElementById('cdLogout');
         el.card = document.getElementById('cdCard');
         el.photo = document.getElementById('cdPhoto');
 
@@ -1577,7 +1673,8 @@
             setupPush();
             return loadProfile().then(loadFeed);
         }).catch(function () {
-            window.location.href = '/login';
+            // С возвратом сюда же: иначе вход высаживает курьера на дашборд
+            window.location.href = loginUrl();
         });
     }
 

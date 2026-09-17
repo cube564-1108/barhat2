@@ -106,8 +106,18 @@ with app.test_client() as client:
     check("курьер не получил лишнего (кассы, счета)",
           not sections & {"cash_shifts", "invoices_v2", "users_manage"}, sections)
 
-    check("страница /courier-app открывается по прямой ссылке (не только кликом)",
-          client.get("/courier-app").status_code == 200)
+    # Дашборд курьеру не показываем вовсе: раздел `courier_app` в нём — это
+    # заглушка со ссылкой в приложение, то есть лишний экран на каждом входе.
+    # Уводим и с корня, и с самого раздела (просьба владельца 17.09.2026).
+    for path in ("/", "/courier-app"):
+        response = client.get(path)
+        check(f"курьер с {path} уезжает в приложение",
+              response.status_code in (301, 302)
+              and response.headers.get("Location", "").endswith("/app/courier"),
+              f"{response.status_code} → {response.headers.get('Location')}")
+
+    check("само приложение курьеру открывается",
+          client.get("/app/courier").status_code == 200)
 
 print("\n2. Управляющий: контроль доступен")
 
@@ -119,6 +129,10 @@ with app.test_client() as client:
     check("но нет приложения курьера", "courier_app" not in sections, sections)
     check("страница /courier-dispatch открывается",
           client.get("/courier-dispatch").status_code == 200)
+    # Обратная сторона редиректа курьера: всех остальных он трогать не должен,
+    # иначе управляющий вместо дашборда попадёт в чужое приложение
+    check("управляющего с корня никуда не уводит",
+          client.get("/").status_code == 200)
 
 print("\n3. Флорист: разделов доставки нет вовсе")
 
@@ -132,13 +146,40 @@ with app.test_client() as client:
 print("\n4. Без входа страницы не отдаются")
 
 with app.test_client() as client:
-    for path in ("/courier-app", "/courier-dispatch"):
+    for path in ("/courier-app", "/courier-dispatch", "/app/courier"):
         response = client.get(path)
         check(f"{path} без авторизации уводит на вход",
               response.status_code in (301, 302) and "/login" in response.headers.get("Location", ""),
               f"{response.status_code} → {response.headers.get('Location')}")
 
-print("\n5. Роль курьера принимается админкой (валидация по ROLE_SECTIONS)")
+print("\n5. Вход возвращает туда, откуда пришли")
+
+# Приложение открывают с рабочего стола телефона. Без `next` форма входа всегда
+# высаживала на дашборд — чужой для курьера экран, на котором надо ещё найти
+# ссылку обратно. Проверяем всю цепочку: редирект несёт адрес, а форма его
+# читает и при этом не пускает чужой домен (открытый редирект — это кража
+# пароля: человек вводит его у нас и уезжает на подделку).
+
+with app.test_client() as client:
+    location = client.get("/app/courier").headers.get("Location", "")
+    check("редирект с приложения несёт next", "next=%2Fapp%2Fcourier" in location, location)
+
+login_html = open(os.path.join(REPO, "src", "dashboard", "login.html"),
+                  encoding="utf-8").read()
+check("форма входа читает next", "nextTarget()" in login_html
+      and "window.location.href = nextTarget();" in login_html,
+      "(иначе параметр отдаётся впустую)")
+check("чужой домен через next не пускается",
+      "raw.startsWith('//')" in login_html and "raw.startsWith('/\\\\')" in login_html,
+      "(//site и /\\site браузер читает как чужой адрес)")
+
+courier_js = open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
+                  encoding="utf-8").read()
+check("приложение уходит на вход с возвратом",
+      "'/login'" not in courier_js and "function loginUrl()" in courier_js,
+      "(голый /login высаживает курьера на дашборд)")
+
+print("\n6. Роль курьера принимается админкой (валидация по ROLE_SECTIONS)")
 
 check("«courier» — известная роль", "courier" in auth.ROLE_SECTIONS)
 check("секции курьера в общем списке модулей",

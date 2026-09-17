@@ -982,6 +982,23 @@ def _serve_dashboard_shell():
     return response
 
 
+def _courier_app_redirect():
+    """
+    Курьеру дашборд не нужен: его единственный экран — приложение.
+
+    У роли `courier` в дашборде ровно один раздел, и тот — заглушка со ссылкой
+    в приложение. Показывать его на входе значит показывать лишний экран и
+    заставлять искать на нём кнопку. Уводим сразу, с какой бы страницы
+    дашборда курьер ни начал (просьба владельца 17.09.2026).
+
+    Возвращает ответ-редирект или None — вызывающий маршрут работает дальше.
+    """
+    from flask_login import current_user
+    if getattr(current_user, 'role', None) == 'courier':
+        return redirect('/app/courier')
+    return None
+
+
 @app.route('/')
 def index():
     """Главная страница — дашборд (с проверкой авторизации)"""
@@ -990,7 +1007,7 @@ def index():
         from flask_login import current_user
         if not current_user.is_authenticated:
             return send_from_directory(DASHBOARD_DIR, 'login.html')
-        return _serve_dashboard_shell()
+        return _courier_app_redirect() or _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки index.html: {e}")
         return f"Ошибка загрузки дашборда: {e}", 500
@@ -1176,8 +1193,9 @@ def courier_app_page():
     try:
         from flask_login import current_user
         if not current_user.is_authenticated:
-            return redirect('/login')
-        return _serve_dashboard_shell()
+            return redirect('/login?next=%2Fcourier-app')
+        # Сам курьер уезжает в приложение, раздел остаётся управляющим
+        return _courier_app_redirect() or _serve_dashboard_shell()
     except Exception as e:
         logger.error(f"Ошибка загрузки /courier-app: {e}")
         return f"Ошибка загрузки страницы: {e}", 500
@@ -1247,7 +1265,10 @@ def courier_pwa_page():
     try:
         from flask_login import current_user
         if not current_user.is_authenticated:
-            return redirect('/login')
+            # С возвратом сюда же: форма входа без `next` уводит на дашборд, и
+            # человек, открывший приложение с рабочего стола, попадает на чужой
+            # для него экран (просьба владельца 17.09.2026)
+            return redirect('/login?next=%2Fapp%2Fcourier')
         return send_from_directory(DASHBOARD_DIR, 'courier-app.html')
     except Exception as e:
         logger.error(f"Ошибка загрузки /app/courier: {e}")

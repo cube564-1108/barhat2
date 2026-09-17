@@ -118,7 +118,7 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     padding: calc(18px + env(safe-area-inset-top)) 20px 18px;
     border-radius: 0 0 var(--bx-r-2xl) var(--bx-r-2xl);
 }
-.cd-header__row { display: flex; align-items: center; gap: 14px; }
+.cd-header__row { display: flex; align-items: center; gap: 12px; }
 .cd-header__icon {
     flex: 0 0 auto; width: 44px; height: 44px;
     display: flex; align-items: center; justify-content: center;
@@ -135,15 +135,30 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     color: rgba(255, 255, 255, 0.72); font-size: 13px; margin: 3px 0 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.cd-header__refresh {
+/* Ряд значков управления: обновить, уведомления, выход. Цель 44px — меньше
+   штатных 48px для действий по заказу, потому что эти три кнопки жмут не на
+   ходу, а стоя, и три полноразмерные цели не оставляют места заголовку. */
+.cd-header__actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.cd-header__btn {
     flex: 0 0 auto;
-    width: var(--cd-touch); height: var(--cd-touch);
+    width: 44px; height: 44px;
     display: flex; align-items: center; justify-content: center;
     background: rgba(255, 255, 255, 0.15);
     border: none; border-radius: var(--bx-r-xl);
     color: #fff; cursor: pointer;
 }
-.cd-header__refresh[data-busy="1"] { opacity: .5; }
+.cd-header__btn[data-busy="1"] { opacity: .5; }
+.cd-header__btn:disabled { opacity: .5; cursor: default; }
+/* Включённые уведомления — залитая кнопка: состояние должно читаться с
+   расстояния вытянутой руки, а не по форме колокольчика. */
+.cd-header__btn--on { background: #ffffff; color: var(--bx-wine); }
+
+/* Узкий экран: декоративная иконка уходит, три работающие кнопки остаются.
+   Без этого заголовок «Доставка» на 360px не помещается и переносится. */
+@media (max-width: 420px) {
+    .cd-header { padding-left: 16px; padding-right: 16px; }
+    .cd-header__icon { display: none; }
+}
 .cd-header__warning {
     margin: 14px 0 0; padding: 10px 12px;
     background: rgba(255, 255, 255, 0.15);

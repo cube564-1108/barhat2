@@ -50,13 +50,33 @@
                 <h1 class="cd-header__title">Доставка</h1>
                 <p class="cd-header__subtitle" id="cdSubtitle">Заказы вашего города</p>
             </div>
-            <button type="button" class="cd-header__refresh" id="cdRefresh" title="Обновить">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
-                     stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
-                    <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
-                    <path d="M21 3v6h-6"></path>
-                </svg>
-            </button>
+            <!-- Управление приложением — значками в шапке, а не строками над
+                 лентой: на телефоне каждая такая строка съедает заказ из
+                 видимой части экрана. Подписи в title и aria-label. -->
+            <div class="cd-header__actions">
+                <!-- Показывается, только когда пуши вообще настроены на
+                     сервере: кнопка, которая ничего не включает, хуже её
+                     отсутствия. Состояние — в aria-pressed и в иконке. -->
+                <button type="button" class="cd-header__btn" id="cdPushBtn" hidden
+                        aria-pressed="false" aria-label="Уведомления о новых заказах"></button>
+                <button type="button" class="cd-header__btn" id="cdRefresh"
+                        title="Обновить" aria-label="Обновить">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                         stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+                        <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+                        <path d="M21 3v6h-6"></path>
+                    </svg>
+                </button>
+                <button type="button" class="cd-header__btn" id="cdLogout"
+                        title="Выйти" aria-label="Выйти из приложения">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                         stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                        <path d="M16 17l5-5-5-5"></path>
+                        <path d="M21 12H9"></path>
+                    </svg>
+                </button>
+            </div>
         </div>
         <p class="cd-header__warning" id="cdWarning" hidden></p>
     </header>

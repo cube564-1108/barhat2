@@ -450,7 +450,12 @@
             + 'Несохранённое на странице пропадёт.',
             { title: 'Нужно войти заново', confirmText: 'Войти заново', cancelText: 'Остаться' }
         ).then(function (ok) {
-            if (ok) window.location.href = '/login';
+            // С возвратом на ту же страницу: иначе вход всегда высаживает на
+            // дашборд, а из приложения курьера — на чужой для него экран
+            if (ok) {
+                window.location.href = '/login?next='
+                    + encodeURIComponent(window.location.pathname);
+            }
         });
     }
 

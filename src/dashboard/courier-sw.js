@@ -114,6 +114,16 @@ self.addEventListener('fetch', (event) => {
         event.respondWith(
             fetch(request)
                 .then((response) => {
+                    // Ответ, доехавший ЧЕРЕЗ редирект, отдавать навигации
+                    // нельзя: браузер это запрещает и показывает ошибку сети
+                    // вместо страницы. А редирект здесь штатный — сервер
+                    // уводит на форму входа, когда сессия кончилась. Отдаём
+                    // сам редирект: по нему браузер перейдёт сам. И в кэш
+                    // такой ответ не кладём — там должна лежать оболочка,
+                    // а не чужая страница под адресом приложения.
+                    if (response.redirected) {
+                        return Response.redirect(response.url, 302);
+                    }
                     const copy = response.clone();
                     caches.open(SHELL_CACHE).then((cache) => cache.put(request, copy));
                     return response;

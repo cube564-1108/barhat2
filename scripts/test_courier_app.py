@@ -424,6 +424,64 @@ check("подпись объясняет, чего ждать", "cd-note" in js_
 check("обход запрета не остался в коде", "force_not_ready" not in js_code,
       "(подтверждение «всё равно забираю» отменено)")
 
+# Сервер уводит на форму входа редиректом, а навигацию, доехавшую через
+# редирект, браузер service worker'у отдавать запрещает: вместо страницы входа
+# курьер получил бы ошибку сети и «приложение не работает».
+sw = sources["courier-sw.js"]
+check("редирект в навигации не ломает вход",
+      "response.redirected" in sw and "Response.redirect(" in sw,
+      "(ответ после редиректа нельзя вернуть из respondWith)")
+check("страница входа не попадает в кэш оболочки",
+      sw.index("response.redirected") < sw.index("cache.put(request, copy)"),
+      "(иначе под адресом приложения ляжет чужая страница)")
+
+# --- управление в шапке -----------------------------------------------------
+# Кнопка без обработчика выглядит живой и молча ничего не делает — это уже
+# ловили в других модулях после перезаписи файла целиком. Поэтому проверяем
+# связку: id есть в разметке, элемент взят в start() и на него повешен клик.
+for el_id, prop, handler in (
+    ("cdRefresh", "refresh", "loadFeed(true)"),
+    ("cdPushBtn", "pushBtn", "unsubscribePush()"),
+    ("cdLogout", "logout", "logout"),
+):
+    check(f"{el_id}: разметка → el → обработчик",
+          f'id="{el_id}"' in html
+          and f"el.{prop} = document.getElementById('{el_id}')" in js
+          and f"el.{prop}.addEventListener('click'" in js
+          and handler in js,
+          "(кнопка без обработчика выглядит живой и ничего не делает)")
+
+# Уведомления переехали в шапку значком: строка над лентой занимала место
+# первого заказа постоянно, а жмут её дважды за всё время работы.
+check("кнопка уведомлений не вставляется над лентой",
+      "createElement('button')" not in js_code
+      and "insertBefore" not in js_code,
+      "(значок в шапке, а не строка в ленте)")
+check("состояние уведомлений видно не только по иконке",
+      "cd-header__btn--on" in js and "cd-header__btn--on" in css
+      and "aria-pressed" in js, "")
+
+# Выход обязан снять подписку на пуши, и обязан сделать это ДО logout: ручка
+# отписки требует сессии. Иначе телефон, с которого человек вышел, продолжит
+# получать чужие заказы с адресом и телефоном клиента.
+logout_fn = js[js.index("function logout()"):js.index("// === Push-уведомления")]
+check("выход снимает подписку на пуши", "removeSubscription()" in logout_fn, "")
+check("подписка снимается до выхода",
+      logout_fn.index("removeSubscription()") < logout_fn.index("/api/auth/logout"),
+      "(после logout сессии нет, и ручка отписки ответит 401)")
+check("выход защищён от чужого сайта",
+      "'X-Requested-With': 'barhat-dashboard'" in logout_fn,
+      "(POST без тела — простой запрос, его отправит форма с чужого сайта)")
+check("выход спрашивает подтверждение", "BarhatUI.confirm" in logout_fn, "")
+
+# Дата доставки в превью — числом. «Сегодня»/«Завтра» приходилось сверять с
+# переключателем дня, а «17 сен» читается само (просьба владельца 17.09.2026).
+preview = js[js.index("function cardHtml"):js.index("function render()")]
+check("превью печатает дату числом",
+      "shortDate(order.delivery_date)" in preview
+      and "dateLabel(order.delivery_date)" not in preview,
+      "(«Сегодня» в ленте за любой день читается как сегодняшний)")
+
 
 # ============================================================================
 print()

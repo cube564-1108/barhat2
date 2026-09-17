@@ -179,6 +179,32 @@
         const errorDiv = document.getElementById('error');
         const loginBtn = document.getElementById('loginBtn');
 
+        /**
+         * Куда уходить после входа: `?next=` или дашборд.
+         *
+         * Нужно ради приложения курьера: без этого вход всегда высаживал на
+         * дашборд, и человек, открывший приложение с рабочего стола, попадал
+         * на чужой для него экран и искал, как вернуться.
+         *
+         * ПУСКАЕМ ТОЛЬКО СВОЙ ПУТЬ. Значение приходит из адресной строки, то
+         * есть его может подставить кто угодно ссылкой в мессенджере. Без
+         * проверки это открытый редирект: человек вводит пароль на нашей
+         * форме и уезжает на чужой сайт, уверенный, что он всё ещё у нас.
+         * Отсюда три условия: начинается с одного «/», дальше не «/» и не «\»
+         * (иначе браузер читает `//site` и `/\site` как чужой домен).
+         */
+        function nextTarget() {
+            let raw = '';
+            try {
+                raw = new URLSearchParams(window.location.search).get('next') || '';
+            } catch (e) {
+                return '/';
+            }
+            if (!raw.startsWith('/')) return '/';
+            if (raw.startsWith('//') || raw.startsWith('/\\')) return '/';
+            return raw;
+        }
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
@@ -206,8 +232,8 @@
                 const data = await response.json();
 
                 if (response.ok) {
-                    // Успешный вход - редирект на дашборд
-                    window.location.href = '/';
+                    // Успешный вход — возвращаем туда, откуда пришли
+                    window.location.href = nextTarget();
                 } else {
                     showError(data.error || 'Ошибка авторизации');
                 }
