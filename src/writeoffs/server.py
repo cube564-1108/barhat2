@@ -600,11 +600,40 @@ def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list, created_
     # списание из-за незаполненного справочника, см. "Сопоставление" в UI.
     employee_link = get_moysklad_employee(created_by)
 
+    # Себестоимость МойСклад в документ сам не подставляет и не пересчитывает
+    # потом: без цены позиция навсегда остаётся нулевой (замер на проде
+    # 17.09.2026), из-за чего «Показатели салонов» видят списание на 0 ₽.
+    # Спрашиваем её у самого МойСклада по складу этой заявки.
+    #
+    # Отчёт не ответил или у товара нет партий на складе — отправляем как
+    # раньше, без цены: непосчитанная стоимость не повод не дать флористу
+    # списать товар. Потерянные цены видно по нулевой сумме документа.
+    store_href = link["moysklad_store_href"]
+    try:
+        cost_prices = client.get_cost_prices(
+            store_href, [pos["moysklad_product_href"] for pos in positions]
+        )
+    except Exception as e:
+        logger.warning(f"Списание #{writeoff_id}: себестоимость не получена ({e})")
+        cost_prices = {}
+
+    missing = [pos["product_name"] for pos in positions
+               if pos["moysklad_product_href"] not in cost_prices]
+    if missing:
+        logger.info(
+            f"Списание #{writeoff_id}: нет себестоимости на складе для "
+            f"{len(missing)} из {len(positions)} позиций ({', '.join(missing[:5])})"
+        )
+
     result = client.create_loss(
         organization_href=organization_href,
-        store_href=link["moysklad_store_href"],
+        store_href=store_href,
         positions=[
-            {"assortment_href": pos["moysklad_product_href"], "quantity": pos["quantity"]}
+            {
+                "assortment_href": pos["moysklad_product_href"],
+                "quantity": pos["quantity"],
+                "price": cost_prices.get(pos["moysklad_product_href"]),
+            }
             for pos in positions
         ],
         applicable=True,

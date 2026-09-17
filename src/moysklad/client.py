@@ -480,8 +480,14 @@ class MoySkladClient:
             organization_href: meta.href организации (см. get_organizations())
             store_href: meta.href склада, с которого списываем
                 (см. moysklad_store_links / get_stores())
-            positions: [{"assortment_href": str, "quantity": float}, ...] —
-                ВСЕ позиции заявки одним списком
+            positions: [{"assortment_href": str, "quantity": float,
+                "price": float | None}, ...] — ВСЕ позиции заявки одним списком.
+                price — себестоимость единицы в копейках (см. get_cost_prices).
+                Без неё МойСклад сохраняет позицию с нулевой стоимостью и
+                НИКОГДА её не пересчитывает: замер на проде 17.09.2026 — документ
+                без цены остался нулевым и через 3 минуты, документ с ценой её
+                сохранил без изменений. Нулевые списания искажают и отчёты
+                МойСклада, и показатель «доля списания цветка» в дашборде
             applicable: True — списание проводится сразу (остаток уменьшается).
                 False — черновик, остаток не меняется
             description: Комментарий к документу (например, номер заявки в дашборде)
@@ -501,17 +507,7 @@ class MoySkladClient:
             "store": {"meta": {"href": store_href, "type": "store", "mediaType": "application/json"}},
             "applicable": applicable,
             "positions": [
-                {
-                    "assortment": {
-                        "meta": {
-                            "href": pos["assortment_href"],
-                            "type": "product",
-                            "mediaType": "application/json",
-                        }
-                    },
-                    "quantity": pos["quantity"],
-                }
-                for pos in positions
+                self._loss_position(pos) for pos in positions
             ],
         }
         if description:
@@ -522,6 +518,75 @@ class MoySkladClient:
             body["group"] = {"meta": {"href": group_href, "type": "group", "mediaType": "application/json"}}
 
         return self.post('/entity/loss', json_data=body)
+
+    @staticmethod
+    def _loss_position(pos: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Позиция документа списания. Цена уходит, только если она известна и
+        положительна: ноль МойСклад принял бы как «товар бесплатный», а
+        отрицательная себестоимость (так отчёт отвечает по товарам с минусовым
+        остатком) — вообще не цена.
+        """
+        body: Dict[str, Any] = {
+            "assortment": {
+                "meta": {
+                    "href": pos["assortment_href"],
+                    "type": "product",
+                    "mediaType": "application/json",
+                }
+            },
+            "quantity": pos["quantity"],
+        }
+        price = pos.get("price")
+        if price is not None and price > 0:
+            body["price"] = price
+        return body
+
+    def get_cost_prices(self, store_href: str, product_hrefs: List[str]) -> Dict[str, float]:
+        """
+        Себестоимость товаров на КОНКРЕТНОМ складе: {href товара: цена в копейках}.
+
+        Склад обязателен, а не «для точности»: себестоимость считается по партиям
+        этого склада и отличается в разы. Замер 17.09.2026 по «Шар Белый»:
+        10,98 ₽ на Свердловском против 20,83 ₽ в среднем по сети.
+
+        В ответ попадают только товары с положительной себестоимостью. Товара
+        нет в ответе, если на складе нет его партий (минусовой остаток —
+        списывают неоприходованное): цены не существует, и подставлять вместо
+        неё среднюю по сети нельзя — это выдуманные данные.
+
+        Фильтр по нескольким товарам МойСклад объединяет по ИЛИ, поэтому вся
+        заявка закрывается одним запросом; длинные списки бьются на пачки, чтобы
+        не упереться в предел длины URL.
+        """
+        prices: Dict[str, float] = {}
+        if not store_href or not product_hrefs:
+            return prices
+
+        chunk_size = 20
+        for start in range(0, len(product_hrefs), chunk_size):
+            chunk = product_hrefs[start:start + chunk_size]
+            conditions = [f"product={href}" for href in chunk]
+            conditions.append(f"store={store_href}")
+            response = self.get('/report/stock/all', params={
+                'filter': ';'.join(conditions),
+                'stockMode': 'all',
+                'limit': 1000,
+            })
+            if response is None:
+                logger.warning(
+                    f"Себестоимость не получена для {len(chunk)} товаров — "
+                    f"списание уйдёт с нулевой стоимостью по ним"
+                )
+                continue
+
+            for row in response.get('rows', []):
+                href = (row.get('meta') or {}).get('href', '').split('?')[0]
+                price = row.get('price')
+                if href and price is not None and price > 0:
+                    prices[href] = price
+
+        return prices
 
     def get_turnover_report(
         self,
