@@ -249,42 +249,6 @@ def get_stores():
 # Ёмкость
 # ============================================================================
 
-@salonload_bp.route("/alerts", methods=["GET"])
-@section_required("salon_load")
-def get_alerts():
-    """
-    Активные предупреждения о перегрузе с альтернативой «куда перенести».
-
-    Плюс признак «синк давно не проходил»: молчание модуля не значит «всё
-    спокойно», и на экране это должно читаться по-разному.
-    """
-    store_ids = _allowed_store_ids()
-    data = metrics.alerts(store_ids)
-    data["stale_sync"] = metrics.sync_is_stale()
-    return success_response({"data": data})
-
-
-@salonload_bp.route("/alerts/<int:alert_id>/dismiss", methods=["POST"])
-@section_required("salon_load")
-@require_ajax_header
-def dismiss_alert(alert_id: int):
-    """Снять предупреждение: разобрались, больше не показывать."""
-    if not storage.dismiss_alert(alert_id, _allowed_store_ids()):
-        return error_response("Предупреждение не найдено или относится к чужому салону", 404)
-    _bump_version()
-    return success_response({"dismissed": alert_id})
-
-
-@salonload_bp.route("/alerts/scan", methods=["POST"])
-@role_required("admin")
-@require_ajax_header
-def run_alert_scan():
-    """Пересчитать предупреждения руками — обычно это делает синк."""
-    result = metrics.scan_alerts()
-    _bump_version()
-    return success_response({"data": result})
-
-
 @salonload_bp.route("/capacity/suggest", methods=["GET"])
 @section_required("salon_load")
 def get_capacity_suggestion():

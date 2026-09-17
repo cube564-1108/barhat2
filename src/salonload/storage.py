@@ -166,32 +166,10 @@ def init_salonload_tables() -> None:
             )
         """)
 
-        # Предупреждения о перегрузе. Уникальность по (салон, дата, час,
-        # горизонт) — чтобы об одном и том же слоте не напоминать каждые
-        # полчаса: предупреждение, которое повторяется, перестают читать.
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS salon_load_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                store_id INTEGER NOT NULL,
-                date TEXT NOT NULL,
-                hour INTEGER NOT NULL,
-                horizon TEXT NOT NULL,
-                percent REAL,
-                units REAL,
-                capacity REAL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                dismissed_at TEXT,
-                resolved_at TEXT,
-                resolved_percent REAL
-            )
-        """)
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_salon_load_alert_slot "
-            "ON salon_load_alerts(store_id, date, hour, horizon)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_salon_load_alert_date ON salon_load_alerts(date)"
-        )
+        # Предупреждения о перегрузе убраны из модуля 17.09.2026: сигнал
+        # приходил на уже перегруженный слот и не менял решений. Таблица
+        # `salon_load_alerts` на проде остаётся со всей историей — код её
+        # больше не заводит и не пишет, но и не удаляет.
 
         # ====================================================================
         # Ф4 «нагрузка в минутах»: ёмкость задаётся числом флористов в смене,
@@ -207,13 +185,6 @@ def init_salonload_tables() -> None:
         # ====================================================================
         _add_column_if_missing(conn, "salon_capacity", "florists", "REAL")
         _add_column_if_missing(conn, "salon_capacity_exceptions", "florists", "REAL")
-
-        # Модель, в которой посчитано предупреждение. Числа в нём заморожены
-        # в момент создания (INSERT OR IGNORE, строка не обновляется), поэтому
-        # подписывать их единицей АКТИВНОЙ модели нельзя: после перехода на
-        # минуты старое «7,4 из 6 ед.» превратилось бы в «7,4 из 6 мин»,
-        # хотя минут там 74 из 60.
-        _add_column_if_missing(conn, "salon_load_alerts", "model", "TEXT")
 
         # Доля часа, которая у флориста уходит именно на сборку: приём заказа,
         # выдача, звонки — это тоже его час. Один коэффициент на салон, а не
@@ -301,139 +272,6 @@ def set_timezone(store_id: int, utc_offset: int, username: Optional[str] = None)
         conn.commit()
     finally:
         conn.close()
-
-
-# ============================================================================
-# Предупреждения о перегрузе
-# ============================================================================
-
-def upsert_alert(store_id: int, date: str, hour: int, horizon: str,
-                 percent: float, units: float, capacity: float,
-                 model: Optional[str] = None) -> bool:
-    """
-    Записать предупреждение. False — про этот слот и горизонт уже говорили.
-
-    Повторно об одном и том же не напоминаем: предупреждение, которое приходит
-    каждые полчаса, перестают читать, и тогда молчит уже человек.
-    """
-    conn = get_db()
-    try:
-        cur = conn.execute(
-            """
-            INSERT OR IGNORE INTO salon_load_alerts
-                   (store_id, date, hour, horizon, percent, units, capacity, model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (store_id, date, hour, horizon, percent, units, capacity,
-             model or DEFAULT_LOAD_MODEL),
-        )
-        conn.commit()
-        return bool(cur.rowcount)
-    finally:
-        conn.close()
-
-
-def active_alerts(store_ids: Optional[List[int]], date_from: str) -> List[Dict[str, Any]]:
-    """Неснятые предупреждения от указанной даты и дальше."""
-    query = ("SELECT id, store_id, date, hour, horizon, percent, units, capacity, "
-             "       model, created_at "
-             "FROM salon_load_alerts WHERE dismissed_at IS NULL AND resolved_at IS NULL "
-             "AND date >= ?")
-    params: List[Any] = [date_from]
-    if store_ids is not None:
-        if not store_ids:
-            return []
-        query += f" AND store_id IN ({','.join('?' * len(store_ids))})"
-        params.extend(store_ids)
-    query += " ORDER BY date, hour"
-
-    conn = get_db()
-    try:
-        rows = conn.execute(query, params).fetchall()
-    finally:
-        conn.close()
-    return [dict(row) for row in rows]
-
-
-def open_alerts_for_scan(date_from: str) -> List[Dict[str, Any]]:
-    """Предупреждения, по которым ещё не known, разгрузился слот или нет."""
-    conn = get_db()
-    try:
-        rows = conn.execute(
-            "SELECT id, store_id, date, hour, horizon, percent FROM salon_load_alerts "
-            "WHERE resolved_at IS NULL AND date >= ?",
-            (date_from,),
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(row) for row in rows]
-
-
-def resolve_alert(alert_id: int, percent: Optional[float]) -> None:
-    """Слот разгрузился — фиксируем факт: это единственная измеримая польза."""
-    conn = get_db()
-    try:
-        conn.execute(
-            "UPDATE salon_load_alerts SET resolved_at = datetime('now'), resolved_percent = ? "
-            "WHERE id = ? AND resolved_at IS NULL",
-            (percent, alert_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def dismiss_alert(alert_id: int, store_ids: Optional[List[int]]) -> bool:
-    """Снять предупреждение руками. Чужой салон снять нельзя."""
-    conn = get_db()
-    try:
-        if store_ids is not None:
-            if not store_ids:
-                return False
-            row = conn.execute("SELECT store_id FROM salon_load_alerts WHERE id = ?",
-                               (alert_id,)).fetchone()
-            if not row or row["store_id"] not in store_ids:
-                return False
-        cur = conn.execute(
-            "UPDATE salon_load_alerts SET dismissed_at = datetime('now') "
-            "WHERE id = ? AND dismissed_at IS NULL",
-            (alert_id,),
-        )
-        conn.commit()
-        return bool(cur.rowcount)
-    finally:
-        conn.close()
-
-
-def alerts_stats(date_from: str, store_ids: Optional[List[int]] = None) -> Dict[str, Any]:
-    """
-    Сколько предупреждений было и сколько слотов после них разгрузилось.
-
-    Это ответ на вопрос «работает ли модуль вообще». Если через месяц
-    разгруженных ноль — предупреждения никто не читает, и это надо видеть
-    цифрой, а не ощущением.
-    """
-    query = ("SELECT COUNT(*) AS total, "
-             "SUM(CASE WHEN resolved_at IS NOT NULL THEN 1 ELSE 0 END) AS resolved, "
-             "SUM(CASE WHEN dismissed_at IS NOT NULL THEN 1 ELSE 0 END) AS dismissed "
-             "FROM salon_load_alerts WHERE date >= ?")
-    params: List[Any] = [date_from]
-    if store_ids is not None:
-        if not store_ids:
-            return {"total": 0, "resolved": 0, "dismissed": 0}
-        query += f" AND store_id IN ({','.join('?' * len(store_ids))})"
-        params.extend(store_ids)
-
-    conn = get_db()
-    try:
-        row = conn.execute(query, params).fetchone()
-    finally:
-        conn.close()
-    return {
-        "total": row["total"] or 0,
-        "resolved": row["resolved"] or 0,
-        "dismissed": row["dismissed"] or 0,
-    }
 
 
 # ============================================================================

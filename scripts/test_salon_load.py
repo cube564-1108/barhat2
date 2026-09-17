@@ -58,7 +58,7 @@ assert storage.DB_PATH.endswith(os.path.join(TMP, "barhat.db")) or storage.DB_PA
 # Даты прогона считаются от сегодняшней, а не задаются константами.
 #
 # Раньше здесь стояло «2026-09-10 (четверг)», и 09.09.2026 прогон развалился:
-# test_alerts пишет заказы на ЗАВТРА, завтра совпало с этой датой, и окно
+# один из разделов писал заказы на ЗАВТРА, завтра совпало с этой датой, и окно
 # витрины затёрлось вместе с данными setup_data. Проверки при этом падали в
 # совсем другом месте — в разделе «нераспределённые», — и выглядело это как
 # сломанный код, а не как календарь.
@@ -657,7 +657,7 @@ def test_round_clock():
     """
     Круглосуточный и ночной режимы. Раньше `open < close` было жёстким
     требованием: 22 → 6 не сохранялось вовсе, и ночная точка оставалась с
-    пустой сеткой, а «ближайшие 3 часа» не переходили через полночь.
+    пустой сеткой.
     """
     print("\n15. Круглосуточный и ночной режим")
     storage.apply_working_hours(OTHER_STORE_ID, 0, 24, capacity=3.0, username="tester")
@@ -681,94 +681,6 @@ def test_round_clock():
             check(f"часы {bad} отклоняются", False, "исключения не было")
         except ValueError:
             check(f"часы {bad} отклоняются", True)
-
-    # Предупреждение «ближайшие часы» обязано перейти на следующие сутки:
-    # в 23:00 ближайший час круглосуточной точки — это 00:00 завтра.
-    from datetime import datetime, timedelta
-    offset = 7
-    storage.set_timezone(OTHER_STORE_ID, offset)
-    now_local = datetime.utcnow() + timedelta(hours=offset)
-    soon = now_local + timedelta(hours=2)
-    soon_day = soon.date().isoformat()
-    storage.apply_working_hours(OTHER_STORE_ID, 0, 24, capacity=1.0, username="tester")
-    couriers_storage.replace_orders_window(soon_day, soon_day, [
-        retailcrm.parse_order(dict(order(700, hour=soon.hour, store="tomsk-key"),
-                                   delivery={"date": soon_day, "code": "dostavka-kurerom"}), {}),
-        retailcrm.parse_order(dict(order(701, hour=soon.hour, store="tomsk-key"),
-                                   delivery={"date": soon_day, "code": "dostavka-kurerom"}), {}),
-    ])
-    metrics.scan_alerts()
-    horizons = {a["horizon"] for a in metrics.alerts([OTHER_STORE_ID])["items"]
-                if a["date"] == soon_day and a["hour"] == soon.hour}
-    check("перегруз через 2 часа виден как «ближайшие часы» даже за полночь",
-          metrics.HORIZON_SOON in horizons,
-          f"получено {horizons} (день {soon_day}, час {soon.hour})")
-
-
-def test_alerts():
-    """
-    Предупреждения (Фаза 7). Главное здесь — не «оно считается», а:
-      - о слоте не напоминают дважды;
-      - разгруженный слот закрывается сам;
-      - салон без часового пояса пропускается, а не получает сигнал по времени
-        сервера (это сдвиг на 5–7 часов, заметный только по жалобе);
-      - у предупреждения есть альтернатива, иначе оно не меняет решений.
-    """
-    print("\n10. Предупреждения о перегрузе")
-    from datetime import datetime, timedelta
-
-    # Перегруз на завтра: ёмкость 1 ед./час, а заказов на 2 ед.
-    offset = 7
-    storage.set_timezone(STORE_ID, offset)
-    tomorrow = (datetime.utcnow() + timedelta(hours=offset) + timedelta(days=1)).date().isoformat()
-
-    rows = [
-        retailcrm.parse_order(dict(order(200, hour=12), delivery={"date": tomorrow,
-                                                                  "code": "dostavka-kurerom"}), {}),
-        retailcrm.parse_order(dict(order(201, hour=12), delivery={"date": tomorrow,
-                                                                  "code": "dostavka-kurerom"}), {}),
-    ]
-    couriers_storage.replace_orders_window(tomorrow, tomorrow, rows)
-    storage.set_exception(STORE_ID, tomorrow, 12, capacity=1.0, reason="проверка")
-
-    result = metrics.scan_alerts()
-    check("перегруженный слот попал в предупреждения", result["created"] >= 1,
-          f"получено {result}")
-
-    again = metrics.scan_alerts()
-    check("повторно о том же слоте не напоминаем", again["created"] == 0, f"получено {again}")
-
-    data = metrics.alerts([STORE_ID])
-    alert = next((a for a in data["items"] if a["date"] == tomorrow and a["hour"] == 12), None)
-    check("предупреждение видно в списке", alert is not None, f"получено {data['items']}")
-    if alert:
-        check("к предупреждению приложены свободные слоты", len(alert["free_slots"]) > 0,
-              f"получено {alert['free_slots']}")
-        check("свободный слот — не тот же самый час",
-              all(not (s["date"] == tomorrow and s["hour"] == 12) for s in alert["free_slots"]),
-              f"получено {alert['free_slots']}")
-
-    # Слот разгрузили: подняли ёмкость — предупреждение обязано закрыться само
-    storage.set_exception(STORE_ID, tomorrow, 12, capacity=10.0, reason="вывели флориста")
-    resolved = metrics.scan_alerts()
-    check("разгруженный слот закрывает предупреждение", resolved["resolved"] >= 1,
-          f"получено {resolved}")
-    check("и оно уходит из активных",
-          all(not (a["date"] == tomorrow and a["hour"] == 12) for a in metrics.alerts([STORE_ID])["items"]),
-          "предупреждение осталось активным")
-
-    stats = storage.alerts_stats("2000-01-01")
-    check("счётчик пользы считает разгруженные", stats["resolved"] >= 1, f"получено {stats}")
-
-    # Салон без пояса: сигнал по времени сервера был бы мимо на 5-7 часов
-    conn = sqlite3.connect(os.environ["BARHAT_DB_PATH"])
-    conn.execute("DELETE FROM salon_timezones WHERE store_id = ?", (STORE_ID,))
-    conn.commit()
-    conn.close()
-    skipped = metrics.scan_alerts()
-    check("салон без часового пояса пропускается и виден",
-          any("Восход" in name for name in skipped["no_timezone"]), f"получено {skipped}")
-    storage.set_timezone(STORE_ID, offset)
 
 
 def test_slot_moved():
@@ -1224,18 +1136,6 @@ def test_minutes_model():
         check("ручка свободных слотов знает про минуты",
               all(s["free_units"] >= 30 for s in slots), f"получено {slots[:3]}")
 
-    # Находка ревью: числа предупреждения заморожены при создании, поэтому
-    # единица берётся из модели САМОГО предупреждения, а не из активной.
-    storage.upsert_alert(STORE_ID, DAY, 10, "day", 120.0, 7.4, 6.0,
-                         storage.LOAD_MODEL_ORDERS)
-    with app.test_client() as client:
-        login_as(client, "test-load-admin")
-        items = (((client.get("/api/salon-load/alerts").get_json() or {})
-                  .get("data") or {}).get("items") or [])
-        old = [i for i in items if i["store_id"] == STORE_ID and i["date"] == DAY]
-        check("старое предупреждение подписано своими единицами",
-              old and old[0]["unit"] == "ед.", f"получено {old[:1]}")
-
     ensure_user("test-load-manager", "manager", [STORE_ID])
     with app.test_client() as client:
         login_as(client, "test-load-manager")
@@ -1259,7 +1159,6 @@ def main():
     test_permissions()
     test_http_access()
     test_ui_contract()
-    test_alerts()
     test_slot_moved()
     test_capacity_suggestion()
     test_review_fixes()
