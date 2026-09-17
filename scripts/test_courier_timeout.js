@@ -202,7 +202,42 @@ function makeSandbox(fetchImpl, timeoutMs) {
     check('текст ошибки от сервера доходит до курьера',
           serverMessage === 'Вам не назначен город', String(serverMessage));
 
-    console.log('\n5. Лента ходит именно через apiGet');
+    console.log('\n5. Таймаут не добавляет серверу нагрузки');
+    // Главная опасность самой этой правки. Прерывание на клиенте НЕ
+    // останавливает обработчик — он доработает свои полторы минуты и займёт
+    // поток воркера до конца. Без отсрочки клиент, освободившись на 45-й
+    // секунде, слал бы следующий запрос через 45–75 секунд вместо ~100, и
+    // держал бы на сервере полтора-два обработчика на курьера вместо одного.
+    // Ровно так 16.09.2026 и положили прод: правка, разумная с одной стороны.
+    const timeoutConst = source.match(/REQUEST_TIMEOUT_MS\s*=\s*(\d+)/);
+    const backoffConst = source.match(/TIMEOUT_BACKOFF_MS\s*=\s*(\d+)/);
+    check('отсрочка после таймаута задана', Boolean(backoffConst));
+
+    // Худшее наблюдавшееся время ответа ленты на проде (лог 16.09.2026).
+    // Пауза между попытками обязана быть не короче: иначе запросов в единицу
+    // времени станет больше, чем было до правки.
+    const WORST_OBSERVED_MS = 100000;
+    const cycle = timeoutConst && backoffConst
+        ? Number(timeoutConst[1]) + Number(backoffConst[1]) : 0;
+    check('попытка не чаще, чем лента отвечала в худшем случае',
+          cycle >= WORST_OBSERVED_MS, cycle + ' мс между попытками');
+
+    // Признак таймаута — поле, а не разбор текста: текст меняют при первой же
+    // правке формулировки, и отсрочка молча перестанет применяться.
+    const apiGetMarksTimeout = /\.timedOut\s*=\s*true/.test(apiGetSource);
+    check('таймаут помечен полем, а не текстом', apiGetMarksTimeout);
+
+    const loadFeedSrc = extractFunction(source, 'loadFeed');
+    check('лента ставит отсрочку именно по таймауту',
+          Boolean(loadFeedSrc && /error\.timedOut/.test(loadFeedSrc)
+                  && /retryNotBefore\s*=\s*Date\.now\(\)\s*\+\s*TIMEOUT_BACKOFF_MS/.test(loadFeedSrc)));
+    check('лента уважает отсрочку перед запросом',
+          Boolean(loadFeedSrc && /retryNotBefore/.test(loadFeedSrc)
+                  && loadFeedSrc.indexOf('retryNotBefore') < loadFeedSrc.indexOf('state.loading = true')));
+    check('удачный ответ снимает отсрочку',
+          Boolean(loadFeedSrc && /retryNotBefore\s*=\s*0/.test(loadFeedSrc)));
+
+    console.log('\n6. Лента ходит именно через apiGet');
     // Единственная проверка по исходнику: без неё таймаут мог бы оказаться в
     // функции, которой лента не пользуется, и сторож всё равно был бы зелёным.
     const loadFeedSource = extractFunction(source, 'loadFeed');
