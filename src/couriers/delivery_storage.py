@@ -18,6 +18,7 @@
 
 import logging
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 
 from datetime import datetime
@@ -609,7 +610,8 @@ def _short_address(address: Optional[str]) -> Optional[str]:
 def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
                             courier_user_id: Optional[int] = None,
                             with_private: bool = False,
-                            courier_delivery_codes: Optional[List[str]] = None
+                            courier_delivery_codes: Optional[List[str]] = None,
+                            timings: Optional[Dict[str, float]] = None
                             ) -> List[Dict[str, Any]]:
     """
     Заказы, которые курьер видит в ленте.
@@ -623,8 +625,24 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
     with_private=True отдаёт контакты и комментарии. Для курьера это включается
     только по его собственной брони, для управляющего — по секции
     courier_dispatch.
+
+    `timings` — необязательный словарь, куда складывается цена каждого шага в
+    миллисекундах. Нужен разбору «почему лента отвечает минуту»: 16.09.2026
+    ручка стоила 53–113 секунд на проде при форме запроса, которая обязана
+    укладываться в десятки миллисекунд, и по коду причину не видно. Правило
+    CLAUDE.md: следующий разбор начинается с числа, а не с чтения кода.
+    Словарь только заполняется — на поведение выборки он не влияет.
     """
+    def _mark(name: str, started: float) -> float:
+        """Запомнить цену шага и вернуть точку отсчёта для следующего."""
+        now = time.monotonic()
+        if timings is not None:
+            timings[name] = round((now - started) * 1000, 1)
+        return now
+
+    step = time.monotonic()
     codes = visible_status_codes()
+    step = _mark("visible_codes", step)
     visible = codes.get(ROLE_VISIBLE, []) + codes.get(ROLE_READY, [])
     if not visible:
         # Пустой справочник — это не «показать всё», а «настройка не сделана».
@@ -695,8 +713,19 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         ORDER BY o.delivery_date, o.delivery_time_from IS NULL, o.delivery_time_from
     """
 
+    # Открытие соединения и сам запрос меряются ПОРОЗНЬ: это два разных
+    # диагноза. На сетевом /data одно открытие — это три файла (.db, -wal,
+    # -shm) и десятки миллисекунд, а долгий SELECT означает либо объём чтения,
+    # либо ожидание блокировки. По суммарному времени ручки их не различить.
+    #
+    # `get_db()` здесь — генератор-контекстменеджер (см. couriers/storage.py),
+    # соединение он открывает на входе в блок и закрывает в своём finally.
+    # Поэтому отметка стоит первой строкой ТЕЛА: до неё как раз уместился
+    # connect.
     with get_db() as conn:
+        step = _mark("connect", step)
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+        step = _mark("query", step)
 
     result = []
     for row in rows:
@@ -730,6 +759,10 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         else:
             item["address_text"] = _short_address(row.get("address_text"))
         result.append(item)
+
+    _mark("serialize", step)
+    if timings is not None:
+        timings["rows"] = len(rows)
     return result
 
 

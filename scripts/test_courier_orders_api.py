@@ -339,6 +339,47 @@ check("обзор управляющего не открывает соедин�
       many <= few + 2, f"(было {few} на пустом дне, стало {many} на +60 заказов)")
 
 
+print("\n11. Лента отчитывается, за что потратила время")
+# 16.09.2026 ручка отвечала 53–113 секунд на проде при форме запроса, которая
+# обязана укладываться в десятки миллисекунд. Общий сторож медленных запросов
+# называл ручку и общее время, но не шаг — и причину найти не удалось.
+# Разбор без числа стоил сорока минут простоя (CLAUDE.md: меряй раньше, чем
+# чинишь), поэтому разложение по шагам теперь часть ручки и обязано жить.
+#
+# Проверяем СВЯЗКУ, а не наличие слова в коде: шаги должны реально считаться
+# (а не приходить нулями-заглушками) и покрывать оба подозреваемых — открытие
+# соединения на сетевом диске и сам SELECT.
+with app.test_client() as client:
+    login(client, "kurier-nsk")
+    meta = client.get(f"/api/courier/orders?date_from={salon_today}"
+                      f"&date_to={salon_today}").get_json()["meta"]
+    timings = meta.get("timings_ms") or {}
+
+    required = ["auth", "dispatch", "city", "delivery_codes",
+                "visible_codes", "connect", "query", "serialize"]
+    missing = [name for name in required if name not in timings]
+    check("разбор по шагам отдаётся целиком", not missing, f"(нет: {missing})")
+
+    # Ноль по всем шагам сразу означает, что меряет заглушка, а не код:
+    # на любой машине хоть один шаг стоит доли миллисекунды.
+    measured = [timings.get(name) for name in required if name in timings]
+    check("шаги посчитаны, а не заполнены нулями",
+          any(isinstance(v, (int, float)) and v > 0 for v in measured),
+          f"({timings})")
+
+    # Сумма шагов не может превышать общее время ручки: если превышает —
+    # отметки расставлены внахлёст и числу верить нельзя.
+    steps_sum = sum(v for name, v in timings.items()
+                    if name in required and isinstance(v, (int, float)))
+    check("сумма шагов не больше общего времени",
+          steps_sum <= (meta.get("total_ms") or 0) + 1,
+          f"(шаги {steps_sum} мс, всего {meta.get('total_ms')} мс)")
+
+    # Сколько строк посчитали — без этого «query=400 мс» не с чем сравнить:
+    # 400 мс на 12 заказов и на 12 тысяч это разные диагнозы.
+    check("в разборе есть число строк", "rows" in timings, f"({timings})")
+
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} — {failures}")

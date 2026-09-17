@@ -21,6 +21,12 @@
 
     var REFRESH_MS = 30000;
 
+    // Потолок ожидания ответа. Больше интервала обновления намеренно: на
+    // медленной мобильной сети честный ответ вполне идёт дольше тика, и рвать
+    // его на 30-й секунде значит не показать заказы вовсе. Меньше минуты —
+    // тоже намеренно: дольше курьер уже считает приложение сломанным.
+    var REQUEST_TIMEOUT_MS = 45000;
+
     // Выбранные салоны переживают перезапуск: курьер собирает ходку из
     // двух-трёх точек и не должен выставлять их заново после каждого закрытия
     // приложения. Ключ с префиксом — на странице живут и другие модули.
@@ -36,6 +42,7 @@
         profileWarning: null,
         loadedAt: null,     // когда лента последний раз пришла с сервера
         stale: false,       // последняя попытка не удалась
+        staleReason: null,  // чем именно не удалась — таймаут или связь
         loading: false,
         openOrderId: null,
         pushKey: null,      // публичный VAPID; null = пуши не настроены
@@ -161,15 +168,58 @@
 
     // === Загрузка данных ====================================================
 
-    function apiGet(url) {
-        return fetch(url, { credentials: 'same-origin' }).then(function (response) {
+    /**
+     * GET с таймаутом.
+     *
+     * Без него зависший запрос держит `state.loading` сколько угодно: экран
+     * остаётся на «Загружаем заказы…», следующий тик обновления не проходит
+     * (loadFeed выходит по флагу), и кнопка обновления не помогает. На проде
+     * 16.09.2026 лента отвечала по 53–113 секунд — всё это время приложение
+     * выглядело сломанным, хотя показать последние заказы с пометкой о
+     * свежести оно вполне могло.
+     *
+     * Таймаут НЕ ускоряет сервер: обработчик там доработает до конца. Он
+     * возвращает управление курьеру — тот видит прежние данные с честной
+     * подписью «данные на HH:MM» и может нажать «Обновить».
+     */
+    function apiGet(url, timeoutMs) {
+        var controller = null;
+        var timer = null;
+        var options = { credentials: 'same-origin' };
+
+        // AbortController есть везде, где есть service worker, но проверка
+        // дешевле, чем разбор «у одного курьера приложение не грузится».
+        if (typeof AbortController === 'function') {
+            controller = new AbortController();
+            options.signal = controller.signal;
+            timer = setTimeout(function () {
+                controller.abort();
+            }, timeoutMs || REQUEST_TIMEOUT_MS);
+        }
+
+        function done() {
+            if (timer) clearTimeout(timer);
+        }
+
+        return fetch(url, options).then(function (response) {
             if (!response.ok) throw new Error('HTTP ' + response.status);
             return response.json();
         }).then(function (payload) {
+            done();
             if (!payload || payload.success !== true) {
                 throw new Error((payload && payload.error) || 'Сервер вернул ошибку');
             }
             return payload;
+        }).catch(function (error) {
+            done();
+            // Прерванный по таймауту запрос — это «сервер не успел», а не
+            // «сломалось». Текст читает курьер на улице, и он должен понимать,
+            // что делать: подождать и обновить.
+            if (error && error.name === 'AbortError') {
+                throw new Error('сервер не ответил за '
+                    + Math.round((timeoutMs || REQUEST_TIMEOUT_MS) / 1000) + ' с');
+            }
+            throw error;
         });
     }
 
@@ -203,6 +253,7 @@
             state.orders = payload.data || [];
             state.loadedAt = new Date();
             state.stale = false;
+            state.staleReason = null;
             if (payload.meta && payload.meta.warning) {
                 state.profileWarning = payload.meta.warning;
             }
@@ -212,6 +263,7 @@
             // вчерашней свежести полезнее прочерка, но врать про актуальность
             // нельзя.
             state.stale = true;
+            state.staleReason = 'Не обновилось: ' + (error && error.message || 'ошибка');
             if (!state.loadedAt) toast('Не удалось загрузить заказы: ' + error.message, 'error');
         }).then(function () {
             state.loading = false;
@@ -583,8 +635,12 @@
         }
 
         if (state.stale && state.loadedAt) {
-            el.stale.textContent = 'Нет связи с сервером. Показаны данные на '
-                + formatClock(state.loadedAt);
+            // Причину берём из последней неудачи, а не пишем «нет связи»
+            // всегда: с таймаутом самый частый случай — связь есть, а сервер
+            // не успел. Это разные действия курьера (искать сеть против
+            // подождать и обновить), и путать их нельзя.
+            el.stale.textContent = (state.staleReason || 'Нет связи с сервером')
+                + '. Показаны данные на ' + formatClock(state.loadedAt);
             el.stale.hidden = false;
         } else {
             el.stale.hidden = true;

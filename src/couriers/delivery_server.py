@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -43,6 +44,33 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Секция управляющего: весь город, чужие брони, контакты по любому заказу.
 DISPATCH_SECTION = "courier_dispatch"
+
+# Порог, после которого разбор ленты уезжает в лог целиком, по шагам.
+#
+# Зачем отдельно от общего сторожа медленных запросов (`_log_slow_request` в
+# pyrus/server.py): тот называет ручку и общее время, а вопрос «где именно эта
+# минута» оставляет открытым. 16.09.2026 лента отвечала 53–113 секунд при
+# форме запроса, которая обязана укладываться в десятки миллисекунд, и по коду
+# причину найти не удалось — гадать на проде уже стоило сорока минут простоя
+# (правило CLAUDE.md: меряй раньше, чем чинишь).
+#
+# Консоли у контейнера на нашем тарифе Amvera нет, логи читаются в панели —
+# поэтому разбор обязан быть ОДНОЙ строкой, а не россыпью.
+SLOW_FEED_SECONDS = float(os.environ.get("COURIER_SLOW_FEED_SECONDS", "1.0"))
+
+
+def _request_started_at() -> Optional[float]:
+    """Момент начала запроса, поставленный общим хуком `_start_request_timer`.
+
+    Нужен, чтобы увидеть цену того, что происходит ДО тела ручки: загрузку
+    учётки с правами (`load_user`) и проверку секции. Это отдельное соединение
+    с barhat.db, и на сетевом диске оно не бесплатное — а в разборе «ручка
+    тормозит» его обычно не видно вовсе, потому что меряют только тело.
+
+    Хук живёт в pyrus/server.py и при отдельном запуске blueprint'а может не
+    стоять — тогда просто не меряем эту часть.
+    """
+    return getattr(request, "_started_at", None)
 
 
 def error_response(message: str, status: int = 400):
@@ -112,7 +140,25 @@ def _courier_delivery_codes() -> List[str]:
 @delivery_bp.route("/orders", methods=["GET"])
 @section_required("courier_app", DISPATCH_SECTION)
 def get_orders():
-    """Лента заказов: свой город, видимые статусы, только курьерская доставка."""
+    """Лента заказов: свой город, видимые статусы, только курьерская доставка.
+
+    Каждый шаг меряется и при превышении порога уезжает в лог одной строкой —
+    см. SLOW_FEED_SECONDS. Замер ничего не решает и ни на что не влияет: он
+    только отвечает на вопрос, за что заплачено время.
+    """
+    view_started = time.monotonic()
+    timings: Dict[str, float] = {}
+    request_started = _request_started_at()
+    if request_started is not None:
+        # Всё, что случилось до первой строки тела: разбор запроса, загрузка
+        # учётки с правами, проверка секции.
+        timings["auth"] = round((view_started - request_started) * 1000, 1)
+
+    def mark(name: str, started: float) -> float:
+        now = time.monotonic()
+        timings[name] = round((now - started) * 1000, 1)
+        return now
+
     date_from = request.args.get("date_from")
     date_to = request.args.get("date_to")
     if not (_valid_date(date_from) and _valid_date(date_to)):
@@ -120,8 +166,11 @@ def get_orders():
     if date_from > date_to:
         return error_response("Начало периода позже конца")
 
+    step = time.monotonic()
     dispatch = _has_dispatch()
+    step = mark("dispatch", step)
     city = request.args.get("city") if dispatch else _courier_city()
+    step = mark("city", step)
 
     if not dispatch and not city:
         return success_response([], {
@@ -130,14 +179,38 @@ def get_orders():
                        "без города заказы не показываются.",
         })
 
+    delivery_codes = _courier_delivery_codes()
+    step = mark("delivery_codes", step)
+
     orders = ds.list_orders_for_courier(
         city=city,
         date_from=date_from,
         date_to=date_to,
         courier_user_id=int(current_user.id),
         with_private=dispatch,
-        courier_delivery_codes=_courier_delivery_codes(),
+        courier_delivery_codes=delivery_codes,
+        timings=timings,
     )
+
+    # Общее время считается от НАЧАЛА ЗАПРОСА, а не от входа в тело: иначе
+    # шаг `auth` (загрузка учётки с правами — отдельное соединение с barhat.db)
+    # оказывается за границей целого, и сумма шагов превышает total_ms. Так
+    # это и вылезло на стороже: 45,9 мс шагов против 21,5 мс «всего».
+    #
+    # Отдельного шага «вся выборка» здесь намеренно нет: он складывался бы из
+    # visible_codes + connect + query + serialize и в логе выглядел бы вторым
+    # слагаемым тех же миллисекунд.
+    finished = time.monotonic()
+    total_ms = round((finished - (request_started or view_started)) * 1000, 1)
+    if (finished - (request_started or view_started)) >= SLOW_FEED_SECONDS:
+        # Одной строкой и с датами: в панели Amvera строки не сгруппировать, а
+        # без периода непонятно, сколько данных вообще просили.
+        logger.warning(
+            "Лента курьера медленно: %s — %s, город %s, шаги мс: %s",
+            date_from, date_to, city or "-",
+            ", ".join(f"{name}={value}" for name, value in timings.items()),
+        )
+
     return success_response(orders, {
         "city": city,
         "date_from": date_from,
@@ -145,6 +218,11 @@ def get_orders():
         "free": sum(1 for order in orders if order["is_free"]),
         "mine": sum(1 for order in orders if order["is_mine"]),
         "ready": sum(1 for order in orders if order["is_ready"]),
+        # Разбор виден и с телефона курьера: если лента встанет у него, а в
+        # логах к тому моменту будет каша, спросить «что показывает meta» —
+        # самый короткий путь к ответу.
+        "timings_ms": timings,
+        "total_ms": total_ms,
     })
 
 
