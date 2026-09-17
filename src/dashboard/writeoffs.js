@@ -88,8 +88,13 @@
         elements.cancelMappingBtn = document.getElementById('cancel-writeoff-mapping-btn');
         elements.saveMappingBtn = document.getElementById('save-writeoff-mapping-btn');
         elements.mappingRows = document.getElementById('writeoff-mapping-rows');
+        elements.backfillCheckBtn = document.getElementById('writeoff-backfill-check-btn');
+        elements.backfillApplyBtn = document.getElementById('writeoff-backfill-apply-btn');
+        elements.backfillResult = document.getElementById('writeoff-backfill-result');
 
         elements.mappingBtn?.addEventListener('click', openMappingModal);
+        elements.backfillCheckBtn?.addEventListener('click', () => runBackfill(true));
+        elements.backfillApplyBtn?.addEventListener('click', () => runBackfill(false));
         elements.closeMappingBtn?.addEventListener('click', closeMappingModal);
         elements.cancelMappingBtn?.addEventListener('click', closeMappingModal);
         elements.mappingOverlay?.addEventListener('click', closeMappingModal);
@@ -1319,6 +1324,85 @@
     function closeMappingModal() {
         elements.mappingModal.classList.remove('active');
         elements.mappingOverlay.classList.remove('active');
+    }
+
+    // =========================================================================
+    // ЦЕНЫ В СТАРЫХ СПИСАНИЯХ (только админ)
+    // =========================================================================
+
+    /**
+     * Проставить себестоимость в документы, ушедшие в МойСклад нулевыми.
+     *
+     * dryRun=true только показывает список — правка требует подтверждения:
+     * это изменение проведённых документов в учёте. Кнопки блокируются на
+     * время запроса, иначе повторный клик по «медленной» кнопке отправит
+     * вторую пачку правок.
+     */
+    async function runBackfill(dryRun) {
+        if (!dryRun) {
+            const ok = await window.BarhatUI.confirm({
+                title: 'Проставить цены',
+                message: 'Будут изменены уже проведённые документы списания в МойСкладе: '
+                    + 'в позиции с нулевой ценой запишется себестоимость на момент документа. '
+                    + 'Продолжить?',
+                confirmText: 'Проставить',
+                danger: true,
+            });
+            if (!ok) return;
+        }
+
+        const buttons = [elements.backfillCheckBtn, elements.backfillApplyBtn];
+        buttons.forEach(b => { if (b) b.disabled = true; });
+        elements.backfillResult.innerHTML = '<p class="form-hint">Обращаемся к МойСкладу...</p>';
+
+        try {
+            const response = await fetch('/api/writeoffs/admin/backfill-prices', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'barhat-dashboard' },
+                body: JSON.stringify({ dry_run: dryRun }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                elements.backfillResult.innerHTML =
+                    `<p class="form-hint" style="color:#c0392b;">${escapeHtml(data.error || 'Ошибка')}</p>`;
+                return;
+            }
+            renderBackfillResult(data);
+        } catch (e) {
+            console.error('Ошибка проставления цен:', e);
+            elements.backfillResult.innerHTML =
+                '<p class="form-hint" style="color:#c0392b;">Сервис не ответил. Повторите.</p>';
+        } finally {
+            buttons.forEach(b => { if (b) b.disabled = false; });
+        }
+    }
+
+    function renderBackfillResult(data) {
+        const lines = data.details.map(d => {
+            const sum = d.sum !== undefined ? ` — ${d.sum.toLocaleString('ru-RU')} ₽` : '';
+            return `<div style="padding:2px 0;">${escapeHtml(d.document)}: ${escapeHtml(d.position)}`
+                + `${sum} <span class="form-hint">(${escapeHtml(d.result)})</span></div>`;
+        }).join('');
+
+        const errorLines = (data.errors || []).map(e =>
+            `<div style="padding:2px 0; color:#c0392b;">${escapeHtml(e.document)}: `
+            + `${escapeHtml(e.position)} — ${escapeHtml(e.error)}</div>`).join('');
+
+        const head = data.dry_run
+            ? `Найдено документов: ${data.documents_found}. К правке: ${data.positions_updated} позиций.`
+            : `Исправлено документов: ${data.documents_updated}, позиций: ${data.positions_updated}.`;
+        const rest = data.remaining > 0
+            ? `<p class="form-hint">Осталось документов: ${data.remaining} — нажмите ещё раз.</p>`
+            : '<p class="form-hint">Необработанных документов не осталось.</p>';
+        const noCost = data.positions_without_cost > 0
+            ? `<p class="form-hint">Без себестоимости: ${data.positions_without_cost} позиций — `
+                + 'товара не было на складе по учёту, цену взять неоткуда.</p>'
+            : '';
+
+        elements.backfillResult.innerHTML = `<p style="margin:0 0 6px;"><strong>${head}</strong></p>`
+            + rest + noCost
+            + `<div style="max-height:220px; overflow:auto; margin-top:8px;">${lines}${errorLines}</div>`;
     }
 
     async function saveMapping() {

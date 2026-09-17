@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request, send_from_directory
 from flask_login import current_user, login_required
@@ -436,6 +437,145 @@ def set_employee_links():
 
     log_action(current_user.username, "set_writeoff_employee_links", f"{len(applied)} применено, {len(errors)} ошибок")
     return jsonify({"ok": True, "applied": applied, "errors": errors})
+
+
+# Разовая починка старых документов: пачка за вызов, а не «всё сразу».
+# Каждый документ — это запрос себестоимости плюс PUT на позицию, то есть
+# секунды на сетевых вызовах; воркеров на проде два, и занимать один надолго
+# нельзя (см. CLAUDE.md про внешние вызовы из интерфейса).
+BACKFILL_DOCS_PER_CALL = 10
+BACKFILL_MAX_DOCS_PER_CALL = 25
+BACKFILL_DEADLINE_SECONDS = 25
+BACKFILL_DEFAULT_SINCE = "2026-08-01"
+
+
+@writeoffs_bp.route("/admin/backfill-prices", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def backfill_prices():
+    """
+    Проставить себестоимость в старых документах списания с нулевой суммой.
+
+    До 17.09.2026 дашборд отправлял позиции без цены, и МойСклад сохранял их
+    нулевыми навсегда. Такие документы занижают списание в «Показателях
+    салонов» и искажают себестоимость в самом МойСкладе, а починить их изнутри
+    контейнера нечем — консоли на нашем тарифе Amvera нет.
+
+    Цена берётся на МОМЕНТ документа, а не на сегодня: партии с тех пор
+    сменились. Правятся только документы, созданные дашбордом, — чужие
+    (заведённые руками в МойСкладе) не трогаем даже при нулевой сумме.
+
+    Body: {"since": "YYYY-MM-DD", "limit": int, "dry_run": bool}
+    dry_run по умолчанию True — сначала показать, что будет сделано.
+    """
+    data = request.get_json(silent=True) or {}
+
+    since = (data.get("since") or BACKFILL_DEFAULT_SINCE).strip()
+    try:
+        datetime.strptime(since, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "since должен быть датой YYYY-MM-DD"}), 400
+
+    dry_run = data.get("dry_run", True) is not False
+    try:
+        limit = int(data.get("limit") or BACKFILL_DOCS_PER_CALL)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit должен быть числом"}), 400
+    limit = max(1, min(limit, BACKFILL_MAX_DOCS_PER_CALL))
+
+    try:
+        client = get_client()
+    except ValueError as e:
+        return jsonify({"error": f"МойСклад не настроен: {e}"}), 500
+
+    # limit=50: при большем МойСклад не разворачивает positions.rows
+    response = client.get("/entity/loss", params={
+        "filter": f"moment>={since} 00:00:00;sum=0",
+        "expand": "positions.assortment,store",
+        "order": "moment,asc",
+        "limit": 50,
+    })
+    if response is None:
+        return jsonify({"error": "МойСклад не ответил на запрос списаний"}), 502
+
+    ours = [doc for doc in response.get("rows", [])
+            if (doc.get("description") or "").startswith("Списание #")]
+
+    started = time.monotonic()
+    processed = updated_positions = updated_docs = 0
+    without_cost = 0
+    details = []
+    errors = []
+
+    for doc in ours:
+        if processed >= limit or time.monotonic() - started > BACKFILL_DEADLINE_SECONDS:
+            break
+        processed += 1
+
+        store_href = ((doc.get("store") or {}).get("meta") or {}).get("href")
+        positions = (doc.get("positions") or {}).get("rows") or []
+        targets = [p for p in positions if not (p.get("price") or 0) > 0]
+        if not store_href or not targets:
+            continue
+
+        hrefs = [((p.get("assortment") or {}).get("meta") or {}).get("href", "").split("?")[0]
+                 for p in targets]
+        prices = client.get_cost_prices(store_href, [h for h in hrefs if h],
+                                        moment=doc["moment"][:19])
+
+        doc_touched = False
+        for position, href in zip(targets, hrefs):
+            price = prices.get(href)
+            name = ((position.get("assortment") or {}).get("name")) or "?"
+            if not price:
+                without_cost += 1
+                details.append({"document": doc.get("name"), "position": name,
+                                "result": "нет себестоимости на складе"})
+                continue
+
+            if dry_run:
+                updated_positions += 1
+                doc_touched = True
+                details.append({"document": doc.get("name"), "position": name,
+                                "price": round(price / 100, 2),
+                                "sum": round(price * (position.get("quantity") or 0) / 100, 2),
+                                "result": "будет проставлена"})
+                continue
+
+            result = client.update_loss_position_price(doc["id"], position["id"], price)
+            if result is None:
+                errors.append({"document": doc.get("name"), "position": name,
+                               "error": "МойСклад отклонил правку позиции"})
+                continue
+            updated_positions += 1
+            doc_touched = True
+            details.append({"document": doc.get("name"), "position": name,
+                            "price": round(price / 100, 2),
+                            "sum": round(price * (position.get("quantity") or 0) / 100, 2),
+                            "result": "проставлена"})
+
+        if doc_touched:
+            updated_docs += 1
+
+    log_action(
+        current_user.username, "backfill_writeoff_prices",
+        f"{'проверка' if dry_run else 'правка'}: документов {processed}, "
+        f"позиций {updated_positions}, без цены {without_cost}, ошибок {len(errors)}"
+    )
+
+    return jsonify({
+        "ok": True,
+        "dry_run": dry_run,
+        "since": since,
+        "documents_found": len(ours),
+        "documents_processed": processed,
+        "documents_updated": updated_docs,
+        "positions_updated": updated_positions,
+        "positions_without_cost": without_cost,
+        "remaining": max(0, len(ours) - processed),
+        "details": details,
+        "errors": errors,
+    })
 
 
 # =============================================================================

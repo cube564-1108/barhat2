@@ -542,9 +542,28 @@ class MoySkladClient:
             body["price"] = price
         return body
 
-    def get_cost_prices(self, store_href: str, product_hrefs: List[str]) -> Dict[str, float]:
+    def update_loss_position_price(self, loss_id: str, position_id: str,
+                                   price: float) -> Optional[Dict]:
+        """
+        Проставить себестоимость в позицию уже созданного списания.
+
+        Правится ОДНА позиция, а не документ целиком: PUT документа с массивом
+        positions переписывает состав, и опечатка в нём стоила бы потерянных
+        строк в проведённом документе учёта.
+        """
+        return self.put(
+            f'/entity/loss/{loss_id}/positions/{position_id}',
+            json_data={'price': price},
+        )
+
+    def get_cost_prices(self, store_href: str, product_hrefs: List[str],
+                        moment: Optional[str] = None) -> Dict[str, float]:
         """
         Себестоимость товаров на КОНКРЕТНОМ складе: {href товара: цена в копейках}.
+
+        moment ("YYYY-MM-DD HH:MM:SS") — себестоимость на прошедший момент, для
+        починки старых документов: партии с тех пор сменились, и сегодняшняя цена
+        к документу месячной давности отношения не имеет. Без него — текущая.
 
         Склад обязателен, а не «для точности»: себестоимость считается по партиям
         этого склада и отличается в разы. Замер 17.09.2026 по «Шар Белый»:
@@ -568,11 +587,14 @@ class MoySkladClient:
             chunk = product_hrefs[start:start + chunk_size]
             conditions = [f"product={href}" for href in chunk]
             conditions.append(f"store={store_href}")
-            response = self.get('/report/stock/all', params={
+            params = {
                 'filter': ';'.join(conditions),
                 'stockMode': 'all',
                 'limit': 1000,
-            })
+            }
+            if moment:
+                params['moment'] = moment
+            response = self.get('/report/stock/all', params=params)
             if response is None:
                 logger.warning(
                     f"Себестоимость не получена для {len(chunk)} товаров — "

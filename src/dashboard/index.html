@@ -2428,6 +2428,27 @@
                                     API-токена и отдел «Основной».
                                 </p>
                                 <div id="writeoff-mapping-rows"></div>
+
+                                <!-- Разовая починка документов, ушедших до 17.09.2026 без
+                                     себестоимости: консоли у контейнера нет, поэтому
+                                     единственный вход к такой операции — кнопка. -->
+                                <div style="margin-top:20px; padding-top:16px; border-top:1px solid #eee;">
+                                    <h4 style="margin:0 0 6px;">Цены в старых списаниях</h4>
+                                    <p class="form-hint">
+                                        До 17.09.2026 списания уходили в МойСклад без себестоимости
+                                        и оставались там с нулевой суммой — из-за этого «Показатели
+                                        салонов» занижают списание. Кнопка проставляет цену на момент
+                                        каждого документа. Правятся только документы, созданные
+                                        дашбордом; заведённые вручную в МойСкладе не трогаются.
+                                        За один раз обрабатывается до 10 документов — нажимайте
+                                        повторно, пока остаток не станет нулём.
+                                    </p>
+                                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                        <button id="writeoff-backfill-check-btn" class="btn btn-secondary">Проверить</button>
+                                        <button id="writeoff-backfill-apply-btn" class="btn btn-success">Проставить цены</button>
+                                    </div>
+                                    <div id="writeoff-backfill-result" style="margin-top:10px;"></div>
+                                </div>
                             </div>
                             <div class="modal-footer">
                                 <button id="cancel-writeoff-mapping-btn" class="btn btn-secondary">Отмена</button>

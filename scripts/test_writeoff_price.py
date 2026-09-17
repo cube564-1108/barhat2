@@ -241,6 +241,170 @@ check('price' not in broken.posted[0]['positions'][0],
 check(get_writeoff_by_id(writeoff2['id'])['status'] == 'sent',
       'заявка не подвисла в processing')
 
+print('\n9. Бэкфилл старых нулевых документов')
+from datetime import datetime, timezone  # noqa: E402
+from flask import Flask  # noqa: E402
+from werkzeug.security import generate_password_hash  # noqa: E402
+from auth import auth_bp, init_auth_tables, login_manager  # noqa: E402
+from writeoffs.storage import get_db  # noqa: E402
+
+# Документ месячной давности: цена должна браться на ЕГО момент, а не на сегодня
+OLD_MOMENT = '2026-08-20 12:07:00.000'
+COSTS_AT_MOMENT = {(STORE_HREF, href_of('rose')): 9900.0}
+
+LOSS_DOCS = [
+    {   # наш, нулевой — чинить
+        'id': 'doc-ours', 'name': '00196-00046', 'moment': OLD_MOMENT,
+        'description': 'Списание #6 (дашборд БАРХАТ)', 'sum': 0.0,
+        'store': {'meta': {'href': STORE_HREF}},
+        'positions': {'rows': [
+            {'id': 'pos-1', 'quantity': 3, 'price': 0.0,
+             'assortment': {'name': 'Роза', 'meta': {'href': href_of('rose')}}},
+            {'id': 'pos-2', 'quantity': 275, 'price': 0.0,
+             'assortment': {'name': 'Клубника', 'meta': {'href': href_of('berry')}}},
+            {'id': 'pos-3', 'quantity': 1, 'price': 15400.0,
+             'assortment': {'name': 'Роза кустовая', 'meta': {'href': href_of('rose')}}},
+        ]},
+    },
+    {   # заведён руками в МойСкладе — не трогать
+        'id': 'doc-alien', 'name': '00210-00001', 'moment': OLD_MOMENT,
+        'description': 'Инвент шары', 'sum': 0.0,
+        'store': {'meta': {'href': STORE_HREF}},
+        'positions': {'rows': [
+            {'id': 'pos-a', 'quantity': 5, 'price': 0.0,
+             'assortment': {'name': 'Шар', 'meta': {'href': href_of('ball')}}},
+        ]},
+    },
+    {   # тоже наш — для проверки лимита
+        'id': 'doc-ours-2', 'name': '00196-00047', 'moment': OLD_MOMENT,
+        'description': 'Списание #8 (дашборд БАРХАТ)', 'sum': 0.0,
+        'store': {'meta': {'href': STORE_HREF}},
+        'positions': {'rows': [
+            {'id': 'pos-4', 'quantity': 1, 'price': 0.0,
+             'assortment': {'name': 'Роза', 'meta': {'href': href_of('rose')}}},
+        ]},
+    },
+]
+
+
+class BackfillClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.puts = []
+        self.loss_queries = []
+
+    def request(self, method, path, params=None, json_data=None, **kwargs):
+        if method == 'GET' and path == '/entity/loss':
+            self.loss_queries.append(params)
+            return {'rows': LOSS_DOCS, 'meta': {'size': len(LOSS_DOCS)}}
+        if method == 'PUT' and '/positions/' in path:
+            self.puts.append((path, json_data))
+            return {'id': path.rsplit('/', 1)[-1], 'price': json_data.get('price')}
+        if method == 'GET' and path == '/report/stock/all' and (params or {}).get('moment'):
+            # исторические цены отличаются от сегодняшних
+            self.stock_calls.append(params)
+            conditions = params['filter'].split(';')
+            store = next((c.split('=', 1)[1] for c in conditions if c.startswith('store=')), None)
+            rows = []
+            for c in conditions:
+                if not c.startswith('product='):
+                    continue
+                product = c.split('=', 1)[1]
+                price = COSTS_AT_MOMENT.get((store, product))
+                if price:
+                    rows.append({'meta': {'href': product}, 'name': product, 'price': price})
+            return {'rows': rows, 'meta': {'size': len(rows)}}
+        return super().request(method, path, params=params, json_data=json_data, **kwargs)
+
+
+AJAX = {'X-Requested-With': 'barhat-dashboard'}
+app = Flask(__name__)
+app.secret_key = 'test-secret'
+login_manager.init_app(app)
+login_manager.login_view = None
+app.register_blueprint(auth_bp)
+app.register_blueprint(writeoffs_server.writeoffs_bp)
+with app.app_context():
+    init_auth_tables()
+
+conn = get_db()
+try:
+    for username, role in (('admin_wo', 'admin'), ('manager_wo', 'manager')):
+        conn.execute(
+            """INSERT INTO users (username, full_name, password_hash, role, is_active, created_at)
+               VALUES (?, ?, ?, ?, 1, ?)""",
+            (username, username, generate_password_hash('secret'), role,
+             datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+finally:
+    conn.close()
+
+admin = app.test_client()
+manager = app.test_client()
+admin.post('/api/auth/login', json={'username': 'admin_wo', 'password': 'secret'})
+manager.post('/api/auth/login', json={'username': 'manager_wo', 'password': 'secret'})
+
+backfill = BackfillClient()
+writeoffs_server.get_client = lambda: backfill
+
+print('   -- проверка (dry_run)')
+resp = admin.post('/api/writeoffs/admin/backfill-prices',
+                  json={'since': '2026-08-01'}, headers=AJAX)
+body = resp.get_json() or {}
+check(resp.status_code == 200, 'проверка отработала', f'код {resp.status_code}')
+check(backfill.puts == [], 'при проверке в МойСклад ничего не записано', str(backfill.puts))
+check(body.get('positions_updated') == 2,
+      'к правке намечены 2 позиции (по одной в каждом нашем документе)', str(body))
+check(body.get('positions_without_cost') == 1,
+      'клубника без себестоимости посчитана отдельно', str(body))
+check(body.get('documents_found') == 2,
+      'чужой документ «Инвент шары» в работу не взят', str(body.get('documents_found')))
+
+print('   -- цена берётся на момент документа')
+check(any(call.get('moment', '').startswith('2026-08-20') for call in backfill.stock_calls),
+      'себестоимость запрошена на момент документа, а не на сегодня',
+      str([c.get('moment') for c in backfill.stock_calls]))
+
+print('   -- реальная правка')
+backfill = BackfillClient()
+writeoffs_server.get_client = lambda: backfill
+resp = admin.post('/api/writeoffs/admin/backfill-prices',
+                  json={'since': '2026-08-01', 'dry_run': False}, headers=AJAX)
+body = resp.get_json() or {}
+check(len(backfill.puts) == 2, 'ушло 2 правки позиций', str(backfill.puts))
+paths = [p for p, _ in backfill.puts]
+check(all('/entity/loss/' in p and '/positions/' in p for p in paths),
+      'правится позиция, а не документ целиком', str(paths))
+check(all(j.get('price') == 9900.0 for _, j in backfill.puts),
+      'проставлена историческая цена 99,00 ₽, а не сегодняшняя 119,00 ₽',
+      str(backfill.puts))
+check('pos-3' not in str(paths), 'позиция, где цена уже была, не тронута', str(paths))
+check('pos-a' not in str(paths), 'позиция чужого документа не тронута', str(paths))
+check(body.get('documents_updated') == 2, 'починены оба наших документа', str(body))
+
+print('   -- ограничения и доступ')
+backfill = BackfillClient()
+writeoffs_server.get_client = lambda: backfill
+resp = admin.post('/api/writeoffs/admin/backfill-prices',
+                  json={'since': '2026-08-01', 'dry_run': False, 'limit': 1}, headers=AJAX)
+body = resp.get_json() or {}
+check(body.get('documents_processed') == 1, 'за вызов обработан 1 документ', str(body))
+check(body.get('remaining') == 1, 'остаток показан', str(body))
+
+bad_date = admin.post('/api/writeoffs/admin/backfill-prices',
+                      json={'since': '20.08.2026'}, headers=AJAX)
+check(bad_date.status_code == 400, 'кривая дата — 400', f'код {bad_date.status_code}')
+
+no_header = admin.post('/api/writeoffs/admin/backfill-prices', json={'since': '2026-08-01'})
+check(no_header.status_code == 403,
+      'без заголовка X-Requested-With — 403 (защита от подделки запроса)',
+      f'код {no_header.status_code}')
+
+not_admin = manager.post('/api/writeoffs/admin/backfill-prices',
+                         json={'since': '2026-08-01'}, headers=AJAX)
+check(not_admin.status_code == 403, 'управляющему ручка недоступна',
+      f'код {not_admin.status_code}')
+
 print('\n' + '=' * 60)
 if failures:
     print(f'ПРОВАЛЕНО проверок: {len(failures)}')
