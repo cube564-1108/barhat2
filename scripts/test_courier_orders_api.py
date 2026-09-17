@@ -288,6 +288,21 @@ with storage.get_db() as conn:
              WHERE x.retailcrm_order_id = o.retailcrm_order_id
                AND x.state IN ({ds.BLOCKING_STATES_SQL}))
         WHERE o.delivery_date = ?""", (salon_today,)))
+# Лента всегда спрашивает «город + день», и отбирать она обязана по обоим
+# сразу. 17.09.2026 план уходил на одиночный индекс по городу: движок
+# перебирал все 16 750 заказов Новосибирска за все времена, чтобы вернуть две
+# строки за сегодня. На быстром локальном диске это 4 мс и незаметно, на
+# сетевом /data — от 0,4 до 1,7 секунды в каждом запросе экрана.
+with storage.get_db() as conn:
+    city_plan = " | ".join(row["detail"] for row in conn.execute(
+        "EXPLAIN QUERY PLAN "
+        "SELECT o.retailcrm_order_id FROM courier_orders o "
+        " WHERE o.city = ? AND o.delivery_date >= ? AND o.delivery_date <= ?",
+        ("Новосибирск", salon_today, salon_today)))
+check("лента отбирает заказы по городу И дате сразу",
+      "delivery_date" in city_plan and "city" in city_plan,
+      f"({city_plan})")
+
 check("бронь ищется по индексу, а не сканом таблицы",
       "SCAN delivery_assignments" not in plan and "SCAN x" not in plan, f"({plan})")
 
