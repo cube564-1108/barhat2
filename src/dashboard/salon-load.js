@@ -24,7 +24,6 @@
         weekDays: 7,
         data: null,
         week: null,
-        alerts: null,
         isAdmin: false,
         loading: false
     };
@@ -131,15 +130,9 @@
 
         try {
             if (state.view === 'day') {
-                const [result, alerts] = await Promise.all([
-                    api(`/api/salon-load/day?date=${encodeURIComponent(state.date)}`),
-                    // Предупреждения грузим вместе с сеткой: отдельной кнопки
-                    // «проверить перегруз» быть не должно — её никто не нажмёт.
-                    api('/api/salon-load/alerts').catch(() => null)
-                ]);
+                const result = await api(`/api/salon-load/day?date=${encodeURIComponent(state.date)}`);
                 state.data = result.data;
                 state.isAdmin = !!result.data.can_edit;
-                state.alerts = alerts ? alerts.data : null;
             } else {
                 const result = await api(
                     `/api/salon-load/week?from=${encodeURIComponent(state.date)}&days=${state.weekDays}`);
@@ -291,77 +284,6 @@
                 : 'Разметку делает администратор.'));
     }
 
-    function alertsCard() {
-        const alerts = state.alerts;
-        if (!alerts) return '';
-        // Единица у КАЖДОГО предупреждения своя: его числа записаны в момент
-        // создания, и после переключения модели старые записи остаются в
-        // прежних единицах. `alerts.unit` — только запасной вариант для
-        // записей, сделанных до появления этого поля. Свободные слоты
-        // считаются здесь и сейчас, поэтому у них единица активная.
-        const alertUnit = alerts.unit || 'ед.';
-
-        // Молчание модуля и «всё спокойно» — разные вещи. Если синк не
-        // проходил больше двух часов, предупреждений просто нет физически.
-        const stale = alerts.stale_sync
-            ? note('bad', 'Синхронизация давно не проходила',
-                'Предупреждения о перегрузе сейчас не считаются, а проценты в сетке ' +
-                'описывают устаревшую картину.')
-            : '';
-
-        const items = alerts.items || [];
-        if (!items.length) {
-            return stale + (alerts.stats && alerts.stats.total ? `
-                <div class="sload-note sload-note--info">
-                    <span style="line-height:0;flex:0 0 auto">${icon(ICON_ALERT, 18)}</span>
-                    <div class="sload-note__body">
-                        <div class="sload-note__title">Перегруженных слотов нет</div>
-                        <div>За 30 дней было ${alerts.stats.total}
-                            ${plural(alerts.stats.total, 'предупреждение', 'предупреждения', 'предупреждений')},
-                            из них ${alerts.stats.resolved} слотов разгрузили после сигнала.</div>
-                    </div>
-                </div>` : '');
-        }
-
-        return stale + `
-        <div class="sload-card">
-            <h2 class="sload-card__title">Перегруз: ${items.length}
-                ${plural(items.length, 'слот', 'слота', 'слотов')}</h2>
-            <p class="sload-card__caption">За сутки — успеть вывести ещё одного флориста,
-                за 3 часа — успеть перенести заказ. Рядом — куда его перенести.</p>
-            <div class="sload-extra">
-                ${items.map(alert => `
-                    <div class="sload-extra__item" style="cursor:default;flex-direction:column;align-items:stretch;gap:8px">
-                        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-                            <span>
-                                <span class="sload-extra__label">${esc(alert.store_name)} ·
-                                    ${esc(dateLabel(alert.date))} · ${String(alert.hour).padStart(2, '0')}:00</span><br>
-                                <span class="sload-extra__value">${pct(alert.percent)}</span>
-                                <span class="sload-extra__label">${num(alert.units)} из
-                                    ${num(alert.capacity)} ${esc(alert.unit || alertUnit)} ·
-                                    ${alert.horizon === 'soon' ? 'ближайшие часы' : 'завтра'}</span>
-                            </span>
-                            <button class="sload-btn sload-btn--ghost" data-dismiss="${alert.id}">Разобрался</button>
-                        </div>
-                        <div class="sload-extra__label">
-                            ${alert.free_slots && alert.free_slots.length
-                                ? 'Свободно рядом: ' + alert.free_slots.map(slot =>
-                                    `<button class="sload-badge sload-badge--pickup" style="border:none;cursor:pointer"
-                                        data-free-slot data-store="${alert.store_id}" data-date="${esc(slot.date)}"
-                                        data-hour="${slot.hour}">${esc(dateLabel(slot.date).split(',')[0])},
-                                        ${String(slot.hour).padStart(2, '0')}:00 — запас ${num(slot.free_units)} ${alertUnit}</button>`).join(' ')
-                                : 'Свободных слотов рядом нет — здесь нужен ещё один флорист, а не перенос.'}
-                        </div>
-                    </div>`).join('')}
-            </div>
-            ${alerts.stats && alerts.stats.total ? `<p class="sload-card__caption" style="margin-top:10px">
-                За 30 дней: ${alerts.stats.total}
-                ${plural(alerts.stats.total, 'предупреждение', 'предупреждения', 'предупреждений')},
-                разгружено после сигнала — ${alerts.stats.resolved}. Если разгруженных ноль,
-                предупреждения не работают.</p>` : ''}
-        </div>`;
-    }
-
     function renderDay() {
         const data = state.data;
         if (!data) return '';
@@ -385,7 +307,7 @@
                 ${hours.map(hour => cell(store, store.cells[hour])).join('')}
             </tr>`).join('');
 
-        return header() + toolbar() + alertsCard() +
+        return header() + toolbar() +
             freshnessNote(data.freshness) + capacityNote(data) + normsNote(data) + `
             <div class="sload-card">
                 <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -764,7 +686,6 @@
             overlay.remove();
             state.data = null;
             state.week = null;
-            state.alerts = null;
             load();
         });
     }
@@ -1826,31 +1747,6 @@
             return;
         }
 
-        const freeSlot = e.target.closest('[data-free-slot]');
-        if (freeSlot) {
-            // Переход на свободный слот: показываем тот день и тот час, чтобы
-            // человек видел, куда переносит, а не верил подписи на бейдже.
-            state.date = freeSlot.dataset.date;
-            state.data = null;
-            state.week = null;
-            load().then(() => openSlot(Number(freeSlot.dataset.store), Number(freeSlot.dataset.hour)));
-            return;
-        }
-
-        const dismiss = e.target.closest('[data-dismiss]');
-        if (dismiss) {
-            dismiss.disabled = true;
-            api(`/api/salon-load/alerts/${dismiss.dataset.dismiss}/dismiss`, postOptions({}))
-                .then(() => {
-                    toast('Предупреждение снято', 'success');
-                    state.data = null;
-                    load();
-                })
-                .catch(error => {
-                    toast('Не удалось снять: ' + error.message, 'error');
-                    dismiss.disabled = false;
-                });
-        }
     });
 
     document.addEventListener('change', function (e) {
