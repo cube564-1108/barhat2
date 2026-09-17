@@ -138,6 +138,9 @@ print("\n2. В уведомлении нет персональных данны
 # ============================================================================
 
 sent = []
+# Оригинал сохраняем: разделы ниже проверяют НАСТОЯЩЕЕ поведение отправки, а
+# подмена, оставленная навсегда, превращает их в проверку заглушки.
+REAL_SEND_TO_USERS = push.send_to_users
 push.send_to_users = lambda user_ids, payload: sent.append(
     {"users": list(user_ids), "payload": payload}) or {"sent": len(user_ids)}
 
@@ -294,6 +297,94 @@ check("после выключения записи не остаётся — и
 anon = app.test_client()
 check("без входа ключ не отдаётся",
       anon.get("/api/courier/push/key").status_code in (401, 403))
+
+
+# ============================================================================
+print("\n6b. Включение отвечает, работают ли уведомления")
+# ============================================================================
+#
+# Настоящий пуш уходит, только когда в городе ПОЯВИТСЯ новый свободный заказ,
+# и по каждому заказу ровно один раз. В пустой день молчание неотличимо от
+# поломки, а разобрать его нечем: консоли у контейнера нет. 17.09.2026
+# владелец включил уведомления и не смог понять, работают они или нет.
+#
+# Поэтому подписка обязана отвечать двумя РАЗНЫМИ фактами: дошло ли пробное
+# до телефона и попадает ли человек в адресаты вообще. Это разные причины
+# молчания и разные действия человека.
+
+# Возвращаем настоящую отправку и снимаем ключи: разделы выше подменяли и то,
+# и другое, а здесь проверяется реальное поведение ручки.
+push.send_to_users = REAL_SEND_TO_USERS
+push.VAPID_PUBLIC_KEY = ""
+push.VAPID_PRIVATE_KEY = ""
+
+r = client.post("/api/courier/push/subscribe", headers=AJAX,
+                json={"endpoint": "https://push.test/probe",
+                      "keys": {"p256dh": "p", "auth": "a"}})
+data = (r.get_json() or {}).get("data") or {}
+check("ответ подписки говорит про пробное", "test_sent" in data, data)
+check("ответ подписки говорит про адресность", "is_recipient" in data, data)
+# Ключей VAPID в прогоне нет — и это должно называться своим именем, а не
+# «не дошло»: администратору чинить одно, курьеру другое.
+check("без ключей VAPID причина названа",
+      data.get("test_reason") == "not_configured", data)
+
+# Профиля курьера у этой учётки нет: пробное придёт, а «новый заказ» — нет
+check("без профиля курьера человек не адресат",
+      data.get("is_recipient") is False, data)
+
+conn = auth.get_db()
+try:
+    kurier_id = conn.execute(
+        "SELECT id FROM users WHERE username = 'kurier'").fetchone()["id"]
+finally:
+    conn.close()
+
+ds.save_courier_profile(user_id=int(kurier_id), username="kurier",
+                        city="Новосибирск", retailcrm_courier_id=None, active=True)
+
+r = client.post("/api/courier/push/subscribe", headers=AJAX,
+                json={"endpoint": "https://push.test/probe",
+                      "keys": {"p256dh": "p", "auth": "a"}})
+data = (r.get_json() or {}).get("data") or {}
+check("с профилем и городом человек адресат", data.get("is_recipient") is True, data)
+check("город возвращается экрану", data.get("city") == "Новосибирск", data)
+
+# Проверку человек вправе повторять сколько угодно: «одно событие на заказ»
+# держит claim_push_event, и пробное под это правило попадать не должно —
+# иначе вторая проверка молча ничего не отправит.
+#
+# Проверяем ПОВЕДЕНИЕМ, а не поиском слова в исходнике: слово встречается в
+# докстроке функции, и проверка «его нет в тексте» падала бы на исправном коде
+# и проходила бы на сломанном без комментария.
+probes = []
+push.VAPID_PUBLIC_KEY = "test-public"
+push.VAPID_PRIVATE_KEY = "test-private"
+push.send_to_users = lambda user_ids, payload: (
+    probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
+
+push.send_test([501])
+push.send_test([501])
+check("повторная проверка тоже отправляет", len(probes) == 2,
+      f"(отправок: {len(probes)})")
+check("пробное не затирает уведомление о заказе",
+      probes and probes[0].get("tag") == "test", probes[:1])
+
+push.send_to_users = REAL_SEND_TO_USERS
+push.VAPID_PUBLIC_KEY = ""
+push.VAPID_PRIVATE_KEY = ""
+
+# --- экран обязан различать исходы ------------------------------------------
+with open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
+          encoding="utf-8") as f:
+    app_js = f.read()
+check("экран разбирает результат пробного",
+      "function announceSubscribed" in app_js and "test_sent" in app_js, "")
+check("«ключей нет» отделено от «не дошло»",
+      "not_configured" in app_js, "(это разные действия человека)")
+check("экран предупреждает не-адресата",
+      "is_recipient === false" in app_js,
+      "(пробное придёт, а сообщения о заказах — никогда)")
 
 
 # ============================================================================
