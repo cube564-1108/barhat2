@@ -318,7 +318,31 @@
             + '<th>Состояние</th><th></th>'
             + '</tr></thead><tbody>' + (rows || '<tr><td colspan="5">Профилей пока нет</td></tr>')
             + '</tbody></table>'
-            + (state.isAdmin ? addProfileHtml() : '');
+            + (state.isAdmin ? addProfileHtml() : '')
+            + (state.isAdmin ? resetPushHtml() : '');
+    }
+
+    /**
+     * Переотправка уведомлений по уже известным заказам.
+     *
+     * Событие «новый заказ» уходит по каждому заказу ровно один раз — так
+     * курьер не получает одно и то же дважды от двух воркеров. Обратная
+     * сторона: если в момент прохода отправлять было некому, заказ молчит
+     * навсегда. Так и вышло 17.09.2026 — курьер завёлся раньше, чем подписал
+     * устройство.
+     *
+     * Кнопка, а не команда в консоли: консоли у контейнера на этом тарифе
+     * Amvera нет, а разовые операции с боевой базой нужны регулярно.
+     */
+    function resetPushHtml() {
+        return '<h3 style="margin-top:28px">Уведомления</h3>'
+            + '<p class="section-description">Сообщение о новом заказе уходит по каждому '
+            + 'заказу один раз. Если в тот момент ни одно устройство не было подписано, '
+            + 'заказ больше не напомнит о себе. Кнопка ниже забывает отправленное за '
+            + 'последние двое суток — уведомления по этим заказам придут заново '
+            + 'ближайшим обновлением ленты.</p>'
+            + '<button type="button" class="btn btn-secondary" data-reset-push="1">'
+            + 'Переотправить уведомления за 2 дня</button>';
     }
 
     /**
@@ -505,6 +529,27 @@
         if (tab) {
             state.tab = tab.getAttribute('data-cdisp-tab');
             loadTab();
+            return;
+        }
+
+        var resetPush = event.target.closest('[data-reset-push]');
+        if (resetPush) {
+            resetPush.disabled = true;
+            window.BarhatUI.confirm(
+                'Курьеры получат уведомления по заказам за последние двое суток заново. '
+                + 'Если устройства уже подписаны, это будет пачка сообщений.',
+                { title: 'Переотправить уведомления', confirmText: 'Переотправить',
+                  cancelText: 'Отмена' }
+            ).then(function (ok) {
+                if (!ok) { resetPush.disabled = false; return; }
+                return post('/api/courier/push/reset-events', { days: 2 })
+                    .then(function (data) {
+                        toast('Забыто событий: ' + (data && data.removed)
+                            + '. Уведомления уйдут ближайшим обновлением ленты', 'success');
+                    })
+                    .catch(function (e) { toast(e.message, 'error'); })
+                    .then(function () { resetPush.disabled = false; });
+            });
             return;
         }
 

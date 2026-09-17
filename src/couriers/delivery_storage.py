@@ -2084,6 +2084,41 @@ def claim_push_event(order_id: int, event_type: str) -> bool:
             return False
 
 
+def has_push_subscriptions(user_ids: List[int]) -> bool:
+    """
+    Есть ли хоть одно устройство у этих людей.
+
+    Спрашивается ПЕРЕД тем, как занять право на событие. Иначе право сгорает
+    вхолостую: курьер в городе заведён, устройство ещё не подписано, отправка
+    уходит в пустоту — а журнал уже считает событие отправленным, и второго
+    шанса у этого заказа не будет никогда.
+    """
+    if not user_ids:
+        return False
+    placeholders = ",".join("?" * len(user_ids))
+    with get_db() as conn:
+        row = conn.execute(
+            f"SELECT 1 FROM push_subscriptions WHERE user_id IN ({placeholders}) LIMIT 1",
+            list(user_ids)).fetchone()
+    return row is not None
+
+
+def reset_push_events(days: int = 2) -> int:
+    """
+    Забыть отправленные события за последние N дней — чтобы уведомления по
+    этим заказам ушли заново.
+
+    Нужно после починки: заказы, чьё право сгорело вхолостую, иначе молчат
+    навсегда. Период ограничен намеренно — полная очистка на живых курьерах
+    означала бы лавину повторных уведомлений по всей истории.
+    """
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM push_events WHERE created_at >= datetime('now', ?)",
+            (f"-{int(days)} days",))
+        return cur.rowcount
+
+
 def courier_user_ids(city: Optional[str]) -> List[int]:
     """Активные курьеры города — кому уходит «новый заказ»."""
     with get_db() as conn:

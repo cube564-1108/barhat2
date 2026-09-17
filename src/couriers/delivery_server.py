@@ -476,6 +476,31 @@ def push_subscribe():
     })
 
 
+@delivery_bp.route("/push/reset-events", methods=["POST"])
+@role_required("admin")
+@require_ajax_header
+def reset_push_events():
+    """
+    Забыть отправленные события — уведомления по этим заказам уйдут заново.
+
+    Нужно после починки «право сгорало вхолостую»: заказы, по которым тик уже
+    занял право, когда подписок ещё не было, иначе молчат навсегда. Консоли у
+    контейнера нет, поэтому разовая операция живёт ручкой под админом.
+
+    Период ограничен: полная очистка на живых курьерах — это лавина повторных
+    уведомлений по всей истории.
+    """
+    days = request.get_json(silent=True) or {}
+    try:
+        days = max(1, min(7, int(days.get("days", 2))))
+    except (TypeError, ValueError):
+        days = 2
+
+    removed = ds.reset_push_events(days)
+    log_action(current_user.username, "push_events_reset", f"days={days}, removed={removed}")
+    return success_response({"removed": removed, "days": days})
+
+
 @delivery_bp.route("/push/unsubscribe", methods=["POST"])
 @section_required("courier_app", DISPATCH_SECTION)
 @require_ajax_header

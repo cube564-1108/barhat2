@@ -112,6 +112,14 @@ ds.save_courier_profile(user_id=501, username="kurier1", city="Новосиби�
 ds.save_courier_profile(user_id=502, username="kurier2", city="Екатеринбург",
                         retailcrm_courier_id=None, active=True, updated_by="test")
 
+# Устройство курьера. Без него отправки не будет вовсе — и это правильно:
+# право на событие одноразовое, занимать его, когда отправлять некому, значит
+# похоронить уведомление по этому заказу навсегда (см. раздел 6c). Профиль без
+# подписки — обычное состояние: курьера заводят раньше, чем он откроет
+# приложение.
+ds.save_push_subscription(user_id=501, endpoint="https://push.test/kurier1",
+                          p256dh="p", auth="a")
+
 
 # ============================================================================
 print("\n1. Без ключей VAPID модуль молчит, а не падает")
@@ -220,6 +228,12 @@ finally:
 # ============================================================================
 print("\n5. Подписки: сохранение, замена владельца, отписка")
 # ============================================================================
+
+# С чистого листа: раздел считает подписки поимённо, и любая заведённая выше
+# (например устройство из фикстуры) ломала бы счёт. Зависимость от порядка
+# разделов — худший вид хрупкости в стороже: он падает не там, где сломано.
+with cs.get_db() as conn:
+    conn.execute("DELETE FROM push_subscriptions")
 
 ds.save_push_subscription(501, "https://push.test/aaa", "key1", "auth1", "Android")
 ds.save_push_subscription(501, "https://push.test/bbb", "key2", "auth2", "Android")
@@ -373,6 +387,69 @@ check("пробное не затирает уведомление о заказ
 push.send_to_users = REAL_SEND_TO_USERS
 push.VAPID_PUBLIC_KEY = ""
 push.VAPID_PRIVATE_KEY = ""
+
+# ============================================================================
+print("\n6c. Право на событие не сгорает вхолостую")
+# ============================================================================
+#
+# Журнал «заказ + событие» одноразовый. Пока проверки не было, тик ленты
+# занимал право по каждому свободному заказу, даже когда ни одно устройство
+# курьеров города не подписано, и слал в пустоту. Курьер, включивший
+# уведомления после этого, не получал НИЧЕГО по уже существующим заказам — а
+# в спокойный день новых и не появляется.
+#
+# Ровно так 17.09.2026 выглядело «включил уведомления, ни одного пуша».
+
+push.VAPID_PUBLIC_KEY = "test-public"
+push.VAPID_PRIVATE_KEY = "test-private"
+
+# Курьер города есть, устройств нет
+with cs.get_db() as conn:
+    conn.execute("DELETE FROM push_subscriptions")
+    conn.execute("DELETE FROM push_events")
+
+quiet = {"retailcrm_order_id": 8100, "city": "Новосибирск", "utc_offset": 7,
+         "address_text": "Новосибирск, улица Мира, 3", "delivery_time_from": "16:00",
+         "site_name": "Восход"}
+check("без подписок уведомление не отправляется",
+      push.notify_new_order(quiet) is False)
+with cs.get_db() as conn:
+    burned = conn.execute(
+        "SELECT COUNT(*) AS c FROM push_events WHERE retailcrm_order_id = 8100"
+    ).fetchone()["c"]
+check("и право на событие не занято", burned == 0,
+      "(иначе этот заказ промолчит навсегда)")
+
+# Устройство подписалось — тот же заказ обязан дойти
+ds.save_push_subscription(user_id=501, endpoint="https://push.test/late",
+                          p256dh="p", auth="a")
+probes.clear()
+push.send_to_users = lambda user_ids, payload: (
+    probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
+check("после подписки уведомление по тому же заказу уходит",
+      push.notify_new_order(quiet) is True, "(второго шанса раньше не было)")
+check("и оно действительно отправлено", len(probes) == 1, f"({len(probes)})")
+
+# Теперь право занято — повтор не проходит, дублей нет
+check("повтор по тому же заказу не отправляется",
+      push.notify_new_order(quiet) is False)
+
+# Сброс журнала возвращает заказу право: это выход для тех заказов, чьё право
+# сгорело до починки
+removed = ds.reset_push_events(2)
+check("сброс журнала что-то удалил", removed >= 1, f"({removed})")
+probes.clear()
+check("после сброса уведомление уходит снова",
+      push.notify_new_order(quiet) is True)
+
+push.send_to_users = REAL_SEND_TO_USERS
+push.VAPID_PUBLIC_KEY = ""
+push.VAPID_PRIVATE_KEY = ""
+
+# --- ручка сброса: только админ и только через ajax --------------------------
+r = client.post("/api/courier/push/reset-events", headers=AJAX, json={"days": 2})
+check("курьеру сброс недоступен", r.status_code in (401, 403), f"({r.status_code})")
+
 
 # --- экран обязан различать исходы ------------------------------------------
 with open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
