@@ -542,6 +542,61 @@ class MoySkladClient:
             body["price"] = price
         return body
 
+    def get_last_purchase_prices(self, store_href: str, product_hrefs: List[str],
+                                 before_moment: Optional[str] = None,
+                                 max_pages: int = 3) -> Dict[str, float]:
+        """
+        Цена ближайшего ОПРИХОДОВАНИЯ товара на этом складе: {href: копейки}.
+
+        Запасной источник для случая, когда себестоимости не существует: товар
+        по учёту в минусе, потому что расход обгоняет оприходование. Физически
+        товар есть, цена закупки известна (её завёл человек), но партии для
+        расчёта FIFO нет — и get_cost_prices честно возвращает пусто.
+
+        Это оценка, а не факт: настоящая себестоимость считалась бы по партиям.
+        Для «доли списания» разница несущественна — порядок величины тот же, —
+        но вызывающий код обязан различать источники и показывать это человеку.
+
+        before_moment ограничивает поиск приходами ДО момента документа: цена,
+        заведённая после списания, к нему отношения не имеет.
+        """
+        prices: Dict[str, float] = {}
+        if not store_href or not product_hrefs:
+            return prices
+
+        wanted = {href for href in product_hrefs if href}
+        conditions = [f"store={store_href}"]
+        if before_moment:
+            conditions.append(f"moment<={before_moment}")
+
+        # От свежих к старым: первое совпадение и есть ближайший приход
+        for page in range(max_pages):
+            if not wanted:
+                break
+            response = self.get('/entity/enter', params={
+                'filter': ';'.join(conditions),
+                'expand': 'positions.assortment',
+                'order': 'moment,desc',
+                'limit': 50,
+                'offset': page * 50,
+            })
+            if response is None:
+                break
+
+            rows = response.get('rows', [])
+            for document in rows:
+                for position in (document.get('positions') or {}).get('rows') or []:
+                    assortment = position.get('assortment') or {}
+                    href = (assortment.get('meta') or {}).get('href', '').split('?')[0]
+                    price = position.get('price')
+                    if href in wanted and price is not None and price > 0:
+                        prices[href] = price
+                        wanted.discard(href)
+            if len(rows) < 50:
+                break
+
+        return prices
+
     def update_loss_position_price(self, loss_id: str, position_id: str,
                                    price: float) -> Optional[Dict]:
         """

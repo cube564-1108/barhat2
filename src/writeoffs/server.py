@@ -503,7 +503,7 @@ def backfill_prices():
 
     started = time.monotonic()
     processed = updated_positions = updated_docs = 0
-    without_cost = 0
+    without_cost = estimated_positions = 0
     details = []
     errors = []
 
@@ -520,8 +520,8 @@ def backfill_prices():
 
         hrefs = [((p.get("assortment") or {}).get("meta") or {}).get("href", "").split("?")[0]
                  for p in targets]
-        prices = client.get_cost_prices(store_href, [h for h in hrefs if h],
-                                        moment=doc["moment"][:19])
+        prices, sources = _resolve_prices(client, store_href, [h for h in hrefs if h],
+                                          moment=doc["moment"][:19])
 
         doc_touched = False
         for position, href in zip(targets, hrefs):
@@ -530,16 +530,26 @@ def backfill_prices():
             if not price:
                 without_cost += 1
                 details.append({"document": doc.get("name"), "position": name,
-                                "result": "нет себестоимости на складе"})
+                                "source": "none",
+                                "result": "цену взять неоткуда — нет ни партий, ни приходов"})
                 continue
+
+            source = sources.get(href, "stock")
+            if source == "purchase":
+                estimated_positions += 1
+            entry = {
+                "document": doc.get("name"), "position": name,
+                "price": round(price / 100, 2),
+                "sum": round(price * (position.get("quantity") or 0) / 100, 2),
+                "source": source,
+            }
 
             if dry_run:
                 updated_positions += 1
                 doc_touched = True
-                details.append({"document": doc.get("name"), "position": name,
-                                "price": round(price / 100, 2),
-                                "sum": round(price * (position.get("quantity") or 0) / 100, 2),
-                                "result": "будет проставлена"})
+                entry["result"] = ("будет проставлена" if source == "stock"
+                                   else "будет проставлена по цене прихода")
+                details.append(entry)
                 continue
 
             result = client.update_loss_position_price(doc["id"], position["id"], price)
@@ -549,10 +559,9 @@ def backfill_prices():
                 continue
             updated_positions += 1
             doc_touched = True
-            details.append({"document": doc.get("name"), "position": name,
-                            "price": round(price / 100, 2),
-                            "sum": round(price * (position.get("quantity") or 0) / 100, 2),
-                            "result": "проставлена"})
+            entry["result"] = ("проставлена" if source == "stock"
+                               else "проставлена по цене прихода")
+            details.append(entry)
 
         if doc_touched:
             updated_docs += 1
@@ -571,6 +580,7 @@ def backfill_prices():
         "documents_processed": processed,
         "documents_updated": updated_docs,
         "positions_updated": updated_positions,
+        "positions_estimated": estimated_positions,
         "positions_without_cost": without_cost,
         "remaining": max(0, len(ours) - processed),
         "details": details,
@@ -713,6 +723,39 @@ def cancel(writeoff_id):
 # СОГЛАСОВАНИЕ
 # =============================================================================
 
+def _resolve_prices(client, store_href: str, product_hrefs: list,
+                    moment: str = None) -> tuple:
+    """
+    Цены для позиций списания: ({href: копейки}, {href: 'stock' | 'purchase'}).
+
+    Два источника, и они не равнозначны:
+      stock    — себестоимость по партиям, то есть факт учёта;
+      purchase — цена ближайшего оприходования, то есть оценка.
+
+    Второй нужен потому, что по учёту товар регулярно уходит в минус: расход
+    (продажи, списания) обгоняет оприходование, партий нет, и себестоимости не
+    существует — при том что товар есть на полке, а цена закупки заведена
+    руками. Без запасного источника списание клубники всегда было бы нулевым:
+    по сети она числится в минусе на сотни килограммов.
+
+    Источник возвращается вместе с ценой: человек должен видеть, где факт, а
+    где оценка, — иначе оценка незаметно становится «данными».
+    """
+    sources = {}
+    prices = client.get_cost_prices(store_href, product_hrefs, moment=moment)
+    for href in prices:
+        sources[href] = "stock"
+
+    missing = [href for href in product_hrefs if href and href not in prices]
+    if missing:
+        fallback = client.get_last_purchase_prices(store_href, missing, before_moment=moment)
+        for href, price in fallback.items():
+            prices[href] = price
+            sources[href] = "purchase"
+
+    return prices, sources
+
+
 def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list, created_by: str) -> None:
     """
     Отправить заявку в МойСклад одним документом "Списание". Заявка уже
@@ -750,12 +793,19 @@ def _send_to_moysklad(writeoff_id: int, store_id: int, positions: list, created_
     # списать товар. Потерянные цены видно по нулевой сумме документа.
     store_href = link["moysklad_store_href"]
     try:
-        cost_prices = client.get_cost_prices(
-            store_href, [pos["moysklad_product_href"] for pos in positions]
+        cost_prices, price_sources = _resolve_prices(
+            client, store_href, [pos["moysklad_product_href"] for pos in positions]
         )
     except Exception as e:
         logger.warning(f"Списание #{writeoff_id}: себестоимость не получена ({e})")
-        cost_prices = {}
+        cost_prices, price_sources = {}, {}
+
+    estimated = sum(1 for src in price_sources.values() if src == "purchase")
+    if estimated:
+        logger.info(
+            f"Списание #{writeoff_id}: по {estimated} позициям взята цена последнего "
+            f"прихода — себестоимости нет, товар по учёту в минусе"
+        )
 
     missing = [pos["product_name"] for pos in positions
                if pos["moysklad_product_href"] not in cost_prices]

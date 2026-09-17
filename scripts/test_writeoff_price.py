@@ -108,6 +108,11 @@ class FakeClient(MoySkladClient):
             self.posted.append(json_data)
             return {'id': 'loss-created-1', 'name': '00210-00999'}
 
+        # По умолчанию приходов нет: базовые разделы проверяют поведение
+        # «цены не существует вовсе». Запасной источник — в PurchaseClient.
+        if method == 'GET' and path == '/entity/enter':
+            return {'rows': [], 'meta': {'size': 0}}
+
         raise AssertionError(f'Неожиданный запрос {method} {path}')
 
 
@@ -240,6 +245,66 @@ check('price' not in broken.posted[0]['positions'][0],
       'позиция ушла без цены, а не с нулевой')
 check(get_writeoff_by_id(writeoff2['id'])['status'] == 'sent',
       'заявка не подвисла в processing')
+
+print('\n8а. Запасной источник: цена ближайшего прихода')
+# Клубника по учёту в минусе — себестоимости нет, но приходы с ценой есть.
+# Без этой ветки её списание навсегда осталось бы нулевым.
+ENTER_DOCS = [
+    {'moment': '2026-08-14 09:57:00.000', 'positions': {'rows': [
+        {'quantity': 2875, 'price': 7500.0,
+         'assortment': {'name': 'Клубника', 'meta': {'href': href_of('berry')}}}]}},
+    {'moment': '2026-08-11 09:52:00.000', 'positions': {'rows': [
+        {'quantity': 3665, 'price': 8000.0,
+         'assortment': {'name': 'Клубника', 'meta': {'href': href_of('berry')}}}]}},
+]
+
+
+class PurchaseClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.enter_calls = []
+
+    def request(self, method, path, params=None, json_data=None, **kwargs):
+        if method == 'GET' and path == '/entity/enter':
+            self.enter_calls.append(params)
+            return {'rows': ENTER_DOCS, 'meta': {'size': len(ENTER_DOCS)}}
+        return super().request(method, path, params=params, json_data=json_data, **kwargs)
+
+
+client = PurchaseClient()
+prices = client.get_last_purchase_prices(STORE_HREF, [href_of('berry')],
+                                         before_moment='2026-08-26 07:32:00')
+check(prices.get(href_of('berry')) == 7500.0,
+      'взята цена ближайшего прихода (75,00 ₽), а не более старого (80,00 ₽)',
+      str(prices))
+call = client.enter_calls[0]
+check(f'store={STORE_HREF}' in call['filter'], 'приход ищется на складе заявки', call['filter'])
+check('moment<=2026-08-26 07:32:00' in call['filter'],
+      'приходы позже документа не берутся', call['filter'])
+check(call.get('order') == 'moment,desc', 'сортировка от свежих к старым')
+
+print('   -- себестоимость важнее цены прихода')
+client = PurchaseClient()
+prices, sources = writeoffs_server._resolve_prices(
+    client, STORE_HREF, [href_of('rose'), href_of('berry')])
+check(prices[href_of('rose')] == 11900.0 and sources[href_of('rose')] == 'stock',
+      'где есть себестоимость — берётся она, источник stock', str(sources))
+check(prices[href_of('berry')] == 7500.0 and sources[href_of('berry')] == 'purchase',
+      'где её нет — цена прихода, источник purchase', str(sources))
+
+print('   -- новое списание тоже получает цену клубники')
+writeoff3 = create_writeoff(store_id, 'florist', [
+    {'moysklad_product_id': 'berry', 'moysklad_product_href': href_of('berry'),
+     'product_name': 'Клубника', 'quantity': 275, 'uom_name': 'г', 'reason': 'порча'},
+])
+purchase_client = PurchaseClient()
+writeoffs_server.get_client = lambda: purchase_client
+lock_writeoff_for_sending(writeoff3['id'], 'manager')
+writeoffs_server._send_to_moysklad(
+    writeoff3['id'], store_id, get_writeoff_by_id(writeoff3['id'])['positions'], 'florist')
+sent_position = purchase_client.posted[0]['positions'][0]
+check(sent_position.get('price') == 7500.0,
+      'клубника уходит в МойСклад с ценой, а не нулём', str(sent_position))
 
 print('\n9. Бэкфилл старых нулевых документов')
 from datetime import datetime, timezone  # noqa: E402

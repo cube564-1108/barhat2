@@ -1379,9 +1379,14 @@
     }
 
     function renderBackfillResult(data) {
+        // Оценка помечается цветом: цена прихода — не то же самое, что
+        // себестоимость по партиям, и это должно быть видно, а не спрятано
+        // в одинаковых строках.
         const lines = data.details.map(d => {
             const sum = d.sum !== undefined ? ` — ${d.sum.toLocaleString('ru-RU')} ₽` : '';
-            return `<div style="padding:2px 0;">${escapeHtml(d.document)}: ${escapeHtml(d.position)}`
+            const color = d.source === 'purchase' ? ' color:#b8860b;'
+                : (d.source === 'none' ? ' color:#888;' : '');
+            return `<div style="padding:2px 0;${color}">${escapeHtml(d.document)}: ${escapeHtml(d.position)}`
                 + `${sum} <span class="form-hint">(${escapeHtml(d.result)})</span></div>`;
         }).join('');
 
@@ -1395,13 +1400,18 @@
         const rest = data.remaining > 0
             ? `<p class="form-hint">Осталось документов: ${data.remaining} — нажмите ещё раз.</p>`
             : '<p class="form-hint">Необработанных документов не осталось.</p>';
+        const estimated = data.positions_estimated > 0
+            ? `<p class="form-hint" style="color:#b8860b;">По цене прихода: ${data.positions_estimated} позиций — `
+                + 'себестоимости нет (товар по учёту в минусе), взята цена последнего '
+                + 'оприходования в этом салоне.</p>'
+            : '';
         const noCost = data.positions_without_cost > 0
-            ? `<p class="form-hint">Без себестоимости: ${data.positions_without_cost} позиций — `
-                + 'товара не было на складе по учёту, цену взять неоткуда.</p>'
+            ? `<p class="form-hint">Без цены: ${data.positions_without_cost} позиций — `
+                + 'ни партий, ни приходов по этому товару на складе не нашлось.</p>'
             : '';
 
         elements.backfillResult.innerHTML = `<p style="margin:0 0 6px;"><strong>${head}</strong></p>`
-            + rest + noCost
+            + rest + estimated + noCost
             + `<div style="max-height:220px; overflow:auto; margin-top:8px;">${lines}${errorLines}</div>`;
     }
 
