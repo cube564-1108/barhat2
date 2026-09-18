@@ -313,7 +313,12 @@ def notify_courier_events(released: List[Dict[str, Any]]) -> Dict[str, int]:
 
     Ошибка не роняет тик: пуш — усиление, а лента обновляется и сама.
     """
-    from . import push
+    # `storage` целиком, а не отдельные функции из него: ниже зовётся
+    # storage.list_delivery_types(). Вверху модуля импортированы только
+    # конкретные имена (get_sync_state, ...), самого модуля в области
+    # видимости нет — и его отсутствие роняло рассылку «нового заказа»
+    # NameError'ом, молча, весь срок жизни модуля (разбор 18.09.2026).
+    from . import push, storage
     from .delivery_storage import (claims_about_to_expire, list_orders_for_courier,
                                    visible_status_codes)
 

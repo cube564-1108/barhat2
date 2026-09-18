@@ -540,6 +540,41 @@ check("разбор показывает состояние ленты",
       report.get("feed"))
 
 
+# ============================================================================
+print("\n6e. Рассылка вызывается целиком и не падает молча")
+# ============================================================================
+#
+# ЗДЕСЬ ЖИЛ САМ БАГ. `notify_courier_events` зовёт storage.list_delivery_types(),
+# а в области видимости модуля есть только отдельные импортированные из storage
+# функции — самого модуля нет. NameError, весь блок в except, рассылка «нового
+# заказа» не работала НИКОГДА. Ошибка уезжала в лог, которого у нас нет.
+#
+# Прежние проверки этого не ловили, потому что звали push.notify_new_order()
+# напрямую — то есть проверяли отправку, минуя того, кто её вызывает.
+# Правило: сторож проверяет СВЯЗКУ и должен исполнять ту ветку, где баг.
+
+from couriers import delivery_feed  # noqa: E402
+
+push.VAPID_PUBLIC_KEY = "test-public"
+push.VAPID_PRIVATE_KEY = "test-private"
+probes.clear()
+push.send_to_users = lambda user_ids, payload: (
+    probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
+
+counts = delivery_feed.notify_courier_events([])
+run = push.why_silent()["feed"]["last_push_run"]
+
+check("прогон рассылки оставил отметку", isinstance(run, dict), run)
+check("рассылка отработала без ошибки", (run or {}).get("error") is None,
+      f"({(run or {}).get('error')})")
+check("отметка несёт счётчики", set((run or {}).get("counts") or {}) >=
+      {"new", "ready", "expiring", "released"}, run)
+
+push.send_to_users = REAL_SEND_TO_USERS
+push.VAPID_PUBLIC_KEY = ""
+push.VAPID_PRIVATE_KEY = ""
+
+
 # --- экран обязан различать исходы ------------------------------------------
 with open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
           encoding="utf-8") as f:
