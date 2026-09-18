@@ -45,6 +45,33 @@ VAPID_CONTACT = os.getenv("VAPID_CONTACT", "mailto:komdir.barhat@gmail.com").str
 # Сколько ждём push-сервис. Он в тике ленты, а тик обязан оставаться дешёвым.
 PUSH_TIMEOUT_SECONDS = 10
 
+# СКОЛЬКО PUSH-СЕРВИС ХРАНИТ СООБЩЕНИЕ, ПОКА ТЕЛЕФОН НЕДОСТУПЕН.
+#
+# У pywebpush умолчание — `ttl=0`, и это не «без ограничения», а «доставить
+# ТОЛЬКО ЕСЛИ устройство на связи прямо сейчас; иначе выбросить». Телефон
+# курьера лежит в кармане с погашенным экраном, Android держит соединение с
+# FCM усыплённым (Doze) — и уведомление о новом заказе выбрасывалось, не
+# доходя. При этом FCM отвечает «принято», ошибки нет нигде: наша диагностика
+# честно показывала `sent: 1`.
+#
+# Так это и выглядело 18.09.2026: пробное уведомление приходило всегда (его
+# жмут, держа телефон в руке, с открытым приложением), а о заказах — никогда.
+#
+# Значения — по сроку жизни самого события, а не «побольше на всякий случай»:
+# протухшее уведомление о заказе, который давно увезли, хуже молчания.
+PUSH_TTL_SECONDS = {
+    "new_order": 2 * 3600,      # заказ можно взять, пока он свободен
+    "ready": 2 * 3600,          # «собрали, забирай» — столько же
+    "claim_expiring": 15 * 60,  # смысл ровно в срочности; позже бесполезно
+    "claim_released": 3600,
+    "test": 300,                # проверка «здесь и сейчас»
+}
+DEFAULT_PUSH_TTL = 3600
+
+# Urgency по RFC 8030: `high` разрешает push-сервису будить устройство в
+# энергосберегающем режиме. Для «новый заказ» это и есть смысл уведомления.
+PUSH_URGENCY = "high"
+
 
 def is_configured() -> bool:
     """Настроены ли ключи. Без них модуль молчит, а не падает."""
@@ -323,7 +350,8 @@ def _short_address(address: Optional[str]) -> str:
     return ", ".join(useful[-2:])
 
 
-def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int]:
+def send_to_users(user_ids: List[int], payload: Dict[str, Any],
+                  event_type: Optional[str] = None) -> Dict[str, int]:
     """
     Отправить уведомление устройствам этих пользователей.
 
@@ -376,6 +404,10 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
         result["detail"] = str(e)
         return result
 
+    # Срок жизни — по типу события. Тег payload сюда не годится: он
+    # уникален на заказ, а срок общий для всех уведомлений одного вида.
+    ttl = PUSH_TTL_SECONDS.get(event_type or payload.get("tag"), DEFAULT_PUSH_TTL)
+
     body = json.dumps(payload, ensure_ascii=False)
     for subscription in subscriptions:
         info = {
@@ -389,6 +421,10 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
                 vapid_private_key=vapid_obj or key_pem,
                 vapid_claims={"sub": VAPID_CONTACT},
                 timeout=PUSH_TIMEOUT_SECONDS,
+                # Без ttl pywebpush ставит 0 — «доставить только если телефон
+                # на связи сию секунду, иначе выбросить». См. PUSH_TTL_SECONDS.
+                ttl=ttl,
+                headers={"Urgency": PUSH_URGENCY},
             )
             ds.mark_push_ok(subscription["endpoint"])
             result["sent"] += 1
@@ -718,7 +754,7 @@ def _notify(order: Dict[str, Any], event_type: str, title: str, body: str,
         # Открываем приложение, а не карточку: до брони контактов всё равно
         # нет, а глубокая ссылка на чужой уже занятый заказ только раздражает
         "url": "/app/courier",
-    })
+    }, event_type=event_type)
 
     _log_send(order, event_type, user_ids, result)
 

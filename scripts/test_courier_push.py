@@ -149,7 +149,7 @@ sent = []
 # Оригинал сохраняем: разделы ниже проверяют НАСТОЯЩЕЕ поведение отправки, а
 # подмена, оставленная навсегда, превращает их в проверку заглушки.
 REAL_SEND_TO_USERS = push.send_to_users
-push.send_to_users = lambda user_ids, payload: sent.append(
+push.send_to_users = lambda user_ids, payload, event_type=None: sent.append(
     {"users": list(user_ids), "payload": payload}) or {"sent": len(user_ids)}
 
 # Время замораживаем явно.
@@ -413,7 +413,7 @@ check("город возвращается экрану", data.get("city") == "�
 probes = []
 push.VAPID_PUBLIC_KEY = "test-public"
 push.VAPID_PRIVATE_KEY = "test-private"
-push.send_to_users = lambda user_ids, payload: (
+push.send_to_users = lambda user_ids, payload, event_type=None: (
     probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
 
 push.send_test([501])
@@ -463,7 +463,7 @@ check("и право на событие не занято", burned == 0,
 ds.save_push_subscription(user_id=501, endpoint="https://fcm.googleapis.com/fcm/send/late",
                           p256dh="p", auth="a")
 probes.clear()
-push.send_to_users = lambda user_ids, payload: (
+push.send_to_users = lambda user_ids, payload, event_type=None: (
     probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
 check("после подписки уведомление по тому же заказу уходит",
       push.notify_new_order(quiet) is True, "(второго шанса раньше не было)")
@@ -480,7 +480,7 @@ check("повтор по тому же заказу не отправляетс�
 # не только не доходила, но и сжигала единственный шанс заказа: следующий тик
 # видел «уже отправляли» и молчал. Девять заказов так и остались немыми.
 ds.reset_push_events(2)
-push.send_to_users = lambda user_ids, payload: {
+push.send_to_users = lambda user_ids, payload, event_type=None: {
     "sent": 0, "failed": 1, "dropped": 0, "reason": "error", "detail": "прод лежит"}
 check("при неудаче отправки notify честно отвечает нет",
       push.notify_new_order(quiet) is False)
@@ -492,7 +492,7 @@ check("и право возвращается, а не сгорает", burned_a
       "(иначе после починки заказ промолчит навсегда)")
 
 probes.clear()
-push.send_to_users = lambda user_ids, payload: (
+push.send_to_users = lambda user_ids, payload, event_type=None: (
     probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
 check("после починки то же уведомление уходит",
       push.notify_new_order(quiet) is True, "(в этом и смысл возврата права)")
@@ -602,7 +602,7 @@ from couriers import delivery_feed  # noqa: E402
 push.VAPID_PUBLIC_KEY = "test-public"
 push.VAPID_PRIVATE_KEY = "test-private"
 probes.clear()
-push.send_to_users = lambda user_ids, payload: (
+push.send_to_users = lambda user_ids, payload, event_type=None: (
     probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
 
 counts = delivery_feed.notify_courier_events([])
@@ -730,6 +730,72 @@ check("экран различает нечитаемый ключ", "'bad_key'"
 
 push.VAPID_PUBLIC_KEY = push.VAPID_PRIVATE_KEY = ""
 push._private_key_pem = push._private_key_error = None
+
+
+# ============================================================================
+print("\n6g. У уведомления есть срок жизни — иначе его выбрасывают на лету")
+# ============================================================================
+#
+# ЗДЕСЬ ЖИЛА ПРИЧИНА «пуши по заказам не приходят» при полностью исправной
+# отправке. У pywebpush умолчание `ttl=0` — это не «без ограничения», а
+# «доставить, ТОЛЬКО если телефон на связи сию секунду, иначе выбросить».
+# Телефон курьера лежит в кармане, Android усыпил соединение с FCM — и
+# уведомление гибнет. FCM при этом отвечает «принято», ошибки нет нигде, и
+# диагностика честно показывает sent: 1.
+#
+# Пробное приходило всегда: его жмут, держа телефон в руке.
+
+import types as _types  # noqa: E402
+
+pub2, priv2 = _generate_pair()
+push.VAPID_PUBLIC_KEY, push.VAPID_PRIVATE_KEY = pub2, priv2
+push._private_key_pem = push._private_key_error = None
+push._vapid_object = push._vapid_object_error = None
+
+captured = {}
+_real_pywebpush = sys.modules.get("pywebpush")
+_fake = _types.ModuleType("pywebpush")
+
+
+class _WebPushException(Exception):
+    pass
+
+
+_fake.WebPushException = _WebPushException
+_fake.webpush = lambda **kwargs: captured.update(kwargs)
+sys.modules["pywebpush"] = _fake
+
+ds.save_push_subscription(user_id=601, endpoint="https://fcm.googleapis.com/fcm/send/ttl",
+                          p256dh="p", auth="a")
+
+push.send_to_users([601], {"title": "x", "body": "y"}, event_type="new_order")
+check("ttl передаётся в push-сервис", "ttl" in captured, sorted(captured))
+check("и он не нулевой", captured.get("ttl", 0) > 0,
+      f"(ttl={captured.get('ttl')}; 0 = «выбросить, если телефон спит»)")
+check("срок для нового заказа — часы, а не минуты",
+      captured.get("ttl", 0) >= 3600, f"(ttl={captured.get('ttl')})")
+check("устройство разрешено будить",
+      (captured.get("headers") or {}).get("Urgency") == "high",
+      captured.get("headers"))
+
+captured.clear()
+push.send_to_users([601], {"title": "x", "body": "y", "tag": "test"})
+check("у пробного срок свой, короткий",
+      0 < captured.get("ttl", 0) <= 600, f"(ttl={captured.get('ttl')})")
+
+captured.clear()
+push.send_to_users([601], {"title": "x", "body": "y"}, event_type="claim_expiring")
+check("у «бронь истекает» срок короче, чем у заказа",
+      0 < captured.get("ttl", 0) < 3600, f"(ttl={captured.get('ttl')})")
+
+if _real_pywebpush is not None:
+    sys.modules["pywebpush"] = _real_pywebpush
+else:
+    sys.modules.pop("pywebpush", None)
+
+push.VAPID_PUBLIC_KEY = push.VAPID_PRIVATE_KEY = ""
+push._private_key_pem = push._private_key_error = None
+push._vapid_object = push._vapid_object_error = None
 
 
 # ============================================================================
