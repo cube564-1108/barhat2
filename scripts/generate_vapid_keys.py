@@ -52,11 +52,28 @@ def main() -> int:
                   + public_numbers.y.to_bytes(32, "big"))
     private_raw = private_key.private_numbers().private_value.to_bytes(32, "big")
 
+    public_b64, private_b64 = b64(public_raw), b64(private_raw)
+
     print("=== Ключи VAPID для push-уведомлений ===\n")
     print("Добавьте в .env в КОРНЕ проекта (и в переменные окружения Amvera):\n")
-    print(f"VAPID_PUBLIC_KEY={b64(public_raw)}")
-    print(f"VAPID_PRIVATE_KEY={b64(private_raw)}")
+    print(f"VAPID_PUBLIC_KEY={public_b64}")
+    print(f"VAPID_PRIVATE_KEY={private_b64}")
     print("VAPID_CONTACT=mailto:komdir.barhat@gmail.com")
+
+    # Длины печатаем НЕ для красоты.
+    #
+    # 18.09.2026 приватный ключ доехал до прода обрезанным: 39 символов вместо
+    # 43. Прочитать его нельзя, поэтому не уходил НИ ОДИН пуш — ни пробный, ни
+    # о новых заказах. Снаружи это выглядело как «уведомления не приходят», и
+    # разбор занял день: ошибка гасилась и пряталась в лог, которого на нашем
+    # тарифе Amvera не существует.
+    #
+    # Сверить два числа после вставки — пять секунд.
+    print(f"\nПРОВЕРЬТЕ ПОСЛЕ ВСТАВКИ, что скопировалось целиком:")
+    print(f"  VAPID_PUBLIC_KEY  — ровно 87 символов (сейчас {len(public_b64)})")
+    print(f"  VAPID_PRIVATE_KEY — ровно 43 символа  (сейчас {len(private_b64)})")
+    print("Обрезанный ключ не читается, и уведомления молча не отправляются вовсе.")
+    print("Проверить на проде: /health?full=1 → courier_push.keys")
     print("\nПриватный ключ не показывайте никому и не коммитьте в git.")
     print("При смене пары все подписки курьеров станут недействительными.")
 
