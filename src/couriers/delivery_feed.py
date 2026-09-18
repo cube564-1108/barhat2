@@ -24,6 +24,7 @@
 не трогает брони (Фаза 4). Её работа — держать витрину свежей.
 """
 
+import json
 import logging
 import threading
 import time
@@ -41,6 +42,11 @@ logger = logging.getLogger(__name__)
 # а не время: время в CRM живёт в поясе аккаунта, а id монотонен и не зависит
 # от часов (урок из feedback про курсоры синхронизации).
 CURSOR_KEY = "orders_history_since_id"
+
+# Отметка о последнем прогоне рассылки: когда, сколько ушло, что упало.
+# Лог у нас недоступен, поэтому результат живёт в базе — см.
+# notify_courier_events и push.why_silent().
+PUSH_RUN_KEY = "push_last_run"
 
 # Как часто лента ходит в CRM. Минута — компромисс: заказ появляется у курьера
 # практически сразу, а нагрузка это 1 запрос (~1 КБ) при лимите CRM в 10
@@ -345,8 +351,28 @@ def notify_courier_events(released: List[Dict[str, Any]]) -> Dict[str, int]:
                 holder = order.get("assignment_user_id")
                 if holder and push.notify_ready(order, holder):
                     counts["ready"] += 1
+        error = None
     except Exception as e:
-        logger.warning(f"Push-уведомления: рассылка не удалась — {e}")
+        logger.warning(f"Push-уведомления: рассылка не удалась — {e}", exc_info=True)
+        error = f"{type(e).__name__}: {e}"
+
+    # Отметка о прогоне — в базу, а не только в лог.
+    #
+    # Этот except гасит ЛЮБУЮ ошибку рассылки: тик ленты важнее уведомлений и
+    # падать из-за них не должен. Цена — рассылка молчит, а причина уезжает в
+    # лог, которого у нас нет: консоли у контейнера на этом тарифе Amvera не
+    # существует. 18.09.2026 разбор «почему не приходят уведомления» упёрся
+    # ровно в это: счётчики показывали «ушло бы 5», лента тикала, а что
+    # происходило между ними — не видел никто.
+    #
+    # Правило CLAUDE.md: «подробности в логах сервера» — это подробности нигде.
+    try:
+        from .storage import set_sync_state
+        set_sync_state(PUSH_RUN_KEY, json.dumps(
+            {"at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+             "counts": counts, "error": error}, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"Push-уведомления: отметку о прогоне записать не удалось — {e}")
 
     if any(counts.values()):
         logger.info(f"Push: отправлено {counts}")

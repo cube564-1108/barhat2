@@ -281,10 +281,10 @@ def _feed_state() -> Dict[str, Any]:
     запуск, лок и курсор истории. Залипший лок — отдельная беда: держатель мог
     умереть вместе с воркером, и до истечения TTL лента стоит целиком.
     """
-    from .delivery_feed import CURSOR_KEY, FEED_LOCK
+    from .delivery_feed import CURSOR_KEY, FEED_LOCK, PUSH_RUN_KEY
     from .storage import get_db as couriers_db
 
-    keys = (f"schedule:{FEED_LOCK}", f"lock:{FEED_LOCK}", CURSOR_KEY)
+    keys = (f"schedule:{FEED_LOCK}", f"lock:{FEED_LOCK}", CURSOR_KEY, PUSH_RUN_KEY)
     try:
         with couriers_db() as conn:
             rows = conn.execute(
@@ -295,12 +295,23 @@ def _feed_state() -> Dict[str, Any]:
 
     state = {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]}
              for row in rows}
+
+    # Результат последнего прогона рассылки: сколько ушло и что упало. Именно
+    # здесь и был слепой участок — исключение гасилось в лог, которого нет.
+    import json
+    last_run = state.get(PUSH_RUN_KEY, {}).get("value")
+    try:
+        last_run = json.loads(last_run) if last_run else None
+    except ValueError:
+        pass   # что записалось, то и показываем: строкой лучше, чем ничем
+
     return {
         # Время в этих полях — UTC, как всё, что пишет планировщик
         "next_tick_not_before": state.get(f"schedule:{FEED_LOCK}", {}).get("value"),
         "lock_until": state.get(f"lock:{FEED_LOCK}", {}).get("value"),
         "cursor": state.get(CURSOR_KEY, {}).get("value"),
         "cursor_updated_at": state.get(CURSOR_KEY, {}).get("updated_at"),
+        "last_push_run": last_run,
         "now_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
