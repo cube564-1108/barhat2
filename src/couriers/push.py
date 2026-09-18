@@ -199,6 +199,19 @@ def key_health() -> Dict[str, Any]:
     except Exception as e:
         info["pair_matches"] = None
         info["error"] = f"{type(e).__name__}: {e}"
+
+    # Наш разбор и разбор библиотеки — разные вещи, и они разъезжаются.
+    # 18.09.2026 ключ читался у нас и падал в py_vapid: снаружи это выглядело
+    # как «ключ в порядке, а уведомления не идут». Спрашиваем саму библиотеку.
+    try:
+        from py_vapid import Vapid
+        Vapid.from_string(pem)
+        info["accepted_by_library"] = True
+    except ImportError:
+        info["accepted_by_library"] = None   # библиотеки нет — см. no_library
+    except Exception as e:
+        info["accepted_by_library"] = False
+        info["library_error"] = f"{type(e).__name__}: {e}"[:200]
     return info
 
 
@@ -317,8 +330,16 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
             ds.mark_push_failed(subscription["endpoint"])
             result["failed"] += 1
             result["reason"] = "error"
-            result["detail"] = f"{type(e).__name__}: {e}"[:300]
-            logger.warning(f"Push не ушёл: {e}")
+            # Текста исключения мало: «Could not deserialize key data» одинаково
+            # звучит и про VAPID-ключ, и про ключи подписки браузера, а это
+            # разные поломки. Последние кадры стека называют место — имя файла
+            # и функцию, без наших данных и без секретов (18.09.2026).
+            import traceback
+            frames = traceback.extract_tb(e.__traceback__)[-3:]
+            where = " < ".join(f"{f.filename.split('/')[-1]}:{f.name}"
+                               for f in reversed(frames))
+            result["detail"] = f"{type(e).__name__}: {e}"[:220] + f" [{where}]"
+            logger.warning(f"Push не ушёл: {e}", exc_info=True)
 
     # Хоть одно устройство получило — это успех, а не отказ
     if result["sent"]:
