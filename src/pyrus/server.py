@@ -741,15 +741,21 @@ def health_check():
         # и задают. Здесь только числа: номера заказов и города остаются в
         # админской ручке /api/courier/push/diagnostics, ручка /health публичная.
         try:
-            steps = courier_push.why_silent()['steps']
+            report = courier_push.why_silent()
+            steps, feed = report['steps'], report['feed']
         except Exception as e:
             steps = {'error': f'{type(e).__name__}: {e}'}
+            feed = None
 
         return {'configured': courier_push.is_configured(),
                 'subscriptions': subscriptions,
                 'addressable_couriers': addressable,
                 'events_sent': events,
-                'steps': steps}
+                'steps': steps,
+                # Рассылка — предпоследний шаг тика ленты. «Ушло бы 5» при
+                # стоящей ленте останется «ушло бы» навсегда, и по одним
+                # счётчикам отсева этого не видно.
+                'feed': feed}
 
     if full:
         body['courier_push'] = timed('courier_push', collect_push)

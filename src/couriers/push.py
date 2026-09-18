@@ -262,8 +262,46 @@ def why_silent() -> Dict[str, Any]:
         "delivery_codes": codes,
         "vapid_configured": is_configured(),
         "steps": steps,
+        "feed": _feed_state(),
         "by_city": by_city,
         "blocked": blocked,
+    }
+
+
+def _feed_state() -> Dict[str, Any]:
+    """
+    Живёт ли лента — тот, кто рассылает.
+
+    Уведомления отправляются НЕ сами по себе: рассылка — предпоследний шаг
+    тика ленты (`run_once` → `sweep_assignments` → `notify_courier_events`).
+    Если тик падает раньше или вовсе не идёт, «ушло бы 5» останется «ушло бы»
+    навсегда, и по одним счётчикам отсева этого не видно.
+
+    Смотрим то, что тик о себе оставляет в `sync_state`: талон на следующий
+    запуск, лок и курсор истории. Залипший лок — отдельная беда: держатель мог
+    умереть вместе с воркером, и до истечения TTL лента стоит целиком.
+    """
+    from .delivery_feed import CURSOR_KEY, FEED_LOCK
+    from .storage import get_db as couriers_db
+
+    keys = (f"schedule:{FEED_LOCK}", f"lock:{FEED_LOCK}", CURSOR_KEY)
+    try:
+        with couriers_db() as conn:
+            rows = conn.execute(
+                "SELECT key, value, updated_at FROM sync_state "
+                f" WHERE key IN ({','.join('?' * len(keys))})", keys).fetchall()
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    state = {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]}
+             for row in rows}
+    return {
+        # Время в этих полях — UTC, как всё, что пишет планировщик
+        "next_tick_not_before": state.get(f"schedule:{FEED_LOCK}", {}).get("value"),
+        "lock_until": state.get(f"lock:{FEED_LOCK}", {}).get("value"),
+        "cursor": state.get(CURSOR_KEY, {}).get("value"),
+        "cursor_updated_at": state.get(CURSOR_KEY, {}).get("updated_at"),
+        "now_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
