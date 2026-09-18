@@ -117,7 +117,7 @@ ds.save_courier_profile(user_id=502, username="kurier2", city="Екатерин�
 # похоронить уведомление по этому заказу навсегда (см. раздел 6c). Профиль без
 # подписки — обычное состояние: курьера заводят раньше, чем он откроет
 # приложение.
-ds.save_push_subscription(user_id=501, endpoint="https://push.test/kurier1",
+ds.save_push_subscription(user_id=501, endpoint="https://fcm.googleapis.com/fcm/send/kurier1",
                           p256dh="p", auth="a")
 
 
@@ -235,24 +235,24 @@ print("\n5. Подписки: сохранение, замена владель�
 with cs.get_db() as conn:
     conn.execute("DELETE FROM push_subscriptions")
 
-ds.save_push_subscription(501, "https://push.test/aaa", "key1", "auth1", "Android")
-ds.save_push_subscription(501, "https://push.test/bbb", "key2", "auth2", "Android")
+ds.save_push_subscription(501, "https://fcm.googleapis.com/fcm/send/aaa", "key1", "auth1", "Android")
+ds.save_push_subscription(501, "https://fcm.googleapis.com/fcm/send/bbb", "key2", "auth2", "Android")
 subs = ds.push_subscriptions_for([501])
 check("две подписки у одного курьера живут вместе", len(subs) == 2, f"({len(subs)})")
 
 # Телефоном воспользовался другой человек — иначе пуши поедут не тому
-ds.save_push_subscription(502, "https://push.test/aaa", "key1", "auth1", "Android")
+ds.save_push_subscription(502, "https://fcm.googleapis.com/fcm/send/aaa", "key1", "auth1", "Android")
 check("подписка переехала к новому владельцу",
       len(ds.push_subscriptions_for([501])) == 1
       and len(ds.push_subscriptions_for([502])) == 1)
 
-ds.mark_push_failed("https://push.test/bbb", drop=True)
+ds.mark_push_failed("https://fcm.googleapis.com/fcm/send/bbb", drop=True)
 check("протухшая подписка снята (410 от push-сервиса)",
       not ds.push_subscriptions_for([501]), f"({ds.push_subscriptions_for([501])})")
 
-ds.save_push_subscription(501, "https://push.test/ccc", "k", "a", "Android")
+ds.save_push_subscription(501, "https://fcm.googleapis.com/fcm/send/ccc", "k", "a", "Android")
 for _ in range(ds.PUSH_MAX_FAILURES):
-    ds.mark_push_failed("https://push.test/ccc")
+    ds.mark_push_failed("https://fcm.googleapis.com/fcm/send/ccc")
 check("подписка, падающая подряд, снимается сама",
       not ds.push_subscriptions_for([501]),
       f"(порог {ds.PUSH_MAX_FAILURES})")
@@ -284,13 +284,44 @@ r = client.get("/api/courier/push/key")
 check("ключ отдаётся курьеру", r.status_code == 200, f"({r.status_code})")
 
 r = client.post("/api/courier/push/subscribe", headers=AJAX,
-                json={"endpoint": "https://push.test/http",
+                json={"endpoint": "https://fcm.googleapis.com/fcm/send/http",
                       "keys": {"p256dh": "p", "auth": "a"}})
 check("подписка принимается", r.status_code == 200, f"({r.status_code})")
 
 r = client.post("/api/courier/push/subscribe", headers=AJAX,
-                json={"endpoint": "https://push.test/bad"})
+                json={"endpoint": "https://fcm.googleapis.com/fcm/send/bad"})
 check("неполная подписка отклоняется", r.status_code == 400, f"({r.status_code})")
+
+# --- endpoint присылает браузер, а идёт по нему сервер ------------------------
+#
+# Сервер сам обращается по этому адресу, и с появлением пробного уведомления
+# делает это НЕМЕДЛЕННО, возвращая клиенту результат. Без проверки любой
+# вошедший курьер превращает ручку подписки в сканер внутренней сети
+# (находка security-review 17.09.2026). Проверяется поведением: адрес,
+# не принадлежащий настоящему push-сервису, не должен сохраняться.
+for bad, why in (
+    ("http://10.0.0.5:8080/", "внутренний адрес по http"),
+    ("https://10.0.0.5:8443/", "внутренний адрес по https"),
+    ("https://evil.example/wpush", "чужой домен"),
+    ("http://fcm.googleapis.com/fcm/send/x", "верный хост, но без TLS"),
+    ("https://fcm.googleapis.com.evil.example/x", "чужой домен, похожий на верный"),
+    ("https://notfcm-googleapis.com/x", "хост без точки перед суффиксом"),
+):
+    r = client.post("/api/courier/push/subscribe", headers=AJAX,
+                    json={"endpoint": bad, "keys": {"p256dh": "p", "auth": "a"}})
+    check(f"не принимается: {why}", r.status_code == 400, f"({r.status_code}, {bad})")
+
+# Настоящие адреса четырёх push-сервисов обязаны проходить: слишком строгий
+# список — это «уведомления не включаются» у целого браузера.
+for good, who in (
+    ("https://fcm.googleapis.com/fcm/send/abc", "Chrome / Android"),
+    ("https://updates.push.services.mozilla.com/wpush/v2/abc", "Firefox"),
+    ("https://web.push.apple.com/abc", "Safari / iOS"),
+    ("https://wns2-by3p.notify.windows.com/w/?token=abc", "Edge"),
+):
+    r = client.post("/api/courier/push/subscribe", headers=AJAX,
+                    json={"endpoint": good, "keys": {"p256dh": "p", "auth": "a"}})
+    check(f"принимается: {who}", r.status_code == 200, f"({r.status_code}, {good})")
 
 r = client.post("/api/courier/push/subscribe",
                 json={"endpoint": "x", "keys": {"p256dh": "p", "auth": "a"}})
@@ -298,13 +329,13 @@ check("без ajax-заголовка подписка не проходит", r
       f"({r.status_code})")
 
 r = client.post("/api/courier/push/unsubscribe", headers=AJAX,
-                json={"endpoint": "https://push.test/http"})
+                json={"endpoint": "https://fcm.googleapis.com/fcm/send/http"})
 check("отписка работает", r.status_code == 200, f"({r.status_code})")
 
 with cs.get_db() as conn:
     left = conn.execute(
         "SELECT COUNT(*) AS cnt FROM push_subscriptions WHERE endpoint = ?",
-        ("https://push.test/http",)).fetchone()["cnt"]
+        ("https://fcm.googleapis.com/fcm/send/http",)).fetchone()["cnt"]
 check("после выключения записи не остаётся — иначе шлём в мёртвый endpoint",
       left == 0, f"({left})")
 
@@ -333,7 +364,7 @@ push.VAPID_PUBLIC_KEY = ""
 push.VAPID_PRIVATE_KEY = ""
 
 r = client.post("/api/courier/push/subscribe", headers=AJAX,
-                json={"endpoint": "https://push.test/probe",
+                json={"endpoint": "https://fcm.googleapis.com/fcm/send/probe",
                       "keys": {"p256dh": "p", "auth": "a"}})
 data = (r.get_json() or {}).get("data") or {}
 check("ответ подписки говорит про пробное", "test_sent" in data, data)
@@ -358,7 +389,7 @@ ds.save_courier_profile(user_id=int(kurier_id), username="kurier",
                         city="Новосибирск", retailcrm_courier_id=None, active=True)
 
 r = client.post("/api/courier/push/subscribe", headers=AJAX,
-                json={"endpoint": "https://push.test/probe",
+                json={"endpoint": "https://fcm.googleapis.com/fcm/send/probe",
                       "keys": {"p256dh": "p", "auth": "a"}})
 data = (r.get_json() or {}).get("data") or {}
 check("с профилем и городом человек адресат", data.get("is_recipient") is True, data)
@@ -421,7 +452,7 @@ check("и право на событие не занято", burned == 0,
       "(иначе этот заказ промолчит навсегда)")
 
 # Устройство подписалось — тот же заказ обязан дойти
-ds.save_push_subscription(user_id=501, endpoint="https://push.test/late",
+ds.save_push_subscription(user_id=501, endpoint="https://fcm.googleapis.com/fcm/send/late",
                           p256dh="p", auth="a")
 probes.clear()
 push.send_to_users = lambda user_ids, payload: (

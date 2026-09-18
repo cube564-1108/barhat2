@@ -428,6 +428,41 @@ def get_push_key():
                              "configured": push.is_configured()})
 
 
+# Адреса push-сервисов, на которые нам вообще есть смысл ходить.
+#
+# ЭТО НЕ ФОРМАЛЬНОСТЬ. `endpoint` присылает браузер, но верит ему сервер: он
+# сам пойдёт по этому адресу — а с появлением пробного уведомления пойдёт
+# НЕМЕДЛЕННО и вернёт клиенту, получилось или нет. Без проверки любой
+# вошедший курьер превращает ручку подписки в сканер нашей внутренней сети:
+# подставил `http://10.0.0.5:8080/`, прочитал `test_sent` в ответе — узнал,
+# живёт ли там что-нибудь. Наружу такие адреса не торчат, изнутри контейнера
+# доступны (находка security-review 17.09.2026).
+#
+# Белый список, а не запрет приватных диапазонов: DNS-имя может указывать на
+# внутренний адрес, и проверка по IP обходится перепривязкой между проверкой
+# и самим запросом. Push-сервисов в мире всё равно четыре.
+PUSH_HOST_SUFFIXES = (
+    "googleapis.com",      # Chrome, Android — FCM
+    "mozilla.com",         # Firefox
+    "push.apple.com",      # Safari, iOS 16.4+
+    "notify.windows.com",  # Edge — WNS
+)
+
+
+def _is_known_push_endpoint(endpoint: str) -> bool:
+    """Ведёт ли адрес к настоящему push-сервису."""
+    from urllib.parse import urlparse
+    try:
+        url = urlparse(endpoint)
+    except ValueError:
+        return False
+    if url.scheme != "https":
+        return False
+    host = (url.hostname or "").lower()
+    return any(host == suffix or host.endswith("." + suffix)
+               for suffix in PUSH_HOST_SUFFIXES)
+
+
 @delivery_bp.route("/push/subscribe", methods=["POST"])
 @section_required("courier_app", DISPATCH_SECTION)
 @require_ajax_header
@@ -438,6 +473,15 @@ def push_subscribe():
     keys = payload.get("keys") or {}
     if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
         return error_response("Подписка неполная")
+
+    if not _is_known_push_endpoint(endpoint):
+        # Хост в лог: если однажды появится браузер с новым push-сервисом, это
+        # будет выглядеть как «у одного курьера не включаются уведомления», и
+        # ответ должен лежать в логе, а не выясняться сначала.
+        from urllib.parse import urlparse
+        logger.warning("Подписка с неизвестного push-сервиса отклонена: %s",
+                       (urlparse(endpoint).hostname or endpoint)[:100])
+        return error_response("Неизвестный адрес службы уведомлений")
 
     ds.save_push_subscription(
         user_id=int(current_user.id),
