@@ -25,6 +25,7 @@ VAPID пуши выключены целиком, и ни отсутствие �
 ключей не должны ронять старт воркера или локальный прогон сторожей.
 """
 
+import base64
 import json
 import logging
 import os
@@ -48,6 +49,110 @@ PUSH_TIMEOUT_SECONDS = 10
 def is_configured() -> bool:
     """Настроены ли ключи. Без них модуль молчит, а не падает."""
     return bool(VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY)
+
+
+def _b64url_decode(value: str) -> bytes:
+    """base64url без padding — формат, в котором ключи VAPID живут везде."""
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+# Готовый ключ считаем один раз на процесс: он не меняется, а сборка EC-ключа
+# и кодирование в PEM — не бесплатны, и делать это на каждый пуш незачем.
+_private_key_pem: Optional[str] = None
+_private_key_error: Optional[str] = None
+
+
+def private_key_pem() -> Optional[str]:
+    """
+    Приватный VAPID-ключ в PEM — единственном формате, который понимают ВСЕ
+    версии py_vapid.
+
+    ЗАЧЕМ ЭТО НУЖНО. `scripts/generate_vapid_keys.py` печатает приватный ключ
+    как base64url от 32 сырых байт — это корректный «raw» формат VAPID, его
+    ждут браузеры и выдают все генераторы ключей. Но py_vapid в установленной
+    версии на такую строку зовёт разбор DER, и `cryptography` отвечает:
+
+        ValueError: Could not deserialize key data ... ASN.1 parsing error:
+        invalid length
+
+    Наружу это выходило как «пробное уведомление не дошло, проверьте настройки
+    телефона» — при полностью исправном телефоне (18.09.2026). Ни один пуш не
+    отправлялся вообще.
+
+    Поэтому формат приводим сами, а не полагаемся на разбор строки чужой
+    библиотекой: PEM опознаётся по заголовку `-----BEGIN` однозначно и во всех
+    версиях. Ключи в `.env` при этом менять НЕ надо — публичный остаётся тем
+    же, и выданные подписки остаются действительными.
+    """
+    global _private_key_pem, _private_key_error
+    if _private_key_pem or _private_key_error:
+        return _private_key_pem
+    if not VAPID_PRIVATE_KEY:
+        _private_key_error = "ключ не задан"
+        return None
+
+    # Уже PEM — отдаём как есть, ничего не изобретая
+    if "-----BEGIN" in VAPID_PRIVATE_KEY:
+        _private_key_pem = VAPID_PRIVATE_KEY
+        return _private_key_pem
+
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        raw = _b64url_decode(VAPID_PRIVATE_KEY.strip())
+        if len(raw) == 32:
+            # Сырое скалярное значение приватного ключа P-256
+            key = ec.derive_private_key(int.from_bytes(raw, "big"), ec.SECP256R1())
+        else:
+            # Не 32 байта — значит это уже DER, просто в base64
+            key = serialization.load_der_private_key(raw, password=None)
+
+        _private_key_pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("ascii")
+        return _private_key_pem
+    except Exception as e:
+        _private_key_error = f"{type(e).__name__}: {e}"
+        logger.error("VAPID: приватный ключ не читается — %s", _private_key_error)
+        return None
+
+
+def key_health() -> Dict[str, Any]:
+    """
+    Читается ли приватный ключ и пара ли он публичному.
+
+    Обе беды молчаливые: при нечитаемом ключе не уходит ни один пуш, при
+    несовпадении пары push-сервис отвергает КАЖДУЮ отправку — а выясняется это
+    только с телефона курьера. Здесь оно видно снаружи, без телефона.
+    Сами ключи наружу не отдаются.
+    """
+    if not is_configured():
+        return {"configured": False}
+
+    pem = private_key_pem()
+    info: Dict[str, Any] = {"configured": True,
+                            "private_readable": bool(pem),
+                            "error": _private_key_error}
+    if not pem:
+        return info
+
+    try:
+        from cryptography.hazmat.primitives import serialization
+        key = serialization.load_pem_private_key(pem.encode("ascii"), password=None)
+        numbers = key.public_key().public_numbers()
+        derived = (b"\x04" + numbers.x.to_bytes(32, "big")
+                   + numbers.y.to_bytes(32, "big"))
+        expected = base64.urlsafe_b64encode(derived).decode("ascii").rstrip("=")
+        # Пара или нет — это ответ «да/нет», сам ключ показывать незачем
+        info["pair_matches"] = (expected == VAPID_PUBLIC_KEY.strip())
+    except Exception as e:
+        info["pair_matches"] = None
+        info["error"] = f"{type(e).__name__}: {e}"
+    return info
 
 
 def public_key() -> Optional[str]:
@@ -109,6 +214,18 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
         result["reason"] = "no_subscriptions"
         return result
 
+    # Ключ проверяем ПЕРВЫМ — раньше чужой библиотеки.
+    #
+    # Это наша собственная конфигурация, проверка дешёвая, и именно она чаще
+    # всего и сломана. Нечитаемый ключ роняет каждую отправку одинаково, и
+    # перебирать из-за него подписки бессмысленно: наружу уйдёт «не дошло»
+    # вместо «ключ не читается», а это разные места починки.
+    key_pem = private_key_pem()
+    if not key_pem:
+        result["reason"] = "bad_key"
+        result["detail"] = _private_key_error
+        return result
+
     try:
         from pywebpush import WebPushException, webpush
     except ImportError as e:
@@ -129,7 +246,7 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
             webpush(
                 subscription_info=info,
                 data=body,
-                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_private_key=key_pem,
                 vapid_claims={"sub": VAPID_CONTACT},
                 timeout=PUSH_TIMEOUT_SECONDS,
             )

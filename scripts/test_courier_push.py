@@ -614,6 +614,81 @@ check("текст отказа службы показывается челов�
 
 
 # ============================================================================
+print("\n6f. Приватный ключ VAPID читается в том виде, в каком его выдал скрипт")
+# ============================================================================
+#
+# ЗДЕСЬ ЖИЛА ПРИЧИНА, ПО КОТОРОЙ НЕ УХОДИЛ НИ ОДИН ПУШ.
+#
+# scripts/generate_vapid_keys.py печатает приватный ключ как base64url от 32
+# сырых байт — корректный «raw» формат VAPID. Установленный py_vapid на такую
+# строку зовёт разбор DER, и cryptography отвечает «ASN.1 parsing error:
+# invalid length». Наружу это выходило как «пробное не дошло, проверьте
+# настройки телефона» — при исправном телефоне.
+#
+# Проверяем ровно тот формат, который человек копирует из скрипта в .env.
+
+import base64 as _b64  # noqa: E402
+
+from cryptography.hazmat.primitives import serialization as _ser  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec as _ec  # noqa: E402
+
+
+def _generate_pair():
+    """Пара ключей ровно так, как её печатает scripts/generate_vapid_keys.py."""
+    key = _ec.generate_private_key(_ec.SECP256R1())
+    numbers = key.public_key().public_numbers()
+    public_raw = (b"\x04" + numbers.x.to_bytes(32, "big")
+                  + numbers.y.to_bytes(32, "big"))
+    private_raw = key.private_numbers().private_value.to_bytes(32, "big")
+
+    def b64(raw):
+        return _b64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return b64(public_raw), b64(private_raw)
+
+
+pub, priv = _generate_pair()
+push.VAPID_PUBLIC_KEY, push.VAPID_PRIVATE_KEY = pub, priv
+push._private_key_pem = push._private_key_error = None
+
+pem = push.private_key_pem()
+check("ключ из скрипта читается", bool(pem), f"({push._private_key_error})")
+check("и приводится к PEM", bool(pem) and "-----BEGIN" in pem, (pem or "")[:40])
+
+# Конверсия обязана сохранять сам ключ, а не просто что-то вернуть: из PEM
+# должен выводиться ТОТ ЖЕ публичный ключ, иначе push-сервис отвергнет всё.
+restored = _ser.load_pem_private_key(pem.encode("ascii"), password=None)
+rn = restored.public_key().public_numbers()
+restored_pub = _b64.urlsafe_b64encode(
+    b"\x04" + rn.x.to_bytes(32, "big") + rn.y.to_bytes(32, "big")
+).decode("ascii").rstrip("=")
+check("публичный ключ после конверсии тот же", restored_pub == pub)
+
+health = push.key_health()
+check("диагностика видит, что ключ читается", health.get("private_readable") is True, health)
+check("диагностика подтверждает пару", health.get("pair_matches") is True, health)
+check("сами ключи наружу не отдаются",
+      not any(pub in str(v) or priv in str(v) for v in health.values()), health)
+
+# PEM в .env тоже должен приниматься: так ключ выдают многие генераторы
+push.VAPID_PRIVATE_KEY = pem
+push._private_key_pem = push._private_key_error = None
+check("PEM принимается как есть", push.private_key_pem() == pem)
+
+# А испорченный ключ обязан называться испорченным, а не «не дошло»
+push.VAPID_PRIVATE_KEY = "не-ключ-вовсе"
+push._private_key_pem = push._private_key_error = None
+check("испорченный ключ не читается", push.private_key_pem() is None)
+bad = push.send_to_users([501], {"title": "x", "body": "y"})
+check("и причина названа своим именем", bad.get("reason") == "bad_key", bad)
+check("экран различает нечитаемый ключ", "'bad_key'" in app_js,
+      "(иначе человек идёт проверять телефон)")
+
+push.VAPID_PUBLIC_KEY = push.VAPID_PRIVATE_KEY = ""
+push._private_key_pem = push._private_key_error = None
+
+
+# ============================================================================
 print("\n7. Service worker умеет принимать и открывать")
 # ============================================================================
 

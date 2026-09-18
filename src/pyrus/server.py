@@ -748,6 +748,10 @@ def health_check():
             feed = None
 
         return {'configured': courier_push.is_configured(),
+                # Читается ли приватный ключ и пара ли он публичному. Обе беды
+                # молчаливые: ни один пуш не уходит, а выясняется это только с
+                # телефона курьера (разбор 18.09.2026). Самих ключей здесь нет.
+                'keys': courier_push.key_health(),
                 'subscriptions': subscriptions,
                 'addressable_couriers': addressable,
                 'events_sent': events,
