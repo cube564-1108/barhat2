@@ -586,6 +586,22 @@ check("под админом текст отказа доступен",
       all("detail" in e for e in push.recent_sends(with_orders=True)),
       "(разбирать отказ всё равно надо)")
 
+# Тот же запрет — для соседних записей. Журнал я закрыл сразу, а last_push_test
+# и last_push_run остались открытыми: один класс, три разных места. Поймал
+# security-review 18.09.2026.
+public_feed = push.why_silent()["feed"]
+admin_feed = push.why_silent(full=True)["feed"]
+check("публичный ответ без текста пробной отправки",
+      "detail" not in (public_feed.get("last_push_test") or {}), public_feed.get("last_push_test"))
+check("публичный ответ без текста ошибки прогона",
+      "error" not in (public_feed.get("last_push_run") or {}), public_feed.get("last_push_run"))
+check("а под админом оба текста на месте",
+      "detail" in (admin_feed.get("last_push_test") or {"detail": None})
+      and "error" in (admin_feed.get("last_push_run") or {"error": None}),
+      "(иначе разбирать отказ нечем)")
+check("публичный ответ отдаёт журнал без номеров",
+      all("order" not in e for e in push.why_silent().get("recent_sends") or []), "")
+
 check("разбор показывает состояние ленты",
       set(report.get("feed") or {}) >= {"next_tick_not_before", "lock_until",
                                         "cursor", "now_utc"},

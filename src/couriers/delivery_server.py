@@ -541,10 +541,10 @@ def push_diagnostics():
     Ничего не отправляет и не меняет.
     """
     from . import push
-    report = push.why_silent()
-    # Под админом — с номерами заказов: спрашивают всегда про конкретный заказ
-    report["recent_sends"] = push.recent_sends(with_orders=True)
-    return success_response(report)
+    # full=True — с номерами заказов и текстами отказов push-сервиса. В
+    # публичный /health те же данные уходят без них: в тексте отказа лежит
+    # адрес устройства курьера, а та ручка отдаётся без входа.
+    return success_response(push.why_silent(full=True))
 
 
 @delivery_bp.route("/push/reset-events", methods=["POST"])

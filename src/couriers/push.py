@@ -562,6 +562,13 @@ def _log_send(order: Dict[str, Any], event_type: str,
 PRIVATE_LOG_FIELDS = ("order", "city", "detail")
 
 
+def _without(entry, *fields):
+    """Копия записи без перечисленных полей. `None` остаётся `None`."""
+    if not isinstance(entry, dict):
+        return entry
+    return {k: v for k, v in entry.items() if k not in fields}
+
+
 def recent_sends(with_orders: bool = False) -> List[Dict[str, Any]]:
     """
     Последние отправки.
@@ -585,7 +592,7 @@ def recent_sends(with_orders: bool = False) -> List[Dict[str, Any]]:
             for entry in log]
 
 
-def why_silent() -> Dict[str, Any]:
+def why_silent(full: bool = False) -> Dict[str, Any]:
     """
     Почему уведомление о новом заказе не уходит — по шагам, на текущих данных.
 
@@ -676,13 +683,14 @@ def why_silent() -> Dict[str, Any]:
         "delivery_codes": codes,
         "vapid_configured": is_configured(),
         "steps": steps,
-        "feed": _feed_state(),
+        "feed": _feed_state(full=full),
+        "recent_sends": recent_sends(with_orders=full),
         "by_city": by_city,
         "blocked": blocked,
     }
 
 
-def _feed_state() -> Dict[str, Any]:
+def _feed_state(full: bool = False) -> Dict[str, Any]:
     """
     Живёт ли лента — тот, кто рассылает.
 
@@ -725,6 +733,17 @@ def _feed_state() -> Dict[str, Any]:
     last_run = parsed(PUSH_RUN_KEY)
     last_test = parsed(PUSH_TEST_KEY)
 
+    # То же правило, что и для журнала отправок (см. PRIVATE_LOG_FIELDS): в
+    # `detail` и `error` попадает ответ push-сервиса, а он включает АДРЕС
+    # УСТРОЙСТВА курьера. `/health` отдаётся без входа, и держать там endpoint
+    # нельзя. Код отказа и причина остаются — по ним понятно, что случилось.
+    #
+    # Найдено security-review 18.09.2026: журнал я закрыл, а эти две соседние
+    # записи — нет. Один и тот же класс, два разных места.
+    if not full:
+        last_test = _without(last_test, "detail")
+        last_run = _without(last_run, "error")
+
     return {
         # Время в этих полях — UTC, как всё, что пишет планировщик
         "next_tick_not_before": state.get(f"schedule:{FEED_LOCK}", {}).get("value"),
@@ -733,7 +752,6 @@ def _feed_state() -> Dict[str, Any]:
         "cursor_updated_at": state.get(CURSOR_KEY, {}).get("updated_at"),
         "last_push_run": last_run,
         "last_push_test": last_test,
-        "recent_sends": recent_sends(),
         "now_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
