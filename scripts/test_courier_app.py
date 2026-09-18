@@ -129,6 +129,61 @@ check("подключён Vollkorn", "Vollkorn" in page)
 
 
 # ============================================================================
+print("\n1b. Салоны для фильтра берутся из справочника, а не из ленты")
+# ============================================================================
+#
+# Раньше список салонов строился по заказам: салон, из которого сегодня ничего
+# не везут, в фильтре просто отсутствовал. Курьер не мог ни отключить точку,
+# куда не поедет, ни заранее включить ту, где заказы появятся через час
+# (просьба владельца 18.09.2026).
+
+from couriers import delivery_storage as _ds  # noqa: E402
+from couriers import storage as _cs  # noqa: E402
+
+_cs.init_couriers_tables()
+_ds.init_delivery_tables()
+with _cs.get_db() as conn:
+    for code, name, city in (("site-a", "Восход", "Новосибирск"),
+                             ("site-b", "Заря", "Новосибирск"),
+                             ("site-c", "Рассвет", "Екатеринбург")):
+        conn.execute("INSERT OR REPLACE INTO courier_sites (code, name, city) "
+                     "VALUES (?, ?, ?)", (code, name, city))
+
+# Ни одного заказа не заводим намеренно: именно этот случай и был сломан
+sites = _ds.sites_of_city("Новосибирск")
+codes = {s["code"] for s in sites}
+check("салоны города отдаются без единого заказа", codes == {"site-a", "site-b"}, codes)
+check("чужой город не попадает", "site-c" not in codes, codes)
+check("у салона есть название для человека",
+      all(s.get("name") for s in sites), sites)
+check("без города список пуст, а не весь справочник",
+      _ds.sites_of_city(None) == [], "(иначе курьер без города увидит чужие точки)")
+
+conn = auth.get_db()
+try:
+    kurier_id = conn.execute(
+        "SELECT id FROM users WHERE username = 'kurier'").fetchone()["id"]
+finally:
+    conn.close()
+
+_ds.save_courier_profile(user_id=int(kurier_id), username="kurier",
+                         city="Новосибирск", retailcrm_courier_id=None, active=True)
+profile = client.get("/api/courier/profile").get_json()
+check("профиль отдаёт салоны города",
+      {s["code"] for s in (profile.get("data") or {}).get("sites") or []}
+      == {"site-a", "site-b"}, profile.get("data"))
+
+app_js_src = open(os.path.join(DASHBOARD, "courier-app.js"), encoding="utf-8").read()
+check("экран кладёт справочник в состояние",
+      "state.sites_catalog = payload.data.sites" in app_js_src, "")
+check("и строит фильтр из него, а не только из ленты",
+      "state.sites_catalog || []" in app_js_src
+      and app_js_src.index("state.sites_catalog || []")
+          < app_js_src.index("state.orders.forEach(function (order) {"),
+      "(справочник — основа списка, лента только добавляет недостающее)")
+
+
+# ============================================================================
 print("\n2. Service worker и версия сборки")
 # ============================================================================
 

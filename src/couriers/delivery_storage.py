@@ -2119,6 +2119,27 @@ def reset_push_events(days: int = 2) -> int:
         return cur.rowcount
 
 
+def sites_of_city(city: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    Все салоны города — из справочника, а не из сегодняшней ленты.
+
+    Фильтр салонов в приложении раньше строился по заказам: салон, из которого
+    сегодня ничего не везут, в списке не появлялся. Выглядело это как «салон
+    пропал», а на деле курьер просто не мог заранее отключить точку, куда не
+    поедет, или включить ту, где заказы появятся через час.
+
+    Список нужен постоянный: выбор — это намерение курьера на смену, и оно не
+    должно зависеть от того, что в ленте прямо сейчас.
+    """
+    if not city:
+        return []
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT code, name FROM courier_sites WHERE city = ? ORDER BY name",
+            (city,)).fetchall()
+    return [{"code": row["code"], "name": row["name"] or row["code"]} for row in rows]
+
+
 def release_push_event(order_id: int, event_type: str) -> None:
     """
     Вернуть право на событие, если отправка не состоялась.

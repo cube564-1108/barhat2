@@ -52,6 +52,7 @@
         orders: [],
         filter: 'free',
         sites: [],          // коды выбранных салонов; пусто = все
+        sites_catalog: [],  // все салоны города из справочника, независимо от заказов
         city: null,
         today: null,        // «сегодня» по стенным часам салона, с сервера
         date: null,         // какой день показываем; по умолчанию — сегодня
@@ -250,6 +251,7 @@
     function loadProfile() {
         return apiGet('/api/courier/profile').then(function (payload) {
             state.city = payload.data.city;
+            state.sites_catalog = payload.data.sites || [];
             state.profileWarning = payload.data.warning;
             // «Сегодня» приходит с сервера по поясу салона, а не берётся из
             // часов телефона: курьер может ехать с устройством в другом поясе
@@ -349,10 +351,29 @@
         return String(order.site_code || order.site_name || '');
     }
 
-    /** Салоны, встречающиеся в ленте, со счётчиком по текущему табу. */
+    /**
+     * Салоны для фильтра со счётчиком по текущему табу.
+     *
+     * Основа — СПРАВОЧНИК салонов города, а не сегодняшняя лента. Раньше
+     * список строился только по заказам, и салон, из которого сейчас ничего не
+     * везут, в нём просто отсутствовал: курьер не мог ни отключить точку, куда
+     * не поедет, ни заранее включить ту, где заказы появятся через час
+     * (просьба владельца 18.09.2026).
+     *
+     * Салоны из ленты всё равно добавляем: у управляющего город не задан,
+     * справочник для него пуст, а лента приходит по всем городам.
+     */
     function siteOptions() {
         var byTab = ordersByTab();
         var map = {};
+        (state.sites_catalog || []).forEach(function (site) {
+            if (!site || !site.code) return;
+            map[String(site.code)] = {
+                code: String(site.code),
+                name: site.name || String(site.code),
+                count: 0
+            };
+        });
         state.orders.forEach(function (order) {
             var key = siteKey(order);
             if (!key) return;
