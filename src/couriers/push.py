@@ -149,6 +149,74 @@ def private_key_pem() -> Optional[str]:
     return None
 
 
+_vapid_object = None
+_vapid_object_error: Optional[str] = None
+_vapid_object_how: Optional[str] = None
+
+
+def vapid_key():
+    """
+    Готовый объект `Vapid` для pywebpush — вместо строки.
+
+    ЗАЧЕМ. pywebpush разбирает переданную строку сам: `Vapid.from_string()`.
+    Наш PKCS8 PEM он не принимает — прод 18.09.2026 ответил
+    «Could not deserialize key data ... ASN.1 parsing error», хотя тот же PEM
+    прекрасно читается `cryptography`. То есть спор двух разборов, в котором
+    наши ключи ни при чём: они верные, `pair_matches: true`.
+
+    Отдавая готовый объект, мы убираем чужой разбор строки из цепочки целиком:
+    pywebpush проверяет `isinstance(..., Vapid01)` и берёт объект как есть.
+
+    Способы перебираются, а не угадываются: у py_vapid разные версии ждут
+    разного, и сломаться это должно один раз, а не при каждом обновлении.
+    Сработавший способ пишется в лог и виден в диагностике.
+    """
+    global _vapid_object, _vapid_object_error, _vapid_object_how
+    if _vapid_object is not None or _vapid_object_error:
+        return _vapid_object
+
+    pem = private_key_pem()
+    if not pem:
+        _vapid_object_error = "приватный ключ не читается"
+        return None
+
+    try:
+        from py_vapid import Vapid01
+    except ImportError as e:
+        _vapid_object_error = f"py_vapid недоступен: {e}"
+        return None
+
+    from cryptography.hazmat.primitives import serialization
+
+    def loaded():
+        return serialization.load_pem_private_key(pem.encode("ascii"), password=None)
+
+    attempts = [
+        # Прямая передача ключа cryptography — то, чем объект и является
+        ("constructor", lambda: Vapid01(loaded())),
+        ("from_pem", lambda: Vapid01.from_pem(pem.encode("ascii"))),
+        # Сырой base64url — ровно то, что лежит у нас в .env
+        ("from_raw", lambda: Vapid01.from_raw(VAPID_PRIVATE_KEY.strip().encode("ascii"))),
+    ]
+
+    errors = []
+    for name, make in attempts:
+        try:
+            obj = make()
+            # Объект обязан уметь подписывать: конструктор может принять что
+            # угодно и промолчать, а упадёт это уже на отправке.
+            obj.sign({"aud": "https://example.com", "sub": VAPID_CONTACT})
+            _vapid_object, _vapid_object_how = obj, name
+            logger.info("VAPID: объект ключа собран через %s", name)
+            return _vapid_object
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}")
+
+    _vapid_object_error = "; ".join(errors)
+    logger.error("VAPID: объект ключа собрать не удалось — %s", _vapid_object_error)
+    return None
+
+
 def key_health() -> Dict[str, Any]:
     """
     Читается ли приватный ключ и пара ли он публичному.
@@ -212,6 +280,13 @@ def key_health() -> Dict[str, Any]:
     except Exception as e:
         info["accepted_by_library"] = False
         info["library_error"] = f"{type(e).__name__}: {e}"[:200]
+
+    # Разбор строки библиотекой мы обходим: отдаём готовый объект. Здесь видно,
+    # собрался ли он и каким способом — именно он и работает на отправке.
+    info["object_built"] = vapid_key() is not None
+    info["object_how"] = _vapid_object_how
+    if not info["object_built"]:
+        info["object_error"] = _vapid_object_error
     return info
 
 
@@ -286,6 +361,11 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
         result["detail"] = _private_key_error
         return result
 
+    # Готовый объект ключа вместо строки: разбор строки внутри pywebpush наш
+    # PEM не принимает (см. vapid_key). Если объект собрать не вышло — шлём
+    # строкой, хуже уже не будет.
+    vapid_obj = vapid_key()
+
     try:
         from pywebpush import WebPushException, webpush
     except ImportError as e:
@@ -306,7 +386,7 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
             webpush(
                 subscription_info=info,
                 data=body,
-                vapid_private_key=key_pem,
+                vapid_private_key=vapid_obj or key_pem,
                 vapid_claims={"sub": VAPID_CONTACT},
                 timeout=PUSH_TIMEOUT_SECONDS,
             )
