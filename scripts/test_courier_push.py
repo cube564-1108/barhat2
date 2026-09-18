@@ -575,8 +575,16 @@ if log:
 public = push.recent_sends()
 check("публичный журнал без номеров заказов",
       all("order" not in e and "city" not in e for e in public), public[:1])
+# Текст отказа от push-сервиса содержит АДРЕС УСТРОЙСТВА курьера, а /health
+# отдаётся без входа. Код и причина остаются — по ним понятно, что за отказ,
+# но найти по ним человека нельзя.
+check("и без текста отказа: там адрес устройства",
+      all("detail" not in e for e in public), public[:1])
 check("но с итогом отправки",
       not public or {"at", "sent", "reason"} <= set(public[0]), public[:1])
+check("под админом текст отказа доступен",
+      all("detail" in e for e in push.recent_sends(with_orders=True)),
+      "(разбирать отказ всё равно надо)")
 
 check("разбор показывает состояние ленты",
       set(report.get("feed") or {}) >= {"next_tick_not_before", "lock_until",

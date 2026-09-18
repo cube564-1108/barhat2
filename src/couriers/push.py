@@ -552,8 +552,24 @@ def _log_send(order: Dict[str, Any], event_type: str,
     set_sync_state(PUSH_LOG_KEY, json.dumps(log[-PUSH_LOG_LIMIT:], ensure_ascii=False))
 
 
+# Поля журнала, которым не место в публичном ответе.
+#
+# `order` и `city` — данные компании. `detail` опаснее: туда попадает текст,
+# который вернул push-сервис, а он включает АДРЕС УСТРОЙСТВА (endpoint) —
+# идентификатор конкретного телефона курьера. `/health` доступен без входа,
+# и светить там endpoint'ы нельзя. Код отказа и причина остаются: понять
+# «что за отказ» по ним можно, а найти по ним человека — нет.
+PRIVATE_LOG_FIELDS = ("order", "city", "detail")
+
+
 def recent_sends(with_orders: bool = False) -> List[Dict[str, Any]]:
-    """Последние отправки. Без `with_orders` — без номеров заказов и городов."""
+    """
+    Последние отправки.
+
+    `with_orders=True` — полная запись, только для админской ручки. По
+    умолчанию — без номера заказа, города и текста отказа (см.
+    `PRIVATE_LOG_FIELDS`): этот вид уходит в публичный `/health?full=1`.
+    """
     from .delivery_feed import PUSH_LOG_KEY
     from .storage import get_sync_state
 
@@ -565,7 +581,7 @@ def recent_sends(with_orders: bool = False) -> List[Dict[str, Any]]:
         return []
     if with_orders:
         return log
-    return [{k: v for k, v in entry.items() if k not in ("order", "city")}
+    return [{k: v for k, v in entry.items() if k not in PRIVATE_LOG_FIELDS}
             for entry in log]
 
 
