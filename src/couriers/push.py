@@ -92,33 +92,61 @@ def private_key_pem() -> Optional[str]:
         _private_key_error = "ключ не задан"
         return None
 
-    # Уже PEM — отдаём как есть, ничего не изобретая
-    if "-----BEGIN" in VAPID_PRIVATE_KEY:
-        _private_key_pem = VAPID_PRIVATE_KEY
-        return _private_key_pem
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
 
-    try:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import ec
-
-        raw = _b64url_decode(VAPID_PRIVATE_KEY.strip())
-        if len(raw) == 32:
-            # Сырое скалярное значение приватного ключа P-256
-            key = ec.derive_private_key(int.from_bytes(raw, "big"), ec.SECP256R1())
-        else:
-            # Не 32 байта — значит это уже DER, просто в base64
-            key = serialization.load_der_private_key(raw, password=None)
-
-        _private_key_pem = key.private_bytes(
+    def to_pem(key) -> str:
+        return key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ).decode("ascii")
-        return _private_key_pem
-    except Exception as e:
-        _private_key_error = f"{type(e).__name__}: {e}"
-        logger.error("VAPID: приватный ключ не читается — %s", _private_key_error)
-        return None
+
+    # Ключ вводит человек, копируя из вывода скрипта или из чужого генератора,
+    # и доезжает он в четырёх разных видах. Перебираем все, а не угадываем
+    # один: цена ошибки — полностью мёртвые уведомления при внешне исправной
+    # настройке (18.09.2026).
+    #
+    # Переносы строк в .env не выживают, поэтому PEM оттуда приходит либо
+    # одной строкой с литеральными «\n», либо со срезанными переносами.
+    text = VAPID_PRIVATE_KEY.strip().strip('"').strip("'")
+    attempts = []
+
+    if "-----BEGIN" in text or "BEGIN " in text:
+        attempts.append(("pem", lambda: serialization.load_pem_private_key(
+            text.replace("\\n", "\n").encode("ascii"), password=None)))
+
+    def from_b64(data: bytes):
+        if len(data) == 32:
+            # Сырое скалярное значение приватного ключа P-256 — то, что
+            # печатает наш scripts/generate_vapid_keys.py
+            return ec.derive_private_key(int.from_bytes(data, "big"), ec.SECP256R1())
+        return serialization.load_der_private_key(data, password=None)
+
+    try:
+        decoded = _b64url_decode(text)
+    except Exception:
+        decoded = None
+
+    if decoded is not None:
+        attempts.append(("base64", lambda: from_b64(decoded)))
+        # Бывает и base64 от целого PEM-файла
+        attempts.append(("base64-pem", lambda: serialization.load_pem_private_key(
+            decoded, password=None)))
+
+    errors = []
+    for name, load in attempts:
+        try:
+            _private_key_pem = to_pem(load())
+            logger.info("VAPID: приватный ключ принят как %s", name)
+            return _private_key_pem
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}")
+
+    _private_key_error = ("ни один формат не подошёл ("
+                          + ", ".join(errors) + ")") if errors else "пустой ключ"
+    logger.error("VAPID: приватный ключ не читается — %s", _private_key_error)
+    return None
 
 
 def key_health() -> Dict[str, Any]:
@@ -138,6 +166,25 @@ def key_health() -> Dict[str, Any]:
                             "private_readable": bool(pem),
                             "error": _private_key_error}
     if not pem:
+        # Форма значения, а не само значение. Восстановить ключ по длине
+        # нельзя, а понять, что человек положил в .env, — можно: без этого
+        # разбор упирается в «не читается» и дальше некуда, потому что читать
+        # сам `.env` правила проекта запрещают.
+        text = VAPID_PRIVATE_KEY.strip()
+        try:
+            decoded_len = len(_b64url_decode(text.strip('"').strip("'")))
+        except Exception:
+            decoded_len = None
+        info["shape"] = {
+            "chars": len(text),
+            "decoded_bytes": decoded_len,
+            "has_pem_header": "BEGIN" in text,
+            "has_escaped_newline": "\\n" in text,
+            "has_whitespace": any(c.isspace() for c in text),
+            "has_quotes": text[:1] in ('"', "'") or text[-1:] in ('"', "'"),
+            "expected": "32 байта после base64url — так печатает "
+                        "scripts/generate_vapid_keys.py",
+        }
         return info
 
     try:
