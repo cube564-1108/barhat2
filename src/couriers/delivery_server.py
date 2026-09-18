@@ -515,6 +515,12 @@ def push_subscribe():
         "subscribed": True,
         "test_sent": test.get("sent", 0),
         "test_reason": test.get("reason"),
+        # Что именно ответил push-сервис. Без этого «не дошло» одинаково
+        # выглядит и когда библиотека не установлена, и когда FCM отверг ключи,
+        # и когда телефон запретил уведомления — а чинят это в трёх разных
+        # местах (разбор 18.09.2026).
+        "test_detail": test.get("detail"),
+        "test_status": test.get("status"),
         "city": profile.get("city"),
         "is_recipient": bool(profile.get("active") and profile.get("city")),
     })

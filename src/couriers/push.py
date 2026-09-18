@@ -87,21 +87,36 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
     """
     Отправить уведомление устройствам этих пользователей.
 
-    Возвращает счётчики. Ошибка одной подписки не мешает остальным: у
-    курьера может быть выброшенный телефон со старым endpoint.
+    Возвращает счётчики и — обязательно — ПРИЧИНУ, когда ничего не ушло.
+
+    Раньше здесь были только счётчики, и три совершенно разных случая давали
+    одинаковый ноль: библиотеки нет, подписок нет, push-сервис отказал. Наверх
+    уходило безликое «не дошло», а объяснение — в лог, которого у нас нет
+    (правило CLAUDE.md про «подробности в логах сервера»). 18.09.2026 на этом
+    встал разбор: пробное не доходило, а сказать почему было нечем.
+
+    `reason` — короткий код для ветвления, `detail` — то, что сказал сам
+    push-сервис, вместе с HTTP-статусом: по нему ищут в документации.
     """
-    result = {"sent": 0, "failed": 0, "dropped": 0}
+    result = {"sent": 0, "failed": 0, "dropped": 0,
+              "reason": None, "detail": None, "status": None}
     if not is_configured():
+        result["reason"] = "not_configured"
         return result
 
     subscriptions = ds.push_subscriptions_for(user_ids)
     if not subscriptions:
+        result["reason"] = "no_subscriptions"
         return result
 
     try:
         from pywebpush import WebPushException, webpush
-    except ImportError:
+    except ImportError as e:
+        # Отдельная причина, а не «не дошло»: чинит это администратор
+        # пересборкой, и перебирать настройки телефона тут бесполезно.
         logger.warning("pywebpush не установлен — пуши не отправляются")
+        result["reason"] = "no_library"
+        result["detail"] = str(e)
         return result
 
     body = json.dumps(payload, ensure_ascii=False)
@@ -123,15 +138,28 @@ def send_to_users(user_ids: List[int], payload: Dict[str, Any]) -> Dict[str, int
         except WebPushException as e:
             # 410 Gone / 404 — подписки больше нет. Держать её значит копить
             # очередь и тратить время тика на заведомо мёртвый адрес.
-            status = getattr(getattr(e, "response", None), "status_code", None)
+            response = getattr(e, "response", None)
+            status = getattr(response, "status_code", None)
             drop = status in (404, 410)
             ds.mark_push_failed(subscription["endpoint"], drop=drop)
             result["dropped" if drop else "failed"] += 1
+            result["reason"] = "expired" if drop else "rejected"
+            result["status"] = status
+            # Тело ответа — это и есть объяснение от FCM/Mozilla/Apple.
+            # Режем: в него попадает эхо заголовков, а читать это человеку.
+            body_text = getattr(response, "text", "") or str(e)
+            result["detail"] = str(body_text)[:300]
         except Exception as e:
             ds.mark_push_failed(subscription["endpoint"])
             result["failed"] += 1
+            result["reason"] = "error"
+            result["detail"] = f"{type(e).__name__}: {e}"[:300]
             logger.warning(f"Push не ушёл: {e}")
 
+    # Хоть одно устройство получило — это успех, а не отказ
+    if result["sent"]:
+        result["reason"] = None
+        result["detail"] = None
     return result
 
 
@@ -155,9 +183,6 @@ def send_test(user_ids: List[int]) -> Dict[str, Any]:
     17.09.2026 владелец включил уведомления и не смог понять, работают они
     или нет.
     """
-    if not is_configured():
-        return {"sent": 0, "failed": 0, "dropped": 0, "reason": "not_configured"}
-
     result = send_to_users(user_ids, {
         "title": "Уведомления включены",
         "body": "Так будет выглядеть сообщение о новом заказе.",
@@ -165,9 +190,20 @@ def send_test(user_ids: List[int]) -> Dict[str, Any]:
         "tag": "test",
         "url": "/app/courier",
     })
-    if not any(result.values()):
-        # Подписок нет вовсе — до push-сервиса дело не дошло
-        result["reason"] = "no_subscriptions"
+
+    # Итог пробной отправки живёт в базе: экран его покажет один раз, а вопрос
+    # «почему не приходят» задают позже и уже без этого экрана.
+    try:
+        from .delivery_feed import PUSH_TEST_KEY
+        from .storage import set_sync_state
+        set_sync_state(PUSH_TEST_KEY, json.dumps(
+            {"at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+             "sent": result.get("sent"), "reason": result.get("reason"),
+             "status": result.get("status"), "detail": result.get("detail")},
+            ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"Пробное уведомление: отметку записать не удалось — {e}")
+
     return result
 
 
@@ -284,7 +320,10 @@ def _feed_state() -> Dict[str, Any]:
     from .delivery_feed import CURSOR_KEY, FEED_LOCK, PUSH_RUN_KEY
     from .storage import get_db as couriers_db
 
-    keys = (f"schedule:{FEED_LOCK}", f"lock:{FEED_LOCK}", CURSOR_KEY, PUSH_RUN_KEY)
+    from .delivery_feed import PUSH_TEST_KEY
+
+    keys = (f"schedule:{FEED_LOCK}", f"lock:{FEED_LOCK}", CURSOR_KEY,
+            PUSH_RUN_KEY, PUSH_TEST_KEY)
     try:
         with couriers_db() as conn:
             rows = conn.execute(
@@ -298,12 +337,15 @@ def _feed_state() -> Dict[str, Any]:
 
     # Результат последнего прогона рассылки: сколько ушло и что упало. Именно
     # здесь и был слепой участок — исключение гасилось в лог, которого нет.
-    import json
-    last_run = state.get(PUSH_RUN_KEY, {}).get("value")
-    try:
-        last_run = json.loads(last_run) if last_run else None
-    except ValueError:
-        pass   # что записалось, то и показываем: строкой лучше, чем ничем
+    def parsed(key):
+        raw = state.get(key, {}).get("value")
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return raw   # что записалось, то и показываем: строкой лучше, чем ничем
+
+    last_run = parsed(PUSH_RUN_KEY)
+    last_test = parsed(PUSH_TEST_KEY)
 
     return {
         # Время в этих полях — UTC, как всё, что пишет планировщик
@@ -312,6 +354,7 @@ def _feed_state() -> Dict[str, Any]:
         "cursor": state.get(CURSOR_KEY, {}).get("value"),
         "cursor_updated_at": state.get(CURSOR_KEY, {}).get("updated_at"),
         "last_push_run": last_run,
+        "last_push_test": last_test,
         "now_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
