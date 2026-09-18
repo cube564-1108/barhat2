@@ -735,10 +735,21 @@ def health_check():
                 " WHERE p.active = 1 AND p.city IS NOT NULL").fetchone()["cnt"]
             events = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM push_events").fetchone()["cnt"]
+        # Разбор по шагам: сколько заказов отсеивается на каждом условии
+        # рассылки. Счётчики «настроено / подписок / адресатов» отвечают, ЕСТЬ
+        # ли кому слать, но не отвечают, ПОЧЕМУ не слали — а именно этот вопрос
+        # и задают. Здесь только числа: номера заказов и города остаются в
+        # админской ручке /api/courier/push/diagnostics, ручка /health публичная.
+        try:
+            steps = courier_push.why_silent()['steps']
+        except Exception as e:
+            steps = {'error': f'{type(e).__name__}: {e}'}
+
         return {'configured': courier_push.is_configured(),
                 'subscriptions': subscriptions,
                 'addressable_couriers': addressable,
-                'events_sent': events}
+                'events_sent': events,
+                'steps': steps}
 
     if full:
         body['courier_push'] = timed('courier_push', collect_push)

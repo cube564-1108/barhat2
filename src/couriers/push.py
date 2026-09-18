@@ -171,6 +171,102 @@ def send_test(user_ids: List[int]) -> Dict[str, Any]:
     return result
 
 
+def why_silent() -> Dict[str, Any]:
+    """
+    Почему уведомление о новом заказе не уходит — по шагам, на текущих данных.
+
+    ЗАЧЕМ ЭТО СУЩЕСТВУЕТ. «Уведомления не приходят» — симптом, у которого
+    полдесятка разных причин, и снаружи они выглядят одинаково. 17–18.09.2026
+    на этом сгорели две правки подряд: сначала решили, что человек не адресат,
+    потом — что право на событие сгорело вхолостую. Обе версии звучали
+    убедительно, обе были мимо, а проверить их было нечем: консоли у
+    контейнера нет, боевую базу не посмотреть.
+
+    Функция повторяет ТУ ЖЕ выборку, что делает рассылка в
+    `notify_courier_events`, и считает, сколько заказов отсеивается на каждом
+    шаге. Ничего не отправляет и ничего не меняет — звать можно сколько угодно.
+
+    `steps` — только числа, их отдаёт и публичный `/health?full=1`.
+    `blocked` содержит номера заказов и города, поэтому наружу уходит лишь
+    через админскую ручку.
+
+    Правило CLAUDE.md: не нашёл причину со второй попытки — встраивай
+    измерение, а не правку.
+    """
+    from datetime import date, timedelta
+
+    from . import storage
+    from .delivery_storage import list_orders_for_courier
+
+    today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    # Коды и окно — ровно как в рассылке: диагностика по другой выборке врёт
+    # убедительнее, чем молчание.
+    codes = [r["code"] for r in storage.list_delivery_types()
+             if r.get("counts_as_courier")]
+
+    orders = list_orders_for_courier(city=None, date_from=today, date_to=tomorrow,
+                                     courier_delivery_codes=codes)
+
+    steps = {"in_window": len(orders), "free": 0, "has_courier_in_city": 0,
+             "has_subscription": 0, "already_sent": 0, "would_send": 0}
+    by_city: Dict[str, Dict[str, int]] = {}
+    blocked: List[Dict[str, Any]] = []
+
+    def note(order, city, reason):
+        if len(blocked) < 10:
+            blocked.append({"order": order.get("order_number"),
+                            "city": city, "reason": reason})
+
+    for order in orders:
+        city = order.get("city")
+        stat = by_city.setdefault(city or "(город не задан)",
+                                  {"orders": 0, "free": 0, "couriers": 0,
+                                   "subscribed_couriers": 0})
+        stat["orders"] += 1
+
+        if not order.get("is_free"):
+            continue
+        steps["free"] += 1
+        stat["free"] += 1
+
+        user_ids = ds.courier_user_ids(city)
+        stat["couriers"] = len(user_ids)
+        if not user_ids:
+            note(order, city, "в городе нет активного профиля курьера")
+            continue
+        steps["has_courier_in_city"] += 1
+
+        if not ds.has_push_subscriptions(user_ids):
+            note(order, city, "у курьеров города нет подписанных устройств")
+            continue
+        stat["subscribed_couriers"] = 1
+        steps["has_subscription"] += 1
+
+        # Право НЕ занимаем: диагностика ничего не меняет
+        with ds.get_db() as conn:
+            seen = conn.execute(
+                "SELECT 1 FROM push_events WHERE retailcrm_order_id = ? "
+                "  AND event_type = ?",
+                (order.get("retailcrm_order_id"), ds.EVENT_NEW_ORDER)).fetchone()
+        if seen:
+            steps["already_sent"] += 1
+            note(order, city, "уведомление по этому заказу уже отправляли")
+            continue
+
+        steps["would_send"] += 1
+
+    return {
+        "window": {"date_from": today, "date_to": tomorrow,
+                   "note": "даты по UTC, как в рассылке"},
+        "delivery_codes": codes,
+        "vapid_configured": is_configured(),
+        "steps": steps,
+        "by_city": by_city,
+        "blocked": blocked,
+    }
+
+
 def _notify(order: Dict[str, Any], event_type: str, title: str, body: str,
             user_ids: List[int]) -> bool:
     """Одно событие: занять право на отправку и отправить."""

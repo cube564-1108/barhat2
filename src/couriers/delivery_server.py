@@ -520,6 +520,20 @@ def push_subscribe():
     })
 
 
+@delivery_bp.route("/push/diagnostics", methods=["GET"])
+@role_required("admin")
+def push_diagnostics():
+    """
+    Почему уведомление о новом заказе не ушло — по шагам, на текущих данных.
+
+    Сам разбор живёт в `push.why_silent()`: те же числа отдаёт публичный
+    `/health?full=1`, а номера заказов и города — только здесь, под админом.
+    Ничего не отправляет и не меняет.
+    """
+    from . import push
+    return success_response(push.why_silent())
+
+
 @delivery_bp.route("/push/reset-events", methods=["POST"])
 @role_required("admin")
 @require_ajax_header

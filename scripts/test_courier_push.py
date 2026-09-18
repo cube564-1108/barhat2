@@ -489,6 +489,48 @@ push.VAPID_PRIVATE_KEY = ""
 r = client.post("/api/courier/push/reset-events", headers=AJAX, json={"days": 2})
 check("курьеру сброс недоступен", r.status_code in (401, 403), f"({r.status_code})")
 
+r = client.get("/api/courier/push/diagnostics")
+check("курьеру разбор недоступен", r.status_code in (401, 403), f"({r.status_code})")
+
+
+# ============================================================================
+print("\n6d. Разбор «почему молчит» отвечает по шагам")
+# ============================================================================
+#
+# Две правки подряд (17–18.09.2026) чинили не ту причину: сначала «человек не
+# адресат», потом «право сгорело вхолостую». Обе звучали убедительно, обе были
+# мимо, и проверить их было нечем — консоли нет, боевую базу не посмотреть.
+# Правило CLAUDE.md: не нашёл причину со второй попытки — встраивай измерение.
+
+before = ds.reset_push_events(2)  # чистый журнал, чтобы числа были предсказуемы
+report = push.why_silent()
+
+check("разбор называет окно выборки",
+      report["window"]["date_from"] and report["window"]["date_to"], report.get("window"))
+check("разбор перечисляет шаги отсева",
+      set(report["steps"]) >= {"in_window", "free", "has_courier_in_city",
+                               "has_subscription", "already_sent", "would_send"},
+      report.get("steps"))
+check("шаги идут от большего к меньшему",
+      report["steps"]["in_window"] >= report["steps"]["free"] >= report["steps"]["would_send"],
+      report.get("steps"))
+
+# Главное свойство: разбор НИЧЕГО не меняет. Иначе он сам занимал бы права на
+# события, и «посмотреть, почему молчит» убивало бы уведомления окончательно.
+with cs.get_db() as conn:
+    events_before = conn.execute("SELECT COUNT(*) AS c FROM push_events").fetchone()["c"]
+push.why_silent()
+push.why_silent()
+with cs.get_db() as conn:
+    events_after = conn.execute("SELECT COUNT(*) AS c FROM push_events").fetchone()["c"]
+check("разбор не занимает права на события", events_before == events_after,
+      f"({events_before} → {events_after})")
+
+# Подробности с номерами заказов не должны утечь в публичный /health
+check("номера заказов лежат отдельно от чисел",
+      "blocked" in report and "steps" in report,
+      "(/health отдаёт только steps, blocked — под админом)")
+
 
 # --- экран обязан различать исходы ------------------------------------------
 with open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
