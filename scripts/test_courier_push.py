@@ -306,6 +306,12 @@ for bad, why in (
     ("http://fcm.googleapis.com/fcm/send/x", "верный хост, но без TLS"),
     ("https://fcm.googleapis.com.evil.example/x", "чужой домен, похожий на верный"),
     ("https://notfcm-googleapis.com/x", "хост без точки перед суффиксом"),
+    # Всё до «@» — это имя пользователя, а не хост. Проверка по вхождению
+    # подстроки на этом и ломается: строка выглядит правильной, идёт запрос
+    # на evil.example.
+    ("https://fcm.googleapis.com@evil.example/x", "верный хост в userinfo"),
+    ("https://fcm.googleapis.com:443@10.0.0.5/x", "userinfo с портом, хост внутренний"),
+    ("https://evil.example/fcm.googleapis.com", "верный хост в пути"),
 ):
     r = client.post("/api/courier/push/subscribe", headers=AJAX,
                     json={"endpoint": bad, "keys": {"p256dh": "p", "auth": "a"}})
@@ -318,6 +324,8 @@ for good, who in (
     ("https://updates.push.services.mozilla.com/wpush/v2/abc", "Firefox"),
     ("https://web.push.apple.com/abc", "Safari / iOS"),
     ("https://wns2-by3p.notify.windows.com/w/?token=abc", "Edge"),
+    # Имя хоста регистронезависимо: браузер вправе прислать его как угодно
+    ("https://FCM.GoogleAPIs.com/fcm/send/abc", "верный хост в другом регистре"),
 ):
     r = client.post("/api/courier/push/subscribe", headers=AJAX,
                     json={"endpoint": good, "keys": {"p256dh": "p", "auth": "a"}})
