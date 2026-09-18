@@ -473,6 +473,30 @@ check("и оно действительно отправлено", len(probes) =
 check("повтор по тому же заказу не отправляется",
       push.notify_new_order(quiet) is False)
 
+# --- неудачная отправка не хоронит уведомление -------------------------------
+#
+# Право занимается ДО отправки (иначе два воркера пошлют дважды). Пока
+# разбирались со сломанным VAPID-ключом 18.09.2026, каждая неудачная попытка
+# не только не доходила, но и сжигала единственный шанс заказа: следующий тик
+# видел «уже отправляли» и молчал. Девять заказов так и остались немыми.
+ds.reset_push_events(2)
+push.send_to_users = lambda user_ids, payload: {
+    "sent": 0, "failed": 1, "dropped": 0, "reason": "error", "detail": "прод лежит"}
+check("при неудаче отправки notify честно отвечает нет",
+      push.notify_new_order(quiet) is False)
+with cs.get_db() as conn:
+    burned_again = conn.execute(
+        "SELECT COUNT(*) AS c FROM push_events WHERE retailcrm_order_id = 8100"
+    ).fetchone()["c"]
+check("и право возвращается, а не сгорает", burned_again == 0,
+      "(иначе после починки заказ промолчит навсегда)")
+
+probes.clear()
+push.send_to_users = lambda user_ids, payload: (
+    probes.append(payload) or {"sent": 1, "failed": 0, "dropped": 0})
+check("после починки то же уведомление уходит",
+      push.notify_new_order(quiet) is True, "(в этом и смысл возврата права)")
+
 # Сброс журнала возвращает заказу право: это выход для тех заказов, чьё право
 # сгорело до починки
 removed = ds.reset_push_events(2)

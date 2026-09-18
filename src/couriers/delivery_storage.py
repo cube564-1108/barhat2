@@ -2119,6 +2119,24 @@ def reset_push_events(days: int = 2) -> int:
         return cur.rowcount
 
 
+def release_push_event(order_id: int, event_type: str) -> None:
+    """
+    Вернуть право на событие, если отправка не состоялась.
+
+    Право занимается ДО отправки — иначе два воркера пошлют одно и то же
+    дважды. Но если отправка провалилась, занятое право хоронит уведомление
+    навсегда: следующий тик увидит «уже отправляли» и промолчит.
+
+    Так 18.09.2026 девять заказов остались без уведомлений, пока разбирались
+    с VAPID-ключом: каждая неудачная попытка не только не доходила, но и
+    сжигала свой единственный шанс.
+    """
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM push_events WHERE retailcrm_order_id = ? AND event_type = ?",
+            (order_id, event_type))
+
+
 def courier_user_ids(city: Optional[str]) -> List[int]:
     """Активные курьеры города — кому уходит «новый заказ»."""
     with get_db() as conn:

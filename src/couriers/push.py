@@ -649,7 +649,7 @@ def _notify(order: Dict[str, Any], event_type: str, title: str, body: str,
     if not ds.claim_push_event(order["retailcrm_order_id"], event_type):
         return False
 
-    send_to_users(user_ids, {
+    result = send_to_users(user_ids, {
         "title": title,
         "body": body,
         "tag": f"{event_type}-{order['retailcrm_order_id']}",
@@ -657,6 +657,20 @@ def _notify(order: Dict[str, Any], event_type: str, title: str, body: str,
         # нет, а глубокая ссылка на чужой уже занятый заказ только раздражает
         "url": "/app/courier",
     })
+
+    # Не ушло никому — возвращаем право, пусть следующий тик попробует снова.
+    #
+    # Право занимается ДО отправки: иначе два воркера пошлют одно и то же
+    # дважды. Обратная сторона — неудачная попытка хоронила уведомление
+    # навсегда. 18.09.2026, пока разбирались со сломанным VAPID-ключом, так
+    # молча сгорели девять заказов: каждая попытка не доходила И сжигала
+    # единственный шанс.
+    #
+    # Бесконечного повтора не будет: мёртвую подписку push-сервис отзывает
+    # (404/410), она удаляется, и следующий заход отсечёт `has_push_subscriptions`.
+    if not result.get("sent"):
+        ds.release_push_event(order["retailcrm_order_id"], event_type)
+        return False
     return True
 
 
