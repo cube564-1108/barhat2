@@ -472,6 +472,67 @@ def send_test(user_ids: List[int]) -> Dict[str, Any]:
     return result
 
 
+PUSH_LOG_LIMIT = 20
+
+
+def _log_send(order: Dict[str, Any], event_type: str,
+              user_ids: List[int], result: Dict[str, Any]) -> None:
+    """
+    Журнал последних отправок: что, когда, скольким и чем кончилось.
+
+    Отметка о ПРОГОНЕ отвечает «упал ли тик», но не отвечает на главный
+    вопрос: «моё уведомление по заказу ушло или нет». Между тиками ничего не
+    остаётся, и отправка, случившаяся двадцать минут назад, невидима — а
+    именно о ней и спрашивают (18.09.2026, «по новым заказам пуши не
+    приходят»).
+
+    Номер заказа кладём: журнал уходит в админскую ручку. В публичный
+    `/health` попадает та же запись без номера — см. `why_silent()`.
+    """
+    from .delivery_feed import PUSH_LOG_KEY
+    from .storage import get_sync_state, set_sync_state
+
+    entry = {
+        "at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "order": order.get("order_number") or order.get("retailcrm_order_id"),
+        "event": event_type,
+        "city": order.get("city"),
+        "recipients": len(user_ids),
+        "sent": result.get("sent", 0),
+        "failed": result.get("failed", 0),
+        "dropped": result.get("dropped", 0),
+        "reason": result.get("reason"),
+        "detail": (result.get("detail") or None),
+    }
+    try:
+        raw = get_sync_state(PUSH_LOG_KEY)
+        log = json.loads(raw) if raw else []
+        if not isinstance(log, list):
+            log = []
+    except Exception:
+        log = []
+
+    log.append(entry)
+    set_sync_state(PUSH_LOG_KEY, json.dumps(log[-PUSH_LOG_LIMIT:], ensure_ascii=False))
+
+
+def recent_sends(with_orders: bool = False) -> List[Dict[str, Any]]:
+    """Последние отправки. Без `with_orders` — без номеров заказов и городов."""
+    from .delivery_feed import PUSH_LOG_KEY
+    from .storage import get_sync_state
+
+    try:
+        log = json.loads(get_sync_state(PUSH_LOG_KEY) or "[]")
+    except Exception:
+        return []
+    if not isinstance(log, list):
+        return []
+    if with_orders:
+        return log
+    return [{k: v for k, v in entry.items() if k not in ("order", "city")}
+            for entry in log]
+
+
 def why_silent() -> Dict[str, Any]:
     """
     Почему уведомление о новом заказе не уходит — по шагам, на текущих данных.
@@ -620,6 +681,7 @@ def _feed_state() -> Dict[str, Any]:
         "cursor_updated_at": state.get(CURSOR_KEY, {}).get("updated_at"),
         "last_push_run": last_run,
         "last_push_test": last_test,
+        "recent_sends": recent_sends(),
         "now_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -657,6 +719,8 @@ def _notify(order: Dict[str, Any], event_type: str, title: str, body: str,
         # нет, а глубокая ссылка на чужой уже занятый заказ только раздражает
         "url": "/app/courier",
     })
+
+    _log_send(order, event_type, user_ids, result)
 
     # Не ушло никому — возвращаем право, пусть следующий тик попробует снова.
     #

@@ -541,7 +541,10 @@ def push_diagnostics():
     Ничего не отправляет и не меняет.
     """
     from . import push
-    return success_response(push.why_silent())
+    report = push.why_silent()
+    # Под админом — с номерами заказов: спрашивают всегда про конкретный заказ
+    report["recent_sends"] = push.recent_sends(with_orders=True)
+    return success_response(report)
 
 
 @delivery_bp.route("/push/reset-events", methods=["POST"])
