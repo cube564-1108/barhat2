@@ -65,7 +65,17 @@
         openOrderId: null,
         pushKey: null,      // публичный VAPID; null = пуши не настроены
         pushOn: false,      // подписка этого устройства оформлена
-        pushBlock: null     // почему уведомлений быть не может (см. pushBlockReason)
+        pushBlock: null,    // почему уведомлений быть не может (см. pushBlockReason)
+        view: 'feed',       // 'feed' — лента заказов, 'earnings' — мои доставки
+        earnings: {
+            from: null,
+            to: null,
+            preset: 'month',  // какой пресет подсвечен; null — свои даты
+            data: null,       // последний успешный ответ
+            meta: null,
+            loading: false,
+            error: null
+        }
     };
 
     var el = {};
@@ -1431,6 +1441,25 @@
             window.scrollTo(0, 0);
         });
 
+        // Мои доставки: переключение вида, пресеты периода и свои даты.
+        // Кнопка одна и работает в обе стороны — отдельной «назад» не нужно.
+        if (el.earningsBtn) {
+            el.earningsBtn.addEventListener('click', function () {
+                setView(state.view === 'earnings' ? 'feed' : 'earnings');
+                window.scrollTo(0, 0);
+            });
+        }
+        if (el.earnPresets) {
+            el.earnPresets.addEventListener('click', function (event) {
+                var chip = event.target.closest('[data-earn-preset]');
+                if (chip) onEarningsPreset(chip.getAttribute('data-earn-preset'));
+            });
+        }
+        // change, а не input: пока человек набирает дату руками, промежуточные
+        // значения («2026-09-0») отправлять наружу незачем
+        if (el.earnFrom) el.earnFrom.addEventListener('change', onEarningsDateChange);
+        if (el.earnTo) el.earnTo.addEventListener('change', onEarningsDateChange);
+
         el.sitesOpen.addEventListener('click', openSites);
 
         el.dateBar.addEventListener('click', function (event) {
@@ -1459,6 +1488,13 @@
         });
 
         el.refresh.addEventListener('click', function () {
+            // Кнопка обновляет то, на что человек смотрит. Иначе она молча
+            // перезагружает ленту, а экран с суммами остаётся прежним — и
+            // выглядит это как сломанная кнопка.
+            if (state.view === 'earnings') {
+                if (!state.earnings.loading) loadEarnings();
+                return;
+            }
             if (state.loading) return;
             loadFeed(true);
         });
@@ -1898,6 +1934,222 @@
         });
     }
 
+    // === Мои доставки =======================================================
+    //
+    // Счётчик выполненных заказов и сумма по дням. Число здесь — это зарплата
+    // курьера, и считает его тот же код, что и выплату (storage.
+    // courier_earnings_by_day). Фронт не вычисляет НИЧЕГО: он показывает то,
+    // что пришло. Любая арифметика на клиенте — это второй расчёт, который
+    // однажды разойдётся с первым.
+
+    /**
+     * Границы периода для пресета — чистая функция, её и проверяет сторож.
+     *
+     * «Сегодня» приходит с сервера по стенным часам салона (state.today):
+     * часы телефона курьера могут стоять на другом городе, и в полночь он
+     * увидел бы не свой день.
+     */
+    function earningsPresetRange(preset, todayIso) {
+        if (!todayIso) return null;
+        if (preset === 'today') return { from: todayIso, to: todayIso };
+        if (preset === 'week') {
+            var parts = todayIso.split('-');
+            var moment = new Date(Date.UTC(+parts[0], +parts[1] - 1, +parts[2]));
+            moment.setUTCDate(moment.getUTCDate() - 6);   // сегодня + 6 назад
+            var back = moment.toISOString().slice(0, 10);
+            return { from: back, to: todayIso };
+        }
+        if (preset === 'month') {
+            return { from: todayIso.slice(0, 8) + '01', to: todayIso };
+        }
+        return null;
+    }
+
+    /** «1 500 ₽». Ноль показываем числом, а не прочерком: это ответ, а не пустота. */
+    function earningsMoney(value) {
+        var number = Number(value) || 0;
+        return number.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' ₽';
+    }
+
+    /** «19 сен» / «19 сен · сегодня». */
+    function earningsDayLabel(iso, todayIso) {
+        var text = shortDate(iso);
+        return iso === todayIso ? text + ' · сегодня' : text;
+    }
+
+    /**
+     * Тело экрана из ответа сервера — тоже чистая функция.
+     *
+     * Дни без доставок в список не добавляем: на периоде в месяц это стена
+     * прочерков. Исключение — сегодняшний день: «сегодня 0» это ответ, а его
+     * отсутствие в списке читается как «экран не обновился».
+     */
+    function earningsBodyHtml(payload, meta, todayIso) {
+        var info = meta || {};
+        var parts = [];
+
+        if (info.warning) {
+            // Связки с CRM нет: у такого человека и выплата не считается.
+            // Ноль здесь соврал бы — он читается как «вы ничего не возили».
+            return '<p class="cd-earn-note cd-earn-note--warn">'
+                + esc(info.warning) + '</p>';
+        }
+
+        var data = payload || {};
+        var days = data.days || [];
+        var totals = data.totals || { orders_count: 0, total_net_cost: 0, zero_cost: 0 };
+
+        var shown = days.slice();
+        var hasToday = shown.some(function (day) { return day.date === todayIso; });
+        if (!hasToday && todayIso && todayIso >= info.date_from && todayIso <= info.date_to) {
+            shown.unshift({ date: todayIso, orders_count: 0, total_net_cost: 0,
+                            zero_cost: 0, empty: true });
+        }
+
+        if (!shown.length) {
+            parts.push('<p class="cd-earn-note">За этот период выполненных доставок нет.</p>');
+        }
+
+        shown.forEach(function (day) {
+            var classes = 'cd-earn-day'
+                + (day.date === todayIso ? ' cd-earn-day--today' : '');
+            var value = day.orders_count
+                ? '<span>' + esc(day.orders_count) + ' · </span>'
+                    + '<span class="cd-earn-day__sum">'
+                    + esc(earningsMoney(day.total_net_cost)) + '</span>'
+                : '<span class="cd-earn-day__value--empty">—</span>';
+            parts.push('<div class="' + classes + '">'
+                + '<span class="cd-earn-day__date">'
+                + esc(earningsDayLabel(day.date, todayIso)) + '</span>'
+                + '<span class="cd-earn-day__value">' + value + '</span>'
+                + '</div>');
+        });
+
+        parts.push('<div class="cd-earn-total">'
+            + '<span class="cd-earn-total__label">К оплате за период · '
+            + esc(totals.orders_count) + ' заказ(ов)</span>'
+            + '<span class="cd-earn-total__value">'
+            + esc(earningsMoney(totals.total_net_cost)) + '</span></div>');
+
+        // Отвезли, а оператор ещё не закрыл заказ. Без этой строки заказ для
+        // курьера просто пропадает: в сумму он не попал, в ленте его уже нет.
+        if (info.awaiting_close) {
+            parts.push('<p class="cd-earn-note">Отвезли ещё '
+                + esc(info.awaiting_close) + ' — они попадут в сумму, когда '
+                + 'оператор закроет заказ в CRM.</p>');
+        }
+
+        // Работа была, денег за неё не будет. Молчаливый ноль в сумме курьер
+        // прочитает как потерю и пойдёт разбираться не туда.
+        if (totals.zero_cost) {
+            parts.push('<p class="cd-earn-note">Заказов без стоимости доставки: '
+                + esc(totals.zero_cost) + '. Уточните у управляющего.</p>');
+        }
+
+        return parts.join('');
+    }
+
+    /** Переключение «лента ↔ мои доставки». Списком заказов не управляет. */
+    function setView(view) {
+        state.view = view;
+        var earnings = view === 'earnings';
+
+        el.earnings.hidden = !earnings;
+        el.feed.hidden = earnings;
+        el.filters.hidden = earnings;
+        el.dateBar.hidden = earnings;
+        // Строку салонов прячем, но её собственное состояние не трогаем: она
+        // и в ленте бывает скрыта, когда салон один
+        if (earnings) el.siteBar.hidden = true;
+
+        if (el.earningsBtn) el.earningsBtn.setAttribute('aria-pressed', String(earnings));
+        if (earnings && !state.earnings.data && !state.earnings.loading) loadEarnings();
+    }
+
+    /** Значения в полях и подсветка пресета. Отдельно от списка — см. разметку. */
+    function syncEarningsControls() {
+        if (el.earnFrom) el.earnFrom.value = state.earnings.from || '';
+        if (el.earnTo) el.earnTo.value = state.earnings.to || '';
+        if (!el.earnPresets) return;
+        Array.prototype.forEach.call(
+            el.earnPresets.querySelectorAll('[data-earn-preset]'), function (chip) {
+                var active = chip.getAttribute('data-earn-preset') === state.earnings.preset;
+                chip.classList.toggle('cd-chip--active', active);
+            });
+    }
+
+    function renderEarnings() {
+        if (!el.earnBody) return;
+        if (state.earnings.loading && !state.earnings.data) {
+            el.earnBody.innerHTML = '<p class="cd-earn-note">Считаем…</p>';
+            return;
+        }
+        if (state.earnings.error) {
+            // Прежние данные не стираем: «медленно» не должно выглядеть как
+            // «пусто» (правило CLAUDE.md). Показываем их с пометкой.
+            el.earnBody.innerHTML =
+                '<p class="cd-earn-note cd-earn-note--warn">'
+                + esc(state.earnings.error) + '</p>'
+                + (state.earnings.data
+                    ? earningsBodyHtml(state.earnings.data, state.earnings.meta,
+                                       state.today)
+                    : '');
+            return;
+        }
+        el.earnBody.innerHTML = earningsBodyHtml(
+            state.earnings.data, state.earnings.meta, state.today);
+    }
+
+    function loadEarnings() {
+        if (!state.earnings.from || !state.earnings.to) {
+            var range = earningsPresetRange(state.earnings.preset, state.today);
+            if (!range) return;
+            state.earnings.from = range.from;
+            state.earnings.to = range.to;
+        }
+        syncEarningsControls();
+
+        state.earnings.loading = true;
+        state.earnings.error = null;
+        renderEarnings();
+
+        var url = '/api/courier/earnings?date_from='
+            + encodeURIComponent(state.earnings.from)
+            + '&date_to=' + encodeURIComponent(state.earnings.to);
+
+        return apiGet(url).then(function (body) {
+            state.earnings.loading = false;
+            state.earnings.data = body.data || null;
+            state.earnings.meta = body.meta || {};
+            renderEarnings();
+        }).catch(function (error) {
+            state.earnings.loading = false;
+            state.earnings.error = error && error.message
+                ? error.message
+                : 'Не удалось посчитать доставки';
+            renderEarnings();
+        });
+    }
+
+    function onEarningsPreset(preset) {
+        var range = earningsPresetRange(preset, state.today);
+        if (!range) return;
+        state.earnings.preset = preset;
+        state.earnings.from = range.from;
+        state.earnings.to = range.to;
+        loadEarnings();
+    }
+
+    function onEarningsDateChange() {
+        var from = el.earnFrom ? el.earnFrom.value : '';
+        var to = el.earnTo ? el.earnTo.value : '';
+        if (!from || !to) return;
+        state.earnings.preset = null;   // свои даты — пресет не подсвечен
+        state.earnings.from = from;
+        state.earnings.to = to;
+        loadEarnings();
+    }
+
     // === Старт ==============================================================
 
     function start() {
@@ -1918,6 +2170,12 @@
         el.logout = document.getElementById('cdLogout');
         el.card = document.getElementById('cdCard');
         el.photo = document.getElementById('cdPhoto');
+        el.earningsBtn = document.getElementById('cdEarningsBtn');
+        el.earnings = document.getElementById('cdEarnings');
+        el.earnPresets = document.getElementById('cdEarnPresets');
+        el.earnFrom = document.getElementById('cdEarnFrom');
+        el.earnTo = document.getElementById('cdEarnTo');
+        el.earnBody = document.getElementById('cdEarnBody');
 
         // Подписи табов запоминаем до первой перерисовки: она переписывает их
         // вместе со счётчиком.

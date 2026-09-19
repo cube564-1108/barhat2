@@ -507,3 +507,66 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     border-radius: var(--bx-r-xl); color: #fff; cursor: pointer;
 }
 .cd-photo__status { color: rgba(255, 255, 255, 0.75); font-size: 14px; text-align: center; }
+
+/* ===== Мои доставки ====================================================== */
+/* Счётчик выполненных заказов и сумма по дням. Числа — те же, что в «Оплате
+   курьерам»: это зарплата курьера, и расходиться они не имеют права. */
+
+.cd-earnings { padding: 12px 16px calc(24px + env(safe-area-inset-bottom)); }
+
+.cd-earnings__presets {
+    display: flex; gap: 8px; flex-wrap: wrap;
+}
+.cd-chip {
+    min-height: 36px; padding: 6px 14px;
+    border: 1px solid rgba(122, 30, 78, 0.25);
+    border-radius: var(--bx-r-xl);
+    background: #fff; color: var(--bx-wine);
+    font-size: 14px; font-family: inherit; cursor: pointer;
+}
+.cd-chip--active { background: var(--bx-wine); color: #fff; border-color: var(--bx-wine); }
+
+.cd-earnings__dates { display: flex; gap: 12px; margin-top: 12px; }
+.cd-earnings__date {
+    flex: 1 1 0; display: flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--bx-ink-soft);
+}
+.cd-earnings__date input {
+    flex: 1 1 auto; min-height: 40px; min-width: 0;
+    padding: 6px 10px;
+    border: 1px solid rgba(122, 30, 78, 0.2);
+    border-radius: var(--bx-r-lg);
+    font-size: 14px; font-family: inherit; color: var(--bx-ink);
+    background: #fff;
+}
+
+.cd-earnings__body { margin-top: 16px; }
+
+.cd-earn-day {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; padding: 12px 0;
+    border-bottom: 1px solid rgba(122, 30, 78, 0.1);
+}
+.cd-earn-day--today .cd-earn-day__date { font-weight: 600; }
+.cd-earn-day__date { font-size: 15px; color: var(--bx-ink); }
+.cd-earn-day__value { font-size: 15px; color: var(--bx-ink); white-space: nowrap; }
+.cd-earn-day__value--empty { color: var(--bx-ink-soft); }
+.cd-earn-day__sum { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+.cd-earn-total {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-top: 16px; padding: 14px 16px;
+    border-radius: var(--bx-r-xl);
+    background: rgba(228, 194, 221, 0.3);
+}
+.cd-earn-total__label { font-size: 14px; color: var(--bx-wine); }
+.cd-earn-total__value {
+    font-size: 18px; font-weight: 600; color: var(--bx-wine);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+.cd-earn-note {
+    margin: 10px 0 0; font-size: 13px; line-height: 1.45;
+    color: var(--bx-ink-soft);
+}
+.cd-earn-note--warn { color: var(--bx-wine); }

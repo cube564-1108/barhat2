@@ -59,6 +59,19 @@
                      отсутствия. Состояние — в aria-pressed и в иконке. -->
                 <button type="button" class="cd-header__btn" id="cdPushBtn" hidden
                         aria-pressed="false" aria-label="Уведомления о новых заказах"></button>
+                <!-- Мои доставки: свой счётчик и своя сумма по дням. В шапке,
+                     а не пятым табом: табы — это фильтры над одним списком, и
+                     экран с другими данными сломал бы их счётчики. -->
+                <button type="button" class="cd-header__btn" id="cdEarningsBtn"
+                        aria-pressed="false"
+                        title="Мои доставки" aria-label="Мои доставки и суммы">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                         stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+                        <path d="M3 7a2 2 0 0 1 2-2h13a1 1 0 0 1 1 1v2"></path>
+                        <path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2H5"></path>
+                        <path d="M16 13h2"></path>
+                    </svg>
+                </button>
                 <button type="button" class="cd-header__btn" id="cdRefresh"
                         title="Обновить" aria-label="Обновить">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
@@ -113,6 +126,33 @@
     </div>
 
     <main class="cd-feed" id="cdFeed"></main>
+
+    <!-- Мои доставки: сколько заказов выполнено и на какую сумму, по дням.
+         Считается тем же кодом, что и выплата курьеру (см. план
+         plans/2026-09-19-счётчик-доставок-курьера.md), — числа обязаны
+         совпадать с тем, что назовёт управляющий.
+
+         Управление (пресеты и две даты) живёт ОТДЕЛЬНО от списка: перерисовка
+         через innerHTML сбрасывает фокус и каретку, а в поле даты человек в
+         этот момент как раз печатает. Переписывается только #cdEarnBody. -->
+    <section class="cd-earnings" id="cdEarnings" hidden aria-label="Мои доставки">
+        <div class="cd-earnings__presets" id="cdEarnPresets">
+            <button type="button" class="cd-chip" data-earn-preset="today">Сегодня</button>
+            <button type="button" class="cd-chip" data-earn-preset="week">7 дней</button>
+            <button type="button" class="cd-chip" data-earn-preset="month">Этот месяц</button>
+        </div>
+        <div class="cd-earnings__dates">
+            <label class="cd-earnings__date">
+                <span>с</span>
+                <input type="date" id="cdEarnFrom">
+            </label>
+            <label class="cd-earnings__date">
+                <span>по</span>
+                <input type="date" id="cdEarnTo">
+            </label>
+        </div>
+        <div class="cd-earnings__body" id="cdEarnBody"></div>
+    </section>
 </div>
 
 <!-- Карточка заказа: отдельный слой во весь экран, а не модалка по центру.
