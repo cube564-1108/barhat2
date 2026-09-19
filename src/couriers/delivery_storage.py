@@ -663,6 +663,33 @@ def ready_stamp(status: Optional[str], previous: Optional[str],
     return None
 
 
+def mark_ready_seen(order_ids: List[int], now: Optional[str] = None) -> int:
+    """
+    Поставить отметку о сборке заказам, которые ПРОШЛИ через ready-статус.
+
+    Зовётся лентой по записям истории: перечитанный заказ показывает только
+    текущий статус, а он к этому моменту мог уехать дальше. Ставится там, где
+    её ещё нет, — уже проставленную не двигаем, иначе «когда собрали» будет
+    временем последней правки заказа.
+    """
+    if not order_ids:
+        return 0
+    stamp = now or datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    ids = [int(order_id) for order_id in order_ids]
+    marked = 0
+    with get_db() as conn:
+        for start in range(0, len(ids), 400):   # потолок переменных SQLite
+            chunk = ids[start:start + 400]
+            cursor = conn.execute(
+                f"UPDATE courier_orders SET ready_seen_at = ? "
+                f" WHERE ready_seen_at IS NULL "
+                f"   AND retailcrm_order_id IN ({','.join('?' * len(chunk))})",
+                [stamp, *chunk],
+            )
+            marked += cursor.rowcount or 0
+    return marked
+
+
 def is_ready_value(status: Optional[str], ready_seen_at: Optional[str],
                    ready_codes) -> bool:
     """
@@ -1202,6 +1229,17 @@ def extend_claim(order_id: int, courier_user_id: int,
             "UPDATE delivery_assignments SET expires_at = ?, extended_at = ? "
             " WHERE id = ?",
             (stamp, now.isoformat(sep=" ", timespec="seconds"), row["id"]),
+        )
+
+        # Вернуть одноразовый талон на предупреждение: он выдаётся раз на
+        # «заказ + событие», и без этого курьер, честно нажавший «Я еду», не
+        # получил бы второго «бронь скоро снимется» — заказ ушёл бы молча.
+        # Повторов не будет: продление одно, значит и предупреждений максимум
+        # два. Той же транзакцией, что и сам сдвиг срока.
+        conn.execute(
+            "DELETE FROM push_events WHERE retailcrm_order_id = ? "
+            "   AND event_type = ?",
+            (order_id, EVENT_CLAIM_EXPIRING),
         )
         conn.execute("COMMIT")
         return {"retailcrm_order_id": order_id, "expires_at": stamp,

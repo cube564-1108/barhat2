@@ -137,6 +137,40 @@ def collect_order_ids(records: List[Dict[str, Any]],
     return order_ids
 
 
+def collect_ready_order_ids(records: List[Dict[str, Any]],
+                            ready_codes) -> List[int]:
+    """
+    Заказы, которые в этой пачке истории ВОШЛИ в статус «Заказ готов».
+
+    Отметку о сборке нельзя ставить по текущему статусу заказа: лента узнаёт
+    про изменение, а перечитывает заказ ЦЕЛИКОМ и уже в теперешнем виде. Если
+    оператор перевёл «Заказ готов» → «Вызван курьер» между двумя тиками (тик
+    раз в минуту, а глубокий синк и вовсе раз в полчаса), в ответе CRM будет
+    только `call-courier`, и факт сборки пропадёт навсегда — то есть вернётся
+    ровно тот баг с заказом 154553, ради которого отметка и заводилась.
+
+    Сама история этот факт помнит: у записи о смене статуса есть `newValue`.
+    Его и читаем, с запасным путём на `order.status` — в выдаче CRM встречаются
+    обе формы.
+    """
+    if not ready_codes:
+        return []
+    order_ids: List[int] = []
+    seen: Set[int] = set()
+    for record in records:
+        if is_own_echo(record) or record.get("field") != "status":
+            continue
+        code = ((record.get("newValue") or {}).get("code")
+                or (record.get("order") or {}).get("status"))
+        if code not in ready_codes:
+            continue
+        order_id = (record.get("order") or {}).get("id")
+        if order_id and order_id not in seen:
+            seen.add(order_id)
+            order_ids.append(int(order_id))
+    return order_ids
+
+
 def get_cursor() -> int:
     raw = get_sync_state(CURSOR_KEY)
     try:
@@ -176,11 +210,15 @@ def run_once(deadline: Optional[float] = None) -> Dict[str, Any]:
     """
     # apply_..., а не upsert_...: витрину читает ещё и «Загрузка салонов»,
     # и пришедший лентой заказ обязан сразу получить трудоёмкость.
-    from .delivery_storage import apply_orders_from_crm
+    from .delivery_storage import (apply_orders_from_crm, mark_ready_seen,
+                                   ready_status_codes)
 
     client = retailcrm.get_client()
     cursor = ensure_cursor(client)
     site_cities = get_site_cities()
+    # Один раз на тик: справочник меняется руками и редко, а соединение к
+    # общему медленному /data стоит десятки миллисекунд на страницу истории.
+    ready_codes = ready_status_codes()
 
     stats = {"records": 0, "orders": 0, "pages": 0, "cursor_from": cursor}
 
@@ -198,6 +236,13 @@ def run_once(deadline: Optional[float] = None) -> Dict[str, Any]:
             applied = apply_orders_from_crm(rows)
             stats["orders"] += applied["written"]
             stats["recalc_dates"] = stats.get("recalc_dates", 0) + applied["recalc_dates"]
+
+            # Отметка о сборке — по ИСТОРИИ, а не по перечитанному заказу:
+            # статус мог уехать дальше между тиками, и тогда факт сборки в
+            # ответе CRM уже не виден (см. collect_ready_order_ids).
+            # После записи заказов: строки витрины к этому моменту есть.
+            stats["ready_marked"] = stats.get("ready_marked", 0) + mark_ready_seen(
+                collect_ready_order_ids(records, ready_codes))
 
         set_cursor(page_cursor)
         stats["cursor_to"] = page_cursor

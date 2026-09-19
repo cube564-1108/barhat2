@@ -269,6 +269,56 @@ check("следующая правка снова видна", card.get("changed
       f"({card.get('changed_fields')})")
 
 
+print("\n8. Сборку, о которой знает только история, лента не теряет")
+# Лента узнаёт ПРО ИЗМЕНЕНИЕ, а перечитывает заказ целиком и уже в теперешнем
+# виде. Оператор успел перевести «Заказ готов» → «Вызван курьер» между тиками —
+# и в ответе CRM статуса «готов» уже нет. Отметку о сборке надо брать из самой
+# истории, иначе возвращается баг заказа 154553: собранный заказ считается
+# несобранным, и забрать его нельзя.
+
+ds.set_visible_status("call-courier", ds.ROLE_VISIBLE, "test")
+
+feed.set_cursor(1000)
+client = FakeClient(pages=[[
+    # Запись истории говорит «стал готов», а заказ в CRM уже «вызван курьер»
+    dict(history(1001, "status", 400), newValue={"code": "order-complete"}),
+]])
+# Перечитанный заказ приходит уже со следующим статусом
+client.get_orders_by_ids = lambda ids: [crm_order(i, status="call-courier")
+                                        for i in ids]
+retailcrm._client = client
+feed.run_once()
+
+with storage.get_db() as conn:
+    row = conn.execute(
+        "SELECT status, ready_seen_at FROM courier_orders "
+        " WHERE retailcrm_order_id = 400").fetchone()
+check("заказ записан со статусом из CRM", row and row["status"] == "call-courier",
+      f"({row and row['status']})")
+check("но отметка о сборке взята из истории", bool(row and row["ready_seen_at"]),
+      f"({row and row['ready_seen_at']})")
+
+card = ds.order_for_courier(400, city=None) or {}
+check("значит заказ считается готовым — его можно забрать",
+      card.get("is_ready") is True, f"({card.get('is_ready')})")
+
+# Обратная сторона: статус, который ready-статусом не является, отметку не
+# ставит — иначе «вызван курьер» начал бы разрешать забор несобранного.
+feed.set_cursor(1100)
+client = FakeClient(pages=[[
+    dict(history(1101, "status", 401), newValue={"code": "call-courier"}),
+]])
+client.get_orders_by_ids = lambda ids: [crm_order(i, status="call-courier")
+                                        for i in ids]
+retailcrm._client = client
+feed.run_once()
+with storage.get_db() as conn:
+    stamp = conn.execute(
+        "SELECT ready_seen_at FROM courier_orders "
+        " WHERE retailcrm_order_id = 401").fetchone()["ready_seen_at"]
+check("несобранный заказ отметки не получает", stamp is None, f"({stamp})")
+
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} — {failures}")

@@ -333,6 +333,27 @@ in_feed = feed_order(7005, courier_user_id=31) or {}
 check("лента говорит, что бронь продлевали", in_feed.get("claim_extended") is True)
 check("и отдаёт новый срок", in_feed.get("expires_at") == extended["expires_at"])
 
+# Талон на предупреждение возвращается: он выдаётся раз на «заказ + событие»,
+# и без возврата курьер, честно нажавший «Я еду», не получил бы второго
+# «бронь скоро снимется» — заказ ушёл бы у него молча.
+with cs.get_db() as conn:
+    conn.execute("INSERT OR REPLACE INTO push_events "
+                 "  (retailcrm_order_id, event_type) VALUES (?, ?)",
+                 (7005, ds.EVENT_CLAIM_EXPIRING))
+with cs.get_db() as conn:
+    # Право на продление уже израсходовано выше — возвращаем, чтобы проверить
+    # именно возврат талона на предупреждение, а не отказ «уже продлевали»
+    conn.execute("UPDATE delivery_assignments SET extended_at = NULL "
+                 " WHERE retailcrm_order_id = ?", (7005,))
+ds.extend_claim(7005, courier_user_id=31)
+with cs.get_db() as conn:
+    left_talon = conn.execute(
+        "SELECT COUNT(*) AS c FROM push_events "
+        " WHERE retailcrm_order_id = ? AND event_type = ?",
+        (7005, ds.EVENT_CLAIM_EXPIRING)).fetchone()["c"]
+check("продление возвращает право на предупреждение", left_talon == 0,
+      f"({left_talon})")
+
 try:
     ds.extend_claim(7005, courier_user_id=31)
     again, code = True, ""
