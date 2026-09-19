@@ -270,6 +270,24 @@ def init_couriers_tables() -> None:
             "ON courier_orders(site_code, delivery_date)"
         )
 
+        # «Заработок одного курьера за период» (экран курьера + отчёт выплат).
+        #
+        # Составной, а не расчёт на два имеющихся: SQLite берёт на таблицу ОДИН
+        # индекс, и с `idx_courier_orders_courier` он нашёл бы все заказы
+        # курьера ЗА ВСЕ ВРЕМЕНА и отфильтровал даты перебором. Тот же случай,
+        # что с городом и датой выше.
+        #
+        # Старый одиночный индекс по курьеру не трогаем («добавляй, не ломай»):
+        # он покрывает запросы без даты, и его удаление — изменение общей
+        # структуры, которой пользуются другие модули. Цена — лишний индекс при
+        # записи: глубокий синк переписывает окно целиком, и каждая вставка
+        # теперь обновляет на один индекс больше. Проверяется замером времени
+        # синка после выката.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_courier_orders_courier_date "
+            "ON courier_orders(courier_id, delivery_date)"
+        )
+
         # ====================================================================
         # Поля модуля «Загрузка салонов» (план 2026-09-04).
         #
@@ -2619,6 +2637,80 @@ def report_by_courier(
             "net_cost_without_courier": round((missing["total"] if missing else 0) or 0, 2),
             "cancelled_orders": cancelled_count,
             "cancelled_net_cost": round((cancelled["total"] if cancelled else 0) or 0, 2),
+        },
+    }
+
+
+def courier_earnings_by_day(
+    retailcrm_courier_id: int,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Заработок ОДНОГО курьера по дням — для его собственного экрана в приложении.
+
+    **Это не второй расчёт, а тот же самый в разрезе одного человека.** Условия
+    отбора берутся из `_payout_scope` и повторяют `report_by_courier` слово в
+    слово: период по дате доставки, статус «Выполнен», курьер из CRM, службы
+    доставки отсечены. Цифра на экране курьера — это его зарплата, и разойтись
+    с тем, что посчитает управляющий, она не имеет права. Сторож
+    `scripts/test_courier_earnings.py` сравнивает обе функции на одних данных.
+
+    Дни без заказов сюда НЕ попадают: их дорисует экран, который и так знает
+    границы периода. Возвращать строку с нулями на каждый пустой день значит
+    гонять по сети то, что вычисляется на месте.
+
+    `zero_cost` — сколько в дне заказов с нулевой себестоимостью. Такой заказ
+    проходит `PAYOUT_FILTER` (курьер указан) и в выплате учтён как ноль: работа
+    была, денег не будет. Прятать его нельзя — курьер решит, что приложение
+    потеряло сумму, — поэтому отдаём отдельным числом, чтобы экран назвал его
+    словами.
+
+    Всё одним соединением: на сетевом `/data` цену определяет число обращений.
+    """
+    where, params = _payout_scope(date_from, date_to, city=None, site_code=None)
+    where.append("o.status = ?")
+    params.append(COMPLETED_STATUS)
+    where.append("o.courier_id = ?")
+    params.append(int(retailcrm_courier_id))
+    # Службы доставки — как в отчёте выплат: им платят не так и не мы.
+    where.append("COALESCE(c.is_service, 0) = 0")
+
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT o.delivery_date                        AS date,
+                   COUNT(*)                               AS orders_count,
+                   COALESCE(SUM(o.net_cost), 0)           AS total_net_cost,
+                   SUM(CASE WHEN COALESCE(o.net_cost, 0) <= 0 THEN 1 ELSE 0 END)
+                                                          AS zero_cost
+              FROM courier_orders o
+              LEFT JOIN couriers c ON c.id = o.courier_id
+             WHERE {' AND '.join(where)}
+             GROUP BY o.delivery_date
+             ORDER BY o.delivery_date DESC
+            """,
+            params,
+        ).fetchall()
+
+    days = [
+        {
+            "date": row["date"],
+            "orders_count": row["orders_count"],
+            "total_net_cost": round(row["total_net_cost"] or 0, 2),
+            "zero_cost": row["zero_cost"] or 0,
+        }
+        for row in rows
+    ]
+    return {
+        "days": days,
+        "totals": {
+            "orders_count": sum(day["orders_count"] for day in days),
+            # Округление тем же способом, что в report_by_courier: сумма
+            # округлённых дней против округлённой суммы расходится на копейки,
+            # а спорить с курьером о копейках — то же самое, что о рублях.
+            "total_net_cost": round(sum(day["total_net_cost"] for day in days), 2),
+            "zero_cost": sum(day["zero_cost"] for day in days),
         },
     }
 
