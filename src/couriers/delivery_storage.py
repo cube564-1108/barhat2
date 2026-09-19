@@ -81,9 +81,19 @@ STATUS_ROLES = (ROLE_VISIBLE, ROLE_READY)
 # «Передан флористу» — момент, с которого заказ имеет смысл показывать;
 # «Заказ готов» — отметка флориста о сборке (её ставят у 85% заказов, но в
 # момент начала окна доставки, поэтому она бейдж, а не пропуск — см. §4 плана).
+#
+# «Вызван курьер» (`call-courier`) — роль visible, добавлен 19.09.2026. Его
+# ставит оператор КЦ, и через него проходят 83% заказов, а в справочнике его не
+# было вовсе: как только статус доезжал лентой, заказ пропадал из ленты у всех
+# курьеров города и из сетки «Контроля доставки». У владельца брони он держался
+# на спецветке «свой заказ виден всегда» — и исчезал вместе с бронью, когда та
+# сгорала по таймеру. Именно visible, а не ready (решение владельца
+# 19.09.2026): забор по-прежнему разрешает только отметка флориста «Заказ
+# готов», иначе курьер поедет за букетом, который ещё собирают.
 SEED_VISIBLE_STATUSES = (
     ("send-to-florist", ROLE_VISIBLE),
     ("correction", ROLE_VISIBLE),
+    ("call-courier", ROLE_VISIBLE),
     ("order-complete", ROLE_READY),
 )
 
@@ -383,6 +393,54 @@ def init_delivery_tables() -> None:
             )
         """)
 
+        _backfill_ready_seen_at(conn)
+
+
+# Разовый бэкфилл отметки о сборке. Ключ в sync_state, а не проверка «есть ли
+# пустые»: пустые будут всегда (заказ до сборки), и такая проверка означала бы
+# скан витрины при каждом старте воркера — а их два.
+READY_SEEN_BACKFILL_KEY = "courier_ready_seen_backfill"
+
+
+def _backfill_ready_seen_at(conn) -> None:
+    """
+    Проставить `ready_seen_at` заказам, которые СЕЙЧАС в статусе «Заказ готов».
+
+    Больше ниоткуда её взять нельзя: в витрине лежит только текущий статус, а
+    история статусов живёт в CRM. Заказы, уже уехавшие дальше по цепочке
+    («Вызван курьер», «Выполнен»), остаются без отметки — выдумывать её по
+    догадке «наверное, собран» нельзя, это ровно тот случай из CLAUDE.md, где
+    неразобранное честнее оставить пустым. Их досчитает лента при следующей
+    правке, а новые заказы стамп получают штатно.
+
+    Не роняет старт воркера: без отметки модуль работает как раньше (is_ready
+    падает обратно на текущий статус), а вот упавший init оставил бы без
+    таблиц весь модуль.
+    """
+    try:
+        done = conn.execute("SELECT value FROM sync_state WHERE key = ?",
+                            (READY_SEEN_BACKFILL_KEY,)).fetchone()
+        if done:
+            return
+        codes = [row["status_code"] for row in conn.execute(
+            "SELECT status_code FROM courier_visible_statuses WHERE role = ?",
+            (ROLE_READY,))]
+        if codes:
+            conn.execute(
+                f"UPDATE courier_orders "
+                f"   SET ready_seen_at = COALESCE(synced_at, datetime('now')) "
+                f" WHERE ready_seen_at IS NULL "
+                f"   AND status IN ({','.join('?' * len(codes))})",
+                codes,
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value, updated_at) "
+            "VALUES (?, datetime('now'), datetime('now'))",
+            (READY_SEEN_BACKFILL_KEY,),
+        )
+    except Exception as e:
+        logger.warning(f"Бэкфилл отметки о сборке не выполнен: {e}")
+
 
 def city_today(city: Optional[str]) -> str:
     """
@@ -557,6 +615,57 @@ def visible_status_codes() -> Dict[str, List[str]]:
         for row in conn.execute("SELECT status_code, role FROM courier_visible_statuses"):
             result.setdefault(row["role"], []).append(row["status_code"])
     return result
+
+
+def ready_status_codes() -> set:
+    """
+    Коды статусов, означающих «заказ собран».
+
+    Пустое множество вместо исключения, когда справочника ещё нет: эту функцию
+    зовёт глубокий синк витрины, а он обязан работать и до того, как поднялись
+    таблицы модуля доставки (порядок init в pyrus/server.py — сначала витрина,
+    потом доставка). Без отметки готовность падает обратно на текущий статус —
+    то есть на поведение до 19.09.2026, а не на пустую витрину.
+    """
+    try:
+        return set(visible_status_codes().get(ROLE_READY, []))
+    except sqlite3.OperationalError:
+        return set()
+
+
+def ready_stamp(status: Optional[str], previous: Optional[str],
+                ready_codes, now: Optional[str] = None) -> Optional[str]:
+    """
+    Отметка «заказ побывал собранным» — то, что пишется в `ready_seen_at`.
+
+    Статус в CRM — это точка на линии, а не состояние: живой путь заказа
+    («Передан флористу → Заказ готов → Вызван курьер → Выполнен») ведёт ДАЛЬШЕ
+    отметки о сборке. Пока готовность считалась как «текущий статус равен
+    order-complete», каждый следующий шаг оператора возвращал собранный заказ
+    в «Собирают» и запрещал забор (разбор 19.09.2026, заказ 154553).
+
+    Поэтому отметка ставится один раз и НЕ снимается: заказ, который однажды
+    собрали, собранным и остаётся. Обратный ход («статус вернули назад, значит
+    заказ разобрали») сознательно не поддерживается — он бывает у правок
+    оператора, а букет от этого не рассыпается.
+    """
+    if previous:
+        return previous
+    if status and status in ready_codes:
+        return now or datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    return None
+
+
+def is_ready_value(status: Optional[str], ready_seen_at: Optional[str],
+                   ready_codes) -> bool:
+    """
+    Собран ли заказ — единственное место, где это решается.
+
+    Отметка важнее статуса, но статус остаётся запасным путём: строки, до
+    которых ещё не дошёл бэкфилл, и заказы, пришедшие мимо обоих путей записи,
+    иначе выглядели бы несобранными.
+    """
+    return bool(ready_seen_at) or (status in ready_codes)
 
 
 # ---------------------------------------------------------------------------
@@ -735,7 +844,8 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         item.update({
             "site_name": row.get("site_name"),
             "utc_offset": row.get("utc_offset"),
-            "is_ready": row.get("status") in ready,
+            "is_ready": is_ready_value(row.get("status"),
+                                       row.get("ready_seen_at"), ready),
             "assignment_state": row.get("assignment_state"),
             "is_mine": mine,
             "is_free": row.get("assignment_state") is None,
@@ -816,7 +926,8 @@ def order_for_courier(order_id: int, city: Optional[str],
     card.update({
         "site_name": row.get("site_name"),
         "utc_offset": row.get("utc_offset"),
-        "is_ready": row.get("status") in ready,
+        "is_ready": is_ready_value(row.get("status"),
+                                   row.get("ready_seen_at"), ready),
         "assignment_state": row.get("assignment_state"),
         "is_mine": mine,
         "is_free": row.get("assignment_state") is None,
@@ -1312,13 +1423,20 @@ def advance_assignment(order_id: int, courier_user_id: int, action: str,
             # стоит в салоне. Доля таких случаев видна в метриках — если
             # окажется высокой, лечится это дисциплиной или настройкой, а не
             # возвратом к подтверждению.
+            #
+            # Готовность берётся из отметки `ready_seen_at`, а не из текущего
+            # статуса: статус уходит дальше по цепочке («Вызван курьер»,
+            # «Выполнен»), и сравнение с текущим запрещало забор у заказа,
+            # который флорист давно собрал (разбор 19.09.2026).
             ready = {code["status_code"] for code in conn.execute(
                 "SELECT status_code FROM courier_visible_statuses WHERE role = ?",
                 (ROLE_READY,))}
             order_status = conn.execute(
-                "SELECT status FROM courier_orders WHERE retailcrm_order_id = ?",
+                "SELECT status, ready_seen_at FROM courier_orders "
+                " WHERE retailcrm_order_id = ?",
                 (order_id,)).fetchone()
-            is_ready = bool(order_status and order_status["status"] in ready)
+            is_ready = bool(order_status and is_ready_value(
+                order_status["status"], order_status["ready_seen_at"], ready))
             if not is_ready:
                 raise ClaimError(
                     "Заказ ещё не отмечен готовым — забрать его нельзя. "
@@ -1721,7 +1839,7 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
         rows = [dict(row) for row in conn.execute(f"""
             SELECT o.retailcrm_order_id, o.order_number, o.city, o.status,
                    o.delivery_date, o.delivery_time_from, o.delivery_time_to,
-                   o.net_cost, s.name AS site_name, s.utc_offset,
+                   o.net_cost, o.ready_seen_at, s.name AS site_name, s.utc_offset,
                    o.courier_name AS crm_courier_name,
                    COALESCE(c.is_service, 0) AS crm_courier_is_service,
                    a.state AS assignment_state, a.courier_name, a.courier_user_id,
@@ -1745,7 +1863,8 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
     for row in rows:
         state = row.get("assignment_state") or "free"
         row["state"] = state
-        row["is_ready"] = row.get("status") in ready
+        row["is_ready"] = is_ready_value(row.get("status"),
+                                         row.get("ready_seen_at"), ready)
         totals[state] = totals.get(state, 0) + 1
         # Заказ уже отдали службе доставки — тип доставки при этом оператор
         # мог и не менять, признак здесь именно поле «курьер»
@@ -2286,9 +2405,19 @@ def upsert_orders_from_crm(rows: List[Dict[str, Any]]) -> int:
     if not rows:
         return 0
 
-    columns = ("retailcrm_order_id",) + FEED_ORDER_FIELDS
+    # ready_seen_at стоит отдельно от FEED_ORDER_FIELDS, потому что у него
+    # другое правило: остальные поля лента перезаписывает значением из CRM, а
+    # отметку о сборке — только ставит. COALESCE на стороне базы, а не сравнение
+    # в Python: тик ленты и глубокий синк ходят в витрину одновременно, и
+    # «прочитал — решил — записал» здесь тот самый разрыв из CLAUDE.md.
+    columns = ("retailcrm_order_id",) + FEED_ORDER_FIELDS + ("ready_seen_at",)
     placeholders = ", ".join("?" * len(columns))
     updates = ", ".join(f"{field} = excluded.{field}" for field in FEED_ORDER_FIELDS)
+    updates += (", ready_seen_at = COALESCE(courier_orders.ready_seen_at, "
+                "excluded.ready_seen_at)")
+
+    ready_codes = ready_status_codes()
+    ready_now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
 
     with get_db() as conn:
         # Что было ДО записи — чтобы поймать правку даты, времени или адреса.
@@ -2304,7 +2433,9 @@ def upsert_orders_from_crm(rows: List[Dict[str, Any]]) -> int:
                 {updates},
                 synced_at = datetime('now')
             """,
-            [(row["retailcrm_order_id"],) + _order_values(row) for row in rows],
+            [(row["retailcrm_order_id"],) + _order_values(row)
+             + (ready_stamp(row.get("status"), None, ready_codes, ready_now),)
+             for row in rows],
         )
 
         for row in rows:
