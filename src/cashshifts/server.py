@@ -28,6 +28,7 @@ from .storage import (
     get_all_categories,
     get_categories_with_usage,
     get_store_by_id,
+    get_store_names,
     get_category_by_id,
     create_store,
     update_store,
@@ -44,15 +45,14 @@ from .storage import (
     get_open_shifts,
     get_last_closed_shift,
     get_cash_shift_by_id,
-    list_cash_shifts,
+    list_cash_shifts_page,
     update_cash_shift,
     delete_cash_shift,
     # Инкассации
     create_collection,
     get_shift_collections,
     get_collections_total,
-    list_collections,
-    get_collections_by_store,
+    list_collections_page,
     update_collection,
     # Кэш заказов
     cache_cash_orders,
@@ -68,6 +68,12 @@ logger = logging.getLogger(__name__)
 
 # Создаём Blueprint
 cashshifts_bp = Blueprint("cashshifts", __name__, url_prefix="/api/cash-shifts")
+
+# Размер страницы таблиц «История смен» и «Инкассации по салонам». Совпадает с
+# PAGE_SIZE в src/dashboard/cash-shifts.js; фронт присылает limit явно, но
+# ручку зовут и без него (curl, Пульс) — тогда отдаём страницу, а не всё сразу.
+PAGE_LIMIT_DEFAULT = 25
+PAGE_LIMIT_MAX = 200
 
 
 # =============================================================================
@@ -1191,11 +1197,12 @@ def list_shifts():
         - status (str, опционально): 'open' или 'closed'
         - date_from (str, опционально): Начало периода (YYYY-MM-DD HH:MM:SS)
         - date_to (str, опционально): Конец периода
-        - limit (int, опционально): Максимум записей (default 100)
+        - limit (int, опционально): Размер страницы (default 25, максимум 200)
         - offset (int, опционально): Сдвиг (default 0)
 
     Returns:
-        - count: Количество смен
+        - count: Сколько смен на этой странице
+        - total: Сколько смен под фильтром всего — по нему рисуются страницы
         - shifts: Список смен
     """
     try:
@@ -1203,8 +1210,11 @@ def list_shifts():
         status = request.args.get("status")
         date_from = request.args.get("date_from")
         date_to = request.args.get("date_to")
-        limit = request.args.get("limit", 100, type=int)
-        offset = request.args.get("offset", 0, type=int)
+        # Границы, а не «что прислали»: offset<0 — ошибка SQLite, а limit без
+        # потолка возвращает всю историю точки одним ответом
+        limit = max(1, min(request.args.get("limit", PAGE_LIMIT_DEFAULT, type=int) or PAGE_LIMIT_DEFAULT,
+                           PAGE_LIMIT_MAX))
+        offset = max(0, request.args.get("offset", 0, type=int) or 0)
 
         # Фильтруем доступы для не-админов
         username = get_current_username()
@@ -1222,8 +1232,8 @@ def list_shifts():
         if store_id and role != "admin":
             require_store_access(store_id)
 
-        # Получаем список смен
-        shifts = list_cash_shifts(
+        # Получаем страницу смен и общее число под фильтром
+        page = list_cash_shifts_page(
             store_id=store_id,
             status=status,
             date_from=date_from,
@@ -1231,17 +1241,20 @@ def list_shifts():
             limit=limit,
             offset=offset
         )
+        shifts = page["items"]
 
-        # Добавляем детали по точкам
+        # Названия точек — ОДНИМ запросом. Раньше здесь звался get_store_by_id
+        # на каждую строку, то есть открывалось соединение на строку
+        store_names = get_store_names([s["store_id"] for s in shifts])
         result = []
         for shift in shifts:
-            store = get_store_by_id(shift["store_id"])
             shift_copy = shift.copy()
-            shift_copy["store_name"] = store["name"] if store else "Unknown"
+            shift_copy["store_name"] = store_names.get(shift["store_id"], "Unknown")
             result.append(shift_copy)
 
         return jsonify(success_response({
             "count": len(result),
+            "total": page["total"],
             "shifts": result,
             "params": {
                 "store_id": store_id,
@@ -1493,7 +1506,7 @@ def list_all_collections():
         - store_id (int, опционально): только по одной точке
         - date_from / date_to (str, опционально): границы периода по дате
           инкассации в UTC ('YYYY-MM-DD HH:MM:SS'), как хранится в БД
-        - limit (int, опционально): максимум строк (default 200, максимум 1000)
+        - limit (int, опционально): размер страницы (default 25, максимум 200)
         - offset (int, опционально)
 
     Returns:
@@ -1501,13 +1514,18 @@ def list_all_collections():
                          created_by, created_by_full_name, custom_comment}, ...]
         - by_store: [{store_id, store_name, count, total}, ...] — итоги за период
         - total: сумма всех инкассаций за период (не только показанных строк)
+        - total_count: сколько инкассаций под фильтром — по нему рисуются
+          страницы. Отдельным именем: `total` здесь исторически ДЕНЬГИ, и
+          переиспользовать его под число строк значило бы молча сломать итог
+          в шапке таблицы
     """
     try:
         store_id = request.args.get("store_id", type=int)
         date_from = request.args.get("date_from")
         date_to = request.args.get("date_to")
-        limit = min(request.args.get("limit", 200, type=int), 1000)
-        offset = request.args.get("offset", 0, type=int)
+        limit = max(1, min(request.args.get("limit", PAGE_LIMIT_DEFAULT, type=int) or PAGE_LIMIT_DEFAULT,
+                           PAGE_LIMIT_MAX))
+        offset = max(0, request.args.get("offset", 0, type=int) or 0)
 
         role = get_current_user_role()
         username = get_current_username()
@@ -1518,18 +1536,15 @@ def list_all_collections():
         else:
             store_ids = None if role == "admin" else get_user_stores(username)
 
-        collections = list_collections(
+        page = list_collections_page(
             store_ids=store_ids,
             date_from=date_from,
             date_to=date_to,
             limit=limit,
             offset=offset
         )
-        by_store = get_collections_by_store(
-            store_ids=store_ids,
-            date_from=date_from,
-            date_to=date_to
-        )
+        collections = page["items"]
+        by_store = page["by_store"]
 
         # ФИО авторов — тем же способом, что и в журнале смены
         usernames = {c.get("created_by") for c in collections}
@@ -1545,9 +1560,11 @@ def list_all_collections():
         return jsonify(success_response({
             "count": len(result),
             "limit": limit,
+            "offset": offset,
             "collections": result,
             "by_store": by_store,
-            "total": sum(row["total"] for row in by_store)
+            "total": page["total_amount"],   # деньги за период
+            "total_count": page["total"]     # строк под фильтром — для страниц
         }))
 
     except StoreAccessError:

@@ -233,7 +233,10 @@ def main():
     check(data["limit"] == 1, "лимит возвращается фронтенду (для подсказки об обрезке)")
 
     data, _ = call_endpoint("limit=99999")
-    check(data["limit"] == 1000, "лимит сверху ограничен, БД не выгружается целиком")
+    # Потолок берём из сервера, а не числом: страница стала 25 строк, и
+    # зашитая в тест копия значения разъедется с кодом при первой же правке
+    check(data["limit"] == server.PAGE_LIMIT_MAX,
+          f"лимит сверху ограничен, БД не выгружается целиком ({data['limit']})")
 
     data, _ = call_endpoint(f"date_from={day_start}&date_to={day_end}")
     check(len(data["collections"]) == 2 and data["total"] == 1700.0,

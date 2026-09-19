@@ -249,6 +249,16 @@ def _init_cashshifts_schema(conn: sqlite3.Connection):
         ON cash_shifts(store_id, datetime_start DESC)
     """)
 
+    # Он же, но с id — под постраничную историю смен. Порядок колонок обязан
+    # совпадать с ORDER BY запроса целиком (datetime_start DESC, id DESC),
+    # иначе SQLite досортировывает страницу через TEMP B-TREE на каждый клик.
+    # Старый индекс не трогаем: «добавляй, не ломай» — им пользуются другие
+    # выборки модуля.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_shifts_store_datetime_id
+        ON cash_shifts(store_id, datetime_start DESC, id DESC)
+    """)
+
     # Одна открытая смена на точку — гарантия уровня БД
     ensure_one_open_shift_index(conn)
 
@@ -272,6 +282,14 @@ def _init_cashshifts_schema(conn: sqlite3.Connection):
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_collections_shift
         ON cash_collections(shift_id)
+    """)
+
+    # Сводная таблица «Инкассации по салонам» отбирает по дате и сортирует по
+    # ней же. Без этого индекса каждая страница — полный перебор инкассаций
+    # плюс сортировка во временном B-дереве.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_collections_date
+        ON cash_collections(date DESC, id DESC)
     """)
 
     # ========================================================================
@@ -782,6 +800,39 @@ def get_cash_shift_by_id(shift_id: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def _build_shifts_filter(
+    store_id: Optional[int],
+    status: Optional[str],
+    date_from: Optional[str],
+    date_to: Optional[str]
+) -> tuple:
+    """Условие WHERE и параметры для выборок по сменам — одно на список и счётчик.
+
+    Строится в одном месте: если страница и total отбирают разное, таблица
+    покажет страницы, которых нет.
+    """
+    where = ""
+    params: List[Any] = []
+
+    if store_id:
+        where += " AND store_id = ?"
+        params.append(store_id)
+
+    if status:
+        where += " AND status = ?"
+        params.append(status)
+
+    if date_from:
+        where += " AND datetime_start >= ?"
+        params.append(date_from)
+
+    if date_to:
+        where += " AND datetime_start <= ?"
+        params.append(date_to)
+
+    return where, params
+
+
 def list_cash_shifts(
     store_id: Optional[int] = None,
     status: Optional[str] = None,
@@ -790,34 +841,76 @@ def list_cash_shifts(
     limit: int = 100,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
-    """Получить список смен с фильтрами."""
+    """Список смен с фильтрами, без счётчика (страницу отдаёт list_cash_shifts_page)."""
+    return list_cash_shifts_page(
+        store_id=store_id, status=status, date_from=date_from, date_to=date_to,
+        limit=limit, offset=offset
+    )["items"]
 
-    query = "SELECT * FROM cash_shifts WHERE 1=1"
-    params = []
 
-    if store_id:
-        query += " AND store_id = ?"
-        params.append(store_id)
+def list_cash_shifts_page(
+    store_id: Optional[int] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0
+) -> Dict[str, Any]:
+    """
+    Страница истории смен + общее число смен под тем же фильтром.
 
-    if status:
-        query += " AND status = ?"
-        params.append(status)
+    Оба запроса идут ОДНИМ соединением: на сетевом /data цену определяет
+    число обращений к базе, а не размер выборки (CLAUDE.md).
 
-    if date_from:
-        query += " AND datetime_start >= ?"
-        params.append(date_from)
-
-    if date_to:
-        query += " AND datetime_start <= ?"
-        params.append(date_to)
-
-    query += " ORDER BY datetime_start DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    Порядок — с тай-брейкером по id: datetime_start хранится с точностью до
+    секунды, и без него две смены одной секунды на границе страниц двоятся,
+    а одна пропадает вовсе.
+    """
+    where, params = _build_shifts_filter(store_id, status, date_from, date_to)
 
     conn = get_db()
     try:
-        rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM cash_shifts WHERE 1=1{where}", params
+        ).fetchone()[0]
+
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cash_shifts
+            WHERE 1=1{where}
+            ORDER BY datetime_start DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset]
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return {"items": [dict(row) for row in rows], "total": total}
+
+
+def get_store_names(store_ids: List[int]) -> Dict[int, str]:
+    """
+    Имена точек одним запросом: id -> name.
+
+    Нужно для списков, где раньше на каждую строку звали get_store_by_id —
+    то есть открывали соединение на строку. Двадцать пять строк истории смен
+    превращались в двадцать пять походов на /data по 90–700 мс каждый.
+
+    Деактивированные точки тоже отдаём: салон закрыли, а его смены в истории
+    остались, и «Unknown» вместо названия делает историю нечитаемой.
+    """
+    ids = [int(i) for i in dict.fromkeys(store_ids) if i is not None]
+    if not ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in ids)
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            f"SELECT id, name FROM stores WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        return {row["id"]: row["name"] for row in rows}
     finally:
         conn.close()
 
@@ -1100,6 +1193,60 @@ def get_collections_total(shift_id: int) -> float:
         conn.close()
 
 
+def _query_collections_rows(conn, where: str, params: List[Any],
+                            limit: int, offset: int) -> List[Dict[str, Any]]:
+    """Страница инкассаций НА ГОТОВОМ соединении.
+
+    Отдельной функцией, потому что этот же запрос нужен и постраничной
+    выборке, и старому list_collections: две копии SQL разъезжаются, и
+    сортировка в одной из них тихо теряет тай-брейкер по id.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT
+            cc.id,
+            cc.shift_id,
+            cc.date,
+            cc.amount,
+            cc.custom_comment,
+            cc.created_by,
+            ec.name as category_name,
+            cs.store_id,
+            s.name as store_name
+        FROM cash_collections cc
+        JOIN cash_shifts cs ON cs.id = cc.shift_id
+        LEFT JOIN stores s ON s.id = cs.store_id
+        LEFT JOIN expense_categories ec ON ec.id = cc.expense_category_id
+        WHERE {where}
+        ORDER BY cc.date DESC, cc.id DESC
+        LIMIT ? OFFSET ?
+        """,
+        params + [limit, offset]
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _query_collections_by_store(conn, where: str, params: List[Any]) -> List[Dict[str, Any]]:
+    """Итоги по салонам за период НА ГОТОВОМ соединении."""
+    rows = conn.execute(
+        f"""
+        SELECT
+            cs.store_id,
+            s.name as store_name,
+            COUNT(cc.id) as count,
+            COALESCE(SUM(cc.amount), 0) as total
+        FROM cash_collections cc
+        JOIN cash_shifts cs ON cs.id = cc.shift_id
+        LEFT JOIN stores s ON s.id = cs.store_id
+        WHERE {where}
+        GROUP BY cs.store_id, s.name
+        ORDER BY total DESC
+        """,
+        params
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _build_collections_filter(
     store_ids: Optional[List[int]],
     date_from: Optional[str],
@@ -1156,31 +1303,47 @@ def list_collections(
 
     conn = get_db()
     try:
-        rows = conn.execute(
-            f"""
-            SELECT
-                cc.id,
-                cc.shift_id,
-                cc.date,
-                cc.amount,
-                cc.custom_comment,
-                cc.created_by,
-                ec.name as category_name,
-                cs.store_id,
-                s.name as store_name
-            FROM cash_collections cc
-            JOIN cash_shifts cs ON cs.id = cc.shift_id
-            LEFT JOIN stores s ON s.id = cs.store_id
-            LEFT JOIN expense_categories ec ON ec.id = cc.expense_category_id
-            WHERE {where}
-            ORDER BY cc.date DESC, cc.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            params + [limit, offset]
-        ).fetchall()
-        return [dict(row) for row in rows]
+        return _query_collections_rows(conn, where, params, limit, offset)
     finally:
         conn.close()
+
+
+def list_collections_page(
+    store_ids: Optional[List[int]] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0
+) -> Dict[str, Any]:
+    """
+    Страница инкассаций + итоги по салонам за ВЕСЬ период.
+
+    Три числа в одном соединении: строки страницы, разбивка по салонам и
+    общее число инкассаций под фильтром. Отдельного COUNT(*) не делаем —
+    итоги по салонам уже содержат count, и их сумма и есть общее число:
+    лишний запрос к /data стоит 90–700 мс, а ответ у нас уже есть.
+
+    Суммы по салонам считаются по всему периоду, а не по показанной странице:
+    иначе итог менялся бы при листании.
+    """
+    built = _build_collections_filter(store_ids, date_from, date_to)
+    if built is None:
+        return {"items": [], "by_store": [], "total": 0, "total_amount": 0.0}
+    where, params = built
+
+    conn = get_db()
+    try:
+        by_store = _query_collections_by_store(conn, where, params)
+        items = _query_collections_rows(conn, where, params, limit, offset)
+    finally:
+        conn.close()
+
+    return {
+        "items": items,
+        "by_store": by_store,
+        "total": sum(row["count"] for row in by_store),
+        "total_amount": sum(row["total"] for row in by_store),
+    }
 
 
 def get_collections_by_store(
@@ -1201,23 +1364,7 @@ def get_collections_by_store(
 
     conn = get_db()
     try:
-        rows = conn.execute(
-            f"""
-            SELECT
-                cs.store_id,
-                s.name as store_name,
-                COUNT(cc.id) as count,
-                COALESCE(SUM(cc.amount), 0) as total
-            FROM cash_collections cc
-            JOIN cash_shifts cs ON cs.id = cc.shift_id
-            LEFT JOIN stores s ON s.id = cs.store_id
-            WHERE {where}
-            GROUP BY cs.store_id, s.name
-            ORDER BY total DESC
-            """,
-            params
-        ).fetchall()
-        return [dict(row) for row in rows]
+        return _query_collections_by_store(conn, where, params)
     finally:
         conn.close()
 

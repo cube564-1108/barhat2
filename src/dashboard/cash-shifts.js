@@ -20,9 +20,17 @@
     let openShifts = [];  // Открытые смены по всем доступным точкам
     let duplicateShiftGroups = [];  // Точки, где открыто больше одной смены (админ)
 
-    // Сколько строк инкассаций тянем за раз. Итоги по салонам лимит не трогает —
-    // их считает бэкенд отдельным запросом по всему периоду
-    const COLLECTIONS_LIMIT = 200;
+    // Размер страницы обеих таблиц — истории смен и инкассаций по салонам.
+    // Совпадает с PAGE_LIMIT_DEFAULT в src/cashshifts/server.py. Итоги по
+    // салонам страница не трогает: бэкенд считает их по всему периоду, иначе
+    // сумма менялась бы при листании.
+    const PAGE_SIZE = 25;
+
+    // Состояние страниц у каждой таблицы своё. loadToken — номер последнего
+    // запущенного запроса: на сетевом /data ответы приходят не в том порядке,
+    // в каком нажимали страницы, и без него в таблице оседает чужой ответ.
+    const shiftsPage = { offset: 0, total: 0, loadToken: 0 };
+    const collectionsPage = { offset: 0, total: 0, loadToken: 0 };
 
     // === DOM элементы ===
     const elements = {
@@ -47,6 +55,12 @@
         collectionsSummary: null,
         collectionsTbody: null,
         collectionsHint: null,
+        shiftsPagination: null,
+        shiftsPaginationInfo: null,
+        shiftsPaginationPages: null,
+        collectionsPagination: null,
+        collectionsPaginationInfo: null,
+        collectionsPaginationPages: null,
         // Модальные окна
         openShiftModal: null,
         openShiftOverlay: null,
@@ -131,6 +145,13 @@
         elements.collectionsSummary = document.getElementById('collections-summary');
         elements.collectionsTbody = document.getElementById('collections-tbody');
         elements.collectionsHint = document.getElementById('collections-hint');
+
+        elements.shiftsPagination = document.getElementById('shifts-pagination');
+        elements.shiftsPaginationInfo = document.getElementById('shifts-pagination-info');
+        elements.shiftsPaginationPages = document.getElementById('shifts-pagination-pages');
+        elements.collectionsPagination = document.getElementById('collections-pagination');
+        elements.collectionsPaginationInfo = document.getElementById('collections-pagination-info');
+        elements.collectionsPaginationPages = document.getElementById('collections-pagination-pages');
 
         // Модальные окна
         elements.openShiftModal = document.getElementById('open-shift-modal');
@@ -255,21 +276,22 @@
             elements.addCollectionOverlay.addEventListener('click', closeAddCollectionModal);
         }
 
-        // Фильтр по дате
+        // Фильтр по дате. Смена фильтра возвращает на первую страницу:
+        // набор строк стал другим, и прежней страницы может не быть вовсе
         if (elements.applyDateFilterBtn) {
-            elements.applyDateFilterBtn.addEventListener('click', loadShiftsHistory);
+            elements.applyDateFilterBtn.addEventListener('click', () => loadShiftsHistory({ resetPage: true }));
         }
 
         // Фильтры таблицы инкассаций
         if (elements.applyCollectionsFilterBtn) {
-            elements.applyCollectionsFilterBtn.addEventListener('click', loadCollections);
+            elements.applyCollectionsFilterBtn.addEventListener('click', () => loadCollections({ resetPage: true }));
         }
         if (elements.resetCollectionsFilterBtn) {
             elements.resetCollectionsFilterBtn.addEventListener('click', () => {
                 if (elements.collectionsStoreFilter) elements.collectionsStoreFilter.value = '';
                 if (elements.collectionsDateFrom) elements.collectionsDateFrom.value = '';
                 if (elements.collectionsDateTo) elements.collectionsDateTo.value = '';
-                loadCollections();
+                loadCollections({ resetPage: true });
             });
         }
 
@@ -277,7 +299,7 @@
         if (elements.shiftStoreSelector) {
             elements.shiftStoreSelector.addEventListener('change', () => {
                 loadCurrentShift();
-                loadShiftsHistory();
+                loadShiftsHistory({ resetPage: true });
             });
         }
 
@@ -768,8 +790,95 @@
         currentShiftCollectionsTotal = 0;
     }
 
+    // =========================================================================
+    // Постраничная навигация — общая для истории смен и инкассаций
+    // =========================================================================
+
+    /**
+     * Номера страниц: первая, последняя и соседи текущей, между ними — «…».
+     * Иначе при сотне страниц навигация шире экрана.
+     */
+    function pageNumbers(current, totalPages) {
+        const wanted = new Set([0, totalPages - 1, current - 1, current, current + 1]);
+        const pages = [...wanted].filter(p => p >= 0 && p < totalPages).sort((a, b) => a - b);
+
+        const result = [];
+        pages.forEach((p, i) => {
+            if (i > 0 && p - pages[i - 1] > 1) result.push('gap');
+            result.push(p);
+        });
+        return result;
+    }
+
+    /**
+     * Отрисовать навигацию. Одна функция на обе таблицы: расходящиеся копии
+     * этого кода — первый источник багов вида «на инкассациях работает,
+     * в истории смен нет».
+     */
+    function renderPagination(state, nodes, onGo) {
+        if (!nodes.wrap) return;
+
+        const totalPages = Math.ceil(state.total / PAGE_SIZE);
+        if (totalPages <= 1) {
+            nodes.wrap.style.display = 'none';
+            return;
+        }
+
+        const current = Math.floor(state.offset / PAGE_SIZE);
+        const shownFrom = state.offset + 1;
+        const shownTo = Math.min(state.offset + PAGE_SIZE, state.total);
+
+        nodes.wrap.style.display = 'flex';
+        nodes.info.textContent = `${shownFrom}–${shownTo} из ${state.total}`;
+
+        const btn = (label, page, opts = {}) => {
+            const cls = opts.active ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-secondary';
+            const disabled = opts.disabled ? ' disabled' : '';
+            return `<button class="${cls}" data-page="${page}"${disabled}>${label}</button>`;
+        };
+
+        const parts = [btn('‹', current - 1, { disabled: current === 0 })];
+        pageNumbers(current, totalPages).forEach(p => {
+            if (p === 'gap') {
+                parts.push('<span style="color: var(--barkhat-gray); padding: 0 2px;">…</span>');
+            } else {
+                parts.push(btn(String(p + 1), p, { active: p === current }));
+            }
+        });
+        parts.push(btn('›', current + 1, { disabled: current === totalPages - 1 }));
+
+        nodes.pages.innerHTML = parts.join('');
+        nodes.pages.querySelectorAll('button[data-page]').forEach(b => {
+            b.addEventListener('click', () => {
+                if (b.disabled) return;
+                const offset = parseInt(b.getAttribute('data-page'), 10) * PAGE_SIZE;
+                if (offset === state.offset) return;
+                state.offset = offset;
+                onGo();
+            });
+        });
+    }
+
+    /**
+     * Не ушла ли страница за конец списка (строки убыли, пока мы на ней стояли).
+     * Условие — именно «смещение за пределами total», а не «строк не пришло»:
+     * второе уводит в вечный цикл перезапросов, если сервер отдаёт пусто при
+     * живом total, а каждый виток — поход на медленный /data.
+     */
+    function rewindIfPastEnd(state) {
+        if (state.total <= 0) return false;
+        const lastOffset = Math.max(0, (Math.ceil(state.total / PAGE_SIZE) - 1) * PAGE_SIZE);
+        if (state.offset > lastOffset) {
+            state.offset = lastOffset;
+            return true;
+        }
+        return false;
+    }
+
     // === Загрузка истории смен ===
-    async function loadShiftsHistory() {
+    async function loadShiftsHistory(options) {
+        if (options && options.resetPage) shiftsPage.offset = 0;
+        const token = ++shiftsPage.loadToken;
         try {
             const params = new URLSearchParams();
 
@@ -797,21 +906,43 @@
             }
 
             params.append('status', 'closed');
-            params.append('limit', '50');
+            params.append('limit', String(PAGE_SIZE));
+            params.append('offset', String(shiftsPage.offset));
 
             // Если точка не определена, а у пользователя их несколько — бэкенд попросит
             // явно выбрать точку в селекторе; это ожидаемо, не показываем ошибку
             const silent = !storeId && currentUserData && currentUserData.role !== 'admin';
             const result = await apiRequest(`/api/cash-shifts?${params}`, { silent });
+            if (token !== shiftsPage.loadToken) return;  // пока ждали, ушли на другую страницу
+
+            shiftsPage.total = Number.isFinite(result.total)
+                ? result.total
+                : (result.shifts || []).length;
+
+            // Смену удалили — страница, на которой мы стояли, могла исчезнуть
+            if (rewindIfPastEnd(shiftsPage)) return loadShiftsHistory();
+
             shiftsHistory = result.shifts || [];
             renderShiftsHistory();
+            renderShiftsPagination();
 
             console.log('[CashShifts] История смен загружена:', shiftsHistory.length);
         } catch (error) {
+            if (token !== shiftsPage.loadToken) return;
             console.error('[CashShifts] Ошибка загрузки истории:', error);
             shiftsHistory = [];
             renderShiftsHistory();
+            // Навигацию не прячем: иначе после разового сбоя со страницы не
+            // выйти иначе как фильтром, а он вернёт на первую
         }
+    }
+
+    function renderShiftsPagination() {
+        renderPagination(shiftsPage, {
+            wrap: elements.shiftsPagination,
+            info: elements.shiftsPaginationInfo,
+            pages: elements.shiftsPaginationPages,
+        }, () => loadShiftsHistory());
     }
 
     // === Загрузка открытых смен по всем доступным точкам ===
@@ -1026,8 +1157,10 @@
     // =========================================================================
 
     // === Загрузка инкассаций (все смены доступных пользователю салонов) ===
-    async function loadCollections() {
+    async function loadCollections(options) {
         if (!elements.collectionsTbody) return;
+        if (options && options.resetPage) collectionsPage.offset = 0;
+        const token = ++collectionsPage.loadToken;
 
         try {
             const params = new URLSearchParams();
@@ -1047,20 +1180,41 @@
             if (dateTo) {
                 params.append('date_to', window.BarhatTime.dayEndUtc(dateTo));
             }
-            params.append('limit', String(COLLECTIONS_LIMIT));
+            params.append('limit', String(PAGE_SIZE));
+            params.append('offset', String(collectionsPage.offset));
 
             const result = await apiRequest(`/api/cash-shifts/collections?${params}`);
+            if (token !== collectionsPage.loadToken) return;
+
+            // total здесь — ДЕНЬГИ за период, строки считает total_count:
+            // перепутать их значит показать «страниц» на сумму инкассаций
+            collectionsPage.total = Number.isFinite(result.total_count)
+                ? result.total_count
+                : (result.collections || []).length;
+
+            if (rewindIfPastEnd(collectionsPage)) return loadCollections();
+
             renderCollections(
                 result.collections || [],
                 result.by_store || [],
                 result.total || 0
             );
+            renderCollectionsPagination();
 
             console.log('[CashShifts] Инкассации загружены:', (result.collections || []).length);
         } catch (error) {
+            if (token !== collectionsPage.loadToken) return;
             console.error('[CashShifts] Ошибка загрузки инкассаций:', error);
             renderCollections([], [], 0);
         }
+    }
+
+    function renderCollectionsPagination() {
+        renderPagination(collectionsPage, {
+            wrap: elements.collectionsPagination,
+            info: elements.collectionsPaginationInfo,
+            pages: elements.collectionsPaginationPages,
+        }, () => loadCollections());
     }
 
     // === Рендер таблицы инкассаций ===
@@ -1118,9 +1272,12 @@
             elements.collectionsSummary.innerHTML = totalPill + pills;
         }
 
+        // Подсказка про обрезку больше не нужна — остальные строки на
+        // соседних страницах. Осталось только пояснение про суммы: они
+        // считаются за весь период, а не по показанной странице
         if (elements.collectionsHint) {
-            elements.collectionsHint.textContent = collections.length >= COLLECTIONS_LIMIT
-                ? `Показаны последние ${COLLECTIONS_LIMIT} инкассаций — сузьте период, чтобы увидеть остальные. Суммы по салонам посчитаны за весь период.`
+            elements.collectionsHint.textContent = collectionsPage.total > PAGE_SIZE
+                ? 'Суммы по салонам посчитаны за весь период, а не по показанной странице.'
                 : '';
         }
     }
@@ -1200,8 +1357,12 @@
             const shiftTypeLabel = shift.shift_type === 'day' ? 'Дневная' : 'Ночная';
 
             // Флорист может исправить только самую свежую закрытую смену своей точки
-            // (список уже отфильтрован по store_id и отсортирован DESC бэкендом)
-            const canEdit = role === 'admin' || (role === 'florist' && index === 0);
+            // (список уже отфильтрован по store_id и отсортирован DESC бэкендом).
+            // С постраничным списком «первая строка» — это первая строка
+            // СТРАНИЦЫ: на второй странице index === 0 у смены месячной
+            // давности, и кнопка вела бы в отказ 403 от сервера
+            const isFirstRowOverall = index === 0 && shiftsPage.offset === 0;
+            const canEdit = role === 'admin' || (role === 'florist' && isFirstRowOverall);
             const editBtnHtml = canEdit
                 ? `<button class="btn btn-sm btn-secondary" data-edit-shift-id="${shift.id}">Исправить</button>`
                 : '';
@@ -1420,7 +1581,10 @@
             closeCloseShiftModal();
             currentShift = null;
             loadCurrentShift();
-            loadShiftsHistory();
+            // Только что закрытая смена — самая свежая, то есть на первой
+            // странице. Остаться на третьей значит показать историю без неё:
+            // человек решит, что смена не закрылась, и закроет её ещё раз
+            loadShiftsHistory({ resetPage: true });
             if (canSeeOpenShifts()) {
                 loadOpenShifts();
             }
@@ -1482,7 +1646,7 @@
             showNotification('Инкассация добавлена', 'success');
             closeAddCollectionModal();
             loadCurrentShift();
-            loadCollections();
+            loadCollections({ resetPage: true });   // новая инкассация — сверху
             // Инкассации и плановый остаток видны только в этой таблице —
             // без перезагрузки они останутся с прежними цифрами
             if (canSeeOpenShifts()) {
