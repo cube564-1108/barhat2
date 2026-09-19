@@ -830,11 +830,19 @@ def notify_ready(order: Dict[str, Any], courier_user_id: int) -> bool:
 
 
 def notify_claim_expiring(order: Dict[str, Any], courier_user_id: int) -> bool:
-    """Бронь скоро сгорит — подтвердите, что едете."""
+    """
+    Бронь скоро сгорит — нажмите «Я еду».
+
+    Текст называет кнопку, которая в приложении есть. До 19.09.2026 он звал
+    «подтвердить, что едете», а подтвердить было нечем: единственным действием,
+    удерживающим бронь, был «Забрал», и жмут его уже в салоне. Курьер
+    добросовестно открывал приложение, не находил кнопки и терял заказ.
+    """
     return _notify(
         order, ds.EVENT_CLAIM_EXPIRING,
         "Бронь скоро снимется",
-        f"Подтвердите, что едете за заказом на {_short_address(order.get('address_text'))}",
+        f"Нажмите «Я еду», чтобы удержать заказ на "
+        f"{_short_address(order.get('address_text'))}",
         [courier_user_id],
     )
 

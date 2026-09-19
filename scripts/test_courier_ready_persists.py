@@ -315,6 +315,134 @@ check("а уехавший дальше остался пустым — дога
       stamp_of(7004) is None, f"({stamp_of(7004)})")
 
 
+# ============================================================================
+print("\n9. «Я еду» — бронь продлевается, но один раз")
+# ============================================================================
+# Пуш «бронь скоро снимется» до 19.09.2026 звал к кнопке, которой не было:
+# удержать заказ мог только «Забрал», а его жмут в салоне.
+
+feed(7005, "order-complete")
+claim = ds.claim_order(7005, courier_user_id=31, courier_name="Третий",
+                       city="Новосибирск")
+before_exp = claim["expires_at"]
+extended = ds.extend_claim(7005, courier_user_id=31)
+check("срок отодвинут", extended["expires_at"] > before_exp,
+      f"({before_exp} → {extended['expires_at']})")
+
+in_feed = feed_order(7005, courier_user_id=31) or {}
+check("лента говорит, что бронь продлевали", in_feed.get("claim_extended") is True)
+check("и отдаёт новый срок", in_feed.get("expires_at") == extended["expires_at"])
+
+try:
+    ds.extend_claim(7005, courier_user_id=31)
+    again, code = True, ""
+except ds.ClaimError as e:
+    again, code = False, e.code
+check("второй раз продлить нельзя", not again, f"({code})")
+check("и отказ назван своим кодом", code == "already_extended", f"({code})")
+
+try:
+    ds.extend_claim(7005, courier_user_id=99)
+    alien, alien_code = True, ""
+except ds.ClaimError as e:
+    alien, alien_code = False, e.code
+check("чужую бронь не продлить", not alien and alien_code == "forbidden",
+      f"({alien_code})")
+
+ds.advance_assignment(7005, courier_user_id=31, action=ds.ACTION_PICKUP,
+                      username="third")
+try:
+    ds.extend_claim(7005, courier_user_id=31)
+    taken, taken_code = True, ""
+except ds.ClaimError as e:
+    taken, taken_code = False, e.code
+check("забранный заказ продлевать нечего", not taken and taken_code == "already",
+      f"({taken_code})")
+
+# Срок, который уже почти истёк, отсчитывается от СЕЙЧАС, а не от него:
+# иначе «продлил на 30 минут» дало бы пять, и кнопка нажата впустую.
+feed(7006, "order-complete")
+ds.claim_order(7006, courier_user_id=32, courier_name="Четвёртый",
+               city="Новосибирск")
+almost = (datetime.utcnow() - timedelta(minutes=20)).isoformat(sep=" ",
+                                                              timespec="seconds")
+with cs.get_db() as conn:
+    conn.execute("UPDATE delivery_assignments SET expires_at = ? "
+                 " WHERE retailcrm_order_id = ?", (almost, 7006))
+late = ds.extend_claim(7006, courier_user_id=32)
+check("просроченный срок считается от текущего момента",
+      late["expires_at"] > datetime.utcnow().isoformat(sep=" ", timespec="seconds"),
+      f"({late['expires_at']})")
+
+
+# ============================================================================
+print("\n10. Кнопка, ручка и текст пуша говорят об одном и том же")
+# ============================================================================
+# Кнопка без обработчика и ручка без заголовка — два разных способа сделать
+# «приложение ничего не делает». Проверяется связка, а не наличие слова.
+
+with open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
+          encoding="utf-8") as fh:
+    app_js = fh.read()
+check("кнопка «Я еду» есть в разметке", 'data-extend="' in app_js)
+check("и её нажатие обработано", "closest('[data-extend]')" in app_js)
+check("обработчик зовёт ручку продления",
+      "/extend'" in app_js or '/extend"' in app_js)
+
+from couriers import push  # noqa: E402
+
+text = push.notify_claim_expiring.__doc__ or ""
+check("пуш назван по той кнопке, что есть в приложении", "Я еду" in text,
+      "(докстрока notify_claim_expiring)")
+
+print("\n11. Ручка продления защищена от чужого сайта")
+
+import auth  # noqa: E402
+from pyrus.server import app  # noqa: E402
+from werkzeug.security import generate_password_hash  # noqa: E402
+
+app.config["TESTING"] = True
+with app.app_context():
+    auth.init_auth_tables()
+    conn = auth.get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (username, full_name, password_hash, role, "
+            "                   is_active, created_at) "
+            "VALUES ('kurier', 'Курьер', ?, 'courier', 1, datetime('now'))",
+            (generate_password_hash("Parol12345"),))
+        conn.commit()
+    finally:
+        conn.close()
+    auth.migrate_permissions_for_existing_users()
+    conn = auth.get_db()
+    try:
+        user_id = conn.execute(
+            "SELECT id FROM users WHERE username = 'kurier'").fetchone()["id"]
+    finally:
+        conn.close()
+
+ds.save_courier_profile(user_id=user_id, username="kurier", city="Новосибирск",
+                        retailcrm_courier_id=555, active=True, updated_by="test")
+feed(7007, "order-complete")
+
+AJAX = {"X-Requested-With": "barhat-dashboard"}
+with app.test_client() as client:
+    client.post("/api/auth/login",
+                json={"username": "kurier", "password": "Parol12345"})
+    client.post("/api/courier/orders/7007/claim", headers=AJAX)
+
+    # Без заголовка запрос уходит простой формой с чужого сайта, а CSRF-токенов
+    # в проекте нет: единственная защита — этот декоратор (правило CLAUDE.md).
+    naked = client.post("/api/courier/orders/7007/extend")
+    check("без заголовка ручка отвечает 403", naked.status_code == 403,
+          f"({naked.status_code})")
+
+    ok = client.post("/api/courier/orders/7007/extend", headers=AJAX)
+    check("со своим заголовком продление проходит", ok.status_code == 200,
+          f"({ok.status_code}: {ok.get_json()})")
+
+
 print()
 if failures:
     print(f"=== ПРОВАЛЕНО: {len(failures)} ===")

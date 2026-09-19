@@ -21,7 +21,7 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlite_conn import connect as sqlite_connect
 
@@ -200,6 +200,13 @@ def init_delivery_tables() -> None:
                 warned_at TEXT
             )
         """)
+        # Когда курьер нажал «Я еду». Одно продление на бронь: предупреждение
+        # «бронь скоро снимется» до 19.09.2026 звало к кнопке, которой не было
+        # вовсе — единственным способом удержать заказ был «Забрал», а его
+        # жмут уже в салоне. Продление одно, потому что смысл сгорания — успеть
+        # перекинуть заказ другому, и бесконечное «я еду» его отменяет.
+        _add_column_if_missing(conn, "delivery_assignments", "extended_at", "TEXT")
+
         # Последняя преграда инварианта «у заказа не больше одной живой брони»:
         # держит его, даже если появится новый путь записи. Частичный индекс —
         # снятые и доставленные записи не мешают взять заказ снова.
@@ -806,6 +813,7 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         SELECT o.*, s.name AS site_name, s.utc_offset,
                a.id AS assignment_id, a.state AS assignment_state,
                a.courier_user_id AS assignment_user_id, a.expires_at,
+               a.extended_at AS claim_extended_at,
                a.courier_name AS assignment_courier_name,
                ch.fields AS changed_fields, ch.changed_at AS changed_at
         FROM courier_orders o
@@ -850,6 +858,9 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
             "is_mine": mine,
             "is_free": row.get("assignment_state") is None,
             "expires_at": row.get("expires_at"),
+            # Продлевал ли курьер эту бронь: второй раз кнопку «Я еду» не
+            # показываем, а не отвечаем отказом на нажатие
+            "claim_extended": bool(row.get("claim_extended_at")),
             # Имя того, кто взял заказ: «Забронирован (Иван)» вместо глухого
             # «Занят». Курьер видит, что происходит со всеми заказами города
             "assignment_courier_name": row.get("assignment_courier_name"),
@@ -890,6 +901,7 @@ def order_for_courier(order_id: int, city: Optional[str],
             SELECT o.*, s.name AS site_name, s.utc_offset,
                    a.id AS assignment_id, a.state AS assignment_state,
                    a.courier_user_id AS assignment_user_id, a.expires_at,
+                   a.extended_at AS claim_extended_at,
                    a.courier_name AS assignment_courier_name,
                    ch.fields AS changed_fields, ch.changed_at AS changed_at
             FROM courier_orders o
@@ -932,6 +944,7 @@ def order_for_courier(order_id: int, city: Optional[str],
         "is_mine": mine,
         "is_free": row.get("assignment_state") is None,
         "expires_at": row.get("expires_at"),
+        "claim_extended": bool(row.get("claim_extended_at")),
         "assignment_courier_name": row.get("assignment_courier_name"),
         "changed_fields": _change_titles(row.get("changed_fields")),
         "changed_at": row.get("changed_at"),
@@ -1131,6 +1144,71 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
         # между нашей проверкой и записью. Это штатный исход гонки, а не 500.
         conn.execute("ROLLBACK")
         raise ClaimError("Заказ только что забрал другой курьер", "taken")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def extend_claim(order_id: int, courier_user_id: int,
+                 minutes: int = salon_time.CLAIM_EXTEND_MINUTES) -> Dict[str, Any]:
+    """
+    «Я еду» — отодвинуть сгорание брони, не забирая заказ.
+
+    Курьер в дороге не может нажать «Забрал»: эту отметку ставят в салоне. До
+    19.09.2026 других действий не было вовсе, и пуш «подтвердите, что едете»
+    звал к кнопке, которой не существовало, — бронь сгорала у человека,
+    который честно ехал.
+
+    Продление одно на бронь и фиксируется `extended_at`. Смысл сгорания — не
+    наказать курьера, а успеть отдать заказ другому, пока до окна доставки есть
+    время; бесконечное «я еду» отменяло бы его целиком.
+
+    Проверка и запись — одной транзакцией под `BEGIN IMMEDIATE` (правило
+    CLAUDE.md): между чтением «продлевали ли» и записью помещаются все
+    параллельные нажатия, а уборка броней в это же время может снять эту самую
+    бронь по таймеру.
+    """
+    now = datetime.utcnow()
+    conn = sqlite_connect(DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        row = _assignment_row(conn, order_id)
+        if row is None:
+            raise ClaimError("Заказ за вами не числится", "gone")
+        if row["courier_user_id"] != courier_user_id:
+            raise ClaimError("Это чужой заказ", "forbidden")
+        if row["state"] != STATE_CLAIMED:
+            raise ClaimError("Заказ уже забран — бронь продлевать не нужно", "already")
+        if not row["expires_at"]:
+            # У салона не задан часовой пояс: срок не считался, гореть нечему
+            raise ClaimError("У этой брони нет срока", "no_expiry")
+        if row["extended_at"]:
+            raise ClaimError(
+                "Бронь уже продлевали один раз. Если не успеваете — "
+                "отпустите заказ, чтобы его успел взять другой курьер.",
+                "already_extended")
+
+        # От ТЕКУЩЕГО момента, если срок уже почти истёк: иначе «продлил на 30
+        # минут» дало бы пять минут, и курьер нажал бы кнопку впустую.
+        current = datetime.strptime(row["expires_at"][:19], "%Y-%m-%d %H:%M:%S")
+        expires_at = max(current, now) + timedelta(minutes=minutes)
+        stamp = expires_at.isoformat(sep=" ", timespec="seconds")
+
+        conn.execute(
+            "UPDATE delivery_assignments SET expires_at = ?, extended_at = ? "
+            " WHERE id = ?",
+            (stamp, now.isoformat(sep=" ", timespec="seconds"), row["id"]),
+        )
+        conn.execute("COMMIT")
+        return {"retailcrm_order_id": order_id, "expires_at": stamp,
+                "claim_extended": True}
+    except ClaimError:
+        conn.execute("ROLLBACK")
+        raise
     except Exception:
         conn.execute("ROLLBACK")
         raise

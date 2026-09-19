@@ -135,6 +135,33 @@
         };
     }
 
+    /**
+     * Сколько минут осталось до сгорания брони (null — срока нет).
+     *
+     * `expires_at` приходит в UTC, как все отметки времени наших баз, и
+     * сравнивается с UTC же: разница двух абсолютных моментов от часовых
+     * поясов не зависит. Пояс нужен только для ПОКАЗА времени (см.
+     * fmtSalonTime).
+     */
+    function claimMinutesLeft(order) {
+        var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/
+            .exec(String(order.expires_at || '').trim());
+        if (!m) return null;
+        var at = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+        return Math.round((at - Date.now()) / 60000);
+    }
+
+    /** Отметка UTC → «ЧЧ:ММ» по стенным часам салона. */
+    function fmtSalonTime(stamp, utcOffset) {
+        var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/
+            .exec(String(stamp || '').trim());
+        if (!m || utcOffset === null || utcOffset === undefined) return '';
+        var at = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])
+            + utcOffset * 3600000);
+        return ('0' + at.getUTCHours()).slice(-2) + ':'
+            + ('0' + at.getUTCMinutes()).slice(-2);
+    }
+
     var MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн',
                   'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 
@@ -666,6 +693,16 @@
 
         parts.push('<div class="cd-card__actions">');
         if (order.is_mine) {
+            // «Я еду» и в ленте тоже: по пушу «бронь скоро снимется» курьер
+            // открывает приложение и попадает именно сюда. Кнопка, ради
+            // которой надо ещё открыть карточку, на ходу не находится.
+            var leftHere = order.assignment_state === 'claimed'
+                ? claimMinutesLeft(order) : null;
+            if (leftHere !== null && leftHere <= 30 && !order.claim_extended) {
+                parts.push('<button type="button" class="cd-btn cd-btn--accent"'
+                    + ' data-extend="' + esc(order.retailcrm_order_id) + '">'
+                    + 'Я еду — продлить бронь</button>');
+            }
             parts.push('<div class="cd-btn-row">'
                 + '<button type="button" class="cd-btn cd-btn--ghost" data-release="'
                 + esc(order.retailcrm_order_id) + '">Отказаться</button>'
@@ -1057,6 +1094,29 @@
                 parts.push('<p class="cd-note">Забрать можно, когда флорист отметит '
                     + 'заказ собранным. Список обновляется сам.</p>');
             }
+
+            // Срок брони и «Я еду».
+            //
+            // До 19.09.2026 срок не показывался нигде, а пуш «бронь скоро
+            // снимется — подтвердите, что едете» звал к кнопке, которой не
+            // было: удержать заказ мог только «Забрал», а его жмут в салоне.
+            // Кнопка появляется за полчаса до сгорания — раньше она сожгла бы
+            // единственное продление задолго до того, как оно нужно.
+            var left = claimMinutesLeft(order);
+            if (left !== null) {
+                parts.push('<p class="cd-note">Бронь до '
+                    + esc(fmtSalonTime(order.expires_at, order.utc_offset))
+                    + (left > 0 ? ' — осталось ' + left + ' мин' : ' — срок вышел')
+                    + '</p>');
+                if (left <= 30 && !order.claim_extended) {
+                    parts.push('<button type="button" class="cd-btn cd-btn--ghost"'
+                        + ' data-extend="' + id + '">Я еду — продлить бронь</button>');
+                } else if (left <= 30) {
+                    parts.push('<p class="cd-note">Бронь уже продлевали. Если не '
+                        + 'успеваете — отпустите заказ, его успеет взять другой.</p>');
+                }
+            }
+
             parts.push('<div class="cd-btn-row">'
                 + '<button type="button" class="cd-btn cd-btn--ghost" data-release="'
                 + id + '">Отказаться</button>'
@@ -1244,6 +1304,28 @@
         });
     }
 
+    /**
+     * «Я еду» — продлить бронь, не забирая заказ.
+     *
+     * Кнопка блокируется на время запроса: медленный ответ иначе превращает
+     * один клик в три запроса (правило CLAUDE.md), а продление одно — второй
+     * запрос вернул бы отказ, и человек решил бы, что кнопка сломана.
+     */
+    function extendClaim(orderId, button) {
+        if (button.disabled) return;
+        button.disabled = true;
+        button.textContent = 'Продлеваем…';
+        apiPost('/api/courier/orders/' + encodeURIComponent(orderId) + '/extend')
+            .then(function () {
+                toast('Бронь продлена на 30 минут', 'success');
+                return loadFeed();
+            })
+            .catch(function (error) {
+                toast(error.message, 'error');
+                loadFeed();
+            });
+    }
+
     function onCardClick(event) {
         var close = event.target.closest('[data-close]');
         if (close) { closeCard(); return; }
@@ -1259,6 +1341,9 @@
 
         var release = event.target.closest('[data-release]');
         if (release) { releaseOrder(release.getAttribute('data-release'), release); return; }
+
+        var extend = event.target.closest('[data-extend]');
+        if (extend) { extendClaim(extend.getAttribute('data-extend'), extend); return; }
 
         var pickup = event.target.closest('[data-pickup]');
         if (pickup) {
@@ -1392,6 +1477,9 @@
 
             var release = event.target.closest('[data-release]');
             if (release) { releaseOrder(release.getAttribute('data-release'), release); return; }
+
+            var extend = event.target.closest('[data-extend]');
+            if (extend) { extendClaim(extend.getAttribute('data-extend'), extend); return; }
 
             var open = event.target.closest('[data-open]');
             if (open) { openCard(open.getAttribute('data-open')); return; }
