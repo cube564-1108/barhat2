@@ -45,6 +45,12 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Секция управляющего: весь город, чужие брони, контакты по любому заказу.
 DISPATCH_SECTION = "courier_dispatch"
 
+# Потолок периода на экране «Мои доставки». Список по дням за год — это и
+# лишнее чтение витрины на сетевом /data, и нечитаемый экран на телефоне.
+# Превышение отбивается текстом, а не молчаливой обрезкой: обрезанный период
+# показал бы сумму меньше настоящей, а это цифра про зарплату.
+MAX_EARNINGS_DAYS = 92
+
 # Порог, после которого разбор ленты уезжает в лог целиком, по шагам.
 #
 # Зачем отдельно от общего сторожа медленных запросов (`_log_slow_request` в
@@ -223,6 +229,75 @@ def get_orders():
         # самый короткий путь к ответу.
         "timings_ms": timings,
         "total_ms": total_ms,
+    })
+
+
+@delivery_bp.route("/earnings", methods=["GET"])
+@section_required("courier_app")
+def get_earnings():
+    """
+    Свои доставки и своя сумма по дням — экран курьера.
+
+    **Секция только `courier_app`, без `DISPATCH_SECTION`.** Это не забывчивость:
+    у управляющего профиля курьера нет, и допуск сюда означал бы параметр
+    `courier_id` в запросе — то есть ровно ту дыру, из-за которой мы отказались
+    открывать курьерам модуль «Оплата курьерам» (там `courier_id` принимается
+    параметром, и любой курьер прочитал бы чужую зарплату). Управляющий смотрит
+    тот модуль.
+
+    Курьер берётся ИЗ ПРОФИЛЯ текущего пользователя и ниоткуда больше.
+
+    Считает `storage.courier_earnings_by_day` — та же формула, что у выплаты.
+    Расхождение между этим экраном и отчётом управляющего недопустимо: это одни
+    и те же деньги (сторож `scripts/test_courier_earnings.py`).
+
+    Query: date_from, date_to (YYYY-MM-DD) — имена как у ручки отчёта выплат,
+    чтобы два экрана сверялись подстановкой одинаковых дат.
+    """
+    profile = ds.get_courier_profile(int(current_user.id)) or {}
+    crm_courier_id = profile.get("retailcrm_courier_id")
+
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+    if not (_valid_date(date_from) and _valid_date(date_to)):
+        # Период по умолчанию — как в «Оплате курьерам»: с 1-го числа по
+        # сегодня. Одинаковый старт у двух экранов означает, что числа можно
+        # сверить, ничего не настраивая.
+        #
+        # «Сегодня» — по стенным часам салона города курьера, а не по UTC и не
+        # по часам его телефона: в 18:31 UTC в Новосибирске уже завтра.
+        today = ds.city_today(profile.get("city"))
+        date_from, date_to = today[:8] + "01", today
+    if date_from > date_to:
+        return error_response("Начало периода позже конца")
+
+    days_in_period = (date.fromisoformat(date_to) - date.fromisoformat(date_from)).days
+    if days_in_period > MAX_EARNINGS_DAYS:
+        return error_response(
+            f"Период больше {MAX_EARNINGS_DAYS} дней — выберите покороче")
+
+    # Связки нет — считать нечего, и это НЕ пустой период: у такого человека и
+    # выплата не считается вовсе (§7-тер плана модуля). Честный ноль здесь
+    # соврал бы: он читается как «вы ничего не возили».
+    if not crm_courier_id:
+        return success_response({"days": [], "totals": None, "awaiting_close": 0}, {
+            "date_from": date_from,
+            "date_to": date_to,
+            "warning": "Ваша учётная запись не связана с курьером в CRM — "
+                       "доставки не считаются ни здесь, ни в оплате. "
+                       "Обратитесь к управляющему.",
+        })
+
+    result = storage.courier_earnings_by_day(
+        int(crm_courier_id), date_from, date_to)
+
+    return success_response(result, {
+        "date_from": date_from,
+        "date_to": date_to,
+        # Отвезли, а оператор ещё не закрыл — объяснение, почему сумма меньше
+        # отвезённого. Отдельным числом и НЕ в итоге.
+        "awaiting_close": ds.courier_awaiting_close(
+            int(current_user.id), date_from, date_to),
     })
 
 

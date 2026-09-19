@@ -1921,6 +1921,42 @@ def list_active_assignments(city: Optional[str] = None) -> List[Dict[str, Any]]:
     return rows
 
 
+def courier_awaiting_close(courier_user_id: int, date_from: str,
+                           date_to: str) -> int:
+    """
+    Сколько заказов курьер отвёз, а CRM их ещё не закрыла.
+
+    Это ответ на вопрос «почему сумма меньше, чем я отвёз». Статус «Выполнен»
+    ставит оператор, иногда через часы после доставки, и всё это время заказ не
+    попадает ни в заработок (там только выполненные), ни в «живые брони» —
+    состояние `delivered` терминальное. Без этого числа заказ выглядит для
+    курьера пропавшим, и он идёт выяснять это к управляющему.
+
+    Считается по дате доставки в том же периоде, что и заработок: заказ,
+    зависший незакрытым с прошлой недели, — это деньги под угрозой, и увидеть
+    его надо именно там, где курьер смотрит свои цифры.
+
+    Только число. Сумму сюда не кладём намеренно: «вам должны ещё 600 ₽» о
+    незакрытом заказе — обещание, которого модуль дать не может.
+    """
+    from .storage import COMPLETED_STATUS
+
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+              FROM delivery_assignments a
+              JOIN courier_orders o ON o.retailcrm_order_id = a.retailcrm_order_id
+             WHERE a.courier_user_id = ?
+               AND a.state = ?
+               AND o.status != ?
+               AND o.delivery_date >= ? AND o.delivery_date <= ?
+            """,
+            (courier_user_id, STATE_DELIVERED, COMPLETED_STATUS, date_from, date_to),
+        ).fetchone()
+    return (row["cnt"] if row else 0) or 0
+
+
 def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
                       courier_delivery_codes: Optional[List[str]] = None
                       ) -> Dict[str, Any]:
