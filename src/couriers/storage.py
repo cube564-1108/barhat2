@@ -327,6 +327,15 @@ def init_couriers_tables() -> None:
         _add_column_if_missing(conn, "courier_orders", "customer_comment", "TEXT")
         _add_column_if_missing(conn, "courier_orders", "note_text", "TEXT")
         _add_column_if_missing(conn, "courier_orders", "ready_planned_at", "TEXT")
+        # Когда заказ ПОБЫВАЛ собранным. Готовность — факт, а не текущий статус:
+        # путь заказа «Передан флористу → Заказ готов → Вызван курьер →
+        # Выполнен» идёт ДАЛЬШЕ отметки о сборке, и пока готовность считалась
+        # как «статус равен order-complete», перевод статуса вперёд молча
+        # возвращал собранный заказ в «Собирают». 19.09.2026 так у заказа
+        # 154553 кнопка «Забрал заказ» сменилась на неактивную «Ждём отметки
+        # Готов»: забрать букет стало нечем, бронь сгорела по таймеру, и заказ
+        # исчез из приложения. Отметка ставится один раз и не снимается.
+        _add_column_if_missing(conn, "courier_orders", "ready_seen_at", "TEXT")
 
         # Минуты сборки и их разбор (Ф3). Разбор хранится колонками, а не
         # считается на показ: «почему здесь 48 минут» спрашивают у ячейки, а
@@ -989,18 +998,47 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
     при UPSERT такие записи навсегда остались бы в отчёте и раздули выплату.
     Всё в одной транзакции, чтобы отчёт никогда не читал полупустое окно.
     """
+    # Отметка «заказ побывал собранным» переживает пересборку окна: она наша, а
+    # не CRM, и восстановить её после DELETE неоткуда — в заказе из CRM лежит
+    # только ТЕКУЩИЙ статус. Правило простановки одно на оба пути записи, см.
+    # delivery_storage.ready_stamp. Импорт локальный: delivery_storage сам
+    # импортирует этот модуль.
+    from .delivery_storage import ready_stamp, ready_status_codes
+
+    ready_codes = ready_status_codes()
+    ready_now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+
     with get_db() as conn:
         # Часы готовности до пересборки: окно переписывается целиком, поэтому
         # «заказ переехал в другой слот» видно только так. Без этого нельзя
         # ответить, помогло ли предупреждение о перегрузе (пункт 7.7 плана).
-        previous = {
-            row["retailcrm_order_id"]: (row["ready_hour"], row["slot_changed_at"])
-            for row in conn.execute(
-                "SELECT retailcrm_order_id, ready_hour, slot_changed_at FROM courier_orders "
-                "WHERE delivery_date >= ? AND delivery_date <= ?",
-                (date_from, date_to),
-            )
-        }
+        previous = {}
+        previous_ready = {}
+        for row in conn.execute(
+            "SELECT retailcrm_order_id, ready_hour, slot_changed_at, ready_seen_at "
+            "  FROM courier_orders "
+            " WHERE delivery_date >= ? AND delivery_date <= ?",
+            (date_from, date_to),
+        ):
+            previous[row["retailcrm_order_id"]] = (row["ready_hour"],
+                                                   row["slot_changed_at"])
+            previous_ready[row["retailcrm_order_id"]] = row["ready_seen_at"]
+
+        # Отметки о сборке у заказов, переехавших в это окно с другой даты.
+        # Их строка лежит под старой датой, выборкой по периоду не ловится, а
+        # INSERT OR REPLACE ниже затрёт её по первичному ключу — вместе с
+        # отметкой. Читаем по идентификаторам, как и удаление позиций ниже.
+        if rows:
+            moved_ids = [row["retailcrm_order_id"] for row in rows
+                         if row["retailcrm_order_id"] not in previous_ready]
+            for start in range(0, len(moved_ids), 400):  # потолок переменных SQLite
+                chunk = moved_ids[start:start + 400]
+                for row in conn.execute(
+                    f"SELECT retailcrm_order_id, ready_seen_at FROM courier_orders "
+                    f" WHERE retailcrm_order_id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                ):
+                    previous_ready[row["retailcrm_order_id"]] = row["ready_seen_at"]
 
         # Позиции чистим ДО заказов и по своей дате доставки: связь по
         # retailcrm_order_id тут не поможет — удаляемых заказов после DELETE
@@ -1037,9 +1075,10 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                 recipient_name, recipient_phone, recipient_is_customer,
                 do_not_contact_recipient, customer_name, customer_phone,
                 manager_comment, customer_comment, note_text, ready_planned_at,
+                ready_seen_at,
                 synced_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             """,
             [
                 (
@@ -1078,6 +1117,11 @@ def replace_orders_window(date_from: str, date_to: str, rows: List[Dict[str, Any
                     row.get("customer_comment"),
                     row.get("note_text"),
                     row.get("ready_planned_at"),
+                    # Готовность — факт, а не текущий статус: отметку, которая
+                    # уже была, пересборка окна не снимает (см. ready_stamp).
+                    ready_stamp(row.get("status") or COMPLETED_STATUS,
+                                previous_ready.get(row["retailcrm_order_id"]),
+                                ready_codes, ready_now),
                 )
                 for row in rows
             ],
