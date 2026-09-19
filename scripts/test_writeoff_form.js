@@ -597,6 +597,241 @@ async function openCard(writeoff, FakeXHR) {
             `крестиков: ${host.querySelectorAll('.writeoff-photo-delete').length}`);
     }
 
+    console.log('\n=== 10. Таблица заявок постранично ===');
+    {
+        // Сервер отдаёт срез и total; страницы человек листает кнопками.
+        // Прогон идёт целиком через onPageActivated и клики — иначе не видно,
+        // что обработчики привязались к разметке, собранной строкой.
+        const TOTAL = 60;
+        const asked = [];
+        const makeEnv = () => {
+            const env = makeSandbox(async (url) => {
+                if (url === '/api/writeoffs/stores') {
+                    return { ok: true, status: 200, json: async () => ({
+                        stores: [{ id: 1, name: 'Тестовая точка' }],
+                        user: { username: 'manager_wo', role: 'manager' },
+                    }) };
+                }
+                if (url.startsWith('/api/writeoffs?')) {
+                    const params = new URLSearchParams(url.split('?')[1]);
+                    const limit = parseInt(params.get('limit') || '0', 10);
+                    const offset = parseInt(params.get('offset') || '0', 10);
+                    asked.push({ limit, offset, store: params.get('store_id') });
+                    const rows = [];
+                    for (let i = offset; i < Math.min(offset + limit, TOTAL); i++) {
+                        rows.push({
+                            id: i + 1, store_id: 1, status: 'on_approval',
+                            created_by: 'florist', created_at: '2026-09-14T10:00:00',
+                            positions_count: 1,
+                        });
+                    }
+                    return { ok: true, status: 200, json: async () => ({
+                        writeoffs: rows, count: rows.length, total: TOTAL, limit, offset,
+                    }) };
+                }
+                return { ok: true, status: 200, json: async () => ({}) };
+            }, makeXhr(() => 201).FakeXHR);
+            env.sandbox.BarhatUI = { confirm: async () => true, prompt: async () => '', toast() {} };
+            return env;
+        };
+
+        const env = makeEnv();
+        await env.sandbox.WriteoffsModule.onPageActivated({ username: 'manager_wo', role: 'manager' });
+        await flush();
+
+        check('Запрошена страница, а не вся витрина',
+            asked[0] && asked[0].limit === 25 && asked[0].offset === 0,
+            JSON.stringify(asked[0]));
+        check('В таблице 25 строк',
+            env.byId['writeoffs-tbody'].querySelectorAll('tr').length === 25,
+            `строк: ${env.byId['writeoffs-tbody'].querySelectorAll('tr').length}`);
+
+        const pager = env.byId['writeoffs-pagination'];
+        const pages = env.byId['writeoffs-pagination-pages'];
+        check('Навигация показана', pager.style.display === 'flex', pager.style.display);
+        check('Подписано, что видно и сколько всего',
+            env.byId['writeoffs-pagination-info'].textContent === `1–25 из ${TOTAL}`,
+            env.byId['writeoffs-pagination-info'].textContent);
+        check('Кнопка «назад» на первой странице выключена',
+            pages.querySelectorAll('button[data-page="-1"]')[0]?.disabled === true);
+
+        // Третья страница — последняя: 60 записей по 25
+        const toThird = pages.querySelectorAll('button[data-page="2"]')[0];
+        check('Есть кнопка третьей страницы', !!toThird);
+        toThird.fire('click');
+        await flush();
+
+        const lastAsk = asked[asked.length - 1];
+        check('Ушёл запрос со смещением 50',
+            lastAsk.limit === 25 && lastAsk.offset === 50, JSON.stringify(lastAsk));
+        check('На последней странице остаток — 10 строк',
+            env.byId['writeoffs-tbody'].querySelectorAll('tr').length === 10,
+            `строк: ${env.byId['writeoffs-tbody'].querySelectorAll('tr').length}`);
+        check('Подпись пересчитана',
+            env.byId['writeoffs-pagination-info'].textContent === `51–60 из ${TOTAL}`,
+            env.byId['writeoffs-pagination-info'].textContent);
+        check('Кнопка «вперёд» на последней странице выключена',
+            env.byId['writeoffs-pagination-pages']
+                .querySelectorAll('button[data-page="3"]')[0]?.disabled === true);
+
+        // Фильтр меняет отбор: остаться на третьей странице нельзя — её может
+        // не быть вовсе, и человек увидит пустую таблицу вместо результата
+        env.byId['writeoffs-filter-store'].value = '1';
+        env.byId['writeoffs-apply-filters-btn'].fire('click');
+        await flush();
+        const afterFilter = asked[asked.length - 1];
+        check('Применение фильтра вернуло на первую страницу',
+            afterFilter.offset === 0 && afterFilter.store === '1',
+            JSON.stringify(afterFilter));
+
+        env.byId['writeoffs-reset-filters-btn'].fire('click');
+        await flush();
+        check('Сброс фильтров тоже возвращает на первую страницу',
+            asked[asked.length - 1].offset === 0,
+            JSON.stringify(asked[asked.length - 1]));
+    }
+
+    console.log('\n=== 10а. Страница ушла за конец списка — не пустая таблица и не цикл ===');
+    {
+        // Человек стоит на третьей странице, часть заявок за это время
+        // согласовали и они ушли из отбора. Показать надо последнюю
+        // существующую страницу — но ровно один раз: перезапрос по «строк не
+        // пришло» вместо «смещение за пределами» уводит в вечный цикл.
+        let total = 60;
+        const asked = [];
+        const env = makeSandbox(async (url, opts) => {
+            if (opts && opts.method === 'DELETE') {
+                total = 30;               // заявки убыли, третьей страницы больше нет
+                return { ok: true, status: 200, json: async () => ({ ok: true }) };
+            }
+            if (url === '/api/writeoffs/stores') {
+                return { ok: true, status: 200, json: async () => ({
+                    stores: [{ id: 1, name: 'Тестовая точка' }],
+                    user: { username: 'manager_wo', role: 'manager' },
+                }) };
+            }
+            if (url.startsWith('/api/writeoffs?')) {
+                const params = new URLSearchParams(url.split('?')[1]);
+                const limit = parseInt(params.get('limit') || '0', 10);
+                const offset = parseInt(params.get('offset') || '0', 10);
+                asked.push(offset);
+                if (asked.length > 20) throw new Error('перезапросы зациклились');
+                const rows = [];
+                for (let i = offset; i < Math.min(offset + limit, total); i++) {
+                    rows.push({
+                        id: i + 1, store_id: 1, status: 'on_approval', created_by: 'manager_wo',
+                        created_at: '2026-09-14T10:00:00', positions_count: 1,
+                    });
+                }
+                return { ok: true, status: 200, json: async () => ({
+                    writeoffs: rows, count: rows.length, total, limit, offset,
+                }) };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+        }, makeXhr(() => 201).FakeXHR);
+        env.sandbox.BarhatUI = { confirm: async () => true, prompt: async () => '', toast() {} };
+
+        await env.sandbox.WriteoffsModule.onPageActivated({ username: 'manager_wo', role: 'manager' });
+        await flush();
+        env.byId['writeoffs-pagination-pages'].querySelectorAll('button[data-page="2"]')[0].fire('click');
+        await flush();
+        check('Стоим на третьей странице',
+            env.byId['writeoffs-pagination-info'].textContent === '51–60 из 60',
+            env.byId['writeoffs-pagination-info'].textContent);
+
+        // Отмена заявки перезагружает список БЕЗ сброса страницы — и упирается
+        // в то, что стоять уже негде
+        asked.length = 0;
+        env.byId['writeoffs-tbody']
+            .querySelectorAll('button[data-action="cancel"]')[0].fire('click');
+        await flush();
+        await flush();
+
+        check('После убыли заявок перезапросов конечное число',
+            asked.length > 0 && asked.length <= 3, `запросов: ${asked.length}`);
+        check('Показана последняя существующая страница, а не пустая таблица',
+            env.byId['writeoffs-pagination-info'].textContent === '26–30 из 30',
+            env.byId['writeoffs-pagination-info'].textContent);
+        check('Строки на ней есть',
+            env.byId['writeoffs-tbody'].querySelectorAll('tr').length === 5,
+            `строк: ${env.byId['writeoffs-tbody'].querySelectorAll('tr').length}`);
+    }
+
+    console.log('\n=== 10в. Сервер отдал пусто при живом total — один запрос, а не долбёжка ===');
+    {
+        // Рассинхрон возможен: между показом страницы и перезагрузкой отбор
+        // поменялся. Клиент, который перезапрашивает «пока не придут строки»,
+        // уходит в цикл, где каждый виток — поход на медленный /data.
+        let asked = 0;
+        const env = makeSandbox(async (url) => {
+            if (url === '/api/writeoffs/stores') {
+                return { ok: true, status: 200, json: async () => ({
+                    stores: [{ id: 1, name: 'Тестовая точка' }],
+                    user: { username: 'manager_wo', role: 'manager' },
+                }) };
+            }
+            if (url.startsWith('/api/writeoffs?')) {
+                asked += 1;
+                if (asked > 15) throw new Error('перезапросы зациклились');
+                const offset = parseInt(new URLSearchParams(url.split('?')[1]).get('offset'), 10);
+                // Первая страница есть, дальше сервер упорно отдаёт пусто
+                const rows = offset === 0 ? [{
+                    id: 1, store_id: 1, status: 'on_approval', created_by: 'florist',
+                    created_at: '2026-09-14T10:00:00', positions_count: 1,
+                }] : [];
+                return { ok: true, status: 200, json: async () => ({
+                    writeoffs: rows, count: rows.length, total: 60, limit: 25, offset,
+                }) };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+        }, makeXhr(() => 201).FakeXHR);
+        env.sandbox.BarhatUI = { confirm: async () => true, prompt: async () => '', toast() {} };
+
+        await env.sandbox.WriteoffsModule.onPageActivated({ username: 'manager_wo', role: 'manager' });
+        await flush();
+        asked = 0;
+        let looped = false;
+        try {
+            env.byId['writeoffs-pagination-pages']
+                .querySelectorAll('button[data-page="1"]')[0].fire('click');
+            await flush();
+            await flush();
+        } catch (e) {
+            looped = true;
+        }
+        check('Пустой ответ не запускает цепочку перезапросов',
+            !looped && asked <= 2, `запросов: ${asked}`);
+    }
+
+    console.log('\n=== 10б. Одна страница — навигации нет ===');
+    {
+        const env = makeSandbox(async (url) => {
+            if (url === '/api/writeoffs/stores') {
+                return { ok: true, status: 200, json: async () => ({
+                    stores: [{ id: 1, name: 'Тестовая точка' }],
+                    user: { username: 'manager_wo', role: 'manager' },
+                }) };
+            }
+            if (url.startsWith('/api/writeoffs?')) {
+                return { ok: true, status: 200, json: async () => ({
+                    writeoffs: [{
+                        id: 1, store_id: 1, status: 'on_approval', created_by: 'florist',
+                        created_at: '2026-09-14T10:00:00', positions_count: 1,
+                    }],
+                    count: 1, total: 1, limit: 25, offset: 0,
+                }) };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+        }, makeXhr(() => 201).FakeXHR);
+        env.sandbox.BarhatUI = { confirm: async () => true, prompt: async () => '', toast() {} };
+
+        await env.sandbox.WriteoffsModule.onPageActivated({ username: 'manager_wo', role: 'manager' });
+        await flush();
+        check('При одной странице навигация скрыта',
+            env.byId['writeoffs-pagination'].style.display === 'none',
+            env.byId['writeoffs-pagination'].style.display);
+    }
+
     console.log('\n' + '='.repeat(60));
     if (failures.length) {
         console.log(`ПРОВАЛЕНО проверок: ${failures.length}`);

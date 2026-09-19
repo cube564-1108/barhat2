@@ -38,7 +38,7 @@ from .storage import (
     link_moysklad_employee,
     create_writeoff,
     get_writeoff_by_id,
-    list_writeoffs,
+    list_writeoffs_page,
     cancel_writeoff,
     lock_writeoff_for_sending,
     lock_writeoff_for_retry,
@@ -58,6 +58,12 @@ logger = logging.getLogger(__name__)
 writeoffs_bp = Blueprint("writeoffs", __name__, url_prefix="/api/writeoffs")
 
 APPROVER_ROLES = ("admin", "manager")
+
+# Страница таблицы заявок. Значение по умолчанию совпадает с PAGE_SIZE в
+# src/dashboard/writeoffs.js — фронт всё равно присылает limit явно, но ручку
+# зовут и без него (curl, Пульс), и отдавать тогда всю витрину незачем.
+PAGE_LIMIT_DEFAULT = 25
+PAGE_LIMIT_MAX = 200
 
 
 def _require_store_access(store_id: int) -> bool:
@@ -626,7 +632,11 @@ def backfill_prices():
 @writeoffs_bp.route("", methods=["GET"])
 @section_required("writeoffs")
 def get_writeoffs():
-    """Список заявок с фильтрами. Query params: status, store_id, date_from, date_to, limit, offset."""
+    """Список заявок с фильтрами. Query params: status, store_id, date_from, date_to, limit, offset.
+
+    Отдаёт страницу и total — число заявок под фильтром целиком, без limit:
+    по нему фронт рисует номера страниц.
+    """
     status = request.args.get("status")
     if status and status not in STATUSES:
         return jsonify({"error": f"Неизвестный статус. Доступны: {list(STATUSES)}"}), 400
@@ -641,14 +651,21 @@ def get_writeoffs():
     else:
         store_ids = accessible  # None = все точки (admin)
 
-    writeoffs = list_writeoffs(
+    # Границы, а не «что прислали»: limit=100000 вернул бы всю витрину с
+    # коррелированным подзапросом на каждую строку, offset<0 — ошибку SQLite.
+    limit = max(1, min(request.args.get("limit", PAGE_LIMIT_DEFAULT, type=int) or PAGE_LIMIT_DEFAULT,
+                       PAGE_LIMIT_MAX))
+    offset = max(0, request.args.get("offset", 0, type=int) or 0)
+
+    page = list_writeoffs_page(
         store_ids=store_ids,
         status=status,
         date_from=request.args.get("date_from"),
         date_to=request.args.get("date_to"),
-        limit=request.args.get("limit", 200, type=int),
-        offset=request.args.get("offset", 0, type=int),
+        limit=limit,
+        offset=offset,
     )
+    writeoffs = page["items"]
 
     usernames = {w.get("created_by") for w in writeoffs}
     usernames.update(w.get("approved_by") for w in writeoffs)
@@ -658,7 +675,13 @@ def get_writeoffs():
         w["created_by_full_name"] = full_names.get(w.get("created_by"))
         w["approved_by_full_name"] = full_names.get(w.get("approved_by"))
 
-    return jsonify({"writeoffs": writeoffs, "count": len(writeoffs)})
+    return jsonify({
+        "writeoffs": writeoffs,
+        "count": len(writeoffs),
+        "total": page["total"],
+        "limit": limit,
+        "offset": offset,
+    })
 
 
 @writeoffs_bp.route("/<int:writeoff_id>", methods=["GET"])

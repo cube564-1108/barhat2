@@ -527,45 +527,32 @@ def get_writeoff_positions(writeoff_id: int) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def list_writeoffs(
-    store_ids: Optional[List[int]] = None,
-    status: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    limit: int = 200,
-    offset: int = 0,
-) -> List[Dict[str, Any]]:
-    """
-    Список заявок с фильтрами. store_ids=None означает "без ограничения по точкам"
-    (роль admin) — передавайте [] явно, если нужно гарантированно пустой результат.
+def _writeoffs_filter(
+    store_ids: Optional[List[int]],
+    status: Optional[str],
+    date_from: Optional[str],
+    date_to: Optional[str],
+) -> tuple:
+    """Условие WHERE и его параметры — общее для страницы и для счётчика.
 
-    Каждая заявка отдаётся с positions_count — сами позиции здесь не грузим
-    (это отдельный запрос на каждую строку списка), но число позиций таблица
-    показывает в колонке «Позиций». Раньше его там не было вовсе: фронт считал
-    длину writeoffs[].positions, которого в ответе этого эндпоинта нет, и
-    колонка у всех заявок показывала 0.
+    Возвращает (sql, params). Строится один раз: список и total обязаны
+    отбирать РОВНО одно и то же, иначе пагинация показывает страницы,
+    которых нет.
     """
-    query = """
-        SELECT w.*,
-               (SELECT COUNT(*) FROM writeoff_positions p WHERE p.writeoff_id = w.id) AS positions_count
-        FROM writeoffs w
-        WHERE 1=1
-    """
+    sql = ""
     params: List[Any] = []
 
     if store_ids is not None:
-        if not store_ids:
-            return []
         placeholders = ",".join("?" * len(store_ids))
-        query += f" AND store_id IN ({placeholders})"
+        sql += f" AND store_id IN ({placeholders})"
         params.extend(store_ids)
 
     if status:
-        query += " AND status = ?"
+        sql += " AND status = ?"
         params.append(status)
 
     if date_from:
-        query += " AND created_at >= ?"
+        sql += " AND created_at >= ?"
         params.append(date_from)
 
     if date_to:
@@ -574,18 +561,63 @@ def list_writeoffs(
         # конца дня сами: created_at <= '2026-08-20' отсекло бы все заявки
         # этого дня, заведённые позже полуночи.
         if len(date_to.strip()) == 10:
-            query += " AND created_at < datetime(?, '+1 day')"
+            sql += " AND created_at < datetime(?, '+1 day')"
         else:
-            query += " AND created_at <= ?"
+            sql += " AND created_at <= ?"
         params.append(date_to)
 
-    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    return sql, params
+
+
+def list_writeoffs_page(
+    store_ids: Optional[List[int]] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """
+    Страница заявок + общее число подходящих под фильтр (для постраничной
+    навигации). store_ids=None означает "без ограничения по точкам"
+    (роль admin) — передавайте [] явно, если нужно гарантированно пустой
+    результат.
+
+    Оба запроса идут ОДНИМ соединением: на сетевом /data цену определяет
+    число открытых соединений, а не размер таблицы (см. CLAUDE.md).
+
+    Каждая заявка отдаётся с positions_count — сами позиции здесь не грузим
+    (это отдельный запрос на каждую строку списка), но число позиций таблица
+    показывает в колонке «Позиций». Раньше его там не было вовсе: фронт считал
+    длину writeoffs[].positions, которого в ответе этого эндпоинта нет, и
+    колонка у всех заявок показывала 0.
+    """
+    if store_ids is not None and not store_ids:
+        return {"items": [], "total": 0}
+
+    where, params = _writeoffs_filter(store_ids, status, date_from, date_to)
 
     conn = get_db()
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM writeoffs WHERE 1=1{where}", params
+        ).fetchone()[0]
+
+        rows = conn.execute(
+            f"""
+            SELECT w.*,
+                   (SELECT COUNT(*) FROM writeoff_positions p WHERE p.writeoff_id = w.id) AS positions_count
+            FROM writeoffs w
+            WHERE 1=1{where}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return {"items": [dict(row) for row in rows], "total": total}
 
 
 # ============================================================================

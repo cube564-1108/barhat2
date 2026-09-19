@@ -14,6 +14,16 @@
     let loaded = false;
     let currentDetailsWriteoffId = null;
 
+    // Таблица заявок постранично: сервер отдаёт срез + total под фильтром.
+    // Совпадает с PAGE_LIMIT_DEFAULT в src/writeoffs/server.py.
+    const PAGE_SIZE = 25;
+    let currentOffset = 0;
+    let currentTotal = 0;
+    // Номер последнего запущенного запроса. Ответы приходят не в том порядке,
+    // в котором нажимали страницы (на /data запрос стоит сотни мс), и без
+    // этого в таблице оседает страница, которую уже никто не ждёт.
+    let loadToken = 0;
+
     // Совпадает с APPROVER_ROLES в src/writeoffs/server.py — кто согласует заявки
     const APPROVER_ROLES = ['admin', 'manager'];
 
@@ -58,6 +68,10 @@
         elements.filterDateTo = document.getElementById('writeoffs-filter-date-to');
         elements.applyFiltersBtn = document.getElementById('writeoffs-apply-filters-btn');
         elements.resetFiltersBtn = document.getElementById('writeoffs-reset-filters-btn');
+
+        elements.pagination = document.getElementById('writeoffs-pagination');
+        elements.paginationInfo = document.getElementById('writeoffs-pagination-info');
+        elements.paginationPages = document.getElementById('writeoffs-pagination-pages');
 
         elements.modal = document.getElementById('create-writeoff-modal');
         elements.overlay = document.getElementById('create-writeoff-overlay');
@@ -115,7 +129,9 @@
             elements.positionsRows.querySelectorAll('.writeoff-position-product').forEach(refreshProductInput);
         });
 
-        elements.applyFiltersBtn?.addEventListener('click', loadWriteoffs);
+        // Смена фильтра меняет и набор строк, и число страниц: оставаться на
+        // седьмой странице прошлого отбора нельзя — её может не существовать.
+        elements.applyFiltersBtn?.addEventListener('click', () => loadWriteoffs({ resetPage: true }));
         elements.resetFiltersBtn?.addEventListener('click', resetFilters);
 
         elements.closeDetailsBtn?.addEventListener('click', closeDetailsModal);
@@ -163,10 +179,13 @@
         elements.filterStatus.value = '';
         elements.filterDateFrom.value = '';
         elements.filterDateTo.value = '';
-        loadWriteoffs();
+        loadWriteoffs({ resetPage: true });
     }
 
-    async function loadWriteoffs() {
+    async function loadWriteoffs(options) {
+        if (options?.resetPage) currentOffset = 0;
+
+        const token = ++loadToken;
         elements.tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color: var(--barkhat-gray); padding:20px;">Загрузка данных...</td></tr>`;
 
         try {
@@ -179,14 +198,102 @@
             // сравнение created_at <= '2026-08-20' отсекало весь выбранный день
             if (elements.filterDateFrom.value) params.set('date_from', window.BarhatTime.dayStartUtc(elements.filterDateFrom.value));
             if (elements.filterDateTo.value) params.set('date_to', window.BarhatTime.dayEndUtc(elements.filterDateTo.value));
+            params.set('limit', String(PAGE_SIZE));
+            params.set('offset', String(currentOffset));
 
             const res = await fetch(`/api/writeoffs?${params.toString()}`, { credentials: 'include' });
             const data = await res.json();
+            if (token !== loadToken) return; // пока ждали, ушли на другую страницу
+
+            currentTotal = Number.isFinite(data.total) ? data.total : (data.writeoffs || []).length;
+
+            // Заявки убыли, и страница, на которой мы стояли, ушла за конец
+            // списка — показываем последнюю имеющуюся, а не пустую таблицу.
+            // Условие — именно «смещение за пределами total», а не «строк не
+            // пришло»: на пустом ответе при живом total это уводит в вечный
+            // цикл перезапросов, каждый из которых стоит похода на /data.
+            const lastOffset = Math.max(0, (Math.ceil(currentTotal / PAGE_SIZE) - 1) * PAGE_SIZE);
+            if (currentTotal > 0 && currentOffset > lastOffset) {
+                currentOffset = lastOffset;
+                return loadWriteoffs();
+            }
+
             renderWriteoffs(data.writeoffs || []);
+            renderPagination();
         } catch (e) {
+            if (token !== loadToken) return;
             console.error('Ошибка загрузки списаний:', e);
             elements.tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color: var(--barkhat-gray); padding:20px;">Ошибка загрузки</td></tr>`;
+            hidePagination();
         }
+    }
+
+    function hidePagination() {
+        if (elements.pagination) elements.pagination.style.display = 'none';
+    }
+
+    function goToPage(pageIndex) {
+        const offset = pageIndex * PAGE_SIZE;
+        if (offset === currentOffset) return;
+        currentOffset = offset;
+        loadWriteoffs();
+    }
+
+    /**
+     * Номера страниц: первая, последняя, соседи текущей, между ними — многоточие.
+     * Иначе при сотне страниц навигация шире экрана.
+     */
+    function pageNumbers(current, totalPages) {
+        const wanted = new Set([0, totalPages - 1, current - 1, current, current + 1]);
+        const pages = [...wanted].filter(p => p >= 0 && p < totalPages).sort((a, b) => a - b);
+
+        const result = [];
+        pages.forEach((p, i) => {
+            if (i > 0 && p - pages[i - 1] > 1) result.push('gap');
+            result.push(p);
+        });
+        return result;
+    }
+
+    function renderPagination() {
+        if (!elements.pagination) return;
+
+        const totalPages = Math.ceil(currentTotal / PAGE_SIZE);
+        if (totalPages <= 1) {
+            hidePagination();
+            return;
+        }
+
+        const current = Math.floor(currentOffset / PAGE_SIZE);
+        const shownFrom = currentOffset + 1;
+        const shownTo = Math.min(currentOffset + PAGE_SIZE, currentTotal);
+
+        elements.pagination.style.display = 'flex';
+        elements.paginationInfo.textContent = `${shownFrom}–${shownTo} из ${currentTotal}`;
+
+        const btn = (label, page, opts = {}) => {
+            const cls = opts.active ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-secondary';
+            const disabled = opts.disabled ? ' disabled' : '';
+            return `<button class="${cls}" data-page="${page}"${disabled}>${label}</button>`;
+        };
+
+        const parts = [btn('‹', current - 1, { disabled: current === 0 })];
+        pageNumbers(current, totalPages).forEach(p => {
+            if (p === 'gap') {
+                parts.push('<span style="color: var(--barkhat-gray); padding: 0 2px;">…</span>');
+            } else {
+                parts.push(btn(String(p + 1), p, { active: p === current }));
+            }
+        });
+        parts.push(btn('›', current + 1, { disabled: current === totalPages - 1 }));
+
+        elements.paginationPages.innerHTML = parts.join('');
+        elements.paginationPages.querySelectorAll('button[data-page]').forEach(b => {
+            b.addEventListener('click', () => {
+                if (b.disabled) return;
+                goToPage(parseInt(b.getAttribute('data-page'), 10));
+            });
+        });
     }
 
     function storeName(id) {
