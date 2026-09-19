@@ -803,6 +803,117 @@ async function openCard(writeoff, FakeXHR) {
             !looped && asked <= 2, `запросов: ${asked}`);
     }
 
+    console.log('\n=== 10г. Новая заявка видна сразу — возврат на первую страницу ===');
+    {
+        // Стоя на третьей странице, человек создаёт заявку. Она самая свежая,
+        // то есть на первой странице. Если остаться на третьей — в таблице её
+        // нет, и человек заводит дубль, а дубль спишет остатки второй раз.
+        const asked = [];
+        const { FakeXHR } = makeXhr(() => 201);
+        const env = makeSandbox(async (url, opts) => {
+            if (url === '/api/writeoffs/stores') {
+                return { ok: true, status: 200, json: async () => ({
+                    stores: [{ id: 1, name: 'Тестовая точка' }],
+                    user: { username: 'manager_wo', role: 'manager' },
+                }) };
+            }
+            if (url === '/api/writeoffs' && opts && opts.method === 'POST') {
+                return { ok: true, status: 201,
+                    json: async () => ({ writeoff: { id: 777, positions: [{ id: 1 }] } }) };
+            }
+            if (url.startsWith('/api/writeoffs?')) {
+                const params = new URLSearchParams(url.split('?')[1]);
+                const limit = parseInt(params.get('limit'), 10);
+                const offset = parseInt(params.get('offset'), 10);
+                asked.push(offset);
+                const rows = [];
+                for (let i = offset; i < Math.min(offset + limit, 60); i++) {
+                    rows.push({
+                        id: i + 1, store_id: 1, status: 'on_approval', created_by: 'florist',
+                        created_at: '2026-09-14T10:00:00', positions_count: 1,
+                    });
+                }
+                return { ok: true, status: 200, json: async () => ({
+                    writeoffs: rows, count: rows.length, total: 60, limit, offset }) };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+        }, FakeXHR);
+        env.sandbox.BarhatUI = { confirm: async () => true, prompt: async () => '', toast() {} };
+
+        await env.sandbox.WriteoffsModule.onPageActivated({ username: 'manager_wo', role: 'manager' });
+        await flush();
+        env.byId['writeoffs-pagination-pages'].querySelectorAll('button[data-page="2"]')[0].fire('click');
+        await flush();
+        check('Стоим на третьей странице', asked[asked.length - 1] === 50, `offset: ${asked[asked.length - 1]}`);
+
+        await prepareForm(env, [fakeFile('kadr.jpg', 300000, 1)]);
+        env.byId['confirm-create-writeoff-btn'].fire('click');
+        await settle(env);
+        await flush();
+
+        check('После создания заявки список показан с первой страницы',
+            asked[asked.length - 1] === 0, `offset: ${asked[asked.length - 1]}`);
+        check('И подпись это подтверждает',
+            env.byId['writeoffs-pagination-info'].textContent === '1–25 из 60',
+            env.byId['writeoffs-pagination-info'].textContent);
+    }
+
+    console.log('\n=== 10д. Сбой загрузки: навигация остаётся, есть «Повторить» ===');
+    {
+        // Разовый таймаут не должен запирать человека на странице: без
+        // навигации и кнопки повтора выйти можно только «Применить»/«Сбросить»,
+        // то есть прыжком на первую страницу.
+        let failNext = false;
+        let calls = 0;
+        const env = makeSandbox(async (url) => {
+            if (url === '/api/writeoffs/stores') {
+                return { ok: true, status: 200, json: async () => ({
+                    stores: [{ id: 1, name: 'Тестовая точка' }],
+                    user: { username: 'manager_wo', role: 'manager' },
+                }) };
+            }
+            if (url.startsWith('/api/writeoffs?')) {
+                calls += 1;
+                if (failNext) { failNext = false; throw new Error('timeout'); }
+                const params = new URLSearchParams(url.split('?')[1]);
+                const limit = parseInt(params.get('limit'), 10);
+                const offset = parseInt(params.get('offset'), 10);
+                const rows = [];
+                for (let i = offset; i < Math.min(offset + limit, 60); i++) {
+                    rows.push({
+                        id: i + 1, store_id: 1, status: 'on_approval', created_by: 'florist',
+                        created_at: '2026-09-14T10:00:00', positions_count: 1,
+                    });
+                }
+                return { ok: true, status: 200, json: async () => ({
+                    writeoffs: rows, count: rows.length, total: 60, limit, offset }) };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+        }, makeXhr(() => 201).FakeXHR);
+        env.sandbox.BarhatUI = { confirm: async () => true, prompt: async () => '', toast() {} };
+
+        await env.sandbox.WriteoffsModule.onPageActivated({ username: 'manager_wo', role: 'manager' });
+        await flush();
+
+        failNext = true;
+        env.byId['writeoffs-pagination-pages'].querySelectorAll('button[data-page="1"]')[0].fire('click');
+        await flush();
+
+        check('Навигация на месте после сбоя',
+            env.byId['writeoffs-pagination'].style.display === 'flex',
+            env.byId['writeoffs-pagination'].style.display);
+        const retry = env.byId['writeoffs-tbody'].querySelector('#writeoffs-retry-load');
+        check('Есть кнопка «Повторить»', !!retry);
+
+        const before = calls;
+        retry.fire('click');
+        await flush();
+        check('Повтор дёргает ту же страницу', calls === before + 1, `запросов: ${calls - before}`);
+        check('Данные вернулись',
+            env.byId['writeoffs-pagination-info'].textContent === '26–50 из 60',
+            env.byId['writeoffs-pagination-info'].textContent);
+    }
+
     console.log('\n=== 10б. Одна страница — навигации нет ===');
     {
         const env = makeSandbox(async (url) => {

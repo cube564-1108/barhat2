@@ -145,6 +145,79 @@ check("Нет доступных точек: строк 0", none_stores["items"]
 check("Нет доступных точек: total 0", none_stores["total"] == 0, f"{none_stores['total']}")
 
 
+print("\n=== 4а. Порядок однозначен: одна секунда на несколько заявок ===")
+# created_at пишется с точностью до секунды. Без тай-брейкера по id заявки с
+# одинаковым временем раскладываются по страницам как попало: одна попадает на
+# обе страницы, другая не показывается вовсе.
+SAME_SECOND_COUNT = 6
+TOTAL_ALL = TOTAL + SAME_SECOND_COUNT   # дальше по тексту этих заявок уже 66
+
+conn = get_db()
+try:
+    for i in range(SAME_SECOND_COUNT):
+        conn.execute(
+            """INSERT INTO writeoffs (id, store_id, status, created_by, created_at)
+               VALUES (?, 3, 'on_approval', 'florist', '2026-08-01T12:00:00')""",
+            (900 + i,),
+        )
+    conn.commit()
+finally:
+    conn.close()
+
+# Проверяем АДМИНСКИЙ путь (без store_ids): у запроса по точке порядок внутри
+# секунды удерживает составной индекс, а здесь в дело идёт idx_writeoffs_created,
+# и без явного тай-брейкера SQLite вправе отдать строки как угодно.
+same_second = []
+for offset in (0, 2, 4):
+    same_second.extend(
+        w["id"] for w in list_writeoffs_page(
+            date_from="2026-08-01", date_to="2026-08-01", limit=2, offset=offset
+        )["items"]
+    )
+check("Заявки одной секунды не дублируются между страницами",
+      len(same_second) == len(set(same_second)), f"{same_second}")
+check("И ни одна не потеряна", sorted(same_second) == list(range(900, 906)), f"{same_second}")
+check("Порядок устойчив между прогонами",
+      same_second == [w["id"] for w in list_writeoffs_page(
+          date_from="2026-08-01", date_to="2026-08-01", limit=10)["items"]],
+      f"{same_second}")
+# Порядок задан явно (id DESC внутри секунды), а не «как лягут строки»: без
+# тай-брейкера он зависит от выбранного плана и меняется вместе с индексами
+check("Внутри одной секунды порядок задан явно — новые сверху",
+      same_second == sorted(same_second, reverse=True), f"{same_second}")
+
+
+print("\n=== 4б. План запроса: страница точки идёт по составному индексу ===")
+# Страница у не-админа — это «точка + свежие сверху». Одиночные индексы не
+# складываются: без составного SQLite берёт store_id и досортировывает всю
+# точку через TEMP B-TREE, и это платится на КАЖДЫЙ клик по странице
+# (CLAUDE.md: проверять планом, а не временем — на тестовой базе разницы не видно).
+conn = get_db()
+try:
+    conn.execute("ANALYZE")
+    # Читаем именно detail: str(sqlite3.Row) печатает адрес объекта, и проверка
+    # «нет TEMP B-TREE» проходила бы всегда — сторож, смотрящий не в то поле,
+    # хуже отсутствующего.
+    plan = "\n".join(
+        r["detail"] for r in conn.execute(
+            """EXPLAIN QUERY PLAN
+               SELECT w.*,
+                      (SELECT COUNT(*) FROM writeoff_positions p WHERE p.writeoff_id = w.id) AS positions_count
+               FROM writeoffs w
+               WHERE 1=1 AND store_id IN (?)
+               ORDER BY created_at DESC, id DESC
+               LIMIT ? OFFSET ?""",
+            (1, 25, 0),
+        ).fetchall()
+    )
+finally:
+    conn.close()
+
+check("Сортировка не через временное B-дерево", "TEMP B-TREE" not in plan.upper(), plan)
+check("Использован индекс (store_id, created_at, id)",
+      "idx_writeoffs_store_created" in plan, plan)
+
+
 print("\n=== 5. Цена: страница и total — одно соединение ===")
 import sqlite_conn as sqlite_conn_module  # noqa: E402
 
@@ -219,7 +292,7 @@ florist.post("/api/auth/login", json={"username": "florist_wo", "password": "sec
 res = admin.get("/api/writeoffs?limit=25&offset=0")
 data = res.get_json()
 check("Ручка отвечает 200", res.status_code == 200, f"код {res.status_code}")
-check("В ответе есть total", data.get("total") == TOTAL, f"{data.get('total')}")
+check("В ответе есть total", data.get("total") == TOTAL_ALL, f"{data.get('total')}")
 check("В ответе есть limit/offset", data.get("limit") == 25 and data.get("offset") == 0,
       f"{data.get('limit')} / {data.get('offset')}")
 check("Строк на странице 25", len(data.get("writeoffs") or []) == 25)

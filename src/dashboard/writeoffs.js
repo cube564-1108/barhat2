@@ -223,8 +223,15 @@
         } catch (e) {
             if (token !== loadToken) return;
             console.error('Ошибка загрузки списаний:', e);
-            elements.tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color: var(--barkhat-gray); padding:20px;">Ошибка загрузки</td></tr>`;
-            hidePagination();
+            // Навигацию НЕ прячем: без неё после разового таймаута из страницы
+            // не выйти иначе как «Применить»/«Сбросить», а это прыжок на первую.
+            elements.tbody.innerHTML = `
+                <tr><td colspan="7" style="text-align:center; color: var(--barkhat-gray); padding:20px;">
+                    Ошибка загрузки
+                    <button class="btn btn-sm btn-secondary" id="writeoffs-retry-load" style="margin-left:8px;">Повторить</button>
+                </td></tr>`;
+            elements.tbody.querySelector('#writeoffs-retry-load')
+                ?.addEventListener('click', () => loadWriteoffs());
         }
     }
 
@@ -952,7 +959,11 @@
             hideCreateRecovery();
             setCreateProgress('');
             closeCreateModal();
-            await loadWriteoffs();
+            // Новая заявка — самая свежая, то есть на ПЕРВОЙ странице. Остаться
+            // на третьей значит показать человеку таблицу без его заявки: он
+            // решит, что не сохранилось, и заведёт дубль — а дубль уедет в
+            // МойСклад и спишет остатки второй раз.
+            await loadWriteoffs({ resetPage: true });
             return;
         }
         if (btn) btn.disabled = false;
@@ -1021,12 +1032,12 @@
                 // Заявка создана — закрывать окно нельзя, иначе человек уходит с
                 // непроводимой заявкой и без понимания, что произошло.
                 showCreateRecovery(data.writeoff.id, failed);
-                await loadWriteoffs();
+                await loadWriteoffs({ resetPage: true });
                 return;
             }
 
             closeCreateModal();
-            await loadWriteoffs();
+            await loadWriteoffs({ resetPage: true });
         } catch (e) {
             console.error('Ошибка создания заявки на списание:', e);
             alert('Ошибка создания заявки');

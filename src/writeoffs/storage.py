@@ -164,6 +164,15 @@ def _create_writeoffs_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_writeoffs_store ON writeoffs(store_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_writeoffs_status ON writeoffs(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_writeoffs_created ON writeoffs(created_at DESC)")
+    # Страница таблицы у не-админа — это «точка + свежие сверху». Одиночные
+    # индексы тут не складываются: SQLite берёт на таблицу ОДИН индекс, выбирал
+    # store_id и досортировывал всю точку через TEMP B-TREE на каждый клик по
+    # странице (CLAUDE.md, раздел про составные индексы). Порядок колонок
+    # обязан совпадать с ORDER BY запроса, включая id DESC.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_writeoffs_store_created "
+        "ON writeoffs(store_id, created_at DESC, id DESC)"
+    )
 
     # ========================================================================
     # Позиции заявки (несколько товаров в одной заявке)
@@ -609,7 +618,7 @@ def list_writeoffs_page(
                    (SELECT COUNT(*) FROM writeoff_positions p WHERE p.writeoff_id = w.id) AS positions_count
             FROM writeoffs w
             WHERE 1=1{where}
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             [*params, limit, offset],
