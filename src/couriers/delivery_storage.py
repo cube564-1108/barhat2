@@ -1938,8 +1938,15 @@ def courier_awaiting_close(courier_user_id: int, date_from: str,
 
     Только число. Сумму сюда не кладём намеренно: «вам должны ещё 600 ₽» о
     незакрытом заказе — обещание, которого модуль дать не может.
+
+    **Отменённые заказы сюда не входят.** Экран обещает «попадут в сумму, когда
+    оператор закроет заказ», а у отменённого этого не случится никогда: число
+    висело бы вечно и обещало деньги, которых не будет. Отбор по ГРУППЕ статусов
+    (`cancel`), а не по одному коду: кодов отмены в справочнике несколько
+    («Отменён», «Отменён клиентом», «Не дозвонились»), и по одному коду
+    остальные молча просочились бы.
     """
-    from .storage import COMPLETED_STATUS
+    from .storage import CANCEL_STATUS_GROUP, COMPLETED_STATUS
 
     with get_db() as conn:
         row = conn.execute(
@@ -1947,12 +1954,15 @@ def courier_awaiting_close(courier_user_id: int, date_from: str,
             SELECT COUNT(*) AS cnt
               FROM delivery_assignments a
               JOIN courier_orders o ON o.retailcrm_order_id = a.retailcrm_order_id
+              LEFT JOIN order_statuses s ON s.code = o.status
              WHERE a.courier_user_id = ?
                AND a.state = ?
                AND o.status != ?
+               AND COALESCE(s.group_code, '') != ?
                AND o.delivery_date >= ? AND o.delivery_date <= ?
             """,
-            (courier_user_id, STATE_DELIVERED, COMPLETED_STATUS, date_from, date_to),
+            (courier_user_id, STATE_DELIVERED, COMPLETED_STATUS,
+             CANCEL_STATUS_GROUP, date_from, date_to),
         ).fetchone()
     return (row["cnt"] if row else 0) or 0
 

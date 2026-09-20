@@ -121,6 +121,24 @@ def _valid_date(value: Optional[str]) -> bool:
     return bool(value and _DATE_RE.match(value))
 
 
+def _real_date(value: Optional[str]) -> Optional[str]:
+    """
+    Дата, которая существует, — или None.
+
+    Регулярки мало: «2026-13-45» ей соответствует, а календарю нет. Любой
+    последующий `date.fromisoformat` на таком значении бросит исключение, и
+    ручка ответит 500 вместо текста. Возвращаем саму строку, чтобы вызывающий
+    код работал с тем же форматом, что хранится в витрине.
+    """
+    if not _valid_date(value):
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
 def _default_period() -> tuple:
     """Сегодня и завтра — горизонт, в котором курьер вообще что-то решает."""
     today = date.today()
@@ -257,9 +275,13 @@ def get_earnings():
     profile = ds.get_courier_profile(int(current_user.id)) or {}
     crm_courier_id = profile.get("retailcrm_courier_id")
 
-    date_from = request.args.get("date_from")
-    date_to = request.args.get("date_to")
-    if not (_valid_date(date_from) and _valid_date(date_to)):
+    # Именно разбор датой, а не регулярка: `_valid_date` пропускает
+    # «2026-13-45», и `date.fromisoformat` ниже уронил бы ручку в 500 вместо
+    # внятного ответа. Логи контейнера на нашем тарифе не читаются, и такой
+    # отказ разбирался бы вслепую.
+    date_from = _real_date(request.args.get("date_from"))
+    date_to = _real_date(request.args.get("date_to"))
+    if not (date_from and date_to):
         # Период по умолчанию — как в «Оплате курьерам»: с 1-го числа по
         # сегодня. Одинаковый старт у двух экранов означает, что числа можно
         # сверить, ничего не настраивая.

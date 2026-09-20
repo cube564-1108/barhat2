@@ -213,6 +213,18 @@ check('поля дат слушают change, а не отправляют ка�
 check('кнопка «Обновить» знает про этот экран',
       source.includes("state.view === 'earnings'"),
       '(иначе она молча обновляет ленту и выглядит сломанной)');
+check('поздний ответ старого периода не затирает новый',
+      source.includes('earningsToken') && source.includes('token !== earningsToken'),
+      '(иначе быстрое переключение пресетов показывает сумму не того периода)');
+check('текст отказа сервера доходит до экрана',
+      source.includes('payload && payload.error')
+      && source.includes("|| ('HTTP ' + response.status)"),
+      '(«HTTP 400» вместо «Период больше 92 дней» обесценивает отказ)');
+check('строка салонов возвращается по своему правилу, а не остаётся скрытой',
+      source.includes('else renderSiteBar();'),
+      '(у курьера с несколькими салонами она пропадала после возврата в ленту)');
+check('пустой state.today не оставляет экран без единого слова',
+      source.includes('Не удалось определить сегодняшний день'));
 check('переписывается только тело списка, не поля дат',
       source.includes('el.earnBody.innerHTML')
       && !source.includes('el.earnings.innerHTML'),

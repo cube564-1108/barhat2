@@ -347,6 +347,17 @@ with app.test_client() as client:
           long_period.status_code != 200 and "дней" in str(body),
           f"({long_period.status_code}: {body})")
 
+    # Регулярка «4-2-2» такую дату пропускает, а календарь — нет. Без разбора
+    # датой ручка отвечала бы 500, который на нашем тарифе разбирать нечем.
+    nonsense = client.get(
+        "/api/courier/earnings?date_from=2026-13-45&date_to=2026-99-99")
+    check("несуществующая дата не роняет ручку в 500",
+          nonsense.status_code == 200, f"({nonsense.status_code})")
+    fallback = (nonsense.get_json() or {}).get("meta") or {}
+    check("вместо неё подставлен период по умолчанию",
+          str(fallback.get("date_from", "")).endswith("-01"),
+          f"({fallback.get('date_from')})")
+
     default = client.get("/api/courier/earnings").get_json()
     meta = default.get("meta") or {}
     check("без дат подставляется месяц с 1-го числа",
@@ -406,6 +417,23 @@ with app.test_client() as client:
     check("а просто взятый заказ в это число не мешается",
           meta.get("awaiting_close") == 1,
           f"({meta.get('awaiting_close')} — «взял» и «отвёз» это разные факты)")
+
+# Отменённый заказ, который курьер успел отметить доставленным, в ожидание
+# попасть не должен: экран обещает «попадёт в сумму, когда закроют», а у
+# отменённого этого не случится никогда — число висело бы вечно.
+cancelled = add_order("2026-09-19", OUR, 480.0, status="cancel-other")
+with cs.get_db() as conn:
+    conn.execute(
+        "INSERT INTO delivery_assignments "
+        "  (retailcrm_order_id, courier_user_id, courier_name, state, delivered_at) "
+        "VALUES (?, ?, 'Шестаков', 'delivered', datetime('now'))",
+        (cancelled, users["kurier"]))
+with app.test_client() as client:
+    login(client, "kurier")
+    meta = (client.get(f"/api/courier/earnings?{PERIOD}").get_json()
+            or {}).get("meta") or {}
+    check("отменённый заказ не обещает денег",
+          meta.get("awaiting_close") == 1, f"({meta.get('awaiting_close')})")
 
 # А когда оператор закроет — заказ переезжает в сумму и из ожидания уходит
 with cs.get_db() as conn:

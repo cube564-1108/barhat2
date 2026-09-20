@@ -258,7 +258,17 @@
         }
 
         return fetch(url, options).then(function (response) {
-            if (!response.ok) throw new Error('HTTP ' + response.status);
+            if (!response.ok) {
+                // Тело читаем ДО того, как бросить: сервер кладёт туда
+                // человеческую причину («Период больше 92 дней — выберите
+                // покороче»), а «HTTP 400» курьеру не говорит ничего и
+                // обесценивает всю работу по формулировке отказов.
+                return response.json().catch(function () { return null; })
+                    .then(function (payload) {
+                        throw new Error((payload && payload.error)
+                            || ('HTTP ' + response.status));
+                    });
+            }
             return response.json();
         }).then(function (payload) {
             done();
@@ -2058,9 +2068,13 @@
         el.feed.hidden = earnings;
         el.filters.hidden = earnings;
         el.dateBar.hidden = earnings;
-        // Строку салонов прячем, но её собственное состояние не трогаем: она
-        // и в ленте бывает скрыта, когда салон один
+        // Строка салонов прячется вместе с лентой, а возвращается по СВОЕМУ
+        // правилу: она видна не всегда (при одном салоне её нет вовсе).
+        // Простое `hidden = earnings` показало бы её там, где её быть не
+        // должно, а «прятать и не возвращать» теряло бы её у курьера с
+        // несколькими салонами до следующей загрузки ленты.
         if (earnings) el.siteBar.hidden = true;
+        else renderSiteBar();
 
         if (el.earningsBtn) el.earningsBtn.setAttribute('aria-pressed', String(earnings));
         if (earnings && !state.earnings.data && !state.earnings.loading) loadEarnings();
@@ -2100,15 +2114,30 @@
             state.earnings.data, state.earnings.meta, state.today);
     }
 
+    // Номер последнего запроса: ответы приходят не в том порядке, в каком их
+    // отправили. Быстрое переключение пресетов иначе заканчивается тем, что
+    // поздний ответ старого периода затирает новый — подсвечен «Этот месяц», а
+    // сумма показана за день. Заниженная зарплата без единого признака сбоя.
+    var earningsToken = 0;
+
     function loadEarnings() {
         if (!state.earnings.from || !state.earnings.to) {
             var range = earningsPresetRange(state.earnings.preset, state.today);
-            if (!range) return;
+            if (!range) {
+                // «Сегодня» приходит с профилем, и профиль мог не загрузиться.
+                // Молча выйти — значит оставить пустой экран, на котором и
+                // кнопка «Обновить» ничего не меняет.
+                state.earnings.error = 'Не удалось определить сегодняшний день. '
+                    + 'Потяните экран или нажмите «Обновить».';
+                renderEarnings();
+                return;
+            }
             state.earnings.from = range.from;
             state.earnings.to = range.to;
         }
         syncEarningsControls();
 
+        var token = ++earningsToken;
         state.earnings.loading = true;
         state.earnings.error = null;
         renderEarnings();
@@ -2118,11 +2147,13 @@
             + '&date_to=' + encodeURIComponent(state.earnings.to);
 
         return apiGet(url).then(function (body) {
+            if (token !== earningsToken) return;   // пока ждали, период сменили
             state.earnings.loading = false;
             state.earnings.data = body.data || null;
             state.earnings.meta = body.meta || {};
             renderEarnings();
         }).catch(function (error) {
+            if (token !== earningsToken) return;
             state.earnings.loading = false;
             state.earnings.error = error && error.message
                 ? error.message
