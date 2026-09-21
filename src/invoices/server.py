@@ -1332,6 +1332,7 @@ def remove_invoice(invoice_id):
 
 @invoices_bp.route("/<int:invoice_id>/status", methods=["PUT"])
 @role_required("admin")
+@require_ajax_header
 def edit_invoice_status(invoice_id):
     """
     Прямая смена статуса счёта. Шире, чем обычное редактирование — не
@@ -1339,6 +1340,11 @@ def edit_invoice_status(invoice_id):
     т.к. не все счета проходят через автозагрузку в банк и админу нужно
     иметь возможность проставить статус вручную в любой момент до архивации.
     Body: {"status": "on_approval"|"approved"|"rejected"|"sent_to_bank"|"paid"}
+
+    PUT сам по себе требует CORS-предпроверки, то есть с чужого сайта не
+    уйдёт. Декоратор здесь — на случай, если ручку когда-нибудь продублируют
+    POST'ом или начнут звать формой: с 21.09.2026 у неё появился вход из
+    интерфейса, и она переключает ЛЮБОЙ статус, включая «Оплачен».
     """
     invoice = get_invoice_by_id(invoice_id)
     if not invoice:

@@ -433,17 +433,29 @@ def main():
 
         # Ручная смена статуса: нужна там, где процесс не сработал вовсе.
         response = client.put(f"/api/invoices/{expense_row['id']}/status",
-                              json={'status': 'approved'})
+                              json={'status': 'approved'}, headers=AJAX)
         check(response.status_code == 200
               and get_invoice_by_id(expense_row['id'])['status'] == 'approved',
               "админ возвращает статус назад руками")
         response = client.put(f"/api/invoices/{expense_row['id']}/status",
-                              json={'status': 'такого статуса нет'})
+                              json={'status': 'такого статуса нет'}, headers=AJAX)
         check(response.status_code == 400, "выдуманный статус не принимается")
+
+        # Ручка переключает ЛЮБОЙ статус, включая «Оплачен», и с 21.09.2026 у
+        # неё есть вход из интерфейса. PUT с чужого сайта не уйдёт и так
+        # (нужна CORS-предпроверка), но декоратор снимает вопрос на случай,
+        # если ручку когда-нибудь продублируют POST'ом.
+        naked_status = client.put(f"/api/invoices/{expense_row['id']}/status",
+                                  json={'status': 'paid'})
+        check(naked_status.status_code == 403,
+              f"без X-Requested-With статус не переключить (получено {naked_status.status_code})")
 
     with app.test_client() as client:
         login(client, 'nsk_manager')
-        response = client.put(f"/api/invoices/{expense_row['id']}/status", json={'status': 'paid'})
+        # С заголовком: иначе 403 пришёл бы от require_ajax_header, и проверка
+        # роли не исполнилась бы вовсе — сторож зеленел бы не по той причине.
+        response = client.put(f"/api/invoices/{expense_row['id']}/status",
+                              json={'status': 'paid'}, headers=AJAX)
         check(response.status_code == 403, "управляющий статус руками не двигает")
 
     print("\n" + "=" * 60)

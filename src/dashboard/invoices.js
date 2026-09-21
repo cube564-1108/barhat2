@@ -1183,7 +1183,12 @@
             const res = await fetch(`/api/invoices/${currentDetailsInvoiceId}/status`, {
                 method: 'PUT',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                // Парная половина require_ajax_header на ручке (21.09.2026).
+                // Без неё старый раздел начал бы получать 403 на проде.
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'barhat-dashboard',
+                },
                 body: JSON.stringify({ status }),
             });
             const data = await res.json();

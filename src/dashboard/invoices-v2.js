@@ -5420,7 +5420,13 @@
         const response = await fetch(path, {
             method: 'PUT',
             credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
+            // X-Requested-With — парная половина require_ajax_header, как в
+            // apiPost. Шлём на все PUT разом: ручкам без декоратора он не
+            // мешает, а забыть его на новой — уже нельзя.
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'barhat-dashboard',
+            },
             body: JSON.stringify(body || {}),
         });
         const data = await response.json().catch(() => ({}));
