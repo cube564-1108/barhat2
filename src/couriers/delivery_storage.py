@@ -66,7 +66,13 @@ RELEASE_ORDER_GONE = "order_gone"  # заказ отменён или ушёл �
 # Значения по умолчанию для города, у которого настроек ещё нет. Ноль записей в
 # `courier_city_settings` — нормальное состояние: заводить строку на каждый
 # город руками не нужно, пока значения устраивают.
-DEFAULT_MAX_ACTIVE_CLAIMS = 3
+# Лимит одновременных броней — БЕЗ ОГРАНИЧЕНИЯ по умолчанию (решение владельца
+# 21.09.2026). Раньше здесь стояла тройка, которую никто не выбирал: в плане
+# записано только «лимит — настройка на город», а число появилось при
+# реализации. Экрана настроек не было, поэтому все девять городов молча жили с
+# тройкой — а в праздники курьер увозит шесть-восемь заказов и упирался в
+# отказ. Ограничение включает администратор там, где оно нужно.
+DEFAULT_MAX_ACTIVE_CLAIMS = None    # None = без ограничения
 DEFAULT_CLAIM_HORIZON_DAYS = 1      # сегодня и завтра
 DEFAULT_UNCLAIMED_ALERT_MINUTES = 90
 DEFAULT_QUIET_HOURS_FROM = "22:00"
@@ -515,11 +521,15 @@ def list_city_settings(cities: List[str]) -> List[Dict[str, Any]]:
 def set_city_settings(city: str, values: Dict[str, Any],
                       username: Optional[str] = None) -> None:
     """
-    Задать настройки города. None в значении — вернуть поле к умолчанию.
+    Задать настройки города. Пустое значение — вернуть поле к умолчанию.
+
+    Для лимита броней умолчание — это «без ограничения» (решение владельца
+    21.09.2026), поэтому очистка поля и есть способ ограничение снять.
 
     Проверки здесь, а не в обработчике: ручку зовут и форма, и будущие массовые
     действия, а «ноль одновременных броней» означал бы молча выключенный
-    модуль в одном городе.
+    модуль в одном городе — поэтому ноль запрещён, а «нет ограничения»
+    выражается пустым полем.
     """
     limits = {
         "max_active_claims": (1, 50),
@@ -1105,16 +1115,20 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
                 raise ClaimError("Этот заказ уже ваш", "already_mine")
             raise ClaimError(f"Заказ уже забрал {who}", "taken")
 
+        # Лимит может быть не задан вовсе — это штатное состояние, а не ошибка
+        # настройки: по умолчанию ограничения нет, его включает администратор
+        # там, где оно нужно. Без этой проверки сравнение с None падало бы.
         limit = settings["max_active_claims"]
-        active = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM delivery_assignments "
-            " WHERE courier_user_id = ? AND state IN (?, ?)",
-            (courier_user_id, STATE_CLAIMED, STATE_PICKED_UP),
-        ).fetchone()["cnt"]
-        if active >= limit:
-            raise ClaimError(
-                f"У вас уже {active} заказ(а) в работе — это предел для города. "
-                f"Завершите или отпустите один из них.", "limit")
+        if limit is not None:
+            active = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM delivery_assignments "
+                " WHERE courier_user_id = ? AND state IN (?, ?)",
+                (courier_user_id, STATE_CLAIMED, STATE_PICKED_UP),
+            ).fetchone()["cnt"]
+            if active >= limit:
+                raise ClaimError(
+                    f"У вас уже {active} заказ(а) в работе — это предел для "
+                    f"города. Завершите или отпустите один из них.", "limit")
 
         # claimed_at — чтобы бронь заказа «на сейчас» не сгорела в ту же
         # минуту: срок от окна доставки у него уже в прошлом
