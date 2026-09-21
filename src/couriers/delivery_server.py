@@ -468,30 +468,6 @@ def release_order(order_id: int):
     return success_response(result)
 
 
-@delivery_bp.route("/orders/<int:order_id>/extend", methods=["POST"])
-@section_required("courier_app", DISPATCH_SECTION)
-@require_ajax_header
-def extend_claim(order_id: int):
-    """
-    «Я еду» — отодвинуть сгорание брони на 30 минут, один раз.
-
-    Отдельной ручкой, а не действием в /action: там действия, которые меняют
-    состояние заказа и уезжают статусом в CRM. Продление — про нашу бронь, в
-    CRM о нём знать нечего.
-
-    `@require_ajax_header` обязателен: POST без тела — простой запрос, его
-    отправит форма с чужого сайта, а CSRF-токенов в проекте нет.
-    """
-    try:
-        result = ds.extend_claim(order_id=order_id,
-                                 courier_user_id=int(current_user.id))
-    except ds.ClaimError as e:
-        return _claim_failed(e)
-
-    log_action(current_user.username, "courier_extend", f"Заказ {order_id}")
-    return success_response(result)
-
-
 @delivery_bp.route("/orders/<int:order_id>/action", methods=["POST"])
 @section_required("courier_app", DISPATCH_SECTION)
 @require_ajax_header

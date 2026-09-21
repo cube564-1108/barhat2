@@ -242,7 +242,6 @@ print("\n5. Флорист отметил «Заказ готов» — у ку�
 with cs.get_db() as conn:
     conn.execute("UPDATE courier_orders SET status = 'order-complete' "
                  " WHERE retailcrm_order_id = 7001")
-ds.expire_stale_claims()
 ds.release_orphan_claims(["dostavka-kurerom"])
 
 with cs.get_db() as conn:

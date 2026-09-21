@@ -186,8 +186,24 @@
                 + orderTable(unclaimed) + '</div>';
         }
 
+        // Забронированы, но не забраны, а окно близко. Это замена автоснятию
+        // брони по таймеру: снимать её теперь некому, кроме человека, — значит
+        // человек обязан о ней узнать. В «Никто не взял» такой заказ не
+        // попадает: он не свободен.
+        var stuck = state.overview.stuck || [];
+        var stuckBlock = '';
+        if (stuck.length) {
+            stuckBlock = '<div class="cdisp-alarm">'
+                + '<h3>Взяли, но не забрали: ' + stuck.length + '</h3>'
+                + '<p class="section-description">До доставки осталось меньше порога '
+                + 'города, а заказ всё ещё в салоне. Бронь сама не снимается — '
+                + 'свяжитесь с курьером или снимите бронь здесь.</p>'
+                + orderTable(stuck) + '</div>';
+        }
+
         return '<div class="cdisp-tiles">' + tiles + '</div>'
             + alarm
+            + stuckBlock
             + mismatchHtml()
             + '<h3>Заказы</h3>'
             + orderTable(state.overview.orders || [])
@@ -237,8 +253,11 @@
             var slot = (order.delivery_time_from || '') +
                 (order.delivery_time_to ? '–' + order.delivery_time_to : '');
             var who = order.courier_name || '';
-            var overdue = order.state === 'claimed' && order.expires_at
-                && order.expires_at <= new Date().toISOString().slice(0, 19).replace('T', ' ');
+            // «Зависла» считает сервер: бронь по времени больше не сгорает
+            // (21.09.2026), и признак теперь не про срок брони, а про заказ —
+            // взят, но не забран, а окно доставки уже близко. Порог свой у
+            // каждого города, и знать его фронту незачем.
+            var overdue = order.stuck_claim === true;
             // Заказ отдали службе доставки: в CRM в поле «курьер» стоит
             // агрегатор. Свободным он выглядит только в наших глазах —
             // показывать его так значило бы звать человека решать решённое
@@ -250,7 +269,7 @@
                 + '<td>' + esc(order.site_name || order.city || '') + '</td>'
                 + '<td>' + esc(slot || 'время уточняется') + '</td>'
                 + '<td>' + esc(state)
-                + (overdue ? ' <span class="cdisp-bad">просрочена</span>' : '') + '</td>'
+                + (overdue ? ' <span class="cdisp-bad">не забран</span>' : '') + '</td>'
                 + '<td>' + esc(order.is_ready ? 'Готов' : 'Собирают') + '</td>'
                 + '<td>' + esc(who || (order.outsourced ? order.crm_courier_name || '' : ''))
                 + '</td>'

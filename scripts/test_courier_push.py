@@ -635,8 +635,12 @@ run = push.why_silent()["feed"]["last_push_run"]
 check("прогон рассылки оставил отметку", isinstance(run, dict), run)
 check("рассылка отработала без ошибки", (run or {}).get("error") is None,
       f"({(run or {}).get('error')})")
+# «expiring» из счётчиков ушёл вместе с уведомлением «бронь скоро снимется»:
+# бронь по времени не сгорает с 21.09.2026, звать курьера некуда
 check("отметка несёт счётчики", set((run or {}).get("counts") or {}) >=
-      {"new", "ready", "expiring", "released"}, run)
+      {"new", "ready", "released"}, run)
+check("счётчика «бронь истекает» больше нет",
+      "expiring" not in ((run or {}).get("counts") or {}), run)
 
 push.send_to_users = REAL_SEND_TO_USERS
 push.VAPID_PUBLIC_KEY = ""
@@ -808,9 +812,9 @@ check("у пробного срок свой, короткий",
       0 < captured.get("ttl", 0) <= 600, f"(ttl={captured.get('ttl')})")
 
 captured.clear()
-push.send_to_users([601], {"title": "x", "body": "y"}, event_type="claim_expiring")
-check("у «бронь истекает» срок короче, чем у заказа",
-      0 < captured.get("ttl", 0) < 3600, f"(ttl={captured.get('ttl')})")
+push.send_to_users([601], {"title": "x", "body": "y"}, event_type="claim_released")
+check("у «бронь снята» срок свой, не как у заказа",
+      0 < captured.get("ttl", 0) <= 3600, f"(ttl={captured.get('ttl')})")
 
 if _real_pywebpush is not None:
     sys.modules["pywebpush"] = _real_pywebpush

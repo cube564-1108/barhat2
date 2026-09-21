@@ -70,6 +70,7 @@ print(f"\nвременные базы: {WORK_DIR}")
 import auth  # noqa: E402
 from pyrus.server import app  # noqa: E402
 
+from couriers import delivery_feed as feed_mod  # noqa: E402
 from couriers import delivery_storage as ds  # noqa: E402
 from couriers import storage as cs  # noqa: E402
 
@@ -289,35 +290,55 @@ check("после снятия заказ можно взять снова", Tru
 
 
 # ============================================================================
-print("\n6. Автоснятие только из состояния claimed")
+print("\n6. Бронь по времени НЕ снимается")
 # ============================================================================
-# Курьер может стоять в салоне и жать «Забрал» ровно в эту секунду. Отобрать
-# у него заказ с букетом в руках нельзя — находка К3 критики плана.
+# Автоснятие по таймеру убрано 21.09.2026. Оно било по тем, кто честно ехал:
+# забрать заказ можно только после отметки флориста «Заказ готов», а её ставят
+# в момент начала окна доставки — то есть уже ПОСЛЕ того, как бронь сгорала.
+# Взятый за 45 минут до доставки заказ уходил у курьера за 15 минут до неё.
+#
+# Теперь бронь снимает только человек, а зависшую видно по сигналу в сетке.
 
-past = (datetime.utcnow() - timedelta(hours=2)).isoformat(sep=" ", timespec="seconds")
+# Заказ сегодняшний, но окно доставки уже началось: вчерашний забронировать
+# нельзя (горизонт), а зависает бронь именно так — взяли и не поехали.
+salon_today = datetime.utcnow() + timedelta(hours=SALON_UTC_OFFSET)
+past_day = salon_today.date().isoformat()
+was = (salon_today - timedelta(hours=2)).strftime("%H:%M")
 with cs.get_db() as conn:
-    conn.execute("UPDATE delivery_assignments SET expires_at = ? "
-                 " WHERE retailcrm_order_id = 9001 AND state = 'claimed'", (past,))
-    conn.execute("UPDATE delivery_assignments SET state = 'picked_up', expires_at = ? "
-                 " WHERE retailcrm_order_id = 9002", (past,))
+    conn.execute(
+        "INSERT OR REPLACE INTO courier_orders "
+        "  (retailcrm_order_id, order_number, delivery_date, delivery_time_from, "
+        "   site_code, city, status, delivery_code) "
+        "VALUES (9105, '9105', ?, ?, 'site-a', 'Новосибирск', "
+        "        'order-complete', 'dostavka-kurerom')", (past_day, was))
+ds.claim_order(9105, courier_user_id=44, courier_name="Задержавшийся",
+               city="Новосибирск")
 
-dropped = ds.expire_stale_claims()
-# Снятые записи возвращаются списком: по ним уходят пуши «бронь снята»,
-# и знать, КОГО сняли, надо не меньше, чем сколько
-check("просроченная бронь снята", len(dropped) >= 1, f"({dropped})")
-check("известно, кому уходит уведомление",
-      all(row.get("courier_user_id") for row in dropped), f"({dropped})")
+# Гоняем уборку целиком, а не конечную функцию: проверять надо путь
+feed_mod.sweep_assignments()
 
 with cs.get_db() as conn:
-    picked = conn.execute(
-        "SELECT state FROM delivery_assignments WHERE retailcrm_order_id = 9002"
-    ).fetchone()["state"]
-    expired = conn.execute(
-        "SELECT state, release_reason FROM delivery_assignments "
-        " WHERE retailcrm_order_id = 9001 ORDER BY id DESC LIMIT 1").fetchone()
-check("забранный заказ автоснятие не трогает", picked == "picked_up", f"({picked})")
-check("снятая по таймеру помечена expired",
-      expired["release_reason"] == "expired", f"({dict(expired)})")
+    row = conn.execute(
+        "SELECT state, expires_at FROM delivery_assignments "
+        " WHERE retailcrm_order_id = 9105").fetchone()
+check("бронь с прошедшим окном жива после уборки", row["state"] == "claimed",
+      f"({dict(row)})")
+check("срок брони не проставляется вовсе", row["expires_at"] is None,
+      f"({row['expires_at']})")
+
+# Зато управляющий её видит: окно доставки давно началось, заказ не забран
+active = {r["retailcrm_order_id"]: r for r in ds.list_active_assignments("Новосибирск")}
+check("в списке управляющего она помечена зависшей",
+      (active.get(9105) or {}).get("is_overdue") is True,
+      f"({(active.get(9105) or {}).get('is_overdue')})")
+
+overview = ds.dispatch_overview("Новосибирск", past_day, past_day,
+                                ["dostavka-kurerom"])
+in_stuck = {r["retailcrm_order_id"] for r in overview["stuck"]}
+check("и попадает в блок «взяли, но не забрали»", 9105 in in_stuck,
+      f"({sorted(in_stuck)})")
+check("а в «никто не взял» не попадает — заказ не свободен",
+      9105 not in {r["retailcrm_order_id"] for r in overview["unclaimed"]})
 
 
 # ============================================================================
@@ -553,19 +574,14 @@ with cs.get_db() as conn:
         (salon_now.date().isoformat(), soon))
 
 ds.claim_order(9110, courier_user_id=43, courier_name="Сергей", city="Новосибирск")
-dropped = ds.expire_stale_claims()
-check("бронь «на сейчас» переживает первый же тик",
-      9110 not in {row["retailcrm_order_id"] for row in dropped},
-      f"({[row['retailcrm_order_id'] for row in dropped]})")
+feed_mod.sweep_assignments()
 
 with cs.get_db() as conn:
     alive = conn.execute(
         "SELECT state, expires_at FROM delivery_assignments "
         " WHERE retailcrm_order_id = 9110").fetchone()
-check("бронь осталась живой", alive["state"] == "claimed", f"({dict(alive)})")
-check("срок отодвинут от момента брони, а не от окна доставки",
-      alive["expires_at"] > datetime.utcnow().isoformat(sep=" ", timespec="seconds"),
-      f"({alive['expires_at']})")
+check("бронь «на сейчас» переживает уборку", alive["state"] == "claimed",
+      f"({dict(alive)})")
 
 feed = ds.list_orders_for_courier("Новосибирск", salon_now.date().isoformat(),
                                   salon_now.date().isoformat(),
@@ -573,6 +589,8 @@ feed = ds.list_orders_for_courier("Новосибирск", salon_now.date().iso
 taken = [row for row in feed if row["retailcrm_order_id"] == 9110]
 check("и заказ не показывается свободным",
       taken and taken[0]["is_free"] is False, f"({taken[:1]})")
+check("срока в ленте больше нет", taken and "expires_at" not in taken[0],
+      "(экран показывал бы то, чего не существует)")
 
 
 # ============================================================================

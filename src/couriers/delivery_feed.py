@@ -320,7 +320,17 @@ def push_status_outbox(client, deadline: Optional[float] = None) -> Dict[str, in
 
 def sweep_assignments() -> Dict[str, int]:
     """
-    Прибрать брони: снять просроченные и те, чьих заказов больше нет.
+    Прибрать брони: снять те, чьих заказов больше нет.
+
+    **По времени бронь не снимается** (решение владельца 21.09.2026). Раньше
+    здесь же сгорали «просроченные», и правило било по тем, кто честно ехал:
+    забрать заказ можно только после отметки флориста «Заказ готов», а её
+    ставят в момент начала окна доставки — то есть уже ПОСЛЕ того, как бронь
+    сгорала. Теперь бронь снимает человек: сам курьер или управляющий, а
+    зависшую видно по сигналу «забронирован, но не забран» в сетке.
+
+    Остаётся снятие, когда исчез сам заказ: отменён или передан службе
+    доставки. Это не таймер, а «объекта больше нет».
 
     Здесь, а не отдельным планировщиком, по двум причинам. Во-первых, тик
     ленты уже захвачен талоном на обоих воркерах — своя фоновая задача
@@ -332,18 +342,15 @@ def sweep_assignments() -> Dict[str, int]:
     повторит следующая минута.
     """
     from . import storage
-    from .delivery_storage import expire_stale_claims, release_orphan_claims
+    from .delivery_storage import release_orphan_claims
 
-    result = {"expired": 0, "orphan": 0}
+    result = {"orphan": 0}
     released = []
     try:
-        expired = expire_stale_claims()
         codes = [row["code"] for row in storage.list_delivery_types()
                  if row.get("counts_as_courier")]
-        orphan = release_orphan_claims(codes)
-        released = expired + orphan
-        result["expired"] = len(expired)
-        result["orphan"] = len(orphan)
+        released = release_orphan_claims(codes)
+        result["orphan"] = len(released)
     except Exception as e:
         logger.warning(f"Лента изменений: уборка броней не удалась — {e}")
 
@@ -374,10 +381,9 @@ def notify_courier_events(released: List[Dict[str, Any]]) -> Dict[str, int]:
     # видимости нет — и его отсутствие роняло рассылку «нового заказа»
     # NameError'ом, молча, весь срок жизни модуля (разбор 18.09.2026).
     from . import push, storage
-    from .delivery_storage import (claims_about_to_expire, list_orders_for_courier,
-                                   visible_status_codes)
+    from .delivery_storage import list_orders_for_courier, visible_status_codes
 
-    counts = {"new": 0, "ready": 0, "expiring": 0, "released": 0}
+    counts = {"new": 0, "ready": 0, "released": 0}
     if not push.is_configured():
         return counts
 
@@ -387,11 +393,6 @@ def notify_courier_events(released: List[Dict[str, Any]]) -> Dict[str, int]:
             if order and push.notify_claim_released(
                     order, row["courier_user_id"], row.get("release_reason")):
                 counts["released"] += 1
-
-        for row in claims_about_to_expire():
-            order = _order_for_push(row["retailcrm_order_id"])
-            if order and push.notify_claim_expiring(order, row["courier_user_id"]):
-                counts["expiring"] += 1
 
         today = date.today().isoformat()
         tomorrow = (date.today() + timedelta(days=1)).isoformat()

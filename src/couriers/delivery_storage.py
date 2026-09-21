@@ -849,8 +849,7 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
     sql = f"""
         SELECT o.*, s.name AS site_name, s.utc_offset,
                a.id AS assignment_id, a.state AS assignment_state,
-               a.courier_user_id AS assignment_user_id, a.expires_at,
-               a.extended_at AS claim_extended_at,
+               a.courier_user_id AS assignment_user_id,
                a.courier_name AS assignment_courier_name,
                ch.fields AS changed_fields, ch.changed_at AS changed_at
         FROM courier_orders o
@@ -894,10 +893,6 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
             "assignment_state": row.get("assignment_state"),
             "is_mine": mine,
             "is_free": row.get("assignment_state") is None,
-            "expires_at": row.get("expires_at"),
-            # Продлевал ли курьер эту бронь: второй раз кнопку «Я еду» не
-            # показываем, а не отвечаем отказом на нажатие
-            "claim_extended": bool(row.get("claim_extended_at")),
             # Имя того, кто взял заказ: «Забронирован (Иван)» вместо глухого
             # «Занят». Курьер видит, что происходит со всеми заказами города
             "assignment_courier_name": row.get("assignment_courier_name"),
@@ -937,8 +932,7 @@ def order_for_courier(order_id: int, city: Optional[str],
         row = conn.execute(f"""
             SELECT o.*, s.name AS site_name, s.utc_offset,
                    a.id AS assignment_id, a.state AS assignment_state,
-                   a.courier_user_id AS assignment_user_id, a.expires_at,
-                   a.extended_at AS claim_extended_at,
+                   a.courier_user_id AS assignment_user_id,
                    a.courier_name AS assignment_courier_name,
                    ch.fields AS changed_fields, ch.changed_at AS changed_at
             FROM courier_orders o
@@ -980,8 +974,6 @@ def order_for_courier(order_id: int, city: Optional[str],
         "assignment_state": row.get("assignment_state"),
         "is_mine": mine,
         "is_free": row.get("assignment_state") is None,
-        "expires_at": row.get("expires_at"),
-        "claim_extended": bool(row.get("claim_extended_at")),
         "assignment_courier_name": row.get("assignment_courier_name"),
         "changed_fields": _change_titles(row.get("changed_fields")),
         "changed_at": row.get("changed_at"),
@@ -1130,21 +1122,26 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
                     f"У вас уже {active} заказ(а) в работе — это предел для "
                     f"города. Завершите или отпустите один из них.", "limit")
 
-        # claimed_at — чтобы бронь заказа «на сейчас» не сгорела в ту же
-        # минуту: срок от окна доставки у него уже в прошлом
-        expires_at = salon_time.claim_expires_at(
-            order["delivery_date"], order["delivery_time_from"], order["utc_offset"],
-            claimed_at=now,
-        ) if order["utc_offset"] is not None else None
-
+        # Срока у брони НЕТ (решение владельца 21.09.2026): она держится, пока
+        # курьер не откажется сам или её не снимет управляющий.
+        #
+        # Раньше здесь считался `expires_at`, и правило «сгорает за 60 минут до
+        # окна, но живёт хотя бы 30 минут» на практике означало вот что: заказ,
+        # взятый за 45 минут до доставки, сгорал за 15 минут до неё. А забрать
+        # его курьер всё это время НЕ МОГ — «Заказ готов» флорист ставит в
+        # момент начала окна. То есть модуль отбирал заказ у человека за то,
+        # что тому нечего было нажать.
+        #
+        # Взамен таймера — сигнал управляющему: «забронирован, но не забран, а
+        # окно близко» (см. dispatch_overview). Решение принимает человек,
+        # кнопка снятия брони у него уже есть.
         cursor = conn.execute(
             "INSERT INTO delivery_assignments "
             "  (retailcrm_order_id, courier_user_id, courier_name, state, "
             "   claimed_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, NULL)",
             (order_id, courier_user_id, courier_name, STATE_CLAIMED,
-             now.isoformat(sep=" ", timespec="seconds"),
-             expires_at.isoformat(sep=" ", timespec="seconds") if expires_at else None),
+             now.isoformat(sep=" ", timespec="seconds")),
         )
 
         # Бронь уходит в CRM (решение владельца 2026-09-11): оператор должен
@@ -1175,7 +1172,6 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
             "retailcrm_order_id": order_id,
             "order_number": order["order_number"],
             "state": STATE_CLAIMED,
-            "expires_at": expires_at.isoformat(sep=" ", timespec="seconds") if expires_at else None,
         }
     except ClaimError:
         conn.execute("ROLLBACK")
@@ -1185,82 +1181,6 @@ def claim_order(order_id: int, courier_user_id: int, courier_name: str,
         # между нашей проверкой и записью. Это штатный исход гонки, а не 500.
         conn.execute("ROLLBACK")
         raise ClaimError("Заказ только что забрал другой курьер", "taken")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
-
-
-def extend_claim(order_id: int, courier_user_id: int,
-                 minutes: int = salon_time.CLAIM_EXTEND_MINUTES) -> Dict[str, Any]:
-    """
-    «Я еду» — отодвинуть сгорание брони, не забирая заказ.
-
-    Курьер в дороге не может нажать «Забрал»: эту отметку ставят в салоне. До
-    19.09.2026 других действий не было вовсе, и пуш «подтвердите, что едете»
-    звал к кнопке, которой не существовало, — бронь сгорала у человека,
-    который честно ехал.
-
-    Продление одно на бронь и фиксируется `extended_at`. Смысл сгорания — не
-    наказать курьера, а успеть отдать заказ другому, пока до окна доставки есть
-    время; бесконечное «я еду» отменяло бы его целиком.
-
-    Проверка и запись — одной транзакцией под `BEGIN IMMEDIATE` (правило
-    CLAUDE.md): между чтением «продлевали ли» и записью помещаются все
-    параллельные нажатия, а уборка броней в это же время может снять эту самую
-    бронь по таймеру.
-    """
-    now = datetime.utcnow()
-    conn = sqlite_connect(DB_PATH, timeout=30)
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-
-        row = _assignment_row(conn, order_id)
-        if row is None:
-            raise ClaimError("Заказ за вами не числится", "gone")
-        if row["courier_user_id"] != courier_user_id:
-            raise ClaimError("Это чужой заказ", "forbidden")
-        if row["state"] != STATE_CLAIMED:
-            raise ClaimError("Заказ уже забран — бронь продлевать не нужно", "already")
-        if not row["expires_at"]:
-            # У салона не задан часовой пояс: срок не считался, гореть нечему
-            raise ClaimError("У этой брони нет срока", "no_expiry")
-        if row["extended_at"]:
-            raise ClaimError(
-                "Бронь уже продлевали один раз. Если не успеваете — "
-                "отпустите заказ, чтобы его успел взять другой курьер.",
-                "already_extended")
-
-        # От ТЕКУЩЕГО момента, если срок уже почти истёк: иначе «продлил на 30
-        # минут» дало бы пять минут, и курьер нажал бы кнопку впустую.
-        current = datetime.strptime(row["expires_at"][:19], "%Y-%m-%d %H:%M:%S")
-        expires_at = max(current, now) + timedelta(minutes=minutes)
-        stamp = expires_at.isoformat(sep=" ", timespec="seconds")
-
-        conn.execute(
-            "UPDATE delivery_assignments SET expires_at = ?, extended_at = ? "
-            " WHERE id = ?",
-            (stamp, now.isoformat(sep=" ", timespec="seconds"), row["id"]),
-        )
-
-        # Вернуть одноразовый талон на предупреждение: он выдаётся раз на
-        # «заказ + событие», и без этого курьер, честно нажавший «Я еду», не
-        # получил бы второго «бронь скоро снимется» — заказ ушёл бы молча.
-        # Повторов не будет: продление одно, значит и предупреждений максимум
-        # два. Той же транзакцией, что и сам сдвиг срока.
-        conn.execute(
-            "DELETE FROM push_events WHERE retailcrm_order_id = ? "
-            "   AND event_type = ?",
-            (order_id, EVENT_CLAIM_EXPIRING),
-        )
-        conn.execute("COMMIT")
-        return {"retailcrm_order_id": order_id, "expires_at": stamp,
-                "claim_extended": True}
-    except ClaimError:
-        conn.execute("ROLLBACK")
-        raise
     except Exception:
         conn.execute("ROLLBACK")
         raise
@@ -1725,68 +1645,6 @@ def list_outbox(limit: int = 100, state: Optional[str] = None) -> List[Dict[str,
     return rows
 
 
-def expire_stale_claims() -> List[Dict[str, Any]]:
-    """
-    Снять брони, до окна доставки которых осталось меньше положенного.
-
-    Возвращает снятые записи — по ним уходят уведомления «бронь снята».
-
-    Только из состояния `claimed` (находка К3): курьер может стоять в салоне
-    и жать «Забрал» ровно в эту секунду, и отобрать у него заказ с букетом в
-    руках нельзя. Кто первый взял write-лок, тот и выиграл.
-
-    Запись помечается `expired`, а не удаляется: если курьер всё-таки забрал
-    заказ, по журналу видно, что произошло.
-    """
-    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
-    conn = sqlite_connect(DB_PATH, timeout=30)
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        # Кого сняли, читаем ДО обновления и тем же соединением: иначе не
-        # узнать, кому уходит уведомление «бронь снята», а второй запрос
-        # после COMMIT уже ничего не найдёт — записи изменились.
-        victims = [dict(row) for row in conn.execute(
-            "SELECT id, retailcrm_order_id, courier_user_id FROM delivery_assignments "
-            " WHERE state = ? AND expires_at IS NOT NULL AND expires_at <= ?",
-            (STATE_CLAIMED, now)).fetchall()]
-        conn.execute(
-            "UPDATE delivery_assignments "
-            "   SET state = ?, released_at = ?, release_reason = ? "
-            " WHERE state = ? AND expires_at IS NOT NULL AND expires_at <= ?",
-            (STATE_RELEASED, now, RELEASE_EXPIRED, STATE_CLAIMED, now),
-        )
-        conn.execute("COMMIT")
-        for victim in victims:
-            victim["release_reason"] = RELEASE_EXPIRED
-        return victims
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
-
-
-def claims_about_to_expire(warn_minutes: int = salon_time.CLAIM_WARN_MINUTES
-                           ) -> List[Dict[str, Any]]:
-    """
-    Брони, которым осталось меньше `warn_minutes` до снятия.
-
-    Отдельным запросом, а не внутри снятия: предупредить надо ДО того, как
-    заказ ушёл, — в этом весь смысл. Повторов не будет: право на отправку
-    занимается журналом событий.
-    """
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT a.retailcrm_order_id, a.courier_user_id, a.expires_at "
-            "  FROM delivery_assignments a "
-            " WHERE a.state = ? AND a.expires_at IS NOT NULL "
-            f"   AND a.expires_at <= datetime('now', '+{int(warn_minutes)} minutes') "
-            "   AND a.expires_at > datetime('now')",
-            (STATE_CLAIMED,)).fetchall()
-    return [dict(row) for row in rows]
-
-
 def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None
                           ) -> List[Dict[str, Any]]:
     """
@@ -1901,17 +1759,40 @@ def release_orphan_claims(courier_delivery_codes: Optional[List[str]] = None
         conn.close()
 
 
+def _window_started(delivery_date: Optional[str], time_from: Optional[str],
+                    utc_offset: Optional[int], now: datetime) -> bool:
+    """
+    Началось ли окно доставки. Пояс не задан или дата пуста — считаем, что нет.
+
+    Отдельной функцией, потому что вопрос «пора ли уже» задают два экрана, а
+    ошибка в нём выглядит не как исключение, а как ложная тревога у
+    управляющего или её отсутствие там, где заказ реально стоит.
+    """
+    if not delivery_date or utc_offset is None:
+        return False
+    try:
+        local = salon_time.parse_local(delivery_date, time_from)
+        return salon_time.local_to_utc(local, utc_offset) <= now
+    except (ValueError, salon_time.TimezoneUnknownError):
+        return False
+
+
 def list_active_assignments(city: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Живые брони с данными заказа — для экрана управляющего и разбора зависших.
 
-    Отдаёт и просроченные (`is_overdue`): именно они и есть предмет разбора,
-    когда у курьера сломалась машина, а заказ висит.
+    Отдаёт и зависшие (`is_overdue`): именно они и есть предмет разбора,
+    когда у курьера сломалась машина, а заказ висит. С 21.09.2026 это не про
+    срок брони (его нет), а про заказ: окно доставки началось, а он не забран.
     """
-    now = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    # Именно datetime, а не строка: ниже идёт сравнение с моментом начала окна
+    # доставки, который считается арифметикой над датами. Раньше здесь была
+    # ISO-строка для сравнения с текстовым `expires_at` из базы.
+    now = datetime.utcnow()
     sql = """
         SELECT a.*, o.order_number, o.city, o.delivery_date,
-               o.delivery_time_from, o.status, s.name AS site_name
+               o.delivery_time_from, o.status, s.name AS site_name,
+               s.utc_offset
           FROM delivery_assignments a
           LEFT JOIN courier_orders o ON o.retailcrm_order_id = a.retailcrm_order_id
           LEFT JOIN courier_sites s ON s.code = o.site_code
@@ -1921,15 +1802,22 @@ def list_active_assignments(city: Optional[str] = None) -> List[Dict[str, Any]]:
     if city:
         sql += " AND o.city = ?"
         params.append(city)
-    sql += " ORDER BY a.expires_at IS NULL, a.expires_at"
+    # По окну доставки, а не по сроку брони: срока у брони больше нет, и
+    # разбирать список надо с того, что вот-вот повезут
+    sql += " ORDER BY o.delivery_date, o.delivery_time_from IS NULL, o.delivery_time_from"
 
     with get_db() as conn:
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
 
     for row in rows:
-        row["is_overdue"] = bool(row.get("expires_at")
-                                 and row["state"] == STATE_CLAIMED
-                                 and row["expires_at"] <= now)
+        # «Просрочена» больше не про срок брони (его нет), а про заказ: окно
+        # доставки уже началось, а курьер его не забрал. Это и есть предмет
+        # разбора — раньше о нём сообщал таймер, теперь сообщает сам список.
+        row["is_overdue"] = bool(
+            row["state"] == STATE_CLAIMED
+            and _window_started(row.get("delivery_date"),
+                                row.get("delivery_time_from"),
+                                row.get("utc_offset"), now))
         # Заказа нет в витрине — его отменили или он уехал за окно синка
         row["order_missing"] = row.get("order_number") is None
     return rows
@@ -2032,7 +1920,7 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
 
     ready = set(codes.get(ROLE_READY, []))
     totals = {"free": 0, "claimed": 0, "picked_up": 0, "delivered": 0,
-              "unclaimed_alert": 0}
+              "unclaimed_alert": 0, "stuck_claim": 0}
     now = datetime.utcnow()
     settings_cache: Dict[Optional[str], Dict[str, Any]] = {}
 
@@ -2070,10 +1958,35 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
             if row["unclaimed_alert"]:
                 totals["unclaimed_alert"] += 1
 
+        # Забронирован, но не забран, а окно уже близко.
+        #
+        # Это замена автоснятию брони по таймеру (убрано 21.09.2026). Раньше
+        # зависшую бронь снимал таймер — молча и заодно с теми, кто честно
+        # ехал. Теперь её никто не снимает сам, и значит человек обязан о ней
+        # УЗНАТЬ: иначе заказ числится взятым, не попадает в «никто не взял»
+        # (он же не свободен) и тихо не едет до звонка клиента.
+        #
+        # Порог тот же, что у «никто не взял»: вопрос один и тот же — «до
+        # доставки осталось столько-то, а заказ ещё в салоне», — и второй
+        # настройки он не заслуживает.
+        row["stuck_claim"] = False
+        if state == "claimed" and row.get("utc_offset") is not None:
+            city_key = row.get("city")
+            if city_key not in settings_cache:
+                settings_cache[city_key] = city_settings(city_key)
+            minutes = settings_cache[city_key]["unclaimed_alert_minutes"]
+            alert_at = salon_time.unclaimed_alert_at(
+                row["delivery_date"], row.get("delivery_time_from"),
+                row["utc_offset"], minutes)
+            row["stuck_claim"] = alert_at <= now
+            if row["stuck_claim"]:
+                totals["stuck_claim"] += 1
+
     return {
         "orders": rows,
         "totals": totals,
         "unclaimed": [row for row in rows if row["unclaimed_alert"]],
+        "stuck": [row for row in rows if row["stuck_claim"]],
     }
 
 
@@ -2281,7 +2194,7 @@ def my_active_claims(courier_user_id: int) -> List[Dict[str, Any]]:
     with get_db() as conn:
         rows = conn.execute(
             "SELECT * FROM delivery_assignments "
-            " WHERE courier_user_id = ? AND state IN (?, ?) ORDER BY expires_at",
+            " WHERE courier_user_id = ? AND state IN (?, ?) ORDER BY claimed_at",
             (courier_user_id, STATE_CLAIMED, STATE_PICKED_UP),
         ).fetchall()
     return [dict(row) for row in rows]
@@ -2293,6 +2206,9 @@ def my_active_claims(courier_user_id: int) -> List[Dict[str, Any]]:
 
 EVENT_NEW_ORDER = "new_order"
 EVENT_READY = "ready"
+# Уведомления «бронь скоро снимется» больше нет: с 21.09.2026 бронь по времени
+# не сгорает. Константа осталась — в журнале `push_events` лежат отправки за
+# прошлые дни, и по ним ещё разбирают «почему курьер об этом узнал».
 EVENT_CLAIM_EXPIRING = "claim_expiring"
 EVENT_CLAIM_RELEASED = "claim_released"
 EVENT_ORDER_GONE = "order_gone"

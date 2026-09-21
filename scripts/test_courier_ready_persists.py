@@ -316,152 +316,66 @@ check("а уехавший дальше остался пустым — дога
 
 
 # ============================================================================
-print("\n9. «Я еду» — бронь продлевается, но один раз")
+print("\n9. Бронь не сгорает, а зависшую видит управляющий")
 # ============================================================================
-# Пуш «бронь скоро снимется» до 19.09.2026 звал к кнопке, которой не было:
-# удержать заказ мог только «Забрал», а его жмут в салоне.
-
-feed(7005, "order-complete")
-claim = ds.claim_order(7005, courier_user_id=31, courier_name="Третий",
-                       city="Новосибирск")
-before_exp = claim["expires_at"]
-extended = ds.extend_claim(7005, courier_user_id=31)
-check("срок отодвинут", extended["expires_at"] > before_exp,
-      f"({before_exp} → {extended['expires_at']})")
-
-in_feed = feed_order(7005, courier_user_id=31) or {}
-check("лента говорит, что бронь продлевали", in_feed.get("claim_extended") is True)
-check("и отдаёт новый срок", in_feed.get("expires_at") == extended["expires_at"])
-
-# Талон на предупреждение возвращается: он выдаётся раз на «заказ + событие»,
-# и без возврата курьер, честно нажавший «Я еду», не получил бы второго
-# «бронь скоро снимется» — заказ ушёл бы у него молча.
-with cs.get_db() as conn:
-    conn.execute("INSERT OR REPLACE INTO push_events "
-                 "  (retailcrm_order_id, event_type) VALUES (?, ?)",
-                 (7005, ds.EVENT_CLAIM_EXPIRING))
-with cs.get_db() as conn:
-    # Право на продление уже израсходовано выше — возвращаем, чтобы проверить
-    # именно возврат талона на предупреждение, а не отказ «уже продлевали»
-    conn.execute("UPDATE delivery_assignments SET extended_at = NULL "
-                 " WHERE retailcrm_order_id = ?", (7005,))
-ds.extend_claim(7005, courier_user_id=31)
-with cs.get_db() as conn:
-    left_talon = conn.execute(
-        "SELECT COUNT(*) AS c FROM push_events "
-        " WHERE retailcrm_order_id = ? AND event_type = ?",
-        (7005, ds.EVENT_CLAIM_EXPIRING)).fetchone()["c"]
-check("продление возвращает право на предупреждение", left_talon == 0,
-      f"({left_talon})")
-
-try:
-    ds.extend_claim(7005, courier_user_id=31)
-    again, code = True, ""
-except ds.ClaimError as e:
-    again, code = False, e.code
-check("второй раз продлить нельзя", not again, f"({code})")
-check("и отказ назван своим кодом", code == "already_extended", f"({code})")
-
-try:
-    ds.extend_claim(7005, courier_user_id=99)
-    alien, alien_code = True, ""
-except ds.ClaimError as e:
-    alien, alien_code = False, e.code
-check("чужую бронь не продлить", not alien and alien_code == "forbidden",
-      f"({alien_code})")
-
-ds.advance_assignment(7005, courier_user_id=31, action=ds.ACTION_PICKUP,
-                      username="third")
-try:
-    ds.extend_claim(7005, courier_user_id=31)
-    taken, taken_code = True, ""
-except ds.ClaimError as e:
-    taken, taken_code = False, e.code
-check("забранный заказ продлевать нечего", not taken and taken_code == "already",
-      f"({taken_code})")
-
-# Срок, который уже почти истёк, отсчитывается от СЕЙЧАС, а не от него:
-# иначе «продлил на 30 минут» дало бы пять, и кнопка нажата впустую.
-feed(7006, "order-complete")
-ds.claim_order(7006, courier_user_id=32, courier_name="Четвёртый",
-               city="Новосибирск")
-almost = (datetime.utcnow() - timedelta(minutes=20)).isoformat(sep=" ",
-                                                              timespec="seconds")
-with cs.get_db() as conn:
-    conn.execute("UPDATE delivery_assignments SET expires_at = ? "
-                 " WHERE retailcrm_order_id = ?", (almost, 7006))
-late = ds.extend_claim(7006, courier_user_id=32)
-check("просроченный срок считается от текущего момента",
-      late["expires_at"] > datetime.utcnow().isoformat(sep=" ", timespec="seconds"),
-      f"({late['expires_at']})")
-
-
-# ============================================================================
-print("\n10. Кнопка, ручка и текст пуша говорят об одном и том же")
-# ============================================================================
-# Кнопка без обработчика и ручка без заголовка — два разных способа сделать
-# «приложение ничего не делает». Проверяется связка, а не наличие слова.
+# До 21.09.2026 здесь проверялась кнопка «Я еду»: она продлевала срок брони.
+# Срока больше нет — бронь снимает только человек, а вместо таймера работает
+# сигнал управляющему. Кнопка, ручка продления и пуш «бронь скоро снимется»
+# убраны: обещание, которого система не выполняет, хуже его отсутствия.
 
 with open(os.path.join(REPO, "src", "dashboard", "courier-app.js"),
           encoding="utf-8") as fh:
     app_js = fh.read()
-check("кнопка «Я еду» есть в разметке", 'data-extend="' in app_js)
-check("и её нажатие обработано", "closest('[data-extend]')" in app_js)
-check("обработчик зовёт ручку продления",
-      "/extend'" in app_js or '/extend"' in app_js)
+check("кнопки «Я еду» в приложении нет", "data-extend" not in app_js)
+check("срок брони курьеру не показывается", "Бронь до" not in app_js,
+      "(показывать нечего: срока не существует)")
 
 from couriers import push  # noqa: E402
 
-text = push.notify_claim_expiring.__doc__ or ""
-check("пуш назван по той кнопке, что есть в приложении", "Я еду" in text,
-      "(докстрока notify_claim_expiring)")
+check("пуша «бронь скоро снимется» нет",
+      not hasattr(push, "notify_claim_expiring"))
+check("функции сгорания по времени нет",
+      not hasattr(ds, "expire_stale_claims") and not hasattr(ds, "extend_claim"))
 
-print("\n11. Ручка продления защищена от чужого сайта")
+# Бронь живёт, даже когда окно доставки давно прошло
+salon_today = (datetime.utcnow() + timedelta(hours=7))
+was = (salon_today - timedelta(hours=3)).strftime("%H:%M")
+with cs.get_db() as conn:
+    conn.execute(
+        "INSERT OR REPLACE INTO courier_orders "
+        "  (retailcrm_order_id, order_number, delivery_date, delivery_time_from, "
+        "   site_code, city, status, delivery_code) "
+        "VALUES (7010, '7010', ?, ?, 'site-a', 'Новосибирск', 'order-complete', "
+        "        'dostavka-kurerom')", (salon_today.date().isoformat(), was))
+ds.claim_order(7010, courier_user_id=51, courier_name="Задержавшийся",
+               city="Новосибирск")
 
-import auth  # noqa: E402
-from pyrus.server import app  # noqa: E402
-from werkzeug.security import generate_password_hash  # noqa: E402
+from couriers import delivery_feed as feed_mod  # noqa: E402
 
-app.config["TESTING"] = True
-with app.app_context():
-    auth.init_auth_tables()
-    conn = auth.get_db()
-    try:
-        conn.execute(
-            "INSERT INTO users (username, full_name, password_hash, role, "
-            "                   is_active, created_at) "
-            "VALUES ('kurier', 'Курьер', ?, 'courier', 1, datetime('now'))",
-            (generate_password_hash("Parol12345"),))
-        conn.commit()
-    finally:
-        conn.close()
-    auth.migrate_permissions_for_existing_users()
-    conn = auth.get_db()
-    try:
-        user_id = conn.execute(
-            "SELECT id FROM users WHERE username = 'kurier'").fetchone()["id"]
-    finally:
-        conn.close()
+feed_mod.sweep_assignments()
+with cs.get_db() as conn:
+    row = conn.execute(
+        "SELECT state, expires_at FROM delivery_assignments "
+        " WHERE retailcrm_order_id = 7010").fetchone()
+check("бронь с прошедшим окном жива", row["state"] == "claimed", f"({dict(row)})")
+check("срока у неё нет", row["expires_at"] is None, f"({row['expires_at']})")
 
-ds.save_courier_profile(user_id=user_id, username="kurier", city="Новосибирск",
-                        retailcrm_courier_id=555, active=True, updated_by="test")
-feed(7007, "order-complete")
+day = salon_today.date().isoformat()
+overview = ds.dispatch_overview("Новосибирск", day, day, ["dostavka-kurerom"])
+check("управляющий видит её в «взяли, но не забрали»",
+      7010 in {r["retailcrm_order_id"] for r in overview["stuck"]},
+      f"({[r['retailcrm_order_id'] for r in overview['stuck']]})")
+check("и счётчик такой блок считает", overview["totals"]["stuck_claim"] >= 1,
+      f"({overview['totals']})")
 
-AJAX = {"X-Requested-With": "barhat-dashboard"}
-with app.test_client() as client:
-    client.post("/api/auth/login",
-                json={"username": "kurier", "password": "Parol12345"})
-    client.post("/api/courier/orders/7007/claim", headers=AJAX)
-
-    # Без заголовка запрос уходит простой формой с чужого сайта, а CSRF-токенов
-    # в проекте нет: единственная защита — этот декоратор (правило CLAUDE.md).
-    naked = client.post("/api/courier/orders/7007/extend")
-    check("без заголовка ручка отвечает 403", naked.status_code == 403,
-          f"({naked.status_code})")
-
-    ok = client.post("/api/courier/orders/7007/extend", headers=AJAX)
-    check("со своим заголовком продление проходит", ok.status_code == 200,
-          f"({ok.status_code}: {ok.get_json()})")
+with open(os.path.join(REPO, "src", "dashboard", "courier-dispatch.js"),
+          encoding="utf-8") as fh:
+    dispatch_js = fh.read()
+check("блок есть в интерфейсе управляющего",
+      "Взяли, но не забрали" in dispatch_js and "state.overview.stuck" in dispatch_js)
+check("экран не считает просрочку сам по сроку брони",
+      "expires_at" not in dispatch_js,
+      "(срок брони больше не существует, признак считает сервер)")
 
 
 print()

@@ -62,7 +62,6 @@ PUSH_TIMEOUT_SECONDS = 10
 PUSH_TTL_SECONDS = {
     "new_order": 2 * 3600,      # заказ можно взять, пока он свободен
     "ready": 2 * 3600,          # «собрали, забирай» — столько же
-    "claim_expiring": 15 * 60,  # смысл ровно в срочности; позже бесполезно
     "claim_released": 3600,
     "test": 300,                # проверка «здесь и сейчас»
 }
@@ -825,24 +824,6 @@ def notify_ready(order: Dict[str, Any], courier_user_id: int) -> bool:
         order, ds.EVENT_READY,
         "Заказ готов",
         f"Можно забирать: {order.get('site_name') or 'салон'}",
-        [courier_user_id],
-    )
-
-
-def notify_claim_expiring(order: Dict[str, Any], courier_user_id: int) -> bool:
-    """
-    Бронь скоро сгорит — нажмите «Я еду».
-
-    Текст называет кнопку, которая в приложении есть. До 19.09.2026 он звал
-    «подтвердить, что едете», а подтвердить было нечем: единственным действием,
-    удерживающим бронь, был «Забрал», и жмут его уже в салоне. Курьер
-    добросовестно открывал приложение, не находил кнопки и терял заказ.
-    """
-    return _notify(
-        order, ds.EVENT_CLAIM_EXPIRING,
-        "Бронь скоро снимется",
-        f"Нажмите «Я еду», чтобы удержать заказ на "
-        f"{_short_address(order.get('address_text'))}",
         [courier_user_id],
     )
 
