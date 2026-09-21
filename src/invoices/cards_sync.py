@@ -47,6 +47,7 @@ from .storage import (
     get_store_by_id,
     get_expense_category_by_id,
     mark_invoice_planfact_synced,
+    mark_invoice_paid,
 )
 
 logger = logging.getLogger(__name__)
@@ -169,10 +170,15 @@ def collect_candidates(force: bool = False) -> List[Dict[str, Any]]:
     """
     Заявки, готовые уехать в ПланФакт.
 
-    Трата — после подтверждения владельцем (`approved`): статуса «оплачен» у
-    неё не бывает, деньги ушли до создания заявки. Пополнение — только когда
-    перевод действительно сделан (`paid`): согласованное, но не переведённое
-    на карту ещё не легло, и перемещение в ПФ было бы неправдой.
+    Трата — после подтверждения владельцем (`approved`). Статус `paid` тоже
+    берём: в него трата переходит САМА после успешной разноски (см.
+    `_settle_card_expense`), и его же можно поставить руками. Отбирать только
+    `approved` значило бы, что трата, отмеченная оплаченной вручную до
+    разноски, не уедет в ПланФакт никогда и молча.
+
+    Пополнение — только когда перевод действительно сделан (`paid`):
+    согласованное, но не переведённое на карту ещё не легло, и перемещение в
+    ПФ было бы неправдой.
 
     Заявка, которая уже падала, до истечения FAILED_RETRY_SECONDS в очередь не
     попадает: её причина (не настроено сопоставление, нет распределения) сама
@@ -207,7 +213,7 @@ def collect_candidates(force: bool = False) -> List[Dict[str, Any]]:
             WHERE planfact_synced_at IS NULL
               AND is_archived = 0
               AND (
-                    (kind = 'card_expense' AND status = 'approved')
+                    (kind = 'card_expense' AND status IN ('approved', 'paid'))
                  OR (kind = 'card_topup'   AND status = 'paid')
               )
               {"" if force else '''
@@ -293,6 +299,33 @@ def _expense_items(invoice: Dict[str, Any], store_map, category_map) -> List[Dic
     return items
 
 
+def _settle_card_expense(invoice: Dict[str, Any]) -> None:
+    """
+    Разнесённая трата с карты переходит в «Оплачен».
+
+    До 21.09.2026 терминальным состоянием траты считался «Согласован» плюс
+    признак разноски. На экране это читалось как незаконченная работа: заявки
+    месяцами висели в «Согласован» рядом с теми, которые и правда ждут
+    действия, и отличить их можно было только по мелкому бейджу.
+
+    Статус двигаем ПОСЛЕ записи признака разноски: обратный порядок при падении
+    между двумя записями оставил бы «Оплачен» без операции в ПланФакте, а
+    заявка в этом статусе выглядит законченной и никого не зовёт.
+
+    `mark_invoice_paid` вернёт False, если трату уже отметили оплаченной
+    руками, — это не ошибка, а нормальный исход.
+    """
+    if invoice.get("kind") != "card_expense":
+        return
+    try:
+        mark_invoice_paid(invoice["id"], "system")
+    except Exception:
+        # Операция в ПланФакте уже создана, и это главное. Незакрытый статус
+        # видно в интерфейсе и чинится кнопкой, а исключение здесь откатило бы
+        # разноску всех остальных заявок прогона.
+        logger.exception("Трата %s разнесена, но статус не переведён в «Оплачен»", invoice["id"])
+
+
 def _push_invoice(invoice: Dict[str, Any], client, store_map, category_map,
                   known: Dict[str, str], dry_run: bool) -> Dict[str, Any]:
     """
@@ -313,6 +346,7 @@ def _push_invoice(invoice: Dict[str, Any], client, store_map, category_map,
         if not dry_run:
             mark_invoice_planfact_synced(invoice["id"], known[marker])
             set_invoice_planfact_error(invoice["id"], None)
+            _settle_card_expense(invoice)
         return {"status": "exists", "invoice_id": invoice["id"], "operation_id": known[marker]}
 
     comment = f"{invoice.get('payment_purpose') or ''} {marker}".strip()
@@ -392,6 +426,7 @@ def _push_invoice(invoice: Dict[str, Any], client, store_map, category_map,
 
     mark_invoice_planfact_synced(invoice["id"], operation_id)
     set_invoice_planfact_error(invoice["id"], None)
+    _settle_card_expense(invoice)
     return {"status": "created", "invoice_id": invoice["id"], "operation_id": operation_id}
 
 

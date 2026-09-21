@@ -222,11 +222,17 @@ def main():
     check(outcome['status'] == 'skip',
           "операция с REF-кодом пополнения пропускается: её разнесёт другой синк")
 
-    print("\n6. Отметить трату оплаченной нельзя")
+    print("\n6. Несогласованную трату оплаченной не отмечают")
+    # До 21.09.2026 здесь стоял отказ «у траты с карты нет статуса оплачен» —
+    # по ТИПУ заявки. Из-за него трата навсегда оставалась в «Согласован».
+    # Теперь отказ только по СТАТУСУ: несогласованное платить нечем.
     with app.test_client() as client:
         login(client, 'admin_test')
         response = client.post(f"/api/invoices/{expense_row['id']}/mark-paid")
-        check(response.status_code == 409, "у траты с карты нет статуса «оплачен»")
+        check(response.status_code == 409, "трата на согласовании оплаченной не становится")
+        reason = (response.get_json() or {}).get('error') or ''
+        check('статус' in reason.lower(),
+              f"и отказ объясняет себя статусом, а не типом заявки: {reason}")
 
     print("\n7. KPI-плитки не засоряются тратами")
     summary = get_invoices_summary(today='2026-08-30')
@@ -391,6 +397,36 @@ def main():
         })
         check(response.status_code == 403,
               "но переставить трату на свою карту он всё равно не может")
+
+    print("\n14. Трата с карты доходит до «Оплачен» и статус двигается руками")
+    # Последним разделом: меняет статус заявки, которую считают разделы 7 и 10.
+    # Жалоба владельца 21.09.2026: траты с карты навсегда оставались в
+    # «Согласован» — кнопка «Отметить оплаченным» отвечала 409 по типу заявки,
+    # а больше статус не двигал никто.
+    approve_invoice(expense_row['id'], 'admin_test')
+    with app.test_client() as client:
+        login(client, 'admin_test')
+        response = client.post(f"/api/invoices/{expense_row['id']}/mark-paid")
+        check(response.status_code == 200,
+              f"согласованную трату отмечаем оплаченной (получено {response.status_code})")
+        paid_row = get_invoice_by_id(expense_row['id'])
+        check(paid_row['status'] == 'paid', f"статус стал «Оплачен» (получено {paid_row['status']})")
+        check(paid_row['paid_at'], "дата оплаты проставлена — иначе история перехода пустая")
+
+        # Ручная смена статуса: нужна там, где процесс не сработал вовсе.
+        response = client.put(f"/api/invoices/{expense_row['id']}/status",
+                              json={'status': 'approved'})
+        check(response.status_code == 200
+              and get_invoice_by_id(expense_row['id'])['status'] == 'approved',
+              "админ возвращает статус назад руками")
+        response = client.put(f"/api/invoices/{expense_row['id']}/status",
+                              json={'status': 'такого статуса нет'})
+        check(response.status_code == 400, "выдуманный статус не принимается")
+
+    with app.test_client() as client:
+        login(client, 'nsk_manager')
+        response = client.put(f"/api/invoices/{expense_row['id']}/status", json={'status': 'paid'})
+        check(response.status_code == 403, "управляющий статус руками не двигает")
 
     print("\n" + "=" * 60)
     if failures:

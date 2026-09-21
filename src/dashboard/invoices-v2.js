@@ -1927,12 +1927,13 @@
         const clarification = invoice.clarification_at
             ? ' <span class="bx-badge b-warn">На уточнении</span>'
             : '';
-        // Ждёт разноски в ПланФакт. У счёта это оплаченный, у траты с карты —
-        // подтверждённый (статуса «оплачен» у неё не бывает), у пополнения —
-        // переведённый. Раньше сбой разноски не видел никто.
+        // Ждёт разноски в ПланФакт. У счёта это оплаченный, у пополнения —
+        // переведённый, у траты с карты — подтверждённый: «Оплачен» она
+        // получает уже ПОСЛЕ разноски (или руками), поэтому берём оба статуса.
+        // Раньше сбой разноски не видел никто.
         const kind = invoice.kind || 'invoice';
         const waitsSync = kind === 'card_expense'
-            ? invoice.status === 'approved'
+            ? (invoice.status === 'approved' || invoice.status === 'paid')
             : invoice.status === 'paid';
         // Заявка с ненаступившей датой операции ждёт срока, а не сломана:
         // называть это ошибкой — заставлять чинить то, что исправно.
@@ -1949,6 +1950,9 @@
     }
 
     function dueBadge(invoice) {
+        // У траты с карты срока оплаты нет вовсе: деньги ушли до создания
+        // заявки. Подпись «оплачен» рядом с прочерком читалась бы как сбой.
+        if (invoice.kind === 'card_expense') return '';
         if (invoice.status === 'paid') return '<span class="iv2-hint">оплачен</span>';
         const days = daysTo(invoice.due_date);
         if (days === null) return '';
@@ -2945,8 +2949,11 @@
     }
 
     /**
-     * Действия над счётом. Ручного селекта статуса нет (решение №16): статус
-     * двигают только эти кнопки, за каждой стоит решение.
+     * Действия над счётом. Основной путь статуса — именные кнопки, за каждой
+     * стоит решение и свой диалог. Ручная смена статуса (решение владельца
+     * 21.09.2026, отменяет решение №16 плана) — отдельная кнопка админа для
+     * случаев мимо процесса: счёт оплатили не через банк, заявка застряла
+     * после сбоя, статус нужно вернуть назад.
      *
      * Кнопок, которых ещё нет на клиенте, здесь не рисуем — вместо них подпись,
      * в какой фазе они появятся. Кнопка, которая «ничего не делает», хуже
@@ -2956,6 +2963,11 @@
         const invoice = details.invoice;
         const admin = isAdmin();
         const buttons = [];
+        // Заявка по рабочей карте в банк не уходит вовсе (_send_invoice_to_bank
+        // отвечает 409): трата уже совершена, пополнение владелец переводит
+        // руками. Кнопка, ведущая в отказ, — та же болезнь, что и кнопка,
+        // которая ничего не делает.
+        const toBank = (invoice.kind || 'invoice') === 'invoice';
 
         // Правку показываем по ответу сервера, а не по своей копии правил:
         // can_edit_fields считает тот же can_edit_invoice_fields, что потом
@@ -2995,7 +3007,7 @@
             // Отправка в банк по одному счёту. Массовое действие живёт только
             // в виде «Таблица», а согласовывают в очереди — без этой кнопки
             // приходилось переключать вид ради одного счёта.
-            if (invoice.status === 'approved' && !invoice.is_archived) {
+            if (toBank && invoice.status === 'approved' && !invoice.is_archived) {
                 buttons.unshift(`<button class="bx-btn bx-btn--ghost" type="button" data-act="bank-test">Проверить сборку</button>`);
                 buttons.unshift(`<button class="bx-btn" type="button" data-act="bank">Отправить в банк</button>`);
             }
@@ -3003,10 +3015,15 @@
             // позже отправки, когда в кабинете банка чего-то не хватает
             // (04.09.2026 — пустая ставка НДС). До этого документ был виден
             // только в отчёте сразу после отправки и исчезал вместе с ним.
-            if (invoice.status === 'sent_to_bank' || invoice.status === 'paid' || invoice.bank_send_error) {
+            if (toBank && (invoice.status === 'sent_to_bank' || invoice.status === 'paid'
+                           || invoice.bank_send_error)) {
                 buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="bank-doc">Платёжка в банк</button>`);
             }
+            // Ручная смена статуса. Последняя из статусных кнопок: обычный
+            // путь — именные действия выше, сюда идут, когда счёт прошёл мимо
+            // процесса. Сервер разрешает её до архивации (can_edit_invoice_status).
             if (!invoice.is_archived) {
+                buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="set-status">Сменить статус</button>`);
                 buttons.push(`<button class="bx-btn bx-btn--ghost" type="button" data-act="archive">В архив</button>`);
             }
         }
@@ -3436,6 +3453,9 @@
                 if (!ok) return;
                 await apiPost(`/api/invoices/${invoiceId}/mark-paid`);
                 toast('Счёт отмечен оплаченным', 'success');
+            } else if (action === 'set-status') {
+                const moved = await changeStatusByHand(invoiceId, invoice);
+                if (!moved) return;
             } else if (action === 'archive') {
                 const ok = await window.BarhatUI.confirm(`${label} уйдёт в архив.`,
                     { title: 'В архив?', confirmText: 'В архив' });
@@ -3468,6 +3488,47 @@
         await refreshDetails(invoiceId);
         loadSummary();
         loadList(false);
+    }
+
+    /**
+     * Ручная смена статуса (только админ, сервер проверяет то же самое).
+     *
+     * Нужна там, где процесс не сработал: счёт оплатили не через банк, трату
+     * с карты надо закрыть до разноски, статус нужно вернуть назад после
+     * ошибки. Диалог прямо говорит, чего смена НЕ делает, — иначе её примут
+     * за отправку в банк или за разноску в ПланФакт.
+     *
+     * Возвращает true, если статус действительно сдвинулся.
+     */
+    async function changeStatusByHand(invoiceId, invoice) {
+        const label = invoice.invoice_number || ('#' + invoice.id);
+        const current = STATUSES[invoice.status];
+        const options = Object.keys(STATUSES).map(key => ({ value: key, label: STATUSES[key].label }));
+
+        const notes = [
+            `${label} · ${money(invoice.amount)}. Сейчас «${current ? current.label : invoice.status}».`,
+            'Статус ставится как есть: платёжка в банк не уйдёт, операция в ПланФакте'
+            + ' не создастся и не удалится.',
+        ];
+        // Разнесённой заявке смена статуса в ПланФакте уже ничего не меняет —
+        // об этом надо сказать до нажатия, а не искать потом расхождение.
+        if (invoice.planfact_synced_at) {
+            notes.push('Заявка уже разнесена в ПланФакт — там всё останется как есть.');
+        } else if (invoice.kind === 'card_expense') {
+            notes.push('Трата ещё не разнесена в ПланФакт: разноска пойдёт своим чередом'
+                       + ' и в статусе «Оплачен».');
+        }
+
+        const picked = await window.BarhatUI.choice(notes.join('\n\n'), options, {
+            title: 'Сменить статус',
+            confirmText: 'Сменить',
+            defaultValue: invoice.status,
+        });
+        if (picked === null || picked === invoice.status) return false;
+
+        await apiPut(`/api/invoices/${invoiceId}/status`, { status: picked });
+        toast(`Статус: ${STATUSES[picked] ? STATUSES[picked].label : picked}`, 'success');
+        return true;
     }
 
     /**

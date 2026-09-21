@@ -260,8 +260,24 @@
             p.textContent = String(cfg.message ?? '');
             dialog.appendChild(p);
 
+            // Поле ввода и выбор из списка — одна ветка: у них общий возврат
+            // значения (а не true/false), общая обработка Enter и общий фокус.
+            // Разводить их на два диалога значило бы дублировать всё это.
             let input = null;
-            if (cfg.withInput) {
+            if (cfg.options && cfg.options.length) {
+                input = document.createElement('select');
+                input.className = 'bx-dialog-input';
+                cfg.options.forEach((option) => {
+                    const node = document.createElement('option');
+                    // textContent, а не innerHTML: подпись приходит из данных
+                    node.value = String(option.value);
+                    node.textContent = String(option.label != null ? option.label : option.value);
+                    if (option.disabled) node.disabled = true;
+                    input.appendChild(node);
+                });
+                if (cfg.defaultValue != null) input.value = String(cfg.defaultValue);
+                dialog.appendChild(input);
+            } else if (cfg.withInput) {
                 input = document.createElement('input');
                 input.type = 'text';
                 input.className = 'bx-dialog-input';
@@ -307,13 +323,15 @@
                 resolve(value);
             }
 
-            const cancelValue = cfg.withInput ? null : false;
+            // Диалог, у которого есть поле или список, отвечает значением, а
+            // отказ от него — null. У обычного подтверждения ответ true/false.
+            const cancelValue = input ? null : false;
             function cancel() { finish(cancelValue); }
-            function accept() { finish(cfg.withInput ? input.value : true); }
+            function accept() { finish(input ? input.value : true); }
 
             function onKeydown(e) {
                 if (e.key === 'Escape') { e.preventDefault(); cancel(); return; }
-                if (e.key === 'Enter' && (cfg.withInput || document.activeElement !== cancelBtn)) {
+                if (e.key === 'Enter' && (input || document.activeElement !== cancelBtn)) {
                     e.preventDefault();
                     accept();
                 }
@@ -329,7 +347,8 @@
             openDialog = { cancel };
             document.body.appendChild(backdrop);
             (input || confirmBtn).focus();
-            if (input) input.select();
+            // У <select> метода select() нет — вызов уронил бы весь диалог
+            if (input && typeof input.select === 'function') input.select();
         });
     }
 
@@ -354,6 +373,28 @@
             withInput: true,
             defaultValue,
             placeholder: opts.placeholder,
+        });
+    }
+
+    /**
+     * Выбор одного значения из списка. options — [{value, label, disabled}].
+     * Возвращает выбранное значение или null, если отказались.
+     *
+     * Нативного аналога нет: prompt со списком в тексте заставляет человека
+     * набирать значение руками, а в iframe Пульса нативные диалоги не
+     * работают вовсе.
+     */
+    function choiceDialog(message, options, opts) {
+        opts = opts || {};
+        const list = (options || []).filter(Boolean);
+        if (!list.length) return Promise.resolve(null);
+        return showDialog({
+            message,
+            title: opts.title || 'Выберите значение',
+            confirmText: opts.confirmText || 'Применить',
+            cancelText: opts.cancelText || 'Отмена',
+            options: list,
+            defaultValue: opts.defaultValue,
         });
     }
 
@@ -521,6 +562,7 @@
         toast,
         confirm: confirmDialog,
         prompt: promptDialog,
+        choice: choiceDialog,
         inIframe,
         nativeAlert,
         recentErrors: function () { return errorBuffer.slice(); },

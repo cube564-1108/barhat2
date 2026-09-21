@@ -308,6 +308,50 @@ def main():
     check(arrived['planfact_synced_at'] is not None,
           "когда день наступил — уехала сама, без человека")
 
+    print("\n10. Разнесённая трата переходит в «Оплачен»")
+    # Жалоба владельца 21.09.2026: траты с карты навсегда висели в
+    # «Согласован» и смешивались с теми, что правда ждут действия. Признак
+    # разноски был только мелким бейджем.
+    settled = make_expense(1800, '2026-08-30')
+    check(get_invoice_by_id(settled['id'])['status'] == 'approved',
+          "до разноски трата в «Согласован»")
+    sync.run_card_sync(force=True)
+    settled_row = get_invoice_by_id(settled['id'])
+    check(settled_row['planfact_synced_at'] is not None, "трата уехала в ПланФакт")
+    check(settled_row['status'] == 'paid',
+          f"и стала «Оплачен» (получено «{settled_row['status']}»)")
+    check(settled_row['paid_at'], "дата оплаты проставлена")
+
+    # Пополнение приходит в разноску уже оплаченным — его статус не трогаем.
+    settled_topup = make_topup(3000, '2026-08-30')
+    sync.run_card_sync(force=True)
+    check(get_invoice_by_id(settled_topup['id'])['status'] == 'paid',
+          "у пополнения статус остаётся «Оплачен»")
+
+    print("\n11. Отказ ПланФакта статус не двигает")
+    # Обратный порядок («сначала статус, потом признак») оставил бы заявку
+    # законченной на вид и не разнесённой на деле — то есть невидимой.
+    not_pushed = make_expense(1900, '2026-08-30')
+    fake.fail_next = True
+    sync.run_card_sync(force=True)
+    not_pushed_row = get_invoice_by_id(not_pushed['id'])
+    check(not_pushed_row['planfact_synced_at'] is None, "операция в ПланФакт не ушла")
+    check(not_pushed_row['status'] == 'approved',
+          f"и статус остался «Согласован» (получено «{not_pushed_row['status']}»)")
+
+    print("\n12. Трата, оплаченная руками до разноски, всё равно уезжает")
+    # Статус «Оплачен» можно поставить рукой раньше синка. Если считать
+    # кандидатами только «Согласован», такая трата не уедет никогда и молча.
+    by_hand = make_expense(2100, '2026-08-30')
+    mark_invoice_paid(by_hand['id'], 'admin')
+    check(get_invoice_by_id(by_hand['id'])['status'] == 'paid',
+          "трату отметили оплаченной до разноски")
+    ids = {row['id'] for row in sync.collect_candidates(force=True)}
+    check(by_hand['id'] in ids, "она остаётся кандидатом на разноску")
+    sync.run_card_sync(force=True)
+    check(get_invoice_by_id(by_hand['id'])['planfact_synced_at'] is not None,
+          "и уезжает в ПланФакт обычным порядком")
+
     print("\n" + "=" * 60)
     if failures:
         print(f"ПРОВАЛОВ: {len(failures)}")

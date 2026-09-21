@@ -2250,28 +2250,37 @@ def update_invoice_status(invoice_id: int, new_status: str, changed_by: str) -> 
     if old_status == new_status:
         return invoice
 
+    # try/finally обязателен: незакрытое соединение с неоткатанной транзакцией
+    # держит write-лок общей базы до перезапуска воркера — вместе с логином.
     conn = get_db()
-    conn.execute("UPDATE invoices SET status = ? WHERE id = ?", (new_status, invoice_id))
+    try:
+        conn.execute("UPDATE invoices SET status = ? WHERE id = ?", (new_status, invoice_id))
 
-    if new_status == "approved" and not invoice["approved_by"]:
-        conn.execute(
-            "UPDATE invoices SET approved_by = ?, approved_at = datetime('now') WHERE id = ?",
-            (changed_by, invoice_id)
-        )
-    elif new_status == "rejected" and not invoice["rejected_by"]:
-        conn.execute(
-            "UPDATE invoices SET rejected_by = ? WHERE id = ?",
-            (changed_by, invoice_id)
-        )
-    elif new_status == "paid" and not invoice["paid_at"]:
-        conn.execute(
-            "UPDATE invoices SET paid_at = datetime('now') WHERE id = ?",
-            (invoice_id,)
-        )
+        if new_status == "approved" and not invoice["approved_by"]:
+            conn.execute(
+                "UPDATE invoices SET approved_by = ?, approved_at = datetime('now') WHERE id = ?",
+                (changed_by, invoice_id)
+            )
+        elif new_status == "rejected" and not invoice["rejected_by"]:
+            conn.execute(
+                "UPDATE invoices SET rejected_by = ? WHERE id = ?",
+                (changed_by, invoice_id)
+            )
+        elif new_status == "paid" and not invoice["paid_at"]:
+            conn.execute(
+                "UPDATE invoices SET paid_at = datetime('now') WHERE id = ?",
+                (invoice_id,)
+            )
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
+    # История пишется СВОИМ соединением и только после close(): вложенный
+    # вызов при открытой транзакции уже клал запись в модуле счетов.
     add_invoice_history(invoice_id, changed_by, "status", old_status, new_status)
 
     return get_invoice_by_id(invoice_id)
@@ -2556,12 +2565,14 @@ def _build_invoice_filters(
     # Оплачен, но в ПланФакт не уехал. Раньше такие счета были неотличимы от
     # разнесённых — из-за этого сбой разноски был полностью беззвучным.
     if planfact == "unsynced" and _planfact_sync_columns_exist():
-        # У траты с карты статуса «оплачен» не бывает — она ждёт разноски с
-        # момента подтверждения. Без второй ветки срез «не разнесены» показывал
-        # бы только счета, а карточные ошибки оставались бы невидимыми.
+        # Трата с карты ждёт разноски с момента подтверждения (`approved`), а
+        # «Оплачен» получает уже ПОСЛЕ неё — но может получить и раньше, рукой
+        # админа. Берём оба статуса: иначе трата, отмеченная оплаченной до
+        # разноски, выпадала бы из среза ровно тогда, когда за ней и надо
+        # следить. Без этой ветки карточные ошибки не видел бы никто.
         if _has_card_columns():
             where += (" AND i.planfact_synced_at IS NULL AND ("
-                      "(i.kind = 'card_expense' AND i.status = 'approved')"
+                      "(i.kind = 'card_expense' AND i.status IN ('approved', 'paid'))"
                       " OR (i.kind != 'card_expense' AND i.status = 'paid'))")
         else:
             where += " AND i.status = 'paid' AND i.planfact_synced_at IS NULL"
@@ -2857,8 +2868,9 @@ def get_invoices_summary(
         due_open = "i.status != 'paid' AND i.due_date IS NOT NULL"
 
         # Расход с рабочей карты в платёжные плитки не попадает: деньги по нему
-        # уже потрачены, платить нечего, и статус 'paid' он не получает никогда.
-        # Без этого условия такие заявки навсегда осели бы в «просрочено».
+        # уже потрачены, платить нечего. Срока оплаты у такой заявки нет вовсе,
+        # но условие оставляем явным: оно не зависит от того, дошла ли заявка до
+        # статуса «Оплачен» (с 21.09.2026 доходит — после разноски в ПланФакт).
         # Пополнение карты, наоборот, ждёт перевода и в плитках нужно.
         if _column_exists(conn, "invoices", "kind"):
             due_open += " AND i.kind != 'card_expense'"
