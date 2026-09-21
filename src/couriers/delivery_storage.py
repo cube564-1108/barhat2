@@ -523,6 +523,11 @@ def set_city_settings(city: str, values: Dict[str, Any],
     """
     Задать настройки города. Пустое значение — вернуть поле к умолчанию.
 
+    **Пишутся только те поля, которые переданы.** Экран настроек шлёт три
+    числовых поля, и запись «всех колонок сразу» молча обнуляла бы тихие часы
+    при каждом сохранении. Отсутствие ключа и пустое значение — разные вещи:
+    первое означает «не трогай», второе — «верни к умолчанию».
+
     Для лимита броней умолчание — это «без ограничения» (решение владельца
     21.09.2026), поэтому очистка поля и есть способ ограничение снять.
 
@@ -538,6 +543,8 @@ def set_city_settings(city: str, values: Dict[str, Any],
     }
     clean: Dict[str, Any] = {}
     for field, (low, high) in limits.items():
+        if field not in values:
+            continue
         value = values.get(field)
         if value in (None, ""):
             clean[field] = None
@@ -548,6 +555,8 @@ def set_city_settings(city: str, values: Dict[str, Any],
         clean[field] = number
 
     for field in ("quiet_hours_from", "quiet_hours_to"):
+        if field not in values:
+            continue
         value = (values.get(field) or "").strip()
         if not value:
             clean[field] = None
@@ -556,25 +565,24 @@ def set_city_settings(city: str, values: Dict[str, Any],
             raise ValueError(f"{field}: ожидается ЧЧ:ММ, получено «{value}»")
         clean[field] = value
 
+    if not clean:
+        return
+
+    columns = list(clean)
+    placeholders = ", ".join("?" * (len(columns) + 2))
+    updates = ", ".join(f"{name} = excluded.{name}" for name in columns)
     with get_db() as conn:
         conn.execute(
-            """
+            f"""
             INSERT INTO courier_city_settings
-                (city, max_active_claims, claim_horizon_days, unclaimed_alert_minutes,
-                 quiet_hours_from, quiet_hours_to, updated_by, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ({", ".join(["city", *columns, "updated_by"])}, updated_at)
+            VALUES ({placeholders}, datetime('now'))
             ON CONFLICT(city) DO UPDATE SET
-                max_active_claims = excluded.max_active_claims,
-                claim_horizon_days = excluded.claim_horizon_days,
-                unclaimed_alert_minutes = excluded.unclaimed_alert_minutes,
-                quiet_hours_from = excluded.quiet_hours_from,
-                quiet_hours_to = excluded.quiet_hours_to,
+                {updates},
                 updated_by = excluded.updated_by,
                 updated_at = datetime('now')
             """,
-            (city, clean["max_active_claims"], clean["claim_horizon_days"],
-             clean["unclaimed_alert_minutes"], clean["quiet_hours_from"],
-             clean["quiet_hours_to"], username),
+            (city, *[clean[name] for name in columns], username),
         )
 
 
@@ -2158,7 +2166,12 @@ def delivery_metrics(date_from: str, date_to: str,
             late += 1
 
     total = len(claims)
-    expired = sum(1 for c in claims if c["release_reason"] == RELEASE_EXPIRED)
+    # Броней, снятых ПО ТАЙМЕРУ, больше не бывает: сгорание убрано 21.09.2026.
+    # Показатель заменён на «сняли руками» — это и есть живой сигнал о том, что
+    # курьер взял и не поехал. Прежняя доля просроченных теперь всегда ноль, и
+    # плитка с ней врала бы, что таких случаев нет.
+    by_hand = sum(1 for c in claims
+                  if c["release_reason"] in (RELEASE_SELF, RELEASE_ADMIN))
 
     def median(values: List[float]) -> Optional[float]:
         if not values:
@@ -2172,8 +2185,8 @@ def delivery_metrics(date_from: str, date_to: str,
     return {
         "period": {"from": date_from, "to": date_to},
         "claims_total": total,
-        "expired_share": round(expired / total * 100, 1) if total else None,
-        "expired_count": expired,
+        "released_by_hand_share": round(by_hand / total * 100, 1) if total else None,
+        "released_by_hand_count": by_hand,
         # Медиана, а не среднее: одна ходка через весь город сдвигает среднее
         # так, что оно перестаёт описывать обычный день
         "minutes_to_pickup_median": round(median(pickup_times), 1) if pickup_times else None,

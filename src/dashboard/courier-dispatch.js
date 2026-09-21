@@ -291,7 +291,7 @@
         if (!m) return '';
         var rows = [
             ['Броней за период', num(m.claims_total)],
-            ['Доля просроченных броней', num(m.expired_share, ' %')],
+            ['Броней сняли руками', num(m.released_by_hand_share, ' %')],
             ['От брони до забора, медиана', num(m.minutes_to_pickup_median, ' мин')],
             ['Доставок вовремя', num(m.on_time_share, ' %')],
             ['Ушло аутсорсу после снятия брони', num(m.outsourced_after_release)],
@@ -504,27 +504,31 @@
                 + 'из справочника салонов.</p>';
         }
 
-        var rows = state.cities.map(function (item) {
-            var city = esc(item.city);
+        // Строки помечаются НОМЕРОМ, а не названием города: название уходит в
+        // разметку экранированным, а getAttribute отдаёт его обратно уже
+        // расшифрованным. Для города с «&» или кавычкой сравнение строк не
+        // совпало бы ни с одним полем — ушёл бы пустой payload, и настройки
+        // сбросились бы к умолчаниям под тостом «сохранено».
+        var rows = state.cities.map(function (item, index) {
             function cell(field, value, placeholder, min, max) {
                 if (!state.isAdmin) {
                     return '<td>' + esc(value === null || value === undefined
                         ? placeholder : value) + '</td>';
                 }
                 return '<td><input type="number" class="form-input"'
-                    + ' data-city-field="' + field + '" data-city="' + city + '"'
+                    + ' data-city-field="' + field + '" data-city-row="' + index + '"'
                     + ' min="' + min + '" max="' + max + '" style="width:120px"'
                     + ' placeholder="' + esc(placeholder) + '"'
                     + ' value="' + (value === null || value === undefined ? '' : esc(value))
                     + '"></td>';
             }
             return '<tr>'
-                + '<td>' + city + '</td>'
+                + '<td>' + esc(item.city) + '</td>'
                 + cell('max_active_claims', item.max_active_claims, 'без ограничения', 1, 50)
                 + cell('claim_horizon_days', item.claim_horizon_days, '1', 0, 14)
                 + cell('unclaimed_alert_minutes', item.unclaimed_alert_minutes, '90', 5, 1440)
                 + '<td>' + (state.isAdmin
-                    ? '<button class="btn btn-sm btn-primary" data-city-save="' + city
+                    ? '<button class="btn btn-sm btn-primary" data-city-save="' + index
                         + '">Сохранить</button>'
                     : '') + '</td>'
                 + '</tr>';
@@ -620,16 +624,26 @@
 
         var citySave = event.target.closest('[data-city-save]');
         if (citySave) {
-            var city = citySave.getAttribute('data-city-save');
+            var rowIndex = citySave.getAttribute('data-city-save');
+            var item = (state.cities || [])[Number(rowIndex)];
+            if (!item) { toast('Строка города не найдена, обновите экран', 'error'); return; }
+            var city = item.city;
             var payload = {};
-            var fields = document.querySelectorAll('[data-city][data-city-field]');
+            var fields = document.querySelectorAll('[data-city-row][data-city-field]');
             Array.prototype.forEach.call(fields, function (input) {
-                if (input.getAttribute('data-city') !== city) return;
+                if (input.getAttribute('data-city-row') !== rowIndex) return;
                 // Пустое поле отправляем как есть: на сервере это «вернуть к
                 // умолчанию», а у лимита умолчание — «без ограничения»
                 var raw = input.value.trim();
                 payload[input.getAttribute('data-city-field')] = raw === '' ? null : raw;
             });
+            // Ни одного поля не нашлось — значит разметка и обработчик
+            // разъехались. Пустой payload сервер понял бы как «ничего не
+            // менять», но молчать об этом нельзя: человек нажал «Сохранить»
+            if (!Object.keys(payload).length) {
+                toast('Поля настроек не найдены, обновите экран', 'error');
+                return;
+            }
             // Кнопка гасится на время запроса: медленный ответ иначе
             // превращает один клик в три (правило CLAUDE.md)
             citySave.disabled = true;

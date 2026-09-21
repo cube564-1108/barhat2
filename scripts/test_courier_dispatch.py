@@ -602,6 +602,49 @@ check("пустое поле уходит как «без ограничения
 check("не-администратору поля не показываются",
       "state.isAdmin" in js and "Менять настройки" in js)
 
+# --- правки по ревью 21.09.2026 ---------------------------------------------
+
+# 1. Город без ВЫПОЛНЕННЫХ заказов настроить было нельзя: список брался из
+#    list_cities(), а она сделана для отчёта выплат.
+with cs.get_db() as conn:
+    conn.execute("INSERT OR REPLACE INTO courier_sites (code, name, city, utc_offset) "
+                 "VALUES ('site-new', 'Новый салон', 'Барнаул', 7)")
+manager = login("upravl")
+cities = [row["city"] for row in
+          (manager.get("/api/courier/city-settings").get_json() or {}).get("data") or []]
+check("город без выполненных заказов есть в настройках", "Барнаул" in cities,
+      f"({cities})")
+
+# 2. Сохранение трёх полей формы не должно обнулять остальные колонки.
+ds.set_city_settings("Новосибирск", {"quiet_hours_from": "23:00",
+                                     "quiet_hours_to": "07:00"}, "admin")
+ds.set_city_settings("Новосибирск", {"max_active_claims": 7,
+                                     "claim_horizon_days": 2,
+                                     "unclaimed_alert_minutes": 45}, "admin")
+after = ds.city_settings("Новосибирск")
+check("переданные поля сохранены", after["max_active_claims"] == 7
+      and after["unclaimed_alert_minutes"] == 45, f"({after})")
+check("непереданные поля не обнулены", after["quiet_hours_from"] == "23:00",
+      f"({after['quiet_hours_from']}) — форма шлёт три поля, остальные не её дело")
+ds.set_city_settings("Новосибирск", {"max_active_claims": None}, "admin")
+
+# 3. Строки помечаются номером, а не названием: название уходит в разметку
+#    экранированным, а обратно приходит расшифрованным, и город с «&» или
+#    кавычкой не совпал бы ни с одним полем — ушёл бы пустой payload.
+check("строки настроек помечены номером", "data-city-row=" in js)
+check("названием города поля не ищут", 'data-city="' not in js,
+      "(сравнение esc(city) с getAttribute сбрасывало настройки)")
+check("пустой набор полей не уходит на сервер", "Поля настроек не найдены" in js)
+
+# 4. Плитка «доля просроченных броней» врала бы нулём: сгорания больше нет.
+check("метрика просроченных заменена на «сняли руками»",
+      "expired_share" not in js and "released_by_hand_share" in js)
+metrics = ds.delivery_metrics(TODAY.isoformat(), TODAY.isoformat())
+check("в метриках нет мёртвого показателя", "expired_share" not in metrics,
+      f"({sorted(metrics)})")
+check("и есть живой", "released_by_hand_share" in metrics, f"({sorted(metrics)})")
+
+
 
 # ============================================================================
 print()

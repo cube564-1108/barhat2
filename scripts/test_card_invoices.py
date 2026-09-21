@@ -59,6 +59,11 @@ from invoices.storage import (  # noqa: E402
 from invoices.server import invoices_bp, _send_invoice_to_bank, _match_planfact_operation  # noqa: E402
 from invoices.cards import list_cards, get_cards_balances  # noqa: E402
 
+# Парная половина require_ajax_header: эти ручки — POST без тела, то есть
+# простой запрос, который отправит форма с чужого сайта. Ходим с заголовком,
+# а отсутствие его проверяется отдельно (правило CLAUDE.md).
+AJAX = {"X-Requested-With": "barhat-dashboard"}
+
 failures = []
 
 
@@ -228,7 +233,8 @@ def main():
     # Теперь отказ только по СТАТУСУ: несогласованное платить нечем.
     with app.test_client() as client:
         login(client, 'admin_test')
-        response = client.post(f"/api/invoices/{expense_row['id']}/mark-paid")
+        response = client.post(f"/api/invoices/{expense_row['id']}/mark-paid",
+                               headers=AJAX)
         check(response.status_code == 409, "трата на согласовании оплаченной не становится")
         reason = (response.get_json() or {}).get('error') or ''
         check('статус' in reason.lower(),
@@ -406,11 +412,23 @@ def main():
     approve_invoice(expense_row['id'], 'admin_test')
     with app.test_client() as client:
         login(client, 'admin_test')
-        response = client.post(f"/api/invoices/{expense_row['id']}/mark-paid")
+        response = client.post(f"/api/invoices/{expense_row['id']}/mark-paid",
+                               headers=AJAX)
         check(response.status_code == 200,
               f"согласованную трату отмечаем оплаченной (получено {response.status_code})")
         paid_row = get_invoice_by_id(expense_row['id'])
         check(paid_row['status'] == 'paid', f"статус стал «Оплачен» (получено {paid_row['status']})")
+
+        # Без заголовка ручка обязана отвечать 403: POST без тела — простой
+        # запрос, его отправит обычная форма с чужого сайта, а CSRF-токенов в
+        # проекте нет. 21.09.2026 правка сняла отказ по типу заявки, то есть
+        # расширила, что можно перещёлкнуть извне, — декоратор стал обязателен.
+        naked = client.post(f"/api/invoices/{expense_row['id']}/mark-paid")
+        check(naked.status_code == 403,
+              f"без X-Requested-With оплата не проходит (получено {naked.status_code})")
+        naked_archive = client.post(f"/api/invoices/{expense_row['id']}/archive")
+        check(naked_archive.status_code == 403,
+              f"и архивация тоже (получено {naked_archive.status_code})")
         check(paid_row['paid_at'], "дата оплаты проставлена — иначе история перехода пустая")
 
         # Ручная смена статуса: нужна там, где процесс не сработал вовсе.

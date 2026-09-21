@@ -1625,6 +1625,7 @@ def resubmit(invoice_id):
 
 @invoices_bp.route("/<int:invoice_id>/mark-paid", methods=["POST"])
 @role_required("admin")
+@require_ajax_header
 def mark_paid(invoice_id):
     """
     Отметить счёт оплаченным вручную. Временная замена Фазы 5-6 плана
@@ -2237,6 +2238,7 @@ def bulk_send_to_bank():
 
 @invoices_bp.route("/<int:invoice_id>/archive", methods=["POST"])
 @role_required("admin")
+@require_ajax_header
 def archive_invoice_view(invoice_id):
     """
     Вручную перенести счёт в архив — в любом статусе.
@@ -2255,6 +2257,7 @@ def archive_invoice_view(invoice_id):
 
 @invoices_bp.route("/<int:invoice_id>/unarchive", methods=["POST"])
 @role_required("admin")
+@require_ajax_header
 def unarchive_invoice_view(invoice_id):
     """Вручную вернуть счёт из архива."""
     if not get_invoice_by_id(invoice_id):

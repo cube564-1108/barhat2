@@ -1288,7 +1288,15 @@
         if (!endpoint) return;
 
         try {
-            const res = await fetch(`/api/invoices/${invoiceId}/${endpoint}`, { method: 'POST', credentials: 'include' });
+            // X-Requested-With — парная половина require_ajax_header на сервере.
+            // Эти три ручки (mark-paid, archive, unarchive) — POST без тела, то
+            // есть простой запрос: его отправит обычная форма с чужого сайта, а
+            // CSRF-токенов в проекте нет. Без заголовка сервер ответит 403.
+            const res = await fetch(`/api/invoices/${invoiceId}/${endpoint}`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'X-Requested-With': 'barhat-dashboard' },
+            });
             const data = await res.json();
             if (!res.ok) { alert(data.error || 'Ошибка'); return; }
             await openDetailsModal(invoiceId);

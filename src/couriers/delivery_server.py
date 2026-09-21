@@ -913,8 +913,22 @@ def toggle_profile_active(user_id: int):
 @delivery_bp.route("/city-settings", methods=["GET"])
 @section_required(DISPATCH_SECTION)
 def get_city_settings():
-    """Настройки по городам: лимит броней, горизонт, порог «никто не взял»."""
-    return success_response(ds.list_city_settings(storage.list_cities()))
+    """
+    Настройки по городам: лимит броней, горизонт, порог «никто не взял».
+
+    Города берутся из справочника САЛОНОВ, а не из `list_cities()`: та отдаёт
+    только города, где уже есть ВЫПОЛНЕННЫЕ заказы под payout-фильтром (она
+    сделана для отчёта выплат). Новый город настроить было нельзя, пока в нём
+    не завершат первую доставку, — хотя настройки к его заказам применяются с
+    первого дня.
+    """
+    cities = {city for city in ds_site_cities() if city}
+    return success_response(ds.list_city_settings(sorted(cities)))
+
+
+def ds_site_cities() -> List[str]:
+    """Города всех салонов из справочника, без дублей."""
+    return list({city for city in storage.get_site_cities().values() if city})
 
 
 @delivery_bp.route("/city-settings/<path:city>", methods=["POST"])
