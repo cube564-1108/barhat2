@@ -239,7 +239,13 @@ with app.test_client() as client:
     login(client, "kurier-nsk")
     profile = client.get("/api/courier/profile").get_json()["data"]
     check("со связкой предупреждения нет", profile["warning"] is None, profile)
-    check("настройки города отданы", profile["settings"]["max_active_claims"] >= 1)
+    # Лимит броней может быть не задан — с 21.09.2026 это умолчание («без
+    # ограничения»), и потребитель обязан пережить null, а не считать его
+    # числом всегда. Прежняя проверка `>= 1` падала ровно на этом.
+    limit = profile["settings"]["max_active_claims"]
+    check("настройки города отданы", "max_active_claims" in profile["settings"])
+    check("лимит броней — число или «не задан»",
+          limit is None or (isinstance(limit, int) and limit >= 1), f"({limit!r})")
 
     # «Сегодня» для выбора дня в приложении считается по стенным часам САЛОНА.
     # По серверной дате в 18:31 UTC курьер из Новосибирска получил бы вчера,

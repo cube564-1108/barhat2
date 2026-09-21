@@ -538,6 +538,72 @@ check("адресат уведомления «заказ собран» ест�
 
 
 # ============================================================================
+print("\n8. Лимит броней: по умолчанию его нет, включает администратор")
+# ============================================================================
+# Тройка в коде была дефолтом, которого никто не выбирал, а экрана настроек не
+# существовало — то есть настройка без интерфейса равна её отсутствию. В
+# праздники курьер увозит шесть-восемь заказов и упирался в отказ.
+
+for order_id in range(6100, 6106):
+    add_order(order_id)
+
+for order_id in range(6100, 6105):
+    try:
+        ds.claim_order(order_id, courier_user_id=41, courier_name="Праздничный",
+                       city="Новосибирск")
+        taken, why = True, ""
+    except ds.ClaimError as e:
+        taken, why = False, f"{e.code}: {e}"
+    if not taken:
+        break
+check("без настройки курьер берёт больше трёх заказов", taken, f"({why})")
+
+active = ds.city_settings("Новосибирск")
+check("в настройках города лимит пуст", active["max_active_claims"] is None,
+      f"({active['max_active_claims']})")
+
+# А когда администратор его задаёт — ограничение работает
+ds.set_city_settings("Новосибирск", {"max_active_claims": 5}, "admin")
+try:
+    ds.claim_order(6105, courier_user_id=41, courier_name="Праздничный",
+                   city="Новосибирск")
+    blocked, code = False, ""
+except ds.ClaimError as e:
+    blocked, code = True, e.code
+check("заданный лимит останавливает шестой заказ", blocked and code == "limit",
+      f"({code})")
+
+# И снимается очисткой поля — отдельной галочки для этого нет
+ds.set_city_settings("Новосибирск", {"max_active_claims": None}, "admin")
+try:
+    ds.claim_order(6105, courier_user_id=41, courier_name="Праздничный",
+                   city="Новосибирск")
+    freed, why2 = True, ""
+except ds.ClaimError as e:
+    freed, why2 = False, f"{e.code}: {e}"
+check("очистка поля снимает ограничение", freed, f"({why2})")
+
+try:
+    ds.set_city_settings("Новосибирск", {"max_active_claims": 0}, "admin")
+    zero_ok = True
+except ValueError:
+    zero_ok = False
+check("ноль запрещён — это молча выключенный модуль в городе", not zero_ok)
+
+# Экран: настройка без интерфейса равна её отсутствию
+check("во вкладках есть настройки городов", "'cities'" in js and "Настройки городов" in js)
+check("вкладка грузит настройки с сервера", "/api/courier/city-settings" in js)
+check("есть поле лимита и кнопка сохранения",
+      "max_active_claims" in js and "data-city-save" in js)
+check("нажатие сохранения обработано", "closest('[data-city-save]')" in js)
+check("пустое поле уходит как «без ограничения»",
+      "raw === '' ? null : raw" in js,
+      "(иначе очистка поля ничего не изменит)")
+check("не-администратору поля не показываются",
+      "state.isAdmin" in js and "Менять настройки" in js)
+
+
+# ============================================================================
 print()
 if failures:
     print(f"=== ПРОВАЛОВ: {len(failures)} ===")

@@ -26,6 +26,7 @@
         { id: 'today', title: 'Доставка сегодня' },
         { id: 'couriers', title: 'Курьеры' },
         { id: 'statuses', title: 'Статусы CRM' },
+        { id: 'cities', title: 'Настройки городов' },
         { id: 'outbox', title: 'Журнал отправок' }
     ];
 
@@ -44,6 +45,7 @@
         profiles: null,
         actions: [],
         statuses: [],
+        cities: [],
         outbox: [],
         users: [],
         loading: false
@@ -124,6 +126,10 @@
             job = get('/api/courier/action-statuses').then(function (data) {
                 state.actions = data.actions || [];
                 state.statuses = data.statuses || [];
+            });
+        } else if (state.tab === 'cities') {
+            job = get('/api/courier/city-settings').then(function (data) {
+                state.cities = data || [];
             });
         } else {
             job = get('/api/courier/outbox?limit=100').then(function (data) {
@@ -460,6 +466,66 @@
             + '</tr></thead><tbody>' + rows + '</tbody></table>';
     }
 
+    /**
+     * Настройки по городам: лимит броней, горизонт бронирования, порог тревоги.
+     *
+     * Ручки существовали с самого начала модуля, а экрана к ним не было — и
+     * лимит «3 заказа на курьера» жил дефолтом кода во всех девяти городах,
+     * хотя в праздники курьер увозит шесть-восемь. Настройка без интерфейса
+     * равна отсутствию настройки: менять её мог только тот, кто умеет слать
+     * запросы руками.
+     *
+     * Пустое поле означает умолчание, и у лимита умолчание — «без
+     * ограничения». Поэтому очистка поля и есть способ ограничение снять,
+     * отдельной галочки для этого не нужно.
+     */
+    function citiesHtml() {
+        if (!state.cities.length) {
+            return '<p class="section-description">Городов пока нет: они приходят '
+                + 'из справочника салонов.</p>';
+        }
+
+        var rows = state.cities.map(function (item) {
+            var city = esc(item.city);
+            function cell(field, value, placeholder, min, max) {
+                if (!state.isAdmin) {
+                    return '<td>' + esc(value === null || value === undefined
+                        ? placeholder : value) + '</td>';
+                }
+                return '<td><input type="number" class="form-input"'
+                    + ' data-city-field="' + field + '" data-city="' + city + '"'
+                    + ' min="' + min + '" max="' + max + '" style="width:120px"'
+                    + ' placeholder="' + esc(placeholder) + '"'
+                    + ' value="' + (value === null || value === undefined ? '' : esc(value))
+                    + '"></td>';
+            }
+            return '<tr>'
+                + '<td>' + city + '</td>'
+                + cell('max_active_claims', item.max_active_claims, 'без ограничения', 1, 50)
+                + cell('claim_horizon_days', item.claim_horizon_days, '1', 0, 14)
+                + cell('unclaimed_alert_minutes', item.unclaimed_alert_minutes, '90', 5, 1440)
+                + '<td>' + (state.isAdmin
+                    ? '<button class="btn btn-sm btn-primary" data-city-save="' + city
+                        + '">Сохранить</button>'
+                    : '') + '</td>'
+                + '</tr>';
+        }).join('');
+
+        return '<p class="section-description">'
+            + '<b>Лимит броней</b> — сколько заказов курьер может держать на руках '
+            + 'одновременно (взятые и забранные; доставленные слот освобождают). '
+            + 'Пусто — ограничения нет. '
+            + '<b>Горизонт</b> — на сколько дней вперёд можно бронировать (0 — только '
+            + 'сегодня). <b>«Никто не взял»</b> — за сколько минут до окна доставки '
+            + 'свободный заказ попадает в тревожный список.</p>'
+            + (state.isAdmin ? '' : '<p class="section-description">Менять настройки '
+                + 'может администратор.</p>')
+            + '<table class="cdisp-table"><thead><tr>'
+            + '<th>Город</th><th>Лимит броней</th><th>Горизонт, дней</th>'
+            + '<th>«Никто не взял», мин</th><th></th>'
+            + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
     function outboxHtml() {
         if (!state.outbox.length) return '<p class="section-description">Отправок пока не было</p>';
         var rows = state.outbox.map(function (item) {
@@ -514,6 +580,7 @@
         else if (state.tab === 'today') body = todayHtml();
         else if (state.tab === 'couriers') body = couriersHtml();
         else if (state.tab === 'statuses') body = statusesHtml();
+        else if (state.tab === 'cities') body = citiesHtml();
         else body = outboxHtml();
 
         host.innerHTML = '<div class="cdisp-tabs">'
@@ -529,6 +596,33 @@
         if (tab) {
             state.tab = tab.getAttribute('data-cdisp-tab');
             loadTab();
+            return;
+        }
+
+        var citySave = event.target.closest('[data-city-save]');
+        if (citySave) {
+            var city = citySave.getAttribute('data-city-save');
+            var payload = {};
+            var fields = document.querySelectorAll('[data-city][data-city-field]');
+            Array.prototype.forEach.call(fields, function (input) {
+                if (input.getAttribute('data-city') !== city) return;
+                // Пустое поле отправляем как есть: на сервере это «вернуть к
+                // умолчанию», а у лимита умолчание — «без ограничения»
+                var raw = input.value.trim();
+                payload[input.getAttribute('data-city-field')] = raw === '' ? null : raw;
+            });
+            // Кнопка гасится на время запроса: медленный ответ иначе
+            // превращает один клик в три (правило CLAUDE.md)
+            citySave.disabled = true;
+            post('/api/courier/city-settings/' + encodeURIComponent(city), payload)
+                .then(function () {
+                    toast('Настройки города сохранены', 'success');
+                    return loadTab();
+                })
+                .catch(function (error) {
+                    citySave.disabled = false;
+                    toast(error.message, 'error');
+                });
             return;
         }
 
