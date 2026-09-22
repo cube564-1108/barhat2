@@ -94,8 +94,8 @@ for (const name of ['esc', 'salonNowMs', 'slotStartMs', 'countdown', 'shortDate'
                     'slotText', 'siteKey', 'availabilityBadge', 'readyBadge',
                     'changeNotice', 'mineGroupKey', 'isMineOpen', 'bySites',
                     'raiseReady', 'ordersByTab', 'visibleOrders', 'mineGroups',
-                    'counts', 'cardHtml', 'mineDoneHtml', 'mineFeedHtml',
-                    'emptyText']) {
+                    'counts', 'siteOptions', 'cardHtml', 'mineDoneHtml',
+                    'mineFeedHtml', 'emptyText']) {
     vm.runInContext(cut(name), sandbox);
 }
 
@@ -246,6 +246,26 @@ check('и секции тоже фильтруются по салонам',
       groupByKey('claimed').orders.length === 1
       && groupByKey('claimed').orders[0].site_code === 'central');
 
+// Слой выбора салонов считает то же, что и таб: иначе «Мои 0» и
+// «Свердловский 3» спорят друг с другом на одном экране.
+state.sites = [];
+state.sites_catalog = [
+    { code: 'sverdlovsky', name: 'Свердловский' },
+    { code: 'central', name: 'Центральный' },
+];
+setOrders([
+    order('delivered', { site_code: 'sverdlovsky' }),
+    order('delivered', { site_code: 'sverdlovsky' }),
+    order('claimed',   { site_code: 'central' }),
+]);
+const sverdlovsky = sandbox.siteOptions().filter((s) => s.code === 'sverdlovsky')[0];
+check('салон с одними выполненными показывает 0, как и таб',
+      sverdlovsky && sverdlovsky.count === 0 && sandbox.counts().mine === 1,
+      `(салон: ${sverdlovsky && sverdlovsky.count}, таб: ${sandbox.counts().mine})`);
+check('но из списка салон не пропадает', !!sverdlovsky,
+      '(иначе выполненные там уже не посмотреть)');
+state.sites_catalog = [];
+
 
 console.log('\n4. Разметка секций');
 
@@ -290,9 +310,25 @@ console.log('\n5. Пустые состояния объясняют себя');
 setOrders([order('delivered'), order('delivered')]);
 const allDone = sandbox.mineFeedHtml();
 check('день без дел, но с доставками говорит «всё закрыто»',
-      allDone.includes('На сегодня всё'),
+      allDone.includes('Все заказы за этот день доставлены'),
       '(пустой экран здесь читается как сбой приложения)');
+check('и не называет этот день сегодняшним', !allDone.includes('сегодня'),
+      '(лента показывает выбранную дату, а она бывает любой)');
 check('и блок выполненных всё равно показан', allDone.includes('cd-done'));
+
+// Самое дорогое враньё: активные заказы скрыты фильтром салонов, а экран
+// отпускает курьера домой словами «всё доставлено».
+setOrders([
+    order('claimed',   { site_code: 'central' }),
+    order('claimed',   { site_code: 'central' }),
+    order('delivered', { site_code: 'sverdlovsky' }),
+], ['sverdlovsky']);
+const filtered = sandbox.mineFeedHtml();
+check('скрытые фильтром дела не выдаются за выполненные',
+      !filtered.includes('Все заказы за этот день доставлены'),
+      '(курьер уедет, оставив два букета в другом салоне)');
+check('и экран зовёт снять фильтр', filtered.includes('Все салоны'));
+state.sites = [];
 
 setOrders([]);
 const nothing = sandbox.mineFeedHtml();
