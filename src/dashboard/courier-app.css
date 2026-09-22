@@ -285,6 +285,47 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
     color: var(--bx-muted); font-size: 14px; line-height: 1.5;
 }
 
+/* ===== Секции вкладки «Мои» ============================================== */
+
+/* Секция — обёртка вокруг заголовка и своих карточек: так заголовок никогда
+   не отрывается от группы, а порядок секций не зависит от того, какие из них
+   сегодня пустые. Заголовки намеренно НЕ липкие: над лентой уже стоят табы,
+   выбор дня и строка салонов, и четвёртый закреплённый слой съел бы треть
+   экрана телефона. */
+.cd-group { display: flex; flex-direction: column; gap: 12px; }
+
+.cd-group__title {
+    margin: 0;
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--bx-font-body);
+    font-size: 12px; font-weight: 600;
+    letter-spacing: .08em; text-transform: uppercase;
+    color: var(--bx-text-2);
+}
+.cd-group__count {
+    color: var(--bx-muted); font-weight: 500; letter-spacing: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Выполненные за день: строка-итог, раскрывается тапом. Пунктир и приглушённый
+   цвет — чтобы блок читался как хвост списка, а не как ещё одно дело. */
+.cd-done {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    width: 100%; min-height: var(--cd-touch);
+    padding: 12px 16px;
+    border: 1px dashed var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    background: transparent;
+    color: var(--bx-text-2); font-family: inherit; font-size: 14px;
+    cursor: pointer;
+}
+.cd-done__count {
+    margin-left: 6px; color: var(--bx-muted);
+    font-variant-numeric: tabular-nums;
+}
+.cd-done__chevron { display: flex; color: var(--bx-muted); }
+.cd-done__chevron--open { transform: rotate(180deg); }
+
 .cd-card {
     background: var(--bx-white);
     border: 1px solid var(--bx-border);
@@ -295,6 +336,9 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
 /* Готовый заказ подсвечивается: это то, что можно забирать прямо сейчас */
 .cd-card--ready { border-color: #a7f3d0; box-shadow: inset 3px 0 0 0 #047857; }
 .cd-card--mine { border-color: var(--bx-pink-deep); box-shadow: inset 3px 0 0 0 var(--bx-pink-deep); }
+/* Работа закончена: карточка отходит на второй план, но остаётся читаемой —
+   по ней курьер проверяет, что ничего не забыл отметить */
+.cd-card--done { background: #fbf8fa; color: var(--bx-text-2); }
 
 .cd-card__top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cd-card__number {

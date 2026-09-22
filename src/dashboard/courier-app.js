@@ -67,6 +67,10 @@
         pushOn: false,      // подписка этого устройства оформлена
         pushBlock: null,    // почему уведомлений быть не может (см. pushBlockReason)
         view: 'feed',       // 'feed' — лента заказов, 'earnings' — мои доставки
+        // Раскрыт ли блок выполненных во вкладке «Мои». Живёт здесь, а не в
+        // DOM: лента перерисовывается каждые 30 секунд и стёрла бы раскрытие
+        // прямо под рукой у читающего.
+        mineDoneOpen: false,
         earnings: {
             from: null,
             to: null,
@@ -542,6 +546,45 @@
 
     // === Отбор и порядок ====================================================
 
+    /**
+     * Секции вкладки «Мои» — в порядке действий курьера.
+     *
+     * До 22.09.2026 «Мои» были плоским списком. Состояние различал только
+     * бейдж — «Мой» и «У меня» двумя словами одного цвета, — а порядок задавала
+     * общая сортировка: она поднимала наверх то, что ещё лежит в салоне, и
+     * топила то, что уже в руках и горит по времени. Доставленные лежали там же
+     * вперемешку и раздували счётчик на табе.
+     *
+     * Порядок секций ПОСТОЯННЫЙ и не зависит от дня: курьер идёт по ленте по
+     * памяти, и переставлять секции от того, что сегодня нечего забирать,
+     * значит заставлять его перечитывать экран каждый раз.
+     */
+    var MINE_GROUPS = [
+        { key: 'picked_up', title: 'Везу' },
+        { key: 'claimed',   title: 'Забрать в салоне' },
+        { key: 'problem',   title: 'Требует внимания' },
+        { key: 'delivered', title: 'Выполнено' }
+    ];
+
+    /**
+     * В какую секцию попадает заказ.
+     *
+     * Незнакомое состояние — к активным, а не в «Выполнено»: бронь у заказа
+     * есть (иначе он не был бы моим), а потерять его в свёрнутом блоке
+     * выполненных хуже, чем показать лишнюю строку в «Забрать».
+     */
+    function mineGroupKey(order) {
+        for (var i = 0; i < MINE_GROUPS.length; i++) {
+            if (MINE_GROUPS[i].key === order.assignment_state) return MINE_GROUPS[i].key;
+        }
+        return 'claimed';
+    }
+
+    /** Незакрытое дело: всё моё, кроме доставленного. */
+    function isMineOpen(order) {
+        return !!order.is_mine && mineGroupKey(order) !== 'delivered';
+    }
+
     /** Заказы под текущим табом, БЕЗ фильтра по салону (по ним считаем салоны). */
     function ordersByTab() {
         return state.orders.filter(function (order) {
@@ -552,17 +595,21 @@
         });
     }
 
-    function visibleOrders() {
-        var list = ordersByTab().filter(function (order) {
-            // Пустой выбор — это «все салоны», а не «ни одного»
+    /** Фильтр по выбранным салонам. Пустой выбор — это «все», а не «ни одного». */
+    function bySites(list) {
+        return list.filter(function (order) {
             if (!state.sites.length) return true;
             return state.sites.indexOf(siteKey(order)) !== -1;
         });
+    }
 
-        // Сервер уже отдал заказы по времени доставки. Поднимаем наверх
-        // готовые: это то, что можно забирать прямо сейчас, — и ровно так это
-        // описано в §8 плана. Сортировка устойчивая, внутри группы порядок
-        // сервера сохраняется.
+    /**
+     * Готовые — наверх: это то, что можно забирать прямо сейчас (§8 плана).
+     *
+     * Сортировка устойчивая, внутри группы сохраняется порядок сервера — по
+     * времени доставки.
+     */
+    function raiseReady(list) {
         return list
             .map(function (order, index) { return { order: order, index: index }; })
             .sort(function (a, b) {
@@ -572,17 +619,43 @@
             .map(function (item) { return item.order; });
     }
 
+    function visibleOrders() {
+        return raiseReady(bySites(ordersByTab()));
+    }
+
+    /**
+     * «Мои», разложенные по секциям. Пустые секции не возвращаются вовсе.
+     *
+     * Подъём готовых применяется ТОЛЬКО к «Забрать в салоне». В остальных
+     * секциях заказ уже у курьера, готовность там ничего не решает, а порядок
+     * — это порядок объезда, то есть тот, в котором заказы отдал сервер.
+     */
+    function mineGroups() {
+        var list = bySites(state.orders.filter(function (order) { return order.is_mine; }));
+        return MINE_GROUPS.map(function (group) {
+            var orders = list.filter(function (order) {
+                return mineGroupKey(order) === group.key;
+            });
+            return {
+                key: group.key,
+                title: group.title,
+                orders: group.key === 'claimed' ? raiseReady(orders) : orders
+            };
+        }).filter(function (group) { return group.orders.length > 0; });
+    }
+
     function counts() {
         // Счётчики на табах считаются по выбранным салонам: иначе «Свободные 7»
         // при пустом списке — не подсказка, а враньё.
-        var scope = state.orders.filter(function (order) {
-            if (!state.sites.length) return true;
-            return state.sites.indexOf(siteKey(order)) !== -1;
-        });
+        var scope = bySites(state.orders);
         return {
             free: scope.filter(function (o) { return o.is_free; }).length,
             ready: scope.filter(function (o) { return o.is_ready; }).length,
-            mine: scope.filter(function (o) { return o.is_mine; }).length,
+            // Незакрытые дела, а не все мои заказы. «Мои 7», где пять уже
+            // доставлены, отвечает не на тот вопрос: курьеру нужно знать,
+            // сколько работы осталось. Проблемный заказ в счёт входит —
+            // букет физически у него, пока человек не разобрался.
+            mine: scope.filter(isMineOpen).length,
             all: scope.length
         };
     }
@@ -642,7 +715,11 @@
     function cardHtml(order) {
         var tick = countdown(order);
         var classes = ['cd-card'];
-        if (order.is_mine) classes.push('cd-card--mine');
+        // Доставленный заказ приглушается на всех табах: работа по нему
+        // закончена, и подсветка «мой» или «готов» на нём зовёт к действию,
+        // которого нет.
+        if (order.assignment_state === 'delivered') classes.push('cd-card--done');
+        else if (order.is_mine) classes.push('cd-card--mine');
         else if (order.is_ready) classes.push('cd-card--ready');
 
         var parts = [];
@@ -685,12 +762,19 @@
         if (changed) parts.push(changed);
 
         parts.push('<div class="cd-card__actions">');
-        if (order.is_mine) {
+        // «Отказаться» — только пока бронь живая. У доставленного и
+        // проблемного заказа живой брони уже нет (_assignment_row на сервере
+        // берёт claimed и picked_up), и кнопка отвечала бы «Бронь уже снята» —
+        // отказ, который ничего не объясняет и пугать курьера не должен.
+        if (order.is_mine && isMineOpen(order) && order.assignment_state !== 'problem') {
             parts.push('<div class="cd-btn-row">'
                 + '<button type="button" class="cd-btn cd-btn--ghost" data-release="'
                 + esc(order.retailcrm_order_id) + '">Отказаться</button>'
                 + '<button type="button" class="cd-btn" data-open="'
                 + esc(order.retailcrm_order_id) + '">Открыть заказ</button></div>');
+        } else if (order.is_mine) {
+            parts.push('<button type="button" class="cd-btn cd-btn--ghost" data-open="'
+                + esc(order.retailcrm_order_id) + '">Открыть заказ</button>');
         } else if (order.is_free) {
             parts.push('<button type="button" class="cd-btn" data-claim="'
                 + esc(order.retailcrm_order_id) + '">Забронировать</button>');
@@ -701,6 +785,56 @@
         parts.push('</div>');
         parts.push('</article>');
         return parts.join('');
+    }
+
+    /**
+     * Лента вкладки «Мои»: секции по состояниям плюс блок выполненных.
+     *
+     * Выполненные не убираются из ленты совсем: курьер проверяет по ним себя
+     * («я точно отметил доставку?»), а экран «Мои доставки» в шапке — про суммы
+     * за период, а не про этот день. Но и мешать активным они не должны,
+     * поэтому свёрнуты в одну строку.
+     */
+    function mineFeedHtml() {
+        var groups = mineGroups();
+        var done = null;
+        var parts = [];
+
+        groups.forEach(function (group) {
+            if (group.key === 'delivered') { done = group; return; }
+            parts.push('<section class="cd-group">'
+                + '<h2 class="cd-group__title">' + esc(group.title)
+                + '<span class="cd-group__count">' + group.orders.length + '</span></h2>'
+                + group.orders.map(cardHtml).join('')
+                + '</section>');
+        });
+
+        if (!parts.length) {
+            // Дел нет, а выполненные за день есть: пустой экран здесь читается
+            // как сбой приложения, поэтому он говорит, что всё закрыто.
+            parts.push('<p class="cd-empty">'
+                + esc(done ? 'На сегодня всё — заказы доставлены.' : emptyText())
+                + '</p>');
+        }
+
+        if (done) parts.push(mineDoneHtml(done.orders));
+        return parts.join('');
+    }
+
+    function mineDoneHtml(orders) {
+        var open = state.mineDoneOpen;
+        return '<section class="cd-group">'
+            + '<button type="button" class="cd-done" data-mine-done'
+            + ' aria-expanded="' + (open ? 'true' : 'false') + '">'
+            + '<span>Выполнено<span class="cd-done__count">' + orders.length + '</span></span>'
+            + '<span class="cd-done__chevron' + (open ? ' cd-done__chevron--open' : '') + '"'
+            + ' aria-hidden="true">'
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+            + ' stroke-linecap="round" stroke-linejoin="round" width="18" height="18">'
+            + '<path d="M6 9l6 6 6-6"></path></svg></span>'
+            + '</button>'
+            + (open ? orders.map(cardHtml).join('') : '')
+            + '</section>';
     }
 
     function render() {
@@ -755,10 +889,16 @@
         // Прокрутку возвращаем сами: innerHTML выбрасывает её в начало, а
         // лента перерисовывается каждые 30 секунд.
         var scroll = window.scrollY;
-        var list = visibleOrders();
-        el.feed.innerHTML = list.length
-            ? list.map(cardHtml).join('')
-            : '<p class="cd-empty">' + esc(emptyText()) + '</p>';
+        if (state.filter === 'mine') {
+            // Секции — только здесь. На остальных табах заказы чужие и свои
+            // вперемешку, и делить их по СВОЕМУ состоянию нечем.
+            el.feed.innerHTML = mineFeedHtml();
+        } else {
+            var list = visibleOrders();
+            el.feed.innerHTML = list.length
+                ? list.map(cardHtml).join('')
+                : '<p class="cd-empty">' + esc(emptyText()) + '</p>';
+        }
         window.scrollTo(0, scroll);
     }
 
@@ -773,7 +913,10 @@
         }
         if (state.filter === 'free') return 'Свободных заказов сейчас нет.';
         if (state.filter === 'ready') return 'Готовых заказов сейчас нет.';
-        if (state.filter === 'mine') return 'Вы пока не взяли ни одного заказа.';
+        // С упоминанием дня: лента показывает выбранную дату, и «вы не взяли
+        // ни одного заказа» на завтрашнем дне читается как «у вас ничего нет
+        // вообще».
+        if (state.filter === 'mine') return 'На этот день вы не брали заказов.';
         return 'Заказов на сегодня и завтра нет.';
     }
 
@@ -1434,6 +1577,12 @@
         el.logout.addEventListener('click', logout);
 
         el.feed.addEventListener('click', function (event) {
+            if (event.target.closest('[data-mine-done]')) {
+                state.mineDoneOpen = !state.mineDoneOpen;
+                render();
+                return;
+            }
+
             var claim = event.target.closest('[data-claim]');
             if (claim) { claimOrder(claim.getAttribute('data-claim'), claim); return; }
 
