@@ -338,7 +338,7 @@ h1, h2, h3 { font-family: var(--bx-font-head); color: var(--bx-wine); font-weigh
 .cd-card--mine { border-color: var(--bx-pink-deep); box-shadow: inset 3px 0 0 0 var(--bx-pink-deep); }
 /* Работа закончена: карточка отходит на второй план, но остаётся читаемой —
    по ней курьер проверяет, что ничего не забыл отметить */
-.cd-card--done { background: #fbf8fa; color: var(--bx-text-2); }
+.cd-card--done { background: var(--bx-bg); color: var(--bx-text-2); }
 
 .cd-card__top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cd-card__number {
