@@ -1,0 +1,339 @@
+/**
+ * Выбор периода одним полем — общий компонент дашборда (date-range.js).
+ *
+ * Всё скоуплено под .bxdr: файл подключается на всех страницах дашборда и не
+ * должен задевать чужую вёрстку. Цвета, радиусы и шрифты — токены --bx-* из
+ * DESIGN-SPEC.md (brand/tokens.css), своих значений здесь нет.
+ */
+
+.bxdr { position: relative; min-width: 0; }
+
+.bxdr__control { position: relative; }
+
+/* Кнопка поля — той же формы, что поля ввода и мультивыбор в фильтрах
+   (DESIGN-SPEC §6): 12px радиус, серая граница, розовая рамка в фокусе */
+.bxdr__btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: var(--bx-r-xl);
+    background: #fff;
+    font-family: inherit;
+    font-size: 14px;
+    color: #1f2937;
+    text-align: left;
+    cursor: pointer;
+    outline: none;
+    transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.bxdr__btn:hover { border-color: var(--bx-pink-light); }
+
+.bxdr--open .bxdr__btn,
+.bxdr__btn:focus-visible {
+    border-color: var(--bx-pink-deep);
+    box-shadow: 0 0 0 3px rgba(178, 111, 161, 0.15);
+}
+
+.bxdr__ico { flex: 0 0 auto; color: var(--bx-muted); }
+
+.bxdr__value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Заданный период — винным, как выбранные значения мультивыбора: по панели
+   фильтров должно быть видно, что стоит, не вчитываясь */
+.bxdr--active .bxdr__btn {
+    border-color: var(--bx-pink-light);
+    color: var(--bx-wine);
+    font-weight: 500;
+}
+
+.bxdr--active .bxdr__ico { color: var(--bx-pink-deep); }
+.bxdr--active .bxdr__btn { padding-right: 34px; }
+
+.bxdr__x {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--bx-wine);
+    cursor: pointer;
+}
+
+.bxdr__x:hover { background: rgba(65, 19, 48, 0.10); }
+.bxdr__x[hidden] { display: none; }
+
+/* === Окно выбора ==================================================== */
+
+.bxdr__pop {
+    position: absolute;
+    z-index: 60;
+    top: calc(100% + 6px);
+    left: 0;
+    display: flex;
+    gap: 10px;
+    max-width: calc(100vw - 32px);
+    padding: 10px;
+    background: #fff;
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-xl);
+    box-shadow: 0 12px 30px rgba(65, 19, 48, 0.14);
+}
+
+/* Окно шире поля и у правого края вылезает за экран — прижимаем правым краем */
+.bxdr--right .bxdr__pop { left: auto; right: 0; }
+
+/* Явно, а не полагаясь на [hidden] из UA-стилей: любое правило вроде
+   `div { display: block }` в чужом модуле перебило бы его */
+.bxdr__pop[hidden] { display: none; }
+
+.bxdr__presets {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 0 0 auto;
+    width: 126px;
+    padding-right: 10px;
+    border-right: 1px solid var(--bx-border);
+}
+
+.bxdr__preset {
+    padding: 6px 8px;
+    border: none;
+    border-radius: var(--bx-r-lg);
+    background: none;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--bx-wine);
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.bxdr__preset:hover { background: rgba(228, 194, 221, 0.28); }
+
+.bxdr__main { min-width: 0; }
+
+/* Поля «с» и «по» — ручной ввод там же, в окне */
+.bxdr__inputs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.bxdr__inp {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 5px 9px;
+    border: 1px solid #e5e7eb;
+    border-radius: var(--bx-r-lg);
+    background: #fff;
+}
+
+.bxdr__inp:focus-within { border-color: var(--bx-pink-deep); }
+
+.bxdr__inp > span {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--bx-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.bxdr__inp input {
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    outline: none;
+    background: none;
+    font-family: inherit;
+    font-size: 13px;
+    color: #1f2937;
+}
+
+.bxdr__inp input::placeholder { color: #cbd5e1; }
+
+/* Непонятая дата — янтарём, как некорректные поля форм счетов */
+.bxdr__inp--bad { border-color: #fbbf24; background: #fffdf5; }
+
+.bxdr__dash { color: var(--bx-muted); font-size: 13px; }
+
+/* === Календари ====================================================== */
+
+.bxdr__cals { display: flex; gap: 14px; }
+
+.bxdr__cal { flex: 0 0 auto; width: 210px; }
+
+.bxdr__cal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    height: 26px;
+    margin-bottom: 4px;
+}
+
+.bxdr__cal-title {
+    font-family: var(--bx-font-head);
+    font-weight: 700;
+    font-size: 13.5px;
+    color: var(--bx-wine);
+}
+
+.bxdr__nav {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--bx-wine);
+    cursor: pointer;
+}
+
+.bxdr__nav:hover { background: rgba(228, 194, 221, 0.3); }
+
+/* Место под кнопку, которой в этом месяце нет: иначе название прыгает */
+.bxdr__nav--ghost { visibility: hidden; }
+
+.bxdr__wd {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+    margin-bottom: 2px;
+}
+
+.bxdr__wd span {
+    font-size: 10.5px;
+    color: var(--bx-muted);
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.bxdr__days {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px 0;
+    /* Протяжка пальцем по календарю должна выбирать период, а не прокручивать */
+    touch-action: none;
+}
+
+.bxdr__day {
+    height: 28px;
+    padding: 0;
+    border: none;
+    border-radius: var(--bx-r-md);
+    background: none;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--bx-text);
+    cursor: pointer;
+    user-select: none;
+}
+
+.bxdr__day:hover { background: rgba(228, 194, 221, 0.35); }
+.bxdr__day.is-out { color: #cbc3c9; }
+.bxdr__day.is-today { box-shadow: inset 0 0 0 1px var(--bx-pink-deep); }
+
+/* Середина периода — светлой заливкой без скруглений: отрезок должен читаться
+   как отрезок, а не как набор отдельных дней */
+.bxdr__day.is-in { background: var(--bx-pink-wash); border-radius: 0; }
+
+.bxdr__day.is-start,
+.bxdr__day.is-end {
+    background: var(--bx-wine);
+    color: #fff;
+}
+
+.bxdr__day.is-start { border-radius: var(--bx-r-md) 0 0 var(--bx-r-md); }
+.bxdr__day.is-end { border-radius: 0 var(--bx-r-md) var(--bx-r-md) 0; }
+.bxdr__day.is-start.is-end { border-radius: var(--bx-r-md); }
+
+/* === Подвал окна ===================================================== */
+
+.bxdr__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--bx-border);
+}
+
+.bxdr__hint { font-size: 11.5px; color: var(--bx-muted); }
+
+.bxdr__acts { display: inline-flex; align-items: center; gap: 8px; }
+
+.bxdr__link {
+    padding: 4px 2px;
+    border: none;
+    background: none;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--bx-wine);
+    cursor: pointer;
+}
+
+.bxdr__link:hover { text-decoration: underline; }
+
+.bxdr__done {
+    padding: 6px 14px;
+    border: none;
+    border-radius: var(--bx-r-xl);
+    background: var(--bx-wine);
+    color: #fff;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.bxdr__done:hover { opacity: 0.92; }
+
+/* === Узкий экран ===================================================== */
+
+/* Месяцев здесь уже один (их число выбирает date-range.js при открытии),
+   поэтому правим только раскладку окна */
+@media (max-width: 760px) {
+    .bxdr__pop { flex-direction: column; }
+
+    .bxdr__presets {
+        flex-direction: row;
+        flex-wrap: wrap;
+        width: auto;
+        padding: 0 0 8px;
+        border-right: none;
+        border-bottom: 1px solid var(--bx-border);
+    }
+
+    .bxdr__cal { width: 100%; }
+    .bxdr__foot { flex-wrap: wrap; }
+}

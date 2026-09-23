@@ -111,14 +111,20 @@
         // заполнены оба одинаково — поиск счёта на ровно эту сумму
         { key: 'amount_from',         label: 'Сумма от',            type: 'number', placeholder: '₽, например 10000' },
         { key: 'amount_to',           label: 'Сумма до',            type: 'number', placeholder: '₽, например 50000' },
-        { key: 'created_from',        label: 'Заведён с',           type: 'date' },
-        { key: 'created_to',          label: 'Заведён по',          type: 'date' },
-        { key: 'due_from',            label: 'Оплата (план) с',     type: 'date' },
-        { key: 'due_to',              label: 'Оплата (план) по',    type: 'date' },
+        // Период — ОДНИМ полем с календарём (обращение #18). `key` здесь только
+        // имя поля на экране; значения лежат в state.filters под `from`/`to`,
+        // и параметры запроса те же, что были у четырёх отдельных полей.
+        // `utc: true` — дата заведения хранится временем в UTC, её границы
+        // считаются по часам сотрудника (dayStartUtc/dayEndUtc в buildListParams).
+        { key: 'created_range',       label: 'Заведён',             type: 'daterange',
+          from: 'created_from',       to: 'created_to',             utc: true },
+        { key: 'due_range',           label: 'Оплата (план)',       type: 'daterange',
+          from: 'due_from',           to: 'due_to' },
     ];
 
     // Какой type= ставить полю фильтра. Всё, чего здесь нет, — обычный текст.
-    const FILTER_INPUT_TYPES = { date: 'date', number: 'number' };
+    // Периоды сюда не входят: их рисует свой компонент (см. dateRangeHtml).
+    const FILTER_INPUT_TYPES = { number: 'number' };
 
     // KPI-плитки. Клик по плитке = фильтр списка, повторный клик снимает.
     const KPI_TILES = [
@@ -329,6 +335,8 @@
     let listToken = 0;
     let summaryToken = 0;
     let filtersRendered = false;
+    // Компоненты выбора периода по ключу поля фильтра (window.BarhatDateRange)
+    const dateRanges = {};
     let textFilterTimer = null;
     let selectFilterTimer = null;
 
@@ -337,7 +345,16 @@
         // У справочных фильтров значение — массив (мультивыбор), у текстовых
         // и дат — строка. Пустое значение обоих типов ложно по-разному,
         // поэтому «задан ли фильтр» спрашиваем через hasFilter().
-        FILTERS.forEach(f => { empty[f.key] = f.type === 'select' ? [] : ''; });
+        FILTERS.forEach(f => {
+            // У периода два ключа состояния (from/to) и ни одного своего:
+            // `key` у него — только имя поля на экране
+            if (f.type === 'daterange') {
+                empty[f.from] = '';
+                empty[f.to] = '';
+                return;
+            }
+            empty[f.key] = f.type === 'select' ? [] : '';
+        });
         return empty;
     }
 
@@ -355,9 +372,22 @@
         return Boolean(String(value || '').trim());
     }
 
+    /** Задан ли хотя бы один край периода. */
+    function fieldActive(f) {
+        if (f.type === 'daterange') return hasFilter(f.from) || hasFilter(f.to);
+        return hasFilter(f.key);
+    }
+
     /** Сбросить одно поле в его «пустое» значение нужного типа. */
     function clearFilter(key) {
         const field = FILTERS.find(f => f.key === key);
+        // Период снимается целиком: полпериода — это не фильтр, а вопрос
+        // «почему список другой»
+        if (field && field.type === 'daterange') {
+            state.filters[field.from] = '';
+            state.filters[field.to] = '';
+            return;
+        }
         state.filters[key] = field && field.type === 'select' ? [] : '';
     }
 
@@ -494,15 +524,19 @@
                 filterValues(f.key).forEach(value => params.append(f.key, value));
                 return;
             }
+            // Период — два параметра из одного поля. Имена параметров и их
+            // смысл не менялись: сервер читает created_from/created_to/
+            // due_from/due_to, как и до объединения полей в одно.
+            if (f.type === 'daterange') {
+                const from = (state.filters[f.from] || '').trim();
+                const to = (state.filters[f.to] || '').trim();
+                if (from) params.set(f.from, f.utc && time ? time.dayStartUtc(from) : from);
+                if (to) params.set(f.to, f.utc && time ? time.dayEndUtc(to) : to);
+                return;
+            }
             const value = (state.filters[f.key] || '').trim();
             if (!value) return;
-            if (f.key === 'created_from') {
-                params.set('created_from', time ? time.dayStartUtc(value) : value);
-            } else if (f.key === 'created_to') {
-                params.set('created_to', time ? time.dayEndUtc(value) : value);
-            } else {
-                params.set(f.key, value);
-            }
+            params.set(f.key, value);
         });
 
         if (state.showArchived) params.set('archived', 'true');
@@ -945,6 +979,8 @@
                 <label class="iv2-field__label" for="iv2f-${f.key}">${escapeHtml(f.label)}</label>
                 ${f.type === 'select'
                     ? multiSelectHtml(f)
+                    : f.type === 'daterange'
+                    ? dateRangeHtml(f)
                     : `<input class="iv2-input" id="iv2f-${f.key}"
                               type="${FILTER_INPUT_TYPES[f.type] || 'text'}"
                               ${f.type === 'number' ? 'inputmode="decimal" step="0.01" min="0"' : ''}
@@ -1018,6 +1054,81 @@
                     </div>
                 </div>
             </div>`;
+    }
+
+    // =========================================================================
+    // Отрисовка: период одним полем
+    //
+    // Свой компонент по тем же причинам, что и мультивыбор выше: пара
+    // <input type="date"> разъезжалась по строкам сетки, один день приходилось
+    // вводить дважды, и каждый край уходил отдельным запросом (обращение #18).
+    // =========================================================================
+
+    /**
+     * Место под компонент: разметку он рисует сам при создании.
+     *
+     * Запасной вариант — две нативные даты, как было раньше. Нужен на случай,
+     * когда date-range.js не доехал (старый кэш страницы, оборванная загрузка):
+     * фильтр по датам обязан работать всегда, иначе человек остаётся без отбора
+     * и без объяснения, почему поля пропали.
+     */
+    function dateRangeHtml(f) {
+        if (window.BarhatDateRange) return `<div id="iv2dr-${f.key}"></div>`;
+        return `
+            <div class="iv2-drfallback">
+                <input class="iv2-input" type="date" id="iv2f-${f.from}"
+                       aria-label="${escapeHtml(f.label)}: начало">
+                <input class="iv2-input" type="date" id="iv2f-${f.to}"
+                       aria-label="${escapeHtml(f.label)}: конец">
+            </div>`;
+    }
+
+    function bindDateRange(f) {
+        const apply = (from, to) => {
+            state.filters[f.from] = from || '';
+            state.filters[f.to] = to || '';
+            renderChips();
+            loadList(false);
+        };
+
+        if (!window.BarhatDateRange) {
+            [f.from, f.to].forEach(key => {
+                const el = $('iv2f-' + key);
+                if (!el) return;
+                el.addEventListener('change', () => {
+                    state.filters[key] = el.value;
+                    renderChips();
+                    loadList(false);
+                });
+            });
+            return;
+        }
+
+        const host = $('iv2dr-' + f.key);
+        if (!host) return;
+        dateRanges[f.key] = window.BarhatDateRange.create({
+            mount: host,
+            buttonId: 'iv2f-' + f.key,
+            ariaLabel: 'Период: ' + f.label,
+            from: state.filters[f.from],
+            to: state.filters[f.to],
+            // Один запрос на период, а не по одному на каждый край: компонент
+            // зовёт onChange, только когда период замкнут или сброшен
+            onChange: apply,
+        });
+    }
+
+    /** Показать в поле то, что лежит в state.filters (сброс, плитки KPI). */
+    function syncDateRange(f) {
+        const picker = dateRanges[f.key];
+        if (picker) {
+            picker.setRange(state.filters[f.from], state.filters[f.to]);
+            return;
+        }
+        [f.from, f.to].forEach(key => {
+            const el = $('iv2f-' + key);
+            if (el) el.value = state.filters[key] || '';
+        });
     }
 
     /**
@@ -1262,6 +1373,10 @@
                 bindMultiSelect(f);
                 return;
             }
+            if (f.type === 'daterange') {
+                bindDateRange(f);
+                return;
+            }
             const el = $('iv2f-' + f.key);
             if (!el) return;
             // Сумма набирается по цифре, как и текст, — ей та же пауза перед
@@ -1346,6 +1461,10 @@
                 syncMultiSelect(f);
                 return;
             }
+            if (f.type === 'daterange') {
+                syncDateRange(f);
+                return;
+            }
             const el = $('iv2f-' + f.key);
             if (el) el.value = state.filters[f.key] || '';
         });
@@ -1367,9 +1486,17 @@
             const head = names.slice(0, MULTI_LABEL_LIMIT).join(', ');
             return `${head} и ещё ${names.length - MULTI_LABEL_LIMIT}`;
         }
+        if (f.type === 'daterange') {
+            const from = state.filters[f.from];
+            const to = state.filters[f.to];
+            // Подпись периода считает сам компонент: «16.09.2026» на один день,
+            // «12.09 – 20.09.2026» внутри одного года
+            if (window.BarhatDateRange) return window.BarhatDateRange.label(from, to, '');
+            if (from && to) return `${fmtDue(from)} – ${fmtDue(to)}`;
+            return from ? 'с ' + fmtDue(from) : 'по ' + fmtDue(to);
+        }
         const value = state.filters[f.key];
         if (!value) return '';
-        if (f.type === 'date') return fmtDue(value);
         // Сумма в чипе — деньгами: «Сумма от, ₽: 10 000 ₽» читается быстрее,
         // чем голое число, среди прочих чипов
         if (f.type === 'number') return Number.isFinite(Number(value)) ? money(value) : value;
@@ -1382,7 +1509,7 @@
 
         const chips = [];
         FILTERS.forEach(f => {
-            if (!hasFilter(f.key)) return;
+            if (!fieldActive(f)) return;
             chips.push({ kind: 'filter', key: f.key, text: `${f.label}: ${filterValueLabel(f)}` });
         });
         if (state.showArchived) chips.push({ kind: 'archived', key: 'archived', text: 'Только архив' });

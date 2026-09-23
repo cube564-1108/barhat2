@@ -1362,6 +1362,17 @@ def serve_datetime():
     """Отдаёт утилиты форматирования дат (window.BarhatTime)"""
     return send_from_directory(DASHBOARD_DIR, 'datetime.js')
 
+@app.route('/date-range.js')
+def serve_date_range():
+    """Отдаёт выбор периода одним полем (window.BarhatDateRange) — общий
+    компонент фильтров вместо пары <input type="date">."""
+    return send_from_directory(DASHBOARD_DIR, 'date-range.js')
+
+@app.route('/date-range.css')
+def serve_date_range_css():
+    """Отдаёт стили выбора периода (токены --bx-*, скоуплены под .bxdr)"""
+    return send_from_directory(DASHBOARD_DIR, 'date-range.css')
+
 @app.route('/script.js')
 def serve_script():
     """Отдаёт основной скрипт дашборда"""

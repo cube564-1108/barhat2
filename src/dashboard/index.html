@@ -13,6 +13,8 @@
     <!-- Стили раздела «Согласование счетов» на токенах --bx-* (DESIGN-SPEC.md).
          Все правила внутри скоуплены под .iv2 — на остальной дашборд не влияют. -->
     <link rel="stylesheet" href="/invoices-v2.css">
+    <!-- Выбор периода одним полем: общий компонент фильтров, скоуплен под .bxdr -->
+    <link rel="stylesheet" href="/date-range.css">
     <link rel="stylesheet" href="/salon-kpi.css">
     <link rel="stylesheet" href="/salon-load.css">
     <link rel="stylesheet" href="/courier-dispatch.css">
@@ -2534,6 +2536,8 @@
     <script defer src="/datetime.js"></script>
     <!-- image-compress.js — до модулей с загрузкой фото (window.BarhatImage) -->
     <script defer src="/image-compress.js"></script>
+    <!-- date-range.js — до модулей: фильтры создают window.BarhatDateRange при отрисовке -->
+    <script defer src="/date-range.js"></script>
     <script defer src="/script.js"></script>
     <script defer src="/bouquet-calculator.js"></script>
     <script defer src="/quality-report.js"></script>
