@@ -54,6 +54,13 @@ from .storage import get_db
 # прятать значит снова считать его в голове, — но помечаем.
 LOW_DATA_DELIVERIES = 5
 
+# Сколько строк детализации уезжает в ответ. Период разрешён до 92 дней, и за
+# квартал список может быть на тысячи строк, а экран всё равно рисует первые
+# 300 (`MAX_ROWS` в courier-dispatch.js): остальное — вес JSON и время
+# воркера впустую. Счётчики при этом остаются ПОЛНЫМИ: сколько всего таких
+# заказов — это и есть ответ на вопрос, а срезанный счётчик врал бы.
+MAX_DETAIL_ROWS = 500
+
 
 def _site_filter(site_codes: Optional[List[str]]) -> (str, List[Any]):
     """Условие по салонам. Пустой список и None означают «все салоны»."""
@@ -147,30 +154,37 @@ def load_analytics(date_from: str, date_to: str,
         """, (*period, *site_params)).fetchall()]
         step = mark("claims", step)
 
-        # Какие типы доставки считаются курьерскими, решает человек в
-        # справочнике. Пустой справочник — это «ничего не показываем», а не
-        # «показываем всё»: иначе блок «ушли службе» покажет вообще все заказы
-        # периода и будет выглядеть катастрофой.
-        courier_codes = [row["code"] for row in conn.execute(
-            "SELECT code FROM delivery_types WHERE counts_as_courier = 1"
-        ).fetchall()]
-        step = mark("delivery_types", step)
-
-        never_claimed: List[Dict[str, Any]] = []
-        if courier_codes:
-            marks = ",".join("?" for _ in courier_codes)
-            never_claimed = [dict(row) for row in conn.execute(f"""
-                SELECT o.retailcrm_order_id, o.order_number, o.delivery_date,
-                       o.delivery_time_from, o.delivery_time_to,
-                       o.site_code, o.status, s.name AS site_name
-                  FROM courier_orders o
-                  LEFT JOIN courier_sites s ON s.code = o.site_code
-                 WHERE o.delivery_date >= ? AND o.delivery_date <= ?{site_clause}
-                   AND (o.delivery_code IS NULL OR o.delivery_code NOT IN ({marks}))
-                   AND NOT EXISTS (SELECT 1 FROM delivery_assignments a
-                                    WHERE a.retailcrm_order_id = o.retailcrm_order_id)
-                 ORDER BY o.delivery_date DESC, o.retailcrm_order_id DESC
-            """, (*period, *site_params, *courier_codes)).fetchall()]
+        # «Ушло службе» определяется по КУРЬЕРУ, назначенному в CRM
+        # (`couriers.is_service` — Яндекс.Доставка, Купер, Максим Такси…), а не
+        # по типу доставки «всё, что не курьерское».
+        #
+        # Разница не тонкая: под «не курьерское» попадают самовывоз и заказы,
+        # у которых `delivery_code` пуст (колонка добавлена миграцией, у старых
+        # строк там NULL). Блок раздулся бы кратно, и управляющий пошёл бы
+        # искать курьеров под заказы, которые клиент забирал сам.
+        #
+        # `is_service` размечает человек, синхронизация его не перетирает —
+        # это данные, а не разбор названия. Заказ без курьера в CRM сюда не
+        # попадает вовсе: мы не знаем, ушёл он службе или просто не доехал, а
+        # выдуманная строка хуже отсутствующей.
+        #
+        # Отменённые исключаются по группе статуса: заказ, который отменили,
+        # службе не передавали.
+        never_claimed = [dict(row) for row in conn.execute(f"""
+            SELECT o.retailcrm_order_id, o.order_number, o.delivery_date,
+                   o.delivery_time_from, o.delivery_time_to,
+                   o.site_code, o.status, s.name AS site_name,
+                   c.name AS service_name
+              FROM courier_orders o
+              JOIN couriers c ON c.id = o.courier_id AND c.is_service = 1
+              LEFT JOIN courier_sites s ON s.code = o.site_code
+              LEFT JOIN order_statuses st ON st.code = o.status
+             WHERE o.delivery_date >= ? AND o.delivery_date <= ?{site_clause}
+               AND (st.group_code IS NULL OR st.group_code != 'cancel')
+               AND NOT EXISTS (SELECT 1 FROM delivery_assignments a
+                                WHERE a.retailcrm_order_id = o.retailcrm_order_id)
+             ORDER BY o.delivery_date DESC, o.retailcrm_order_id DESC
+        """, (*period, *site_params)).fetchall()]
         step = mark("never_claimed", step)
 
     # --- разбор брони по смыслу ------------------------------------------
@@ -342,15 +356,29 @@ def load_analytics(date_from: str, date_to: str,
                            reverse=True)
     mark("aggregate", step)
 
+    # Сколько строк ВСЕГО — считаем до среза: счётчик в заголовке блока
+    # отвечает на вопрос «сколько таких заказов», и срезанное число врало бы.
+    detail_totals = {
+        "late_orders": len(late_orders),
+        "outsourced_after_claim": len(outsourced_orders),
+        "outsourced_never_claimed": len(never_claimed),
+    }
+    truncated = {key: value > MAX_DETAIL_ROWS
+                 for key, value in detail_totals.items()}
+
     timings["total"] = round((time.monotonic() - started) * 1000, 1)
     return {
         "period": {"from": date_from, "to": date_to},
         "site_codes": [code for code in (site_codes or []) if code],
         "totals": totals,
         "couriers": rows,
-        "late_orders": late_orders,
-        "outsourced_after_claim": outsourced_orders,
-        "outsourced_never_claimed": never_claimed,
+        "late_orders": late_orders[:MAX_DETAIL_ROWS],
+        "outsourced_after_claim": outsourced_orders[:MAX_DETAIL_ROWS],
+        "outsourced_never_claimed": never_claimed[:MAX_DETAIL_ROWS],
+        # Полные числа рядом со срезанными списками: заголовок блока берёт их,
+        # а не длину массива, иначе «Ушли службе — 500» при тысяче заказов.
+        "detail_totals": detail_totals,
+        "detail_truncated": truncated,
         # Честно называем, чего не умеем: момент появления заказа в ленте нигде
         # не записан, а `delivered_at` — это отметка курьера, а не факт вручения.
         "not_measured": [

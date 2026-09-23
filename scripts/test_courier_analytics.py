@@ -91,24 +91,39 @@ with cs.get_db() as conn:
             "INSERT OR REPLACE INTO courier_sites (code, name, city, utc_offset) "
             "VALUES (?, ?, ?, ?)", (code, name, city, offset))
     for code, name, is_courier in (("dostavka-kurerom", "Доставка курьером", 1),
+                                   ("samovyvoz", "Самовывоз", 0),
                                    ("ya-dostavka", "Яндекс Доставка", 0)):
         conn.execute(
             "INSERT OR REPLACE INTO delivery_types (code, name, counts_as_courier, active) "
             "VALUES (?, ?, ?, 1)", (code, name, is_courier))
+    # Курьеры CRM: служба доставки размечена человеком (is_service), штатный —
+    # нет. Именно по этому флагу считается «ушло службе», а не по типу
+    # доставки: «не курьерский тип» — это ещё и самовывоз.
+    for courier_id, name, is_service in ((900, "Яндекс Доставка", 1),
+                                         (901, "Пётр Штатный", 0)):
+        conn.execute(
+            "INSERT OR REPLACE INTO couriers (id, name, is_service, active) "
+            "VALUES (?, ?, ?, 1)", (courier_id, name, is_service))
+    for code, name, group in (("complete", "Выполнен", "complete"),
+                              ("cancel-other", "Отменён", "cancel")):
+        conn.execute(
+            "INSERT OR REPLACE INTO order_statuses (code, name, group_code, active) "
+            "VALUES (?, ?, ?, 1)", (code, name, group))
 
 
 def add_order(order_id, site="ekb", day=DAY, time_from="12:00", time_to="14:00",
-              code="dostavka-kurerom", net_cost=300, status="complete"):
+              code="dostavka-kurerom", net_cost=300, status="complete",
+              courier_id=None):
     with cs.get_db() as conn:
         conn.execute("""
             INSERT OR REPLACE INTO courier_orders
                 (retailcrm_order_id, order_number, delivery_date, site_code,
                  city, status, delivery_code, net_cost,
-                 delivery_time_from, delivery_time_to)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 delivery_time_from, delivery_time_to, courier_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (order_id, str(order_id), day, site,
               dict((s[0], s[2]) for s in SITES)[site], status, code, net_cost,
-              time_from, time_to))
+              time_from, time_to, courier_id))
 
 
 def add_claim(order_id, user_id, name, state, delivered_at=None, reason=None,
@@ -230,8 +245,17 @@ print("\n5. Аутсорс: после снятия брони и «никто �
 add_order(9, site="ekb", code="ya-dostavka", net_cost=700)
 add_claim(9, 11, "Иван Петров", ds.STATE_RELEASED, reason=ds.RELEASE_OUTSOURCED,
           released_at=f"{DAY} 08:00:00")
-add_order(10, site="ekb", code="ya-dostavka")     # ушёл службе, броней не было
-add_order(11, site="ekb", code="dostavka-kurerom")  # свой, но никто не взял
+# Ушёл службе: в CRM назначен курьер, помеченный как служба доставки.
+add_order(10, site="ekb", code="ya-dostavka", courier_id=900)
+add_order(11, site="ekb", code="dostavka-kurerom")   # свой, но никто не взял
+# Самовывоз и заказ без типа доставки: «не курьерский тип» — это ещё не
+# «ушло службе». Клиент забрал заказ сам, искать под него курьера не нужно.
+add_order(12, site="ekb", code="samovyvoz")
+add_order(13, site="ekb", code=None)
+# Отменённый заказ со службой в курьерах: его никому не передавали.
+add_order(14, site="ekb", code="ya-dostavka", courier_id=900, status="cancel-other")
+# Заказ со ШТАТНЫМ курьером в CRM, но без брони у нас: это не аутсорс.
+add_order(15, site="ekb", code="dostavka-kurerom", courier_id=901)
 
 data = analytics.load_analytics(DAY, DAY)
 check("ушедшее аутсорсу после брони посчитано",
@@ -245,24 +269,28 @@ check("в списке аутсорса есть номер заказа и ку
       f"({data['outsourced_after_claim']})")
 
 never = [o["retailcrm_order_id"] for o in data["outsourced_never_claimed"]]
-check("заказ службы без броней попал в «не взяты никем»", never == [10], f"({never})")
+check("заказ со службой в курьерах попал в «не взяты никем»", never == [10],
+      f"({never})")
 check("свой заказ без броней туда НЕ попал", 11 not in never, f"({never})")
 check("счётчик совпадает с длиной списка",
       data["totals"]["outsourced_never_claimed"] == len(never), f"({data['totals']})")
 
 # ============================================================================
-print("\n6. Пустой справочник типов = ничего не показываем")
+print("\n6. «Ушло службе» — это курьер-служба, а не «любой не курьерский тип»")
 # ============================================================================
+#
+# Под «тип доставки не курьерский» попадают самовывоз и заказы без типа
+# (колонка добавлена миграцией, у старых строк NULL). Блок раздулся бы кратно,
+# и управляющий пошёл бы искать курьеров под заказы, которые клиент забирал
+# сам. Признак «служба доставки» размечает человек в справочнике курьеров.
 
-with cs.get_db() as conn:
-    conn.execute("UPDATE delivery_types SET counts_as_courier = 0")
-empty = analytics.load_analytics(DAY, DAY)
-check("без настройки справочника список «ушли службе» пуст, а не «все заказы»",
-      empty["outsourced_never_claimed"] == [],
-      f"({len(empty['outsourced_never_claimed'])} строк)")
-with cs.get_db() as conn:
-    conn.execute("UPDATE delivery_types SET counts_as_courier = 1 "
-                 " WHERE code = 'dostavka-kurerom'")
+check("самовывоз не считается ушедшим службе", 12 not in never, f"({never})")
+check("заказ без типа доставки — тоже", 13 not in never, f"({never})")
+check("отменённый заказ службе не передавали", 14 not in never, f"({never})")
+check("штатный курьер в CRM — это не аутсорс", 15 not in never, f"({never})")
+check("в строке названа служба, которой уехал заказ",
+      data["outsourced_never_claimed"][0]["service_name"] == "Яндекс Доставка",
+      f"({data['outsourced_never_claimed'][0]})")
 
 # ============================================================================
 print("\n7. Сходимость: из чего складываются брони")
@@ -344,8 +372,19 @@ print("\n11. Отчёт о цене запроса")
 # ============================================================================
 
 check("разбивка по шагам отдана", set(data["timings_ms"]) >= {
-    "claims", "delivery_types", "never_claimed", "aggregate", "total"},
+    "claims", "never_claimed", "aggregate", "total"},
       f"({sorted(data['timings_ms'])})")
+# Списки детализации срезаются, а счётчики остаются полными: заголовок блока
+# отвечает на вопрос «сколько таких заказов», и срезанное число врало бы.
+check("счётчики детализации отданы отдельно от списков",
+      set(data["detail_totals"]) == {"late_orders", "outsourced_after_claim",
+                                     "outsourced_never_claimed"},
+      f"({sorted(data.get('detail_totals', {}))})")
+check("счётчик совпадает со списком, пока он короткий",
+      data["detail_totals"]["late_orders"] == len(data["late_orders"]))
+check("сказано, что срезов не было",
+      all(flag is False for flag in data["detail_truncated"].values()),
+      f"({data['detail_truncated']})")
 check("честно названо, чего не умеем",
       any("отметке курьера" in text for text in data["not_measured"]),
       f"({data['not_measured']})")

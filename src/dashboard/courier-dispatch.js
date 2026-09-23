@@ -1028,20 +1028,33 @@
             + '</tr></tfoot></table>';
     }
 
-    /** Аккордеон детализации: заголовок с числом, тело — таблица. */
-    function anaBlock(key, title, rows, tableHtml, hint) {
+    /**
+     * Аккордеон детализации: заголовок с числом, тело — таблица.
+     *
+     * Число в заголовке берётся из СЧЁТЧИКА сервера, а не из длины массива:
+     * длинные списки сервер обрезает, и «Ушли службе — 500» при тысяче таких
+     * заказов было бы враньём ровно в той цифре, ради которой блок открывают.
+     */
+    function anaBlock(key, title, rows, total, tableHtml, hint) {
         var open = state.anaOpen[key];
+        var shown = Math.min(rows.length, MAX_ROWS);
+        var cut = total > shown
+            ? '<p class="section-description">Показаны первые ' + esc(shown)
+                + ' строк из ' + esc(total) + '. Сузьте период или выберите '
+                + 'меньше салонов — либо выгрузите в Excel.</p>'
+            : '';
+
         return '<div class="cdisp-block">'
             + '<button type="button" class="cdisp-block__head" data-cdisp-ana-block="'
             + esc(key) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
             + '<span class="cdisp-block__arrow">' + (open ? '▾' : '▸') + '</span> '
-            + esc(title) + ' — ' + esc(rows.length)
+            + esc(title) + ' — ' + esc(total)
             + '</button>'
             + (open
                 ? '<div class="cdisp-block__body">'
                     + (hint ? '<p class="section-description">' + hint + '</p>' : '')
                     + (rows.length ? tableHtml() : '<p class="section-description">Пусто</p>')
-                    + cutNotice(rows)
+                    + cut
                     + '</div>'
                 : '')
             + '</div>';
@@ -1194,15 +1207,23 @@
         var outsourced = data.outsourced_after_claim || [];
         var never = data.outsourced_never_claimed || [];
 
+        var counts = data.detail_totals || {};
+        function total(key, rows) {
+            return counts[key] === undefined ? rows.length : counts[key];
+        }
+
         return anaFiltersHtml()
             + anaTilesHtml(t)
             + anaReconcileHtml(t)
             + anaCouriersHtml(data.couriers || [], t)
             + anaBlock('late', 'Доставлены с опозданием', late,
+                total('late_orders', late),
                 function () { return anaLateTable(late); })
             + anaBlock('outsourced', 'Переданы службе после снятия брони', outsourced,
+                total('outsourced_after_claim', outsourced),
                 function () { return anaOutsourcedTable(outsourced); })
             + anaBlock('never', 'Ушли службе, не взяты никем', never,
+                total('outsourced_never_claimed', never),
                 function () { return anaNeverTable(never); },
                 'Курьер на эти заказы не нашёлся вовсе — это не про отказы, '
                 + 'а про число людей и условия на непопулярные слоты.')

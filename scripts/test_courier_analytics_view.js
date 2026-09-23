@@ -304,6 +304,25 @@ check('опоздание подписано знаком', view.includes('+72 �
 check('сказано, что «доставлено» — это отметка курьера',
       view.includes('отметка курьера'), '');
 
+// Длинные списки сервер обрезает, а счётчик отдаёт полный: заголовок обязан
+// показывать, сколько таких заказов ВСЕГО. Иначе «Ушли службе — 500» при
+// тысяче — враньё ровно в той цифре, ради которой блок открывают.
+setData({
+    totals: totals(),
+    late_orders: late,
+    detail_totals: { late_orders: 900, outsourced_after_claim: 0,
+                     outsourced_never_claimed: 0 },
+    detail_truncated: { late_orders: true, outsourced_after_claim: false,
+                        outsourced_never_claimed: false },
+});
+state.anaOpen.late = true;
+view = sandbox.analyticsHtml();
+check('заголовок показывает полное число, а не длину среза',
+      view.includes('Доставлены с опозданием — 900'), '');
+check('сказано, сколько строк показано из скольких',
+      view.includes('из 900') && view.includes('Excel'), '');
+state.anaOpen.late = false;
+
 // Раскрытие блока «не взяты никем» объясняет, что это другая беда: курьер на
 // эти заказы не нашёлся вовсе, и чинится это не разговором с курьерами.
 setData({
