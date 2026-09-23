@@ -3,7 +3,9 @@
  *
  * Четыре вкладки, и каждая отвечает на свой вопрос:
  *
- *   Доставка сегодня — где сейчас каждый заказ и какие никто не взял;
+ *   Доставка        — где сейчас каждый заказ и какие никто не взял. Период
+ *                     по умолчанию «сегодня и завтра», но задаётся любой:
+ *                     таблица заказов фильтруется и выгружается в Excel;
  *   Курьеры         — профили: город и связка с курьером CRM (от неё
  *                     зависит, попадёт ли работа человека в выплаты);
  *   Статусы CRM     — действие курьера → код статуса, заполняет человек;
@@ -23,7 +25,9 @@
     };
 
     var TABS = [
-        { id: 'today', title: 'Доставка сегодня' },
+        // Не «Доставка сегодня»: период стал произвольным, и старое имя
+        // врало бы на каждом выборе прошлой недели.
+        { id: 'today', title: 'Доставка' },
         { id: 'couriers', title: 'Курьеры' },
         { id: 'statuses', title: 'Статусы CRM' },
         { id: 'cities', title: 'Настройки городов' },
@@ -52,6 +56,19 @@
     // Пустая строка занята под «любой», поэтому у него свой признак.
     var NO_COURIER = '__none__';
 
+    /*
+     * Сколько строк рисуем за раз.
+     *
+     * Период стал произвольным, и «прошлый месяц» — это тысячи заказов.
+     * innerHTML на таком объёме вешает вкладку на секунды, а читать сетку из
+     * десяти тысяч строк всё равно нельзя. Отсечка громкая, с числом и
+     * подсказкой: тихо показать часть — значит соврать про остальное.
+     *
+     * Выгрузки это не касается: файл открывают ровно затем, чтобы работать со
+     * всем объёмом.
+     */
+    var MAX_ROWS = 300;
+
     var state = {
         tab: 'today',
         isAdmin: false,
@@ -64,7 +81,13 @@
         outbox: [],
         users: [],
         loading: false,
-        filters: Object.assign({}, EMPTY_FILTERS)
+        filters: Object.assign({}, EMPTY_FILTERS),
+        // Что просим у сервера и что он реально отдал. Две разные вещи:
+        // умолчание («сегодня и завтра») знает только он, а отказ по слишком
+        // длинному периоду обязан вернуть поля к тому, что на экране.
+        period: { from: '', to: '' },
+        shownPeriod: { from: '', to: '' },
+        maxDays: null
     };
 
     function esc(value) {
@@ -84,15 +107,26 @@
         return esc(value) + (suffix || '');
     }
 
-    function get(url) {
+    /**
+     * Ответ целиком, вместе с meta.
+     *
+     * Умолчание периода и его предел знает сервер, и оба приезжают в meta.
+     * Повторять их во фронте значило бы однажды их развести: поля показывали
+     * бы один период, а запрос уходил за другой.
+     */
+    function getFull(url) {
         return fetch(url, { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(function (payload) {
                 if (!payload || payload.success !== true) {
                     throw new Error((payload && payload.error) || 'Сервер вернул ошибку');
                 }
-                return payload.data;
+                return { data: payload.data, meta: payload.meta || {} };
             });
+    }
+
+    function get(url) {
+        return getFull(url).then(function (r) { return r.data; });
     }
 
     function post(url, body) {
@@ -123,16 +157,46 @@
 
     // === Загрузка ===========================================================
 
+    /*
+     * Номер загрузки. Период произвольный, и длинный отрезок считается дольше
+     * короткого: ответы приходят не в том порядке, в каком их просили, и без
+     * номера на экране осядет тот, которого уже никто не ждёт (CLAUDE.md).
+     */
+    var loadToken = 0;
+
     function loadTab() {
         var host = document.getElementById('cdispRoot');
         if (!host) return Promise.resolve();
+        var token = ++loadToken;
         state.loading = true;
         render();
 
         var job;
         if (state.tab === 'today') {
-            job = Promise.all([get('/api/courier/overview'), get('/api/courier/metrics')])
-                .then(function (r) { state.overview = r[0]; state.metrics = r[1]; });
+            // Показатели за 30 дней живут своим периодом и в заголовке так и
+            // названы: сузить их до выбранного дня значило бы убить медианы,
+            // ради которых блок и существует.
+            job = Promise.all([getFull('/api/courier/overview' + periodQuery()),
+                               get('/api/courier/metrics')])
+                .then(function (r) {
+                    if (token !== loadToken) return;
+                    state.overview = r[0].data;
+                    state.metrics = r[1];
+                    state.period = {
+                        from: r[0].meta.date_from || '',
+                        to: r[0].meta.date_to || ''
+                    };
+                    state.shownPeriod = state.period;
+                    state.maxDays = r[0].meta.max_days || null;
+                })
+                .catch(function (error) {
+                    // Данные на экране остались прежние — значит и поля
+                    // периода обязаны остаться прежними. Иначе подпись врёт
+                    // про то, что показано (CLAUDE.md: «медленно» и «отказ»
+                    // не должны превращаться в «пусто» и в чужие цифры).
+                    if (token === loadToken) state.period = state.shownPeriod;
+                    throw error;
+                });
         } else if (state.tab === 'couriers') {
             // Список учёток нужен, чтобы завести профиль новому курьеру:
             // профилей у него ещё нет, и выбирать не из чего
@@ -154,8 +218,10 @@
         }
 
         return job.catch(function (error) {
+            if (token !== loadToken) return;
             toast('Не удалось загрузить: ' + error.message, 'error');
         }).then(function () {
+            if (token !== loadToken) return;
             state.loading = false;
             render();
         });
@@ -278,6 +344,19 @@
         return order.site_name || order.city || '';
     }
 
+    /**
+     * Дата доставки в человеческом виде.
+     *
+     * Через BarhatTime не пропускаем: это НЕ отметка времени в UTC, а день по
+     * стенным часам салона — ровно тот, что менеджер ввёл в CRM. Перевод в
+     * пояс устройства сдвинул бы утренний заказ на вчера.
+     */
+    function dateLabel(order) {
+        var raw = String(order.delivery_date || '');
+        var parts = raw.split('-');
+        return parts.length === 3 ? parts[2] + '.' + parts[1] + '.' + parts[0] : raw;
+    }
+
     function slotLabel(order) {
         return (order.delivery_time_from || '')
             + (order.delivery_time_to ? '–' + order.delivery_time_to : '');
@@ -317,6 +396,7 @@
             var overdue = order.stuck_claim === true;
             return '<tr>'
                 + '<td>' + esc(orderLabel(order)) + '</td>'
+                + '<td>' + esc(dateLabel(order)) + '</td>'
                 + '<td>' + esc(siteLabel(order)) + '</td>'
                 + '<td>' + esc(slotLabel(order) || 'время уточняется') + '</td>'
                 + '<td>' + esc(stateLabel(order))
@@ -331,7 +411,7 @@
         }).join('');
 
         return '<table class="cdisp-table"><thead><tr>'
-            + '<th>Заказ</th><th>Салон</th><th>Окно</th><th>Состояние</th>'
+            + '<th>Заказ</th><th>Дата</th><th>Салон</th><th>Окно</th><th>Состояние</th>'
             + '<th>Сборка</th><th>Курьер</th><th></th>'
             + '</tr></thead><tbody>' + rows + '</tbody></table>';
     }
@@ -427,6 +507,37 @@
             + esc(label) + '</label>' + control + '</div>';
     }
 
+    /**
+     * Период — единственное условие, за которым мы идём на сервер.
+     *
+     * Поэтому он и живёт за кнопкой «Показать», а не применяется на каждое
+     * изменение поля: остальные условия мгновенные и бесплатные, а это —
+     * запрос к медленному /data, и нажать его должен человек.
+     */
+    function periodQuery() {
+        if (!state.period.from || !state.period.to) return '';
+        return '?date_from=' + encodeURIComponent(state.period.from)
+            + '&date_to=' + encodeURIComponent(state.period.to);
+    }
+
+    function periodHtml() {
+        return '<div class="cdisp-filters cdisp-filters--period">'
+            + filterField('Дата доставки с',
+                '<input type="date" class="form-input cdisp-filter__control"'
+                + ' id="cdispPeriodFrom" value="' + esc(state.period.from || '') + '">')
+            + filterField('по',
+                '<input type="date" class="form-input cdisp-filter__control"'
+                + ' id="cdispPeriodTo" value="' + esc(state.period.to || '') + '">')
+            + '<div class="cdisp-filter">'
+            + '<button type="button" class="btn btn-primary" data-cdisp-period="1"'
+            + (state.loading ? ' disabled' : '') + '>Показать</button></div>'
+            + (state.maxDays
+                ? '<div class="cdisp-filter"><span class="cdisp-note">За раз можно '
+                    + 'запросить не больше ' + esc(state.maxDays) + ' дней</span></div>'
+                : '')
+            + '</div>';
+    }
+
     function ordersFilterHtml() {
         var sites = [['', 'Все салоны']].concat(
             columnValues(siteLabel).map(function (v) { return [v, v]; }));
@@ -470,17 +581,28 @@
     }
 
     function ordersBodyHtml() {
-        if (!allOrders().length) return '<p class="section-description">Заказов нет</p>';
+        if (!allOrders().length) {
+            return '<p class="section-description">За выбранный период заказов нет</p>';
+        }
         var rows = filteredOrders();
         if (!rows.length) {
             return '<p class="section-description">Под фильтр не попал ни один заказ. '
                 + 'Снимите часть условий или нажмите «Сбросить».</p>';
         }
-        return orderTable(rows);
+        // Отсечка громкая и с числом: показать часть молча — значит соврать
+        // про остальное. Выгрузка при этом заберёт всё, и здесь об этом
+        // сказано, чтобы за недостающими строками не шли сужать период.
+        var cut = rows.length > MAX_ROWS
+            ? '<p class="section-description">Показаны первые ' + MAX_ROWS
+                + ' строк из ' + rows.length + '. Сузьте период или фильтр — '
+                + 'а выгрузка в Excel заберёт все ' + rows.length + '.</p>'
+            : '';
+        return cut + orderTable(rows.slice(0, MAX_ROWS));
     }
 
     function ordersSectionHtml() {
         return '<h3 style="margin-top:28px">Заказы</h3>'
+            + periodHtml()
             + ordersFilterHtml()
             + '<div class="cdisp-orders-head">'
             + '<span class="cdisp-note" id="cdispOrdersCount">' + esc(ordersCountText())
@@ -892,8 +1014,15 @@
         }).join(' ');
 
         var body;
-        if (state.loading) body = '<p class="section-description">Загружаем…</p>';
-        else if (state.tab === 'today') body = todayHtml();
+        if (state.loading && state.tab === 'today' && state.overview) {
+            // Экран не очищаем, пока есть что показать: «медленно»
+            // превращается в «пусто», и человек видит сломанный модуль вместо
+            // задержки (CLAUDE.md). Заодно поля периода остаются на месте —
+            // иначе их не поправить, не дождавшись длинного запроса.
+            body = '<p class="section-description">Обновляем…</p>' + todayHtml();
+        } else if (state.loading) {
+            body = '<p class="section-description">Загружаем…</p>';
+        } else if (state.tab === 'today') body = todayHtml();
         else if (state.tab === 'couriers') body = couriersHtml();
         else if (state.tab === 'statuses') body = statusesHtml();
         else if (state.tab === 'cities') body = citiesHtml();
@@ -911,6 +1040,33 @@
         var tab = event.target.closest('[data-cdisp-tab]');
         if (tab) {
             state.tab = tab.getAttribute('data-cdisp-tab');
+            loadTab();
+            return;
+        }
+
+        var period = event.target.closest('[data-cdisp-period]');
+        if (period) {
+            var fromEl = document.getElementById('cdispPeriodFrom');
+            var toEl = document.getElementById('cdispPeriodTo');
+            if (!fromEl || !toEl) {
+                toast('Поля периода не найдены, обновите экран', 'error');
+                return;
+            }
+            if (!fromEl.value || !toEl.value) {
+                toast('Задайте обе даты периода', 'error');
+                return;
+            }
+            // Понятную половину проверок делаем здесь, чтобы не гонять заведомо
+            // отвергаемый запрос. Предел длины остаётся за сервером: держать
+            // одно и то же число в двух местах значит однажды их развести.
+            if (fromEl.value > toEl.value) {
+                toast('Начало периода позже конца', 'error');
+                return;
+            }
+            state.period = { from: fromEl.value, to: toEl.value };
+            // Кнопка гасится на время запроса; loadTab перерисует панель
+            // целиком и вернёт её живой в любом исходе
+            period.disabled = true;
             loadTab();
             return;
         }

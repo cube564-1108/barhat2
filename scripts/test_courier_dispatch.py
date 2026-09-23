@@ -647,6 +647,134 @@ check("и есть живой", "released_by_hand_share" in metrics, f"({sorted(
 
 
 # ============================================================================
+print("\n9. Произвольный период: границы и тревоги")
+# ============================================================================
+# Период стал произвольным 23.09.2026. Вместе с полем ввода появились две
+# вещи, которых раньше быть не могло: просьба показать год (цену запроса
+# определяет объём чтения с сетевого /data) и прошлые даты в тревожных
+# блоках. Второе опаснее: «никто не взял» считается как «до окна осталось
+# меньше порога», и для вчерашнего заказа это верно ВСЕГДА.
+
+from couriers import delivery_server as dsrv  # noqa: E402
+
+default_from, default_to, refusal = dsrv._bounded_period(None, None)
+check("без дат берётся умолчание сервера",
+      refusal is None and default_from == datetime.utcnow().date().isoformat(),
+      f"({default_from}..{default_to}, {refusal})")
+
+_, _, refusal = dsrv._bounded_period("2026-09-01", "2026-09-30")
+check("месяц разрешён", refusal is None, f"({refusal})")
+
+_, _, refusal = dsrv._bounded_period("2026-09-30", "2026-09-01")
+check("перевёрнутый период отвергается", refusal == "Начало периода позже конца",
+      f"({refusal})")
+
+bad_from, _, refusal = dsrv._bounded_period("2026-13-45", "2026-09-30")
+check("несуществующая дата не роняет ручку в 500",
+      refusal is None and bad_from == default_from,
+      "(«2026-13-45» проходит регулярку и падает в date.fromisoformat)")
+
+edge_to = (datetime(2026, 9, 1)
+           + timedelta(days=dsrv.MAX_OVERVIEW_DAYS - 1)).date().isoformat()
+_, _, refusal = dsrv._bounded_period("2026-09-01", edge_to)
+check("ровно предел разрешён", refusal is None, f"({refusal})")
+
+over_to = (datetime(2026, 9, 1)
+           + timedelta(days=dsrv.MAX_OVERVIEW_DAYS)).date().isoformat()
+_, _, refusal = dsrv._bounded_period("2026-09-01", over_to)
+check("предел плюс день — отказ", refusal is not None, f"({refusal})")
+check("отказ называет и запрошенное, и разрешённое",
+      refusal and str(dsrv.MAX_OVERVIEW_DAYS) in refusal
+      and str(dsrv.MAX_OVERVIEW_DAYS + 1) in refusal,
+      f"({refusal})")
+
+manager = login("upravl")
+r = manager.get("/api/courier/overview")
+meta = (r.get_json() or {}).get("meta") or {}
+check("ручка отдаёт период в meta",
+      meta.get("date_from") == default_from and meta.get("date_to") == default_to,
+      f"({meta})")
+check("и называет предел заранее",
+      meta.get("max_days") == dsrv.MAX_OVERVIEW_DAYS, f"({meta})")
+
+r = manager.get("/api/courier/overview?date_from=2020-01-01&date_to=2026-12-31")
+body = r.get_json() or {}
+check("слишком длинный период отвергается с текстом",
+      r.status_code == 400 and body.get("success") is False
+      and "дней" in (body.get("error") or ""),
+      f"({r.status_code}: {body.get('error')})")
+
+r = manager.get("/api/courier/overview?date_from=2026-09-01&date_to=2026-09-10")
+check("короткий период принимается", r.status_code == 200, f"({r.status_code})")
+
+# --- тревоги смотрят вперёд, а не назад -------------------------------------
+YESTERDAY = TODAY - timedelta(days=1)
+
+
+def add_past_order(order_id, delivery_day, time_from="00:05"):
+    with cs.get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO courier_orders "
+            "  (retailcrm_order_id, order_number, delivery_date, delivery_time_from, "
+            "   delivery_time_to, site_code, city, status, delivery_code, net_cost) "
+            "VALUES (?, ?, ?, ?, '23:59', 'site-a', 'Новосибирск', "
+            "        'send-to-florist', 'dostavka-kurerom', 0)",
+            (order_id, f"N{order_id}", delivery_day.isoformat(), time_from))
+
+
+add_past_order(6090, YESTERDAY)                  # вчерашний, никто не взял
+
+# Бронь на вчерашний день заводим так, как она и появляется в жизни: заказ
+# берут сегодняшним, а потом день проходит. Напрямую `claim_order` его уже не
+# отдаст — «Дата доставки уже прошла».
+add_past_order(6091, TODAY)
+ds.claim_order(6091, courier_user_id=11, courier_name="Иван", city="Новосибирск")
+with cs.get_db() as conn:
+    conn.execute("UPDATE courier_orders SET delivery_date = ? "
+                 " WHERE retailcrm_order_id = 6091", (YESTERDAY.isoformat(),))
+
+overview = ds.dispatch_overview("Новосибирск", YESTERDAY.isoformat(),
+                                TODAY.isoformat(), CODES)
+past = {o["retailcrm_order_id"]: o for o in overview["orders"]}
+
+check("вчерашний свободный заказ в «никто не взял» не попадает",
+      past[6090]["unclaimed_alert"] is False,
+      "(решать по нему уже нечего, а блок он наполнил бы целиком)")
+check("вчерашняя висящая бронь не выдаётся за «взяли, но не забрали»",
+      past[6091]["stuck_claim"] is False, f"({past[6091]['stuck_claim']})")
+check("и в тревожные списки прошлое не течёт",
+      6090 not in {o["retailcrm_order_id"] for o in overview["unclaimed"]}
+      and 6091 not in {o["retailcrm_order_id"] for o in overview["stuck"]})
+check("но из таблицы заказов прошлое никуда не делось",
+      6090 in past and 6091 in past,
+      "(период просили именно ради него)")
+
+# Сегодняшняя тревога от расширения периода не пропала: заказ 6011 заведён на
+# «сейчас» в разделе 2.
+check("сегодняшняя тревога внутри длинного периода жива",
+      past.get(6011, {}).get("unclaimed_alert") is True,
+      f"({past.get(6011, {}).get('unclaimed_alert')})")
+
+# Салон без пояса считать нечем — и это не повод звать человека
+with cs.get_db() as conn:
+    conn.execute("INSERT OR REPLACE INTO courier_sites (code, name, city, utc_offset) "
+                 "VALUES ('site-nz', 'Без пояса', 'Новосибирск', NULL)")
+    conn.execute(
+        "INSERT OR REPLACE INTO courier_orders "
+        "  (retailcrm_order_id, order_number, delivery_date, delivery_time_from, "
+        "   delivery_time_to, site_code, city, status, delivery_code, net_cost) "
+        "VALUES (6092, 'N6092', ?, '00:05', '23:59', 'site-nz', 'Новосибирск', "
+        "        'send-to-florist', 'dostavka-kurerom', 0)",
+        (TODAY.isoformat(),))
+overview = ds.dispatch_overview("Новосибирск", YESTERDAY.isoformat(),
+                                TODAY.isoformat(), CODES)
+no_tz = {o["retailcrm_order_id"]: o for o in overview["orders"]}[6092]
+check("салон без часового пояса тревогу не поднимает",
+      no_tz["unclaimed_alert"] is False,
+      "(считать порог нечем — выдуманная тревога хуже её отсутствия)")
+
+
+# ============================================================================
 print()
 if failures:
     print(f"=== ПРОВАЛОВ: {len(failures)} ===")

@@ -104,6 +104,13 @@
     padding: 12px 14px;
     margin: 10px 0 12px;
 }
+/* Период отделён от мгновенных условий: за ним идёт запрос к серверу, и
+   применяется он кнопкой, а не сам собой. */
+.cdisp-filters--period { margin-bottom: 0; border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0; border-bottom: none; }
+.cdisp-filters--period + .cdisp-filters { border-top-left-radius: 0;
+    border-top-right-radius: 0; margin-top: 0; }
+
 .cdisp-filter { display: flex; flex-direction: column; gap: 4px; }
 .cdisp-filter__label {
     font-size: 11.5px; color: var(--bx-muted); text-transform: uppercase;

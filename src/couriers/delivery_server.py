@@ -145,6 +145,43 @@ def _default_period() -> tuple:
     return today.isoformat(), (today + timedelta(days=1)).isoformat()
 
 
+# Сколько дней разрешено запросить в «Контроле доставки» одним разом.
+#
+# Период стал произвольным 23.09.2026, и вместе с полем ввода появилась
+# возможность попросить год. Цену запроса определяет объём чтения с сетевого
+# /data (CLAUDE.md), а `dispatch_overview` ещё и проходит по каждой строке
+# ответа: на дневном потоке в несколько сотен заказов год — это десятки тысяч
+# строк, которые сначала читает диск, а потом рисует браузер.
+#
+# Квартал закрывает то, ради чего период просили (разбор прошлой недели,
+# месяца, выгрузка за квартал), и остаётся объяснимым числом. Отказ называет
+# причину и предлагает действие — молча сузить период нельзя: человек получил
+# бы не те данные, которые запросил, и не узнал бы об этом.
+MAX_OVERVIEW_DAYS = 92
+
+
+def _bounded_period(date_from: Optional[str], date_to: Optional[str]):
+    """
+    Разобрать период из запроса. Возвращает (from, to, текст отказа).
+
+    Даты проверяются календарём, а не регуляркой: «2026-13-45» соответствует
+    формату и не существует, а `date.fromisoformat` на нём бросает исключение —
+    ручка ответила бы 500 вместо текста.
+    """
+    start, end = _real_date(date_from), _real_date(date_to)
+    if not (start and end):
+        return (*_default_period(), None)
+    if start > end:
+        return start, end, "Начало периода позже конца"
+    days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+    if days > MAX_OVERVIEW_DAYS:
+        return start, end, (
+            f"Период {days} дней — больше разрешённых {MAX_OVERVIEW_DAYS}. "
+            f"Выберите отрезок покороче."
+        )
+    return start, end, None
+
+
 def _courier_delivery_codes() -> List[str]:
     """
     Коды типов доставки «своим курьером» из справочника.
@@ -697,12 +734,13 @@ def get_overview():
     «Доставка сегодня»: где сейчас каждый заказ.
 
     Период по умолчанию — сегодня и завтра: горизонт, в котором вообще
-    что-то решают. Дальше смотреть незачем, а лишние даты стоят чтения.
+    что-то решают. Произвольный период задаётся явно и ограничен
+    MAX_OVERVIEW_DAYS — лишние даты стоят чтения с медленного /data.
     """
-    date_from = request.args.get("date_from")
-    date_to = request.args.get("date_to")
-    if not (_valid_date(date_from) and _valid_date(date_to)):
-        date_from, date_to = _default_period()
+    date_from, date_to, refusal = _bounded_period(
+        request.args.get("date_from"), request.args.get("date_to"))
+    if refusal:
+        return error_response(refusal)
 
     city = request.args.get("city") or None
     overview = ds.dispatch_overview(
@@ -715,8 +753,12 @@ def get_overview():
     # стороны одного вопроса «где сейчас заказ», и второй поход на экран за
     # ними означал бы второе обращение к общему медленному диску.
     overview["mismatches"] = ds.courier_mismatches(date_from, date_to, city)
-    return success_response(overview,
-                            {"date_from": date_from, "date_to": date_to})
+    # max_days отдаём вместе с данными: предел придётся назвать человеку до
+    # того, как он в него упрётся, а держать одно и то же число в двух местах
+    # (здесь и во фронте) значит однажды их развести.
+    return success_response(overview, {"date_from": date_from,
+                                       "date_to": date_to,
+                                       "max_days": MAX_OVERVIEW_DAYS})
 
 
 @delivery_bp.route("/metrics", methods=["GET"])

@@ -96,8 +96,12 @@ function cutVar(name) {
 // их своими копиями значило бы проверять не тот код.
 const state = {
     overview: null,
+    loading: false,
     filters: { order: '', site: '', time_from: '', time_to: '',
                state: '', ready: '', courier: '' },
+    period: { from: '', to: '' },
+    shownPeriod: { from: '', to: '' },
+    maxDays: null,
 };
 
 // Что показал BarhatUI.alert и что ушло в скачанный файл.
@@ -125,13 +129,15 @@ sandbox.window = sandbox;
 sandbox.window.BarhatUI = { alert(text) { captured.alerts.push(text); } };
 vm.createContext(sandbox);
 
-for (const name of ['STATE_TITLES', 'READY_TITLES', 'EMPTY_FILTERS', 'NO_COURIER']) {
+for (const name of ['STATE_TITLES', 'READY_TITLES', 'EMPTY_FILTERS', 'NO_COURIER',
+                    'MAX_ROWS']) {
     vm.runInContext(cutVar(name), sandbox);
 }
-for (const name of ['esc', 'orderLabel', 'siteLabel', 'slotLabel', 'stateKey',
-                    'stateLabel', 'readyKey', 'courierLabel', 'orderTable',
+for (const name of ['esc', 'orderLabel', 'dateLabel', 'siteLabel', 'slotLabel',
+                    'stateKey', 'stateLabel', 'readyKey', 'courierLabel', 'orderTable',
                     'hhmm', 'allOrders', 'hasFilters', 'filteredOrders',
                     'columnValues', 'filterSelect', 'filterField',
+                    'periodQuery', 'periodHtml',
                     'ordersFilterHtml', 'ordersCountText', 'ordersBodyHtml',
                     'ordersSectionHtml', 'csvCell', 'exportOrders']) {
     vm.runInContext(cut(name), sandbox);
@@ -314,7 +320,8 @@ check('пустой результат объясняется не как «за
 setOrders([]);
 resetFilters();
 check('а вот когда заказов правда нет — так и написано',
-      sandbox.ordersBodyHtml().includes('Заказов нет'));
+      sandbox.ordersBodyHtml().includes('За выбранный период заказов нет'),
+      '(«заказов нет» без упоминания периода читается как поломка синка)');
 
 
 console.log('\n5. Счётчик показанного');
@@ -426,7 +433,102 @@ check('и причина другая — чинить надо разное',
 resetFilters();
 
 
-console.log('\n9. Разметка, стили и код не разъехались');
+console.log('\n9. Дата доставки в таблице');
+
+setOrders([ord({ retailcrm_order_id: 90, delivery_date: '2026-01-05' })]);
+resetFilters();
+const withDate = sandbox.orderTable(state.overview.orders);
+check('столбец «Дата» есть в шапке', withDate.includes('<th>Дата</th>'));
+check('дата показана по-человечески', withDate.includes('05.01.2026'),
+      '(ISO в сетке читают хуже)');
+check('год в дате остался',
+      sandbox.dateLabel({ delivery_date: '2026-01-05' }) === '05.01.2026',
+      '(период до квартала может пересечь новый год)');
+check('пустая дата не рисует мусор',
+      sandbox.dateLabel({}) === '' && sandbox.dateLabel({ delivery_date: null }) === '');
+check('неожиданный формат отдаётся как есть, а не портится',
+      sandbox.dateLabel({ delivery_date: '05.01.2026' }) === '05.01.2026');
+check('дату не гоняем через BarhatTime',
+      !/BarhatTime/.test(cut('dateLabel')),
+      '(это день по стенным часам салона, а не отметка времени в UTC: '
+      + 'перевод в пояс устройства сдвинул бы утренний заказ на вчера)');
+
+// Число столбцов в шапке и в строке обязано совпасть, иначе таблица едет
+const head = (withDate.match(/<th[ >]/g) || []).length;
+const cells = (withDate.split('<tbody>')[1].match(/<td[ >]/g) || []).length;
+check('шапка и строка одной ширины', head === cells, `(${head} против ${cells})`);
+
+
+console.log('\n10. Произвольный период');
+
+state.period = { from: '', to: '' };
+check('пустой период не уходит в запрос — умолчание знает сервер',
+      sandbox.periodQuery() === '', sandbox.periodQuery());
+
+state.period = { from: '2026-09-01', to: '2026-09-30' };
+check('заданный период уходит обеими границами',
+      sandbox.periodQuery() === '?date_from=2026-09-01&date_to=2026-09-30',
+      sandbox.periodQuery());
+
+state.period = { from: '2026-09-01', to: '' };
+check('половина периода в запрос не уходит', sandbox.periodQuery() === '',
+      '(сервер подставил бы умолчание по одной границе — это не то, что просили)');
+
+state.period = { from: '2026-09-01', to: '2026-09-30' };
+state.maxDays = 92;
+const periodHtml = sandbox.periodHtml();
+check('поля периода показывают выбранное',
+      periodHtml.includes('value="2026-09-01"') && periodHtml.includes('value="2026-09-30"'));
+check('предел назван до того, как в него упрутся',
+      periodHtml.includes('не больше 92 дней'),
+      '(отказ задним числом — худший способ узнать про ограничение)');
+check('период применяется кнопкой, а не сам собой',
+      periodHtml.includes('data-cdisp-period'),
+      '(за ним идёт запрос к медленному /data)');
+check('поля периода не помечены как мгновенный фильтр',
+      !periodHtml.includes('data-cdisp-filter='),
+      '(иначе обработчик мгновенных условий начнёт их применять без запроса)');
+
+state.loading = true;
+check('на время запроса кнопка гаснет',
+      sandbox.periodHtml().includes('disabled'),
+      '(медленный клик иначе превращается в три запроса)');
+state.loading = false;
+state.maxDays = null;
+check('пока предел неизвестен, о нём молчим',
+      !sandbox.periodHtml().includes('не больше'));
+state.maxDays = 92;
+
+
+console.log('\n11. Длинный период не вешает вкладку');
+
+const many = [];
+for (let i = 0; i < sandbox.MAX_ROWS + 25; i++) {
+    many.push(ord({ retailcrm_order_id: 1000 + i }));
+}
+setOrders(many);
+resetFilters();
+const capped = sandbox.ordersBodyHtml();
+const rowCount = (capped.split('<tbody>')[1].match(/<tr>/g) || []).length;
+check('рисуется не больше предела строк', rowCount === sandbox.MAX_ROWS,
+      `(нарисовано ${rowCount} из ${many.length})`);
+check('отсечка называет оба числа',
+      capped.includes(String(sandbox.MAX_ROWS)) && capped.includes(String(many.length)),
+      '(показать часть молча — значит соврать про остальное)');
+check('и зовёт за остальным в выгрузку, а не в сужение периода',
+      /выгрузка в Excel заберёт все/.test(capped));
+
+lines = exported();
+check('выгрузка отсечкой не ограничена',
+      lines.length === many.length + 1,
+      `(в файле ${lines.length - 1} строк из ${many.length})`);
+
+setOrders(many.slice(0, sandbox.MAX_ROWS));
+check('ровно предел — отсечки нет',
+      !sandbox.ordersBodyHtml().includes('Показаны первые'));
+
+
+console.log('\n12. Разметка, стили и код не разъехались');
 
 // Смотрим ТЕЛО обработчика, а не файл целиком: `render()` в файле есть и
 // должен быть, и поиск по всему исходнику зеленел бы на любой версии.
@@ -448,8 +550,32 @@ check('«Сбросить» перерисовывает экран целико
 check('кнопка выгрузки заведена и привязана',
       source.includes('data-cdisp-export') && source.includes('exportOrders();'));
 
-for (const cls of ['cdisp-filters', 'cdisp-filter', 'cdisp-filter__label',
-                   'cdisp-filter__control', 'cdisp-orders-head']) {
+// Период: ответы на длинный и короткий отрезок приходят не в том порядке,
+// в каком их просили, и отказ по слишком длинному периоду не должен оставлять
+// в полях то, чего на экране нет.
+check('у загрузки есть номер запроса',
+      source.includes('var token = ++loadToken;')
+      && (source.match(/token !== loadToken/g) || []).length >= 3,
+      '(иначе в таблице осядет ответ, которого уже никто не ждёт)');
+check('отказ возвращает поля периода к показанному',
+      source.includes('state.period = state.shownPeriod;'),
+      '(иначе подпись врёт про то, что на экране)');
+check('успех запоминает показанный период',
+      source.includes('state.shownPeriod = state.period;'));
+check('предел периода фронт у себя не хранит',
+      !/MAX_OVERVIEW_DAYS|92/.test(cut('periodHtml')) && source.includes('meta.max_days'),
+      '(одно и то же число в двух местах однажды разъедется)');
+check('обновление не стирает уже показанное',
+      /state\.loading && state\.tab === 'today' && state\.overview/.test(source)
+      && source.includes('Обновляем…'),
+      '(«медленно» превратилось бы в «пусто», а поля периода — не поправить)');
+check('вкладка больше не называет период сегодняшним',
+      !/title:\s*'Доставка сегодня'/.test(cutVar('TABS')),
+      '(имя врало бы на каждом выборе прошлой недели)');
+
+for (const cls of ['cdisp-filters', 'cdisp-filters--period', 'cdisp-filter',
+                   'cdisp-filter__label', 'cdisp-filter__control',
+                   'cdisp-orders-head']) {
     check(`класс .${cls} описан в courier-dispatch.css`, css.includes(`.${cls}`));
 }
 check('своих цветов не завели: только токены --bx-*',

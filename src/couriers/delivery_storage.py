@@ -1931,6 +1931,29 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
               "unclaimed_alert": 0, "stuck_claim": 0}
     now = datetime.utcnow()
     settings_cache: Dict[Optional[str], Dict[str, Any]] = {}
+    today_cache: Dict[int, str] = {}
+
+    def still_ahead(row: Dict[str, Any]) -> bool:
+        """
+        Про этот заказ ещё есть что решать?
+
+        Обе тревоги ниже считаются как «до окна доставки осталось меньше
+        порога города», а для вчерашнего заказа это верно всегда. Пока период
+        был жёстко «сегодня и завтра», разницы не было; с произвольным
+        периодом (23.09.2026) выбор «прошлый месяц» наполнил бы тревожный
+        блок тысячами заказов, по которым решать уже нечего, — и его
+        перестали бы читать вовсе.
+
+        Сегодняшний день считаем по стенным часам САЛОНА, а не сервера:
+        салоны в UTC+5 и UTC+7, и в полночь по UTC у них уже давно новый
+        день. По UTC-дате заказы целого утра выпадали бы из тревог.
+        """
+        offset = row.get("utc_offset")
+        if offset is None:
+            return False
+        if offset not in today_cache:
+            today_cache[offset] = salon_time.utc_to_local(now, offset).date().isoformat()
+        return (row.get("delivery_date") or "") >= today_cache[offset]
 
     for row in rows:
         state = row.get("assignment_state") or "free"
@@ -1950,7 +1973,7 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
         # взял» каждый вечер наполнялся бы заказами, которые давно везёт Яндекс,
         # и его перестали бы читать.
         row["unclaimed_alert"] = False
-        if state == "free" and not row["outsourced"] and row.get("utc_offset") is not None:
+        if state == "free" and not row["outsourced"] and still_ahead(row):
             # Настройки города читаем один раз на город, а не на заказ.
             # city_settings() открывает СВОЁ соединение, и в цикле по ленте
             # это давало сотни обращений к общему медленному /data: замер
@@ -1978,7 +2001,7 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
         # доставки осталось столько-то, а заказ ещё в салоне», — и второй
         # настройки он не заслуживает.
         row["stuck_claim"] = False
-        if state == "claimed" and row.get("utc_offset") is not None:
+        if state == "claimed" and still_ahead(row):
             city_key = row.get("city")
             if city_key not in settings_cache:
                 settings_cache[city_key] = city_settings(city_key)
