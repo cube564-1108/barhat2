@@ -34,8 +34,23 @@
         free: 'Свободен',
         claimed: 'Забронирован',
         picked_up: 'В пути',
-        delivered: 'Доставлен'
+        delivered: 'Доставлен',
+        // Заказ отдали службе доставки. В поле `state` такого значения нет —
+        // оно живёт только на экране, и потому лежит здесь же, чтобы столбец
+        // таблицы и выпадающий список фильтра не разъехались.
+        outsourced: 'Передан службе'
     };
+
+    var READY_TITLES = { ready: 'Готов', making: 'Собирают' };
+
+    var EMPTY_FILTERS = {
+        order: '', site: '', time_from: '', time_to: '',
+        state: '', ready: '', courier: ''
+    };
+
+    // «Курьер не назначен» — тоже значение столбца, и выбрать его надо уметь.
+    // Пустая строка занята под «любой», поэтому у него свой признак.
+    var NO_COURIER = '__none__';
 
     var state = {
         tab: 'today',
@@ -48,7 +63,8 @@
         cities: [],
         outbox: [],
         users: [],
-        loading: false
+        loading: false,
+        filters: Object.assign({}, EMPTY_FILTERS)
     };
 
     function esc(value) {
@@ -205,8 +221,7 @@
             + alarm
             + stuckBlock
             + mismatchHtml()
-            + '<h3>Заказы</h3>'
-            + orderTable(state.overview.orders || [])
+            + ordersSectionHtml()
             + metricsHtml();
     }
 
@@ -247,32 +262,67 @@
             + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
     }
 
+    // --- Значения ячеек -----------------------------------------------------
+    /*
+     * Что показано в столбце, по чему фильтруем и что уходит в выгрузку —
+     * считает ОДНА функция на столбец. Развести их значит развести и смысл:
+     * в столбце «Состояние» есть «Передан службе», которого в поле `state`
+     * нет вовсе, и фильтр по сырому полю такой заказ никогда бы не нашёл.
+     */
+
+    function orderLabel(order) {
+        return order.order_number || order.retailcrm_order_id || '';
+    }
+
+    function siteLabel(order) {
+        return order.site_name || order.city || '';
+    }
+
+    function slotLabel(order) {
+        return (order.delivery_time_from || '')
+            + (order.delivery_time_to ? '–' + order.delivery_time_to : '');
+    }
+
+    /**
+     * Заказ отдали службе доставки: в CRM в поле «курьер» стоит агрегатор.
+     * Свободным он выглядит только в наших глазах — показывать его так
+     * значило бы звать человека решать решённое.
+     */
+    function stateKey(order) {
+        if (order.outsourced && order.state === 'free') return 'outsourced';
+        return order.state || 'free';
+    }
+
+    function stateLabel(order) {
+        var key = stateKey(order);
+        return STATE_TITLES[key] || key;
+    }
+
+    function readyKey(order) {
+        return order.is_ready ? 'ready' : 'making';
+    }
+
+    function courierLabel(order) {
+        return order.courier_name
+            || (order.outsourced ? (order.crm_courier_name || '') : '');
+    }
+
     function orderTable(orders) {
         if (!orders.length) return '<p class="section-description">Заказов нет</p>';
         var rows = orders.map(function (order) {
-            var slot = (order.delivery_time_from || '') +
-                (order.delivery_time_to ? '–' + order.delivery_time_to : '');
-            var who = order.courier_name || '';
             // «Зависла» считает сервер: бронь по времени больше не сгорает
             // (21.09.2026), и признак теперь не про срок брони, а про заказ —
             // взят, но не забран, а окно доставки уже близко. Порог свой у
             // каждого города, и знать его фронту незачем.
             var overdue = order.stuck_claim === true;
-            // Заказ отдали службе доставки: в CRM в поле «курьер» стоит
-            // агрегатор. Свободным он выглядит только в наших глазах —
-            // показывать его так значило бы звать человека решать решённое
-            var state = order.outsourced && order.state === 'free'
-                ? 'Передан службе'
-                : (STATE_TITLES[order.state] || order.state);
             return '<tr>'
-                + '<td>' + esc(order.order_number || order.retailcrm_order_id) + '</td>'
-                + '<td>' + esc(order.site_name || order.city || '') + '</td>'
-                + '<td>' + esc(slot || 'время уточняется') + '</td>'
-                + '<td>' + esc(state)
+                + '<td>' + esc(orderLabel(order)) + '</td>'
+                + '<td>' + esc(siteLabel(order)) + '</td>'
+                + '<td>' + esc(slotLabel(order) || 'время уточняется') + '</td>'
+                + '<td>' + esc(stateLabel(order))
                 + (overdue ? ' <span class="cdisp-bad">не забран</span>' : '') + '</td>'
-                + '<td>' + esc(order.is_ready ? 'Готов' : 'Собирают') + '</td>'
-                + '<td>' + esc(who || (order.outsourced ? order.crm_courier_name || '' : ''))
-                + '</td>'
+                + '<td>' + esc(READY_TITLES[readyKey(order)]) + '</td>'
+                + '<td>' + esc(courierLabel(order)) + '</td>'
                 + '<td>' + (order.state === 'claimed' || order.state === 'picked_up'
                     ? '<button class="btn btn-secondary" data-release-order="'
                         + esc(order.retailcrm_order_id) + '">Снять бронь</button>'
@@ -284,6 +334,249 @@
             + '<th>Заказ</th><th>Салон</th><th>Окно</th><th>Состояние</th>'
             + '<th>Сборка</th><th>Курьер</th><th></th>'
             + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    // --- Фильтр таблицы «Заказы» --------------------------------------------
+    /*
+     * Фильтр клиентский: заказы за период уже пришли одним запросом, и ходить
+     * за каждым переключением на общий медленный /data незачем (правило
+     * CLAUDE.md про цену обращения к базе). Тревожные блоки выше фильтр не
+     * трогает: это не таблица, а список того, что требует действия сейчас.
+     */
+
+    function hhmm(value) {
+        return String(value || '').slice(0, 5);
+    }
+
+    function allOrders() {
+        return (state.overview && state.overview.orders) || [];
+    }
+
+    function hasFilters() {
+        return Object.keys(EMPTY_FILTERS).some(function (key) {
+            return String(state.filters[key] || '').trim() !== '';
+        });
+    }
+
+    function filteredOrders() {
+        var f = state.filters;
+        var query = String(f.order || '').trim().toLowerCase();
+        var from = hhmm(f.time_from);
+        var to = hhmm(f.time_to);
+
+        return allOrders().filter(function (order) {
+            if (query && String(orderLabel(order)).toLowerCase().indexOf(query) === -1) {
+                return false;
+            }
+            if (f.site && siteLabel(order) !== f.site) return false;
+            if (f.state && stateKey(order) !== f.state) return false;
+            if (f.ready && readyKey(order) !== f.ready) return false;
+            if (f.courier) {
+                var who = courierLabel(order);
+                if (f.courier === NO_COURIER ? who !== '' : who !== f.courier) return false;
+            }
+            if (from || to) {
+                // Окно у заказа может быть не заведено вовсе («время
+                // уточняется»). Такой заказ не «раньше» и не «позже» — он вне
+                // шкалы, и под ограничение по времени не попадает. Об этом
+                // сказано подписью под фильтром, чтобы он не пропадал молча.
+                var start = hhmm(order.delivery_time_from);
+                if (!start) return false;
+                if (from && start < from) return false;
+                if (to && start > to) return false;
+            }
+            return true;
+        });
+    }
+
+    /** Уникальные непустые значения столбца — в том же виде, в каком они в нём. */
+    function columnValues(fn) {
+        var seen = {};
+        allOrders().forEach(function (order) {
+            var value = fn(order);
+            if (value) seen[value] = true;
+        });
+        return Object.keys(seen).sort(function (a, b) {
+            return a.localeCompare(b, 'ru');
+        });
+    }
+
+    /**
+     * Выбранное значение обязано остаться в списке, даже если данные
+     * обновились и такого салона/курьера в выборке больше нет: иначе браузер
+     * молча покажет первый пункт («Все»), а фильтр останется применённым —
+     * экран и состояние разойдутся.
+     */
+    function filterSelect(field, options) {
+        var current = state.filters[field] || '';
+        var known = options.some(function (pair) { return pair[0] === current; });
+        var all = options.slice();
+        if (current && !known) all.push([current, current + ' — нет в выборке']);
+        return '<select class="form-select cdisp-filter__control" data-cdisp-filter="'
+            + field + '">'
+            + all.map(function (pair) {
+                return '<option value="' + esc(pair[0]) + '"'
+                    + (pair[0] === current ? ' selected' : '') + '>'
+                    + esc(pair[1]) + '</option>';
+            }).join('')
+            + '</select>';
+    }
+
+    function filterField(label, control) {
+        return '<div class="cdisp-filter"><label class="cdisp-filter__label">'
+            + esc(label) + '</label>' + control + '</div>';
+    }
+
+    function ordersFilterHtml() {
+        var sites = [['', 'Все салоны']].concat(
+            columnValues(siteLabel).map(function (v) { return [v, v]; }));
+
+        // Состояния перечисляем в порядке жизни заказа, а не по алфавиту, и
+        // только те, что реально есть на экране.
+        var present = {};
+        allOrders().forEach(function (order) { present[stateKey(order)] = true; });
+        var states = [['', 'Любое состояние']].concat(
+            ['free', 'claimed', 'picked_up', 'delivered', 'outsourced']
+                .filter(function (key) { return present[key]; })
+                .map(function (key) { return [key, STATE_TITLES[key]]; }));
+
+        var couriers = [['', 'Любой курьер'], [NO_COURIER, 'Без курьера']].concat(
+            columnValues(courierLabel).map(function (v) { return [v, v]; }));
+
+        return '<div class="cdisp-filters">'
+            + filterField('Заказ', '<input type="search" class="form-input cdisp-filter__control"'
+                + ' data-cdisp-filter="order" placeholder="номер заказа"'
+                + ' value="' + esc(state.filters.order || '') + '">')
+            + filterField('Салон', filterSelect('site', sites))
+            + filterField('Окно с', '<input type="time" class="form-input cdisp-filter__control"'
+                + ' data-cdisp-filter="time_from" value="' + esc(state.filters.time_from || '') + '">')
+            + filterField('по', '<input type="time" class="form-input cdisp-filter__control"'
+                + ' data-cdisp-filter="time_to" value="' + esc(state.filters.time_to || '') + '">')
+            + filterField('Состояние', filterSelect('state', states))
+            + filterField('Сборка', filterSelect('ready', [
+                ['', 'Любая'], ['ready', 'Готов'], ['making', 'Собирают']]))
+            + filterField('Курьер', filterSelect('courier', couriers))
+            + '<div class="cdisp-filter">'
+            + '<button type="button" class="btn btn-secondary" data-cdisp-filter-reset="1">'
+            + 'Сбросить</button></div>'
+            + '</div>';
+    }
+
+    function ordersCountText() {
+        var total = allOrders().length;
+        var shown = filteredOrders().length;
+        if (!hasFilters()) return 'Заказов: ' + total;
+        return 'Показано ' + shown + ' из ' + total;
+    }
+
+    function ordersBodyHtml() {
+        if (!allOrders().length) return '<p class="section-description">Заказов нет</p>';
+        var rows = filteredOrders();
+        if (!rows.length) {
+            return '<p class="section-description">Под фильтр не попал ни один заказ. '
+                + 'Снимите часть условий или нажмите «Сбросить».</p>';
+        }
+        return orderTable(rows);
+    }
+
+    function ordersSectionHtml() {
+        return '<h3 style="margin-top:28px">Заказы</h3>'
+            + ordersFilterHtml()
+            + '<div class="cdisp-orders-head">'
+            + '<span class="cdisp-note" id="cdispOrdersCount">' + esc(ordersCountText())
+            + '</span>'
+            + '<button type="button" class="btn btn-secondary" data-cdisp-export="1">'
+            + 'Выгрузить в Excel</button>'
+            + '</div>'
+            + '<p class="cdisp-note">Заказы без заведённого окна доставки под ограничение '
+            + '«Окно с / по» не попадают: у них времени нет вовсе.</p>'
+            + '<div id="cdispOrders">' + ordersBodyHtml() + '</div>';
+    }
+
+    /**
+     * Перерисовываем ТОЛЬКО таблицу, а не весь экран.
+     *
+     * Полный render() переписывает host.innerHTML целиком и вместе с ним —
+     * поля самого фильтра: набор в строке «Заказ» обрывался бы на первом
+     * символе, а прокрутка прыгала бы вверх (правило CLAUDE.md про
+     * перерисовку через innerHTML).
+     */
+    function refreshOrders() {
+        var host = document.getElementById('cdispOrders');
+        if (!host) { render(); return; }
+        host.innerHTML = ordersBodyHtml();
+        var counter = document.getElementById('cdispOrdersCount');
+        if (counter) counter.textContent = ordersCountText();
+    }
+
+    // --- Выгрузка в Excel ---------------------------------------------------
+    /*
+     * CSV, а не xlsx: ради одной кнопки не тащим на прод openpyxl — то же
+     * решение, что в «Ссылках товаров» и «Оплате курьерам». Excel с русской
+     * локалью открывает такой файл двойным кликом.
+     *
+     * Выгружается ровно то, что видно на экране: применённый фильтр — часть
+     * ответа на вопрос «что это за список». Даты и город в файле есть, хотя
+     * в таблице их нет: строка из выгрузки читается отдельно от экрана, и без
+     * даты «10:00–12:00» не значит ничего — период охватывает и завтра.
+     */
+
+    function csvCell(value) {
+        var text = String(value === null || value === undefined ? '' : value);
+        // Название салона и имя курьера правят в CRM, а Excel исполняет
+        // ячейку, начинающуюся с = + - @, как формулу. Апостроф делает её
+        // текстом.
+        if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+        return /[";\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+    }
+
+    function exportOrders() {
+        var rows = filteredOrders();
+        if (!rows.length) {
+            window.BarhatUI.alert(allOrders().length
+                ? 'Нечего выгружать: под фильтр не попал ни один заказ'
+                : 'Нечего выгружать: заказов за период нет');
+            return;
+        }
+
+        var lines = [[
+            'Заказ', 'Дата доставки', 'Салон', 'Город', 'Окно', 'Состояние',
+            'Не забран', 'Сборка', 'Курьер', 'Курьер в CRM'
+        ].join(';')];
+
+        rows.forEach(function (order) {
+            lines.push([
+                csvCell(orderLabel(order)),
+                csvCell(order.delivery_date || ''),
+                csvCell(order.site_name || ''),
+                csvCell(order.city || ''),
+                csvCell(slotLabel(order)),
+                csvCell(stateLabel(order)),
+                csvCell(order.stuck_claim === true ? 'да' : ''),
+                csvCell(READY_TITLES[readyKey(order)]),
+                csvCell(order.courier_name || ''),
+                csvCell(order.crm_courier_name || '')
+            ].join(';'));
+        });
+
+        // Период берём из самих строк: ручка отдаёт его в meta, но до экрана
+        // meta не доходит, а выдумывать «сегодня» в имени файла нельзя —
+        // выгрузка захватывает и завтрашние доставки.
+        var dates = rows.map(function (o) { return o.delivery_date || ''; })
+            .filter(Boolean).sort();
+        var stamp = dates.length
+            ? (dates[0] === dates[dates.length - 1]
+                ? dates[0] : dates[0] + '_' + dates[dates.length - 1])
+            : new Date().toISOString().slice(0, 10);
+
+        // BOM — иначе Excel открывает кириллицу кракозябрами
+        var blob = new Blob(['﻿' + lines.join('\r\n')],
+                            { type: 'text/csv;charset=utf-8;' });
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'контроль-доставки_заказы_' + stamp + '.csv';
+        link.click();
+        URL.revokeObjectURL(link.href);
     }
 
     function metricsHtml() {
@@ -622,6 +915,20 @@
             return;
         }
 
+        if (event.target.closest('[data-cdisp-filter-reset]')) {
+            state.filters = Object.assign({}, EMPTY_FILTERS);
+            // Здесь перерисовываем экран целиком: поля фильтра сами обязаны
+            // опустеть, а точечное обновление таблицы их не трогает
+            render();
+            return;
+        }
+
+        var exportBtn = event.target.closest('[data-cdisp-export]');
+        if (exportBtn) {
+            exportOrders();
+            return;
+        }
+
         var citySave = event.target.closest('[data-city-save]');
         if (citySave) {
             var rowIndex = citySave.getAttribute('data-city-save');
@@ -784,6 +1091,25 @@
             });
         }
     });
+
+    /*
+     * Фильтр слушаем и по `input`, и по `change`: у текстового поля нужен
+     * первый (иначе список обновится только на уходе фокуса), у select в
+     * старых браузерах приходит только второй. Обработчик идемпотентен, и
+     * двойной вызов ничего не стоит — данные уже в памяти.
+     */
+    function onFilterEvent(event) {
+        if (!event.target.closest) return;
+        var control = event.target.closest('[data-cdisp-filter]');
+        if (!control) return;
+        var field = control.getAttribute('data-cdisp-filter');
+        if (!(field in EMPTY_FILTERS)) return;
+        state.filters[field] = control.value;
+        refreshOrders();
+    }
+
+    document.addEventListener('input', onFilterEvent);
+    document.addEventListener('change', onFilterEvent);
 
     document.addEventListener('change', function (event) {
         if (!event.target.closest) return;
