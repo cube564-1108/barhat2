@@ -113,3 +113,75 @@ def unclaimed_alert_at(delivery_date: str, time_from: Optional[str],
 def minutes_until(moment: datetime, now: Optional[datetime] = None) -> float:
     """Сколько минут осталось до момента (отрицательное — уже прошло)."""
     return ((moment - (now or datetime.utcnow())).total_seconds()) / 60.0
+
+
+# ---------------------------------------------------------------------------
+# «Вовремя или опоздал» — ОДНА формула на весь модуль
+# ---------------------------------------------------------------------------
+#
+# Живёт здесь, а не в том месте, которое считает показатели, потому что мест
+# этих два: сводка управляющего (`delivery_metrics`) и вкладка «Аналитика»
+# (`analytics.py`). Две копии формулы — это две правды, которые разъедутся на
+# первой же правке, и потом не понять, какая верная.
+#
+# Здесь же — причина, по которой фактическое время нельзя сравнивать с
+# интервалом напрямую: `delivered_at` мы пишем в UTC, а `delivery_time_to`
+# менеджер вводит в стенных часах салона. Салоны в UTC+5 и UTC+7: сравнение
+# «в лоб» показало бы пятичасовое опоздание у каждого заказа Екатеринбурга,
+# и выглядело бы это как работающая метрика.
+
+
+def deadline_utc(delivery_date: str, time_to: Optional[str],
+                 utc_offset: Optional[int]) -> Optional[datetime]:
+    """
+    Конец интервала доставки в UTC. `None` — посчитать нечем.
+
+    Две причины вернуть `None`, и обе означают «неизвестно», а не «успел»:
+
+    - **интервала нет** (`time_to` пуст или записан словами: «уточ», «Ждем
+      уточнений» — около 1% заказов);
+    - **у салона не задан пояс** (`utc_offset IS NULL` — салон новый).
+
+    Поэтому здесь НЕ используется `parse_local` с его `fallback_time`:
+    подстановка «23:59» превратила бы заказ без времени в заказ, доставленный
+    точно в срок. Ноль наоборот — заказ, про который мы ничего не знаем,
+    получает право считаться успешным.
+    """
+    if utc_offset is None:
+        return None
+
+    text = (time_to or "").strip()
+    if len(text) < 4 or ":" not in text:
+        return None
+    head, tail = text.split(":", 1)
+    if not head.strip().isdigit() or not tail[:2].isdigit():
+        return None
+    hour, minute = int(head), int(tail[:2])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    try:
+        day = datetime.strptime(delivery_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    return local_to_utc(day.replace(hour=hour, minute=minute), utc_offset)
+
+
+def lateness_minutes(delivered_at: Optional[str],
+                     deadline: Optional[datetime]) -> Optional[float]:
+    """
+    На сколько минут опоздали. `0` — вовремя, `None` — посчитать нечем.
+
+    Доставленное РАНЬШЕ интервала — вовремя, а не «минус сорок минут»
+    (решение владельца 23.09.2026): опоздание считается только от конца окна,
+    и отрицательные значения не должны попадать в среднее, иначе одна ранняя
+    доставка компенсирует чужое опоздание.
+    """
+    if not delivered_at or deadline is None:
+        return None
+    try:
+        delivered = datetime.fromisoformat(str(delivered_at))
+    except (ValueError, TypeError):
+        return None
+    late = (delivered - deadline).total_seconds() / 60.0
+    return late if late > 0 else 0.0

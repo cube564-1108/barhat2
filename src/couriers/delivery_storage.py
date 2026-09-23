@@ -2177,22 +2177,21 @@ def delivery_metrics(date_from: str, date_to: str,
                                 for c in claims) if m is not None and m >= 0]
 
     on_time, late = 0, 0
+    # Формула «вовремя» одна на модуль — она же считает вкладку «Аналитика».
+    # Две копии разъехались бы на первой правке, и тогда два экрана дашборда
+    # отвечали бы на один вопрос разными числами.
     for claim in claims:
-        if not claim["delivered_at"] or not claim["delivery_time_to"]:
+        minutes = salon_time.lateness_minutes(
+            claim["delivered_at"],
+            salon_time.deadline_utc(claim["delivery_date"],
+                                    claim["delivery_time_to"],
+                                    claim["utc_offset"]))
+        if minutes is None:
             continue
-        if claim["utc_offset"] is None:
-            continue
-        try:
-            deadline = salon_time.local_to_utc(
-                salon_time.parse_local(claim["delivery_date"], claim["delivery_time_to"]),
-                claim["utc_offset"])
-            delivered = datetime.fromisoformat(claim["delivered_at"])
-        except (ValueError, TypeError):
-            continue
-        if delivered <= deadline:
-            on_time += 1
-        else:
+        if minutes > 0:
             late += 1
+        else:
+            on_time += 1
 
     total = len(claims)
     # Броней, снятых ПО ТАЙМЕРУ, больше не бывает: сгорание убрано 21.09.2026.
