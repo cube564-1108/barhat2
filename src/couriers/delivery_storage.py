@@ -727,7 +727,18 @@ def is_ready_value(status: Optional[str], ready_seen_at: Optional[str],
 # Поля, которые видит любой курьер города: по ним он решает, брать заказ или нет.
 PUBLIC_ORDER_FIELDS = (
     "retailcrm_order_id", "order_number", "delivery_date", "site_code", "city",
-    "store_key", "address_text", "delivery_time_from", "delivery_time_to",
+    "store_key",
+    # Адрес отдаётся ЦЕЛИКОМ и до брони (решение владельца 23.09.2026). Он
+    # приходит из CRM одной строкой, которую заводят руками, и формат у неё
+    # разный по городам: «ул. Ленина, 45, кв. 12» в Новосибирске против
+    # «Свердловская область, Екатеринбург, ул. Бажова, 89» в ЕКБ. Прежнее
+    # сокращение резало первые две части — на екатеринбургских адресах это
+    # оставляло «Свердловская область, Екатеринбург», то есть курьер не видел
+    # ни улицы, ни дома и не мог решить, брать ли заказ, а «Маршрут» вёл в
+    # центр города. Любой разбор такой строки ломается на следующем написании,
+    # поэтому не разбираем её вовсе.
+    "address_text",
+    "delivery_time_from", "delivery_time_to",
     "ready_time", "ready_planned_at", "status",
     # «Не связываться с получателем» — не персональные данные, а указание, как
     # везти. Пока флаг лежал среди контактов, курьер узнавал о нём только
@@ -738,8 +749,8 @@ PUBLIC_ORDER_FIELDS = (
 )
 
 # Поля с персональными данными: отдаются только тому, кто взял заказ (и
-# управляющему). До брони курьеру хватает улицы и времени — а объём ПДн,
-# который «просто просматривают», лишним быть не должен.
+# управляющему). До брони курьеру хватает адреса и времени — телефоны,
+# имена и комментарии он «просто просматривать» не должен.
 PRIVATE_ORDER_FIELDS = (
     "recipient_name", "recipient_phone", "customer_name", "customer_phone",
     "manager_comment", "customer_comment", "note_text",
@@ -752,20 +763,6 @@ def _change_titles(fields: Optional[str]) -> List[str]:
     if not fields:
         return []
     return [CHANGE_TITLES[key] for key in fields.split(",") if key in CHANGE_TITLES]
-
-
-def _short_address(address: Optional[str]) -> Optional[str]:
-    """
-    Улица и дом без квартиры, подъезда и кода домофона.
-
-    Курьеру до брони нужно понять, далеко ли ехать, а не как попасть в
-    квартиру. Режем по первой запятой после номера дома: адреса приходят
-    строкой «ул. Ленина, 45, кв. 12, подъезд 2».
-    """
-    if not address:
-        return None
-    parts = [part.strip() for part in address.split(",")]
-    return ", ".join(parts[:2]) if len(parts) > 2 else address
 
 
 def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
@@ -917,8 +914,6 @@ def list_orders_for_courier(city: Optional[str], date_from: str, date_to: str,
         # Контакты — только по своей брони либо управляющему.
         if with_private or mine:
             item.update({field: row.get(field) for field in PRIVATE_ORDER_FIELDS})
-        else:
-            item["address_text"] = _short_address(row.get("address_text"))
         result.append(item)
 
     _mark("serialize", step)
@@ -995,8 +990,6 @@ def order_for_courier(order_id: int, city: Optional[str],
     })
     if with_private or mine:
         card.update({field: row.get(field) for field in PRIVATE_ORDER_FIELDS})
-    else:
-        card["address_text"] = _short_address(row.get("address_text"))
     return card
 
 

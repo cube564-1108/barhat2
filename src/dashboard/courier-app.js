@@ -1173,7 +1173,7 @@
             + (order.address_text
                 ? '<div class="cd-block__actions" style="margin-top:12px">'
                     + '<button type="button" class="cd-btn cd-btn--ghost" data-route="'
-                    + esc([order.city, order.address_text].filter(Boolean).join(', '))
+                    + esc(routeQuery(order))
                     + '">Маршрут</button></div>'
                 : '')));
 
@@ -1511,6 +1511,20 @@
      *
      * Точки маршрута появятся в Фазе 7 — там будут координаты из геокодера.
      */
+    // Строка для карт: город впереди нужен тем адресам, что приходят из CRM
+    // одной улицей («ул. Ленина, 45») — без него Яндекс ищет её по всей стране.
+    // Но в части городов CRM пишет адрес уже с регионом и городом
+    // («Свердловская область, Екатеринбург, ул. Бажова, 89»), и второй
+    // «Екатеринбург» впереди — лишний. Поэтому подставляем, только если города
+    // в строке ещё нет.
+    function routeQuery(order) {
+        var address = order.address_text || '';
+        var city = order.city || '';
+        if (!city) return address;
+        if (address.toLowerCase().indexOf(city.toLowerCase()) !== -1) return address;
+        return city + ', ' + address;
+    }
+
     function openRoute(address) {
         if (!address) return;
         window.open('https://yandex.ru/maps/?rtext=~' + encodeURIComponent(address) + '&rtt=auto',

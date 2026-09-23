@@ -4,7 +4,8 @@
 Проверяет на живом приложении то, что нельзя проверить чтением кода:
 
   - курьер видит ТОЛЬКО свой город (фильтр на сервере, а не в интерфейсе);
-  - до брони ему не отдают телефон и комментарии, а адрес урезан до улицы;
+  - до брони ему не отдают телефон и комментарии, но адрес виден ЦЕЛИКОМ —
+    и в городах, где CRM пишет его с регионом впереди, тоже;
   - заказы аутсорса (Яндекс.Доставка) в ленту не попадают — у них и адреса нет;
   - в ленту не попадают статусы вне справочника (отменённые, выполненные);
   - курьер без города получает пустой список и объяснение, а не чужие заказы;
@@ -81,12 +82,21 @@ storage.upsert_order_statuses([
 ])
 
 
-def order(order_id, city, site, status="send-to-florist", code="dostavka-kurerom"):
+# Два реальных написания адреса из CRM. Екатеринбургское начинается с региона
+# и города: на нём сокращение «первые две части» оставляло курьеру
+# «Свердловская область, Екатеринбург» — без улицы и дома (23.09.2026). Сторож
+# обязан содержать ОБА, иначе он снова зеленеет на сломанном коде.
+NSK_ADDRESS = "ул. Ленина, 45, кв. 12, подъезд 2, код 1234"
+EKB_ADDRESS = "Свердловская область, Екатеринбург, ул. Бажова, 89, кв. 12"
+
+
+def order(order_id, city, site, status="send-to-florist", code="dostavka-kurerom",
+          address=None):
     return {
         "retailcrm_order_id": order_id, "order_number": str(order_id),
         "delivery_date": TODAY, "status": status, "net_cost": 300,
         "site_code": site, "city": city, "delivery_code": code,
-        "address_text": "ул. Ленина, 45, кв. 12, подъезд 2, код 1234",
+        "address_text": address or NSK_ADDRESS,
         "delivery_time_from": "14:00", "delivery_time_to": "15:00",
         "recipient_name": "Евгения", "recipient_phone": "+79130000003",
         "customer_name": "Ирина", "customer_phone": "+79130000001",
@@ -100,13 +110,14 @@ storage.replace_orders_window(TODAY, TODAY, [
     order(2, "Новосибирск", "nsk-voskhod-3", status="order-complete"),
     order(3, "Новосибирск", "nsk-voskhod-3", status="complete"),        # выполнен
     order(4, "Новосибирск", "nsk-voskhod-3", code="ya-dostavka"),       # аутсорс
-    order(5, "Екатеринбург", "barkhat-ekb"),                            # чужой город
+    order(5, "Екатеринбург", "barkhat-ekb", address=EKB_ADDRESS),       # чужой город
 ])
 
 with app.app_context():
     auth.init_auth_tables()
     from werkzeug.security import generate_password_hash
-    for username, role in (("kurier-nsk", "courier"), ("kurier-bez-goroda", "courier"),
+    for username, role in (("kurier-nsk", "courier"), ("kurier-ekb", "courier"),
+                           ("kurier-bez-goroda", "courier"),
                            ("upravl", "manager")):
         conn = auth.get_db()
         try:
@@ -127,6 +138,7 @@ with app.app_context():
         conn.close()
 
 ds.save_courier_profile(rows["kurier-nsk"], "kurier-nsk", "Новосибирск", 101)
+ds.save_courier_profile(rows["kurier-ekb"], "kurier-ekb", "Екатеринбург", 102)
 
 
 def login(client, username):
@@ -153,7 +165,7 @@ with app.test_client() as client:
     check("счётчики в сводке", body["meta"]["free"] == 2 and body["meta"]["ready"] == 1,
           body["meta"])
 
-print("\n2. До брони контактов нет, адрес урезан")
+print("\n2. До брони контактов нет, а адрес виден целиком")
 
 with app.test_client() as client:
     login(client, "kurier-nsk")
@@ -162,14 +174,34 @@ with app.test_client() as client:
     check("телефона получателя нет в списке", "recipient_phone" not in first)
     check("телефона заказчика нет в списке", "customer_phone" not in first)
     check("комментария оператора нет в списке", "manager_comment" not in first)
-    check("адрес урезан до улицы и дома", first["address_text"] == "ул. Ленина, 45",
+    check("адрес в списке не урезан", first["address_text"] == NSK_ADDRESS,
           first["address_text"])
     check("время доставки видно (по нему и решают)",
           first["delivery_time_from"] == "14:00")
 
     card = client.get("/api/courier/orders/1").get_json()["data"]
     check("в карточке до брони телефона тоже нет", "recipient_phone" not in card)
+    check("адрес в карточке не урезан", card["address_text"] == NSK_ADDRESS,
+          card["address_text"])
     check("карточка отдаёт состав заказа", "items" in card)
+
+print("\n2а. Адрес с регионом впереди: курьер видит улицу и дом")
+# Тот самый случай: в Екатеринбурге CRM пишет «регион, город, улица, дом», и
+# сокращение до первых двух частей оставляло курьеру один город.
+
+with app.test_client() as client:
+    login(client, "kurier-ekb")
+    ekb = client.get(f"/api/courier/orders?date_from={TODAY}&date_to={TODAY}"
+                     ).get_json()["data"]
+    check("заказ своего города в ленте", [o["retailcrm_order_id"] for o in ekb] == [5],
+          [o["retailcrm_order_id"] for o in ekb])
+    check("в ленте видна улица с домом, а не только город",
+          ekb[0]["address_text"] == EKB_ADDRESS, ekb[0]["address_text"])
+
+    card = client.get("/api/courier/orders/5").get_json()["data"]
+    check("в карточке до брони видна улица с домом",
+          card["address_text"] == EKB_ADDRESS, card["address_text"])
+    check("контакты при этом закрыты", "recipient_phone" not in card)
 
 print("\n3. Управляющий видит контакты и чужие города")
 
@@ -180,7 +212,7 @@ with app.test_client() as client:
     check("видит оба города", ids == [1, 2, 5], f"получено {ids}")
     first = [o for o in body["data"] if o["retailcrm_order_id"] == 1][0]
     check("контакты открыты", first.get("recipient_phone") == "+79130000003")
-    check("полный адрес", first["address_text"].startswith("ул. Ленина, 45, кв. 12"))
+    check("полный адрес", first["address_text"] == NSK_ADDRESS)
     check("флаг «не связываться» виден", first.get("do_not_contact_recipient") == 1)
 
 print("\n4. Курьер без города не получает чужих заказов")
