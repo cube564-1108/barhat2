@@ -137,7 +137,7 @@ for (const name of ['esc', 'orderLabel', 'dateLabel', 'siteLabel', 'slotLabel',
                     'stateKey', 'stateLabel', 'readyKey', 'courierLabel', 'orderTable',
                     'hhmm', 'allOrders', 'hasFilters', 'filteredOrders',
                     'columnValues', 'filterSelect', 'filterField',
-                    'periodQuery', 'periodHtml',
+                    'capped', 'cutNotice', 'periodQuery', 'periodHtml',
                     'ordersFilterHtml', 'ordersCountText', 'ordersBodyHtml',
                     'ordersSectionHtml', 'csvCell', 'exportOrders']) {
     vm.runInContext(cut(name), sandbox);
@@ -312,10 +312,21 @@ const html = sandbox.ordersFilterHtml();
 check('исчезнувший салон остаётся в списке выбранным',
       html.includes('value="Центральный"') && /Центральный[^<]*нет в выборке/.test(html),
       '(иначе браузер покажет «Все салоны», а фильтр останется применённым)');
+
 check('и список пуст честно', ids() === '', ids());
 check('пустой результат объясняется не как «заказов нет»',
       sandbox.ordersBodyHtml().includes('Под фильтр не попал'),
       '(«Заказов нет» тут читается как поломка синхронизации)');
+
+// У салона и курьера значение и есть название, а у состояния значение — код
+resetFilters();
+state.filters.state = 'delivered';    // доставленных в выборке нет
+const goneState = sandbox.ordersFilterHtml();
+check('исчезнувшее состояние названо по-человечески',
+      /Доставлен — нет в выборке/.test(goneState)
+      && !/>delivered — нет/.test(goneState),
+      '(код `delivered` в списке человеку ничего не говорит)');
+resetFilters();
 
 setOrders([]);
 resetFilters();
@@ -526,6 +537,24 @@ check('выгрузка отсечкой не ограничена',
 setOrders(many.slice(0, sandbox.MAX_ROWS));
 check('ровно предел — отсечки нет',
       !sandbox.ordersBodyHtml().includes('Показаны первые'));
+
+// Отсечка одна на все таблицы раздела: расхождения по курьеру считаются по
+// ВСЕМУ периоду и растут вместе с ним, а тревожные блоки — по дню.
+check('capped режет, а не копирует бесконечно',
+      sandbox.capped(many).length === sandbox.MAX_ROWS
+      && sandbox.capped([1, 2]).length === 2);
+check('cutNotice молчит, пока резать нечего',
+      sandbox.cutNotice([1, 2]) === '');
+check('и называет оба числа, когда режет',
+      sandbox.cutNotice(many).includes(String(many.length))
+      && sandbox.cutNotice(many).includes(String(sandbox.MAX_ROWS)));
+check('отсечка стоит на блоке расхождений по курьеру',
+      /capped\(list\)/.test(cut('mismatchHtml'))
+      && /cutNotice\(list\)/.test(cut('mismatchHtml')),
+      '(courier_mismatches без LIMIT, а период теперь до квартала)');
+check('и на тревожных блоках',
+      /capped\(unclaimed\)/.test(cut('todayHtml'))
+      && /capped\(stuck\)/.test(cut('todayHtml')));
 
 
 console.log('\n12. Разметка, стили и код не разъехались');

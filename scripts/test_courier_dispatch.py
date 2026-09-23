@@ -25,7 +25,7 @@ import socket
 import ssl  # noqa: F401  — импортировать до патча сокета
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "src"))
@@ -658,8 +658,12 @@ print("\n9. Произвольный период: границы и трево�
 from couriers import delivery_server as dsrv  # noqa: E402
 
 default_from, default_to, refusal = dsrv._bounded_period(None, None)
+# Сверяем теми же часами, какими считает сама функция: она берёт
+# `date.today()` (локальные), а `utcnow()` на машине в UTC+5/+7 после обеда
+# даёт вчерашнюю дату — проверка падала бы сама по себе, без правок кода.
 check("без дат берётся умолчание сервера",
-      refusal is None and default_from == datetime.utcnow().date().isoformat(),
+      refusal is None and default_from == date.today().isoformat()
+      and default_to == (date.today() + timedelta(days=1)).isoformat(),
       f"({default_from}..{default_to}, {refusal})")
 
 _, _, refusal = dsrv._bounded_period("2026-09-01", "2026-09-30")
@@ -737,15 +741,20 @@ overview = ds.dispatch_overview("Новосибирск", YESTERDAY.isoformat(),
                                 TODAY.isoformat(), CODES)
 past = {o["retailcrm_order_id"]: o for o in overview["orders"]}
 
-check("вчерашний свободный заказ в «никто не взял» не попадает",
-      past[6090]["unclaimed_alert"] is False,
-      "(решать по нему уже нечего, а блок он наполнил бы целиком)")
-check("вчерашняя висящая бронь не выдаётся за «взяли, но не забрали»",
-      past[6091]["stuck_claim"] is False, f"({past[6091]['stuck_claim']})")
-check("и в тревожные списки прошлое не течёт",
+# Факт и призыв к действию — разные вещи, и гасить надо только второе.
+check("тревожный СПИСОК прошлым не наполняется",
       6090 not in {o["retailcrm_order_id"] for o in overview["unclaimed"]}
-      and 6091 not in {o["retailcrm_order_id"] for o in overview["stuck"]})
-check("но из таблицы заказов прошлое никуда не делось",
+      and 6091 not in {o["retailcrm_order_id"] for o in overview["stuck"]},
+      "(решать по вчерашнему заказу нечего, а блок он наполнил бы целиком)")
+check("и счётчик тревог идёт в ногу со списком",
+      overview["totals"]["unclaimed_alert"] == len(overview["unclaimed"])
+      and overview["totals"]["stuck_claim"] == len(overview["stuck"]),
+      f"({overview['totals']})")
+check("но ПРИЗНАК у вчерашнего заказа остаётся",
+      past[6090]["unclaimed_alert"] is True and past[6091]["stuck_claim"] is True,
+      "(он виден бейджем и уезжает столбцом «Не забран» в выгрузку — "
+      "погасив его, мы отдали бы пустой столбец на всей исторической части)")
+check("и из таблицы заказов прошлое никуда не делось",
       6090 in past and 6091 in past,
       "(период просили именно ради него)")
 

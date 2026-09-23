@@ -1935,14 +1935,20 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
 
     def still_ahead(row: Dict[str, Any]) -> bool:
         """
-        Про этот заказ ещё есть что решать?
+        По этому заказу ещё можно что-то сделать?
 
-        Обе тревоги ниже считаются как «до окна доставки осталось меньше
-        порога города», а для вчерашнего заказа это верно всегда. Пока период
-        был жёстко «сегодня и завтра», разницы не было; с произвольным
-        периодом (23.09.2026) выбор «прошлый месяц» наполнил бы тревожный
-        блок тысячами заказов, по которым решать уже нечего, — и его
-        перестали бы читать вовсе.
+        Отделяет ФАКТ от ПРИЗЫВА К ДЕЙСТВИЮ, и это разные вещи.
+
+        Факт («заказ так и не взяли», «взяли и не забрали») остаётся фактом и
+        для вчерашнего заказа: он виден бейджем в строке и уезжает в выгрузку,
+        ради которой период и сделали произвольным. Гасить его по дате значит
+        молча отдавать пустой столбец на всей исторической части периода.
+
+        А вот тревожный СПИСОК зовёт человека действовать, и для прошлого
+        действия не существует. Пока период был жёстко «сегодня и завтра»,
+        разницы не было; с произвольным периодом (23.09.2026) выбор «прошлый
+        месяц» наполнил бы блок тысячами заказов, по которым решать нечего, —
+        и его перестали бы читать вовсе.
 
         Сегодняшний день считаем по стенным часам САЛОНА, а не сервера:
         салоны в UTC+5 и UTC+7, и в полночь по UTC у них уже давно новый
@@ -1973,7 +1979,7 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
         # взял» каждый вечер наполнялся бы заказами, которые давно везёт Яндекс,
         # и его перестали бы читать.
         row["unclaimed_alert"] = False
-        if state == "free" and not row["outsourced"] and still_ahead(row):
+        if state == "free" and not row["outsourced"] and row.get("utc_offset") is not None:
             # Настройки города читаем один раз на город, а не на заказ.
             # city_settings() открывает СВОЁ соединение, и в цикле по ленте
             # это давало сотни обращений к общему медленному /data: замер
@@ -1986,7 +1992,9 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
                 row["delivery_date"], row.get("delivery_time_from"),
                 row["utc_offset"], minutes)
             row["unclaimed_alert"] = alert_at <= now
-            if row["unclaimed_alert"]:
+            # Счётчик идёт в ногу со СПИСКОМ, а не с признаком: он подписывает
+            # тревожный блок, а в блоке лежит только то, что ещё можно сделать
+            if row["unclaimed_alert"] and still_ahead(row):
                 totals["unclaimed_alert"] += 1
 
         # Забронирован, но не забран, а окно уже близко.
@@ -2001,7 +2009,7 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
         # доставки осталось столько-то, а заказ ещё в салоне», — и второй
         # настройки он не заслуживает.
         row["stuck_claim"] = False
-        if state == "claimed" and still_ahead(row):
+        if state == "claimed" and row.get("utc_offset") is not None:
             city_key = row.get("city")
             if city_key not in settings_cache:
                 settings_cache[city_key] = city_settings(city_key)
@@ -2010,14 +2018,19 @@ def dispatch_overview(city: Optional[str], date_from: str, date_to: str,
                 row["delivery_date"], row.get("delivery_time_from"),
                 row["utc_offset"], minutes)
             row["stuck_claim"] = alert_at <= now
-            if row["stuck_claim"]:
+            if row["stuck_claim"] and still_ahead(row):
                 totals["stuck_claim"] += 1
 
+    # Признак остаётся в строке и для прошлого — это факт, он виден бейджем и
+    # уезжает в выгрузку. В тревожные СПИСКИ попадает только то, по чему ещё
+    # можно действовать: список — это призыв, а не отчёт (см. still_ahead).
     return {
         "orders": rows,
         "totals": totals,
-        "unclaimed": [row for row in rows if row["unclaimed_alert"]],
-        "stuck": [row for row in rows if row["stuck_claim"]],
+        "unclaimed": [row for row in rows
+                      if row["unclaimed_alert"] and still_ahead(row)],
+        "stuck": [row for row in rows
+                  if row["stuck_claim"] and still_ahead(row)],
     }
 
 

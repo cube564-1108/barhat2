@@ -265,7 +265,7 @@
                 + '<h3>Никто не взял: ' + unclaimed.length + '</h3>'
                 + '<p class="section-description">До доставки осталось меньше порога города. '
                 + 'Если свой курьер не успевает — заказ передают службе доставки в CRM.</p>'
-                + orderTable(unclaimed) + '</div>';
+                + orderTable(capped(unclaimed)) + cutNotice(unclaimed) + '</div>';
         }
 
         // Забронированы, но не забраны, а окно близко. Это замена автоснятию
@@ -280,7 +280,7 @@
                 + '<p class="section-description">До доставки осталось меньше порога '
                 + 'города, а заказ всё ещё в салоне. Бронь сама не снимается — '
                 + 'свяжитесь с курьером или снимите бронь здесь.</p>'
-                + orderTable(stuck) + '</div>';
+                + orderTable(capped(stuck)) + cutNotice(stuck) + '</div>';
         }
 
         return '<div class="cdisp-tiles">' + tiles + '</div>'
@@ -306,7 +306,9 @@
         var list = (state.overview && state.overview.mismatches) || [];
         if (!list.length) return '';
 
-        var rows = list.map(function (item) {
+        // Отсечка та же, что у таблицы заказов: расхождения считаются по
+        // всему периоду, а он теперь до квартала — блок растёт вместе с ним.
+        var rows = capped(list).map(function (item) {
             var what = item.kind === 'stale_courier'
                 ? 'Бронь снята, курьер в CRM остался'
                 : 'В CRM другой курьер';
@@ -325,7 +327,26 @@
             + 'Модуль сюда не вмешивается — поправьте в CRM или снимите бронь.</p>'
             + '<table class="cdisp-table"><thead><tr>'
             + '<th>Заказ</th><th>Дата</th><th>У нас</th><th>В CRM</th><th>Что не так</th>'
-            + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+            + '</tr></thead><tbody>' + rows + '</tbody></table>'
+            + cutNotice(list) + '</div>';
+    }
+
+    /*
+     * Отсечка отрисовки, одна на все таблицы раздела.
+     *
+     * Период стал произвольным, и «прошлый месяц» — это тысячи строк:
+     * innerHTML на таком объёме вешает вкладку на секунды, а читать сетку из
+     * десяти тысяч строк всё равно нельзя. Молчаливая отсечка врёт про
+     * остальное, поэтому `capped` всегда ходит в паре с `cutNotice`.
+     */
+    function capped(list) {
+        return list.length > MAX_ROWS ? list.slice(0, MAX_ROWS) : list;
+    }
+
+    function cutNotice(list, hint) {
+        if (list.length <= MAX_ROWS) return '';
+        return '<p class="section-description">Показаны первые ' + MAX_ROWS
+            + ' строк из ' + list.length + '. ' + (hint || 'Сузьте период.') + '</p>';
     }
 
     // --- Значения ячеек -----------------------------------------------------
@@ -487,11 +508,17 @@
      * молча покажет первый пункт («Все»), а фильтр останется применённым —
      * экран и состояние разойдутся.
      */
-    function filterSelect(field, options) {
+    function filterSelect(field, options, titles) {
         var current = state.filters[field] || '';
         var known = options.some(function (pair) { return pair[0] === current; });
         var all = options.slice();
-        if (current && !known) all.push([current, current + ' — нет в выборке']);
+        if (current && !known) {
+            // Имя берём из словаря, а не из ключа: у салона и курьера значение
+            // и есть название, а у состояния значение — это код (`delivered`),
+            // и человеку он ничего не говорит.
+            all.push([current, ((titles || {})[current] || current)
+                      + ' — нет в выборке']);
+        }
         return '<select class="form-select cdisp-filter__control" data-cdisp-filter="'
             + field + '">'
             + all.map(function (pair) {
@@ -563,9 +590,10 @@
                 + ' data-cdisp-filter="time_from" value="' + esc(state.filters.time_from || '') + '">')
             + filterField('по', '<input type="time" class="form-input cdisp-filter__control"'
                 + ' data-cdisp-filter="time_to" value="' + esc(state.filters.time_to || '') + '">')
-            + filterField('Состояние', filterSelect('state', states))
+            + filterField('Состояние', filterSelect('state', states, STATE_TITLES))
             + filterField('Сборка', filterSelect('ready', [
-                ['', 'Любая'], ['ready', 'Готов'], ['making', 'Собирают']]))
+                ['', 'Любая'], ['ready', 'Готов'], ['making', 'Собирают']],
+                READY_TITLES))
             + filterField('Курьер', filterSelect('courier', couriers))
             + '<div class="cdisp-filter">'
             + '<button type="button" class="btn btn-secondary" data-cdisp-filter-reset="1">'
@@ -592,12 +620,9 @@
         // Отсечка громкая и с числом: показать часть молча — значит соврать
         // про остальное. Выгрузка при этом заберёт всё, и здесь об этом
         // сказано, чтобы за недостающими строками не шли сужать период.
-        var cut = rows.length > MAX_ROWS
-            ? '<p class="section-description">Показаны первые ' + MAX_ROWS
-                + ' строк из ' + rows.length + '. Сузьте период или фильтр — '
-                + 'а выгрузка в Excel заберёт все ' + rows.length + '.</p>'
-            : '';
-        return cut + orderTable(rows.slice(0, MAX_ROWS));
+        return cutNotice(rows, 'Сузьте период или фильтр — а выгрузка в Excel '
+                               + 'заберёт все ' + rows.length + '.')
+            + orderTable(capped(rows));
     }
 
     function ordersSectionHtml() {
