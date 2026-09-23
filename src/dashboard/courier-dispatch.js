@@ -31,8 +31,17 @@
         { id: 'couriers', title: 'Курьеры' },
         { id: 'statuses', title: 'Статусы CRM' },
         { id: 'cities', title: 'Настройки городов' },
-        { id: 'outbox', title: 'Журнал отправок' }
+        { id: 'outbox', title: 'Журнал отправок' },
+        // Сюда переехали «Показатели за 30 дней», жившие внизу «Доставки»:
+        // два места с одними числами разъезжаются на первой правке формулы,
+        // и потом не понять, какое верное (решение владельца 23.09.2026).
+        { id: 'analytics', title: 'Аналитика' }
     ];
+
+    // Сколько дней показываем при первом открытии «Аналитики». Месяц — это то,
+    // на что смотрят: неделя шумит, квартал прячет свежее. Предел периода у
+    // сервера свой и приезжает в meta.
+    var ANALYTICS_DEFAULT_DAYS = 30;
 
     var STATE_TITLES = {
         free: 'Свободен',
@@ -73,7 +82,6 @@
         tab: 'today',
         isAdmin: false,
         overview: null,
-        metrics: null,
         profiles: null,
         actions: [],
         statuses: [],
@@ -87,7 +95,22 @@
         // длинному периоду обязан вернуть поля к тому, что на экране.
         period: { from: '', to: '' },
         shownPeriod: { from: '', to: '' },
-        maxDays: null
+        maxDays: null,
+
+        // --- Вкладка «Аналитика» --------------------------------------------
+        //
+        // Свой период, а не общий с «Доставкой»: там смотрят сегодня и завтра,
+        // здесь — прошлый месяц. Один period на две вкладки означал бы, что
+        // переключение молча меняет то, на что человек только что смотрел.
+        analytics: null,
+        anaSites: [],            // справочник салонов, приезжает с данными
+        anaPicked: [],           // что отмечено СЕЙЧАС (ещё не применено)
+        anaApplied: { period: { from: '', to: '' }, sites: [] },
+        anaPeriod: { from: '', to: '' },
+        anaSitesOpen: false,
+        // Раскрытые блоки детализации. Переживают перерисовку: лента блоков
+        // переписывается целиком, и состояние в DOM стёрлось бы под рукой.
+        anaOpen: { late: false, outsourced: false, never: false }
     };
 
     function esc(value) {
@@ -173,21 +196,20 @@
 
         var job;
         if (state.tab === 'today') {
-            // Показатели за 30 дней живут своим периодом и в заголовке так и
-            // названы: сузить их до выбранного дня значило бы убить медианы,
-            // ради которых блок и существует.
-            job = Promise.all([getFull('/api/courier/overview' + periodQuery()),
-                               get('/api/courier/metrics')])
+            // Показателей здесь больше нет — они переехали во вкладку
+            // «Аналитика» (23.09.2026). Вместе с ними ушёл и второй запрос:
+            // каждый поход на медленный /data стоит денег, а числа, которых
+            // на экране нет, грузить незачем.
+            job = getFull('/api/courier/overview' + periodQuery())
                 .then(function (r) {
                     if (token !== loadToken) return;
-                    state.overview = r[0].data;
-                    state.metrics = r[1];
+                    state.overview = r.data;
                     state.period = {
-                        from: r[0].meta.date_from || '',
-                        to: r[0].meta.date_to || ''
+                        from: r.meta.date_from || '',
+                        to: r.meta.date_to || ''
                     };
                     state.shownPeriod = state.period;
-                    state.maxDays = r[0].meta.max_days || null;
+                    state.maxDays = r.meta.max_days || null;
                 })
                 .catch(function (error) {
                     // Данные на экране остались прежние — значит и поля
@@ -211,6 +233,43 @@
             job = get('/api/courier/city-settings').then(function (data) {
                 state.cities = data || [];
             });
+        } else if (state.tab === 'analytics') {
+            if (!state.anaPeriod.from || !state.anaPeriod.to) {
+                state.anaPeriod = defaultAnalyticsPeriod();
+            }
+            job = getFull('/api/courier/analytics' + analyticsQuery())
+                .then(function (r) {
+                    if (token !== loadToken) return;
+                    state.analytics = r.data;
+                    state.anaSites = (r.meta && r.meta.sites) || state.anaSites;
+                    state.maxDays = (r.meta && r.meta.max_days) || state.maxDays;
+                    // Применённым считается то, что сервер реально посчитал, а
+                    // не то, что человек отметил: иначе подпись под таблицей
+                    // врёт про показанные числа при любом отказе.
+                    state.anaApplied = {
+                        period: {
+                            from: (r.meta && r.meta.date_from) || state.anaPeriod.from,
+                            to: (r.meta && r.meta.date_to) || state.anaPeriod.to
+                        },
+                        sites: (r.data.site_codes || []).slice()
+                    };
+                    state.anaPeriod = {
+                        from: state.anaApplied.period.from,
+                        to: state.anaApplied.period.to
+                    };
+                })
+                .catch(function (error) {
+                    // Отказ возвращает поля к показанному: данные на экране
+                    // прежние, значит и период обязан остаться прежним.
+                    if (token === loadToken) {
+                        state.anaPeriod = {
+                            from: state.anaApplied.period.from || state.anaPeriod.from,
+                            to: state.anaApplied.period.to || state.anaPeriod.to
+                        };
+                        state.anaPicked = state.anaApplied.sites.slice();
+                    }
+                    throw error;
+                });
         } else {
             job = get('/api/courier/outbox?limit=100').then(function (data) {
                 state.outbox = data || [];
@@ -287,8 +346,7 @@
             + alarm
             + stuckBlock
             + mismatchHtml()
-            + ordersSectionHtml()
-            + metricsHtml();
+            + ordersSectionHtml();
     }
 
     /**
@@ -726,26 +784,432 @@
         URL.revokeObjectURL(link.href);
     }
 
-    function metricsHtml() {
-        var m = state.metrics;
-        if (!m) return '';
-        var rows = [
-            ['Броней за период', num(m.claims_total)],
-            ['Броней сняли руками', num(m.released_by_hand_share, ' %')],
-            ['От брони до забора, медиана', num(m.minutes_to_pickup_median, ' мин')],
-            ['Доставок вовремя', num(m.on_time_share, ' %')],
-            ['Ушло аутсорсу после снятия брони', num(m.outsourced_after_release)],
-            ['На сумму', num(m.outsourced_amount, ' ₽')]
-        ].map(function (pair) {
-            return '<tr><td>' + esc(pair[0]) + '</td><td>' + pair[1] + '</td></tr>';
+    /*
+     * Блок «Показатели за 30 дней» жил здесь до 23.09.2026 и переехал во
+     * вкладку «Аналитика» — целиком, вместе с медианой «от брони до забора» и
+     * суммой аутсорса. Держать одни и те же числа в двух местах значит
+     * однажды их развести: формулу правят в одном, а читают из другого.
+     *
+     * Ручка `/api/courier/metrics` осталась на месте — её ответ показывает
+     * теперь вкладка «Аналитика» через свой расчёт, а формула «вовремя» у них
+     * общая (`salon_time.deadline_utc`).
+     */
+
+    // === Вкладка «Аналитика» ================================================
+    /*
+     * Сюда переехали «Показатели за 30 дней» из «Доставки» и добавился разрез
+     * по курьерам. Решения по виду (согласованы 23.09.2026):
+     *
+     *   - у плитки под числом стоит его БАЗА («171 из 198»): процент без
+     *     знаменателя не проверяется — при трёх доставках 66,7% не значит
+     *     ничего;
+     *   - строка сходимости обязательна: «броней 247, доставок 198» рождает
+     *     вопрос «где остальные 49», и отвечать на него надо на экране;
+     *   - полоски доли нет, только число — сравнение даёт сортировка;
+     *   - непосчитанное («без интервала», «салон без пояса») названо вслух,
+     *     а не спрятано: иначе доля считается по куску выборки молча.
+     */
+
+    function defaultAnalyticsPeriod() {
+        var to = new Date();
+        var from = new Date();
+        from.setDate(from.getDate() - (ANALYTICS_DEFAULT_DAYS - 1));
+        function iso(d) {
+            return d.getFullYear() + '-'
+                + String(d.getMonth() + 1).padStart(2, '0') + '-'
+                + String(d.getDate()).padStart(2, '0');
+        }
+        return { from: iso(from), to: iso(to) };
+    }
+
+    function analyticsQuery() {
+        var query = '?date_from=' + encodeURIComponent(state.anaPeriod.from)
+            + '&date_to=' + encodeURIComponent(state.anaPeriod.to);
+        if (state.anaPicked.length) {
+            query += '&sites=' + encodeURIComponent(state.anaPicked.join(','));
+        }
+        return query;
+    }
+
+    /** Выбранное отличается от показанного — значит «Показать» ещё не нажимали. */
+    function analyticsDirty() {
+        var applied = state.anaApplied;
+        if (state.anaPeriod.from !== applied.period.from
+            || state.anaPeriod.to !== applied.period.to) return true;
+        if (state.anaPicked.length !== applied.sites.length) return true;
+        return state.anaPicked.some(function (code) {
+            return applied.sites.indexOf(code) === -1;
+        });
+    }
+
+    function siteName(code) {
+        var found = state.anaSites.filter(function (s) { return s.code === code; })[0];
+        return (found && (found.name || found.code)) || code;
+    }
+
+    /**
+     * Салоны: выпадающий список с галочками и чипсы выбранного.
+     *
+     * Выбор НЕ уходит на сервер сразу: каждый щелчок стоил бы запроса к
+     * медленному /data. Применяется той же кнопкой «Показать», что и период,
+     * а до нажатия рядом висит напоминание — иначе человек смотрит на числа
+     * одного набора салонов и читает подписи другого.
+     */
+    function anaSitesHtml() {
+        var picked = state.anaPicked;
+        var label = picked.length
+            ? 'Салоны: выбрано ' + picked.length
+            : 'Салоны: все';
+
+        var list = '';
+        if (state.anaSitesOpen) {
+            var options = state.anaSites.map(function (site) {
+                var on = picked.indexOf(site.code) !== -1;
+                return '<label class="cdisp-ms__row">'
+                    + '<input type="checkbox" data-cdisp-site="' + esc(site.code) + '"'
+                    + (on ? ' checked' : '') + '> '
+                    + '<span>' + esc(site.name || site.code)
+                    + (site.city ? ' <span class="cdisp-note">· ' + esc(site.city) + '</span>' : '')
+                    + '</span></label>';
+            }).join('');
+            list = '<div class="cdisp-ms__list" data-cdisp-ms-list>'
+                + (options || '<p class="section-description">Салонов пока нет</p>')
+                + (picked.length
+                    ? '<button type="button" class="btn btn-secondary cdisp-ms__clear"'
+                        + ' data-cdisp-sites-clear="1">Снять все</button>'
+                    : '')
+                + '</div>';
+        }
+
+        var chips = picked.map(function (code) {
+            return '<button type="button" class="cdisp-chip" data-cdisp-site-off="'
+                + esc(code) + '" title="Убрать из выборки">'
+                + esc(siteName(code)) + ' ×</button>';
         }).join('');
 
-        return '<h3 style="margin-top:28px">Показатели за 30 дней</h3>'
-            + '<table class="cdisp-table"><tbody>' + rows + '</tbody></table>'
+        return '<div class="cdisp-filter cdisp-ms">'
+            + '<label class="cdisp-filter__label">Салоны</label>'
+            + '<button type="button" class="form-input cdisp-filter__control cdisp-ms__button"'
+            + ' data-cdisp-sites-toggle="1">' + esc(label) + ' ▾</button>'
+            + list + '</div>'
+            + (chips ? '<div class="cdisp-chips">' + chips + '</div>' : '');
+    }
+
+    function anaFiltersHtml() {
+        return '<div class="cdisp-filters cdisp-filters--period">'
+            + filterField('Дата доставки с',
+                '<input type="date" class="form-input cdisp-filter__control"'
+                + ' id="cdispAnaFrom" value="' + esc(state.anaPeriod.from || '') + '">')
+            + filterField('по',
+                '<input type="date" class="form-input cdisp-filter__control"'
+                + ' id="cdispAnaTo" value="' + esc(state.anaPeriod.to || '') + '">')
+            + anaSitesHtml()
+            + '<div class="cdisp-filter">'
+            + '<button type="button" class="btn btn-primary" data-cdisp-ana-apply="1"'
+            + (state.loading ? ' disabled' : '') + '>Показать</button></div>'
+            + '<div class="cdisp-filter">'
+            + '<button type="button" class="btn btn-secondary" data-cdisp-ana-excel="1"'
+            + (state.analytics ? '' : ' disabled') + '>Excel</button></div>'
+            + (analyticsDirty()
+                ? '<div class="cdisp-filter"><span class="cdisp-note cdisp-note--warn">'
+                    + 'Фильтр изменён — нажмите «Показать»</span></div>'
+                : '')
+            + (state.maxDays
+                ? '<div class="cdisp-filter"><span class="cdisp-note">За раз можно '
+                    + 'запросить не больше ' + esc(state.maxDays) + ' дней</span></div>'
+                : '')
+            + '</div>';
+    }
+
+    function tile(label, value, caption) {
+        return '<div class="cdisp-tile">'
+            + '<div class="cdisp-tile__label">' + esc(label) + '</div>'
+            + '<div class="cdisp-tile__value">' + value + '</div>'
+            + (caption ? '<div class="cdisp-tile__caption">' + caption + '</div>' : '')
+            + '</div>';
+    }
+
+    function anaTilesHtml(t) {
+        var deliveredCaption = t.claims
+            ? 'из ' + esc(t.claims) + ' броней' : '';
+        var counted = (t.on_time || 0) + (t.late || 0);
+        var byHand = 'курьер ' + esc(t.released_self || 0)
+            + ' · управляющий ' + esc(t.released_admin || 0);
+        var outsourcedCaption = t.claims
+            ? esc(Math.round((t.outsourced_after_claim || 0) / t.claims * 100)) + ' % от броней'
+            : '';
+
+        return '<div class="cdisp-tiles cdisp-tiles--ana">'
+            + tile('Броней', num(t.claims), '')
+            + tile('Доставок', num(t.delivered), deliveredCaption)
+            + tile('Вовремя', num(t.on_time_share, ' %'),
+                counted ? esc(t.on_time) + ' из ' + esc(counted) : 'нечего считать')
+            + tile('Опоздание', num(t.late_minutes_avg, ' мин'),
+                t.late ? 'среднее по ' + esc(t.late) : 'опозданий нет')
+            + tile('Сняли руками', num(t.released_by_hand), byHand)
+            + tile('Ушло аутсорсу', num(t.outsourced_after_claim), outsourcedCaption)
+            + '</div>';
+    }
+
+    /**
+     * Куда делись брони, не ставшие доставками.
+     *
+     * Без этой строки «броней 247, доставок 198» выглядит потерей сорока девяти
+     * заказов. Здесь же названо непосчитанное: доля «вовремя» считается не по
+     * всем доставкам, и знать об этом надо на экране, а не из кода.
+     */
+    function anaReconcileHtml(t) {
+        var parts = [
+            'доставлено ' + esc(t.delivered || 0),
+            'снято руками ' + esc(t.released_by_hand || 0),
+            'аутсорс ' + esc(t.outsourced_after_claim || 0)
+        ];
+        if (t.released_expired) parts.push('сгорело по таймеру ' + esc(t.released_expired));
+        if (t.order_gone) parts.push('заказ ушёл из работы ' + esc(t.order_gone));
+        if (t.active) parts.push('в работе ' + esc(t.active));
+        if (t.problem) parts.push('с проблемой ' + esc(t.problem));
+
+        var notCounted = t.not_counted || {};
+        var tail = [];
+        if (notCounted.no_interval) {
+            tail.push('без интервала доставки — ' + esc(notCounted.no_interval)
+                + ' (в долю не вошли)');
+        }
+        if (notCounted.no_timezone) {
+            tail.push('без часового пояса салона — ' + esc(notCounted.no_timezone)
+                + ' ('
+                + esc((notCounted.sites_without_timezone || []).join(', '))
+                + ' — задайте пояс в «Настройках городов»)');
+        }
+
+        return '<p class="cdisp-reconcile">Из ' + esc(t.claims || 0) + ' броней: '
+            + parts.join(' · ') + '.'
+            + (tail.length ? ' Не посчитано: ' + tail.join('; ') + '.' : '')
+            + '</p>';
+    }
+
+    function anaCouriersHtml(rows, t) {
+        if (!rows.length) {
+            return '<p class="section-description">За выбранный период броней нет</p>';
+        }
+        var body = rows.map(function (row) {
+            // «Мало данных» — про число посчитанных доставок, а не всех: у
+            // курьера с двумя «50,0 %» читается так же уверенно, как «86,4 %»
+            // у курьера с двумя сотнями, и по нему примут решение о человеке.
+            var share = num(row.on_time_share, ' %');
+            if (row.low_data && row.on_time_share !== null) {
+                share = '<span class="cdisp-note" title="Посчитано доставок: '
+                    + esc(row.counted) + ' — слишком мало, чтобы судить">'
+                    + share + ' · мало данных</span>';
+            }
+            return '<tr>'
+                + '<td>' + esc(row.courier_name || ('#' + row.courier_user_id)) + '</td>'
+                + '<td>' + esc(row.claims) + '</td>'
+                + '<td>' + esc(row.released_by_hand) + '</td>'
+                + '<td>' + esc(row.delivered) + '</td>'
+                + '<td>' + share + '</td>'
+                + '<td>' + num(row.late_minutes_avg, ' мин') + '</td>'
+                + '<td>' + esc(row.outsourced) + '</td>'
+                + '</tr>';
+        }).join('');
+
+        return '<table class="cdisp-table cdisp-table--ana"><thead><tr>'
+            + '<th>Курьер</th><th>Брони</th><th>Снял</th><th>Доставок</th>'
+            + '<th>Вовремя</th><th>Опоздание</th><th>Аутсорс</th>'
+            + '</tr></thead><tbody>' + body + '</tbody>'
+            + '<tfoot><tr>'
+            + '<td>Итого</td>'
+            + '<td>' + esc(t.claims || 0) + '</td>'
+            + '<td>' + esc(t.released_by_hand || 0) + '</td>'
+            + '<td>' + esc(t.delivered || 0) + '</td>'
+            + '<td>' + num(t.on_time_share, ' %') + '</td>'
+            + '<td>' + num(t.late_minutes_avg, ' мин') + '</td>'
+            + '<td>' + esc(t.outsourced_after_claim || 0) + '</td>'
+            + '</tr></tfoot></table>';
+    }
+
+    /** Аккордеон детализации: заголовок с числом, тело — таблица. */
+    function anaBlock(key, title, rows, tableHtml, hint) {
+        var open = state.anaOpen[key];
+        return '<div class="cdisp-block">'
+            + '<button type="button" class="cdisp-block__head" data-cdisp-ana-block="'
+            + esc(key) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
+            + '<span class="cdisp-block__arrow">' + (open ? '▾' : '▸') + '</span> '
+            + esc(title) + ' — ' + esc(rows.length)
+            + '</button>'
+            + (open
+                ? '<div class="cdisp-block__body">'
+                    + (hint ? '<p class="section-description">' + hint + '</p>' : '')
+                    + (rows.length ? tableHtml() : '<p class="section-description">Пусто</p>')
+                    + cutNotice(rows)
+                    + '</div>'
+                : '')
+            + '</div>';
+    }
+
+    function anaLateTable(rows) {
+        var body = capped(rows).map(function (row) {
+            var plan = [row.time_from, row.time_to].filter(Boolean).join('–');
+            return '<tr>'
+                + '<td>' + esc(row.order_number || row.retailcrm_order_id) + '</td>'
+                + '<td>' + esc(row.courier_name || '') + '</td>'
+                + '<td>' + esc(row.site_name || '') + '</td>'
+                + '<td>' + esc(row.delivery_date || '') + '</td>'
+                + '<td>' + esc(plan || 'не задан') + '</td>'
+                + '<td>' + esc(row.delivered_local || '') + '</td>'
+                + '<td>+' + esc(row.late_minutes) + ' мин</td>'
+                + '</tr>';
+        }).join('');
+        return '<table class="cdisp-table"><thead><tr>'
+            + '<th>№ заказа</th><th>Курьер</th><th>Салон</th><th>Дата</th>'
+            + '<th>План</th><th>Факт</th><th>Опоздание</th>'
+            + '</tr></thead><tbody>' + body + '</tbody></table>';
+    }
+
+    function anaOutsourcedTable(rows) {
+        var body = capped(rows).map(function (row) {
+            return '<tr>'
+                + '<td>' + esc(row.order_number || row.retailcrm_order_id) + '</td>'
+                + '<td>' + esc(row.courier_name || '') + '</td>'
+                + '<td>' + esc(row.site_name || '') + '</td>'
+                + '<td>' + esc(row.delivery_date || '') + '</td>'
+                + '<td>' + esc((row.released_at || '').slice(0, 16)) + '</td>'
+                + '</tr>';
+        }).join('');
+        return '<table class="cdisp-table"><thead><tr>'
+            + '<th>№ заказа</th><th>Курьер</th><th>Салон</th><th>Дата доставки</th>'
+            + '<th>Когда сняли бронь</th>'
+            + '</tr></thead><tbody>' + body + '</tbody></table>';
+    }
+
+    function anaNeverTable(rows) {
+        var body = capped(rows).map(function (row) {
+            var plan = [row.delivery_time_from, row.delivery_time_to]
+                .filter(Boolean).join('–');
+            return '<tr>'
+                + '<td>' + esc(row.order_number || row.retailcrm_order_id) + '</td>'
+                + '<td>' + esc(row.site_name || '') + '</td>'
+                + '<td>' + esc(row.delivery_date || '') + '</td>'
+                + '<td>' + esc(plan || 'не задан') + '</td>'
+                + '</tr>';
+        }).join('');
+        return '<table class="cdisp-table"><thead><tr>'
+            + '<th>№ заказа</th><th>Салон</th><th>Дата доставки</th><th>Интервал</th>'
+            + '</tr></thead><tbody>' + body + '</tbody></table>';
+    }
+
+    /**
+     * Выгрузка аналитики: свод по курьерам и три списка одним файлом.
+     *
+     * Период и салоны идут ПЕРВОЙ строкой файла. Без них выгрузка через неделю
+     * бессмысленна: числа есть, а за что они — неизвестно.
+     */
+    function exportAnalytics() {
+        var data = state.analytics;
+        if (!data) {
+            window.BarhatUI.alert('Нечего выгружать: данные ещё не загружены');
+            return;
+        }
+        var t = data.totals || {};
+        var applied = state.anaApplied;
+        var sitesLabel = applied.sites.length
+            ? applied.sites.map(siteName).join(', ') : 'все салоны';
+
+        var lines = [
+            ['Аналитика курьеров'].join(';'),
+            ['Период', applied.period.from + ' — ' + applied.period.to].map(csvCell).join(';'),
+            ['Салоны', sitesLabel].map(csvCell).join(';'),
+            '',
+            ['Курьер', 'Брони', 'Снял руками', 'Доставок', 'Вовремя, %',
+             'Среднее опоздание, мин', 'Аутсорс', 'Посчитано доставок'].join(';')
+        ];
+        (data.couriers || []).forEach(function (row) {
+            lines.push([
+                csvCell(row.courier_name || ('#' + row.courier_user_id)),
+                csvCell(row.claims), csvCell(row.released_by_hand),
+                csvCell(row.delivered),
+                csvCell(row.on_time_share === null ? '' : row.on_time_share),
+                csvCell(row.late_minutes_avg === null ? '' : row.late_minutes_avg),
+                csvCell(row.outsourced), csvCell(row.counted)
+            ].join(';'));
+        });
+        lines.push(['Итого', t.claims || 0, t.released_by_hand || 0, t.delivered || 0,
+                    t.on_time_share === null ? '' : t.on_time_share,
+                    t.late_minutes_avg === null ? '' : t.late_minutes_avg,
+                    t.outsourced_after_claim || 0, (t.on_time || 0) + (t.late || 0)]
+            .map(csvCell).join(';'));
+
+        lines.push('', ['Доставлены с опозданием'].join(';'));
+        lines.push(['№ заказа', 'Курьер', 'Салон', 'Дата', 'План', 'Факт',
+                    'Опоздание, мин'].join(';'));
+        (data.late_orders || []).forEach(function (row) {
+            lines.push([
+                csvCell(row.order_number || row.retailcrm_order_id),
+                csvCell(row.courier_name || ''), csvCell(row.site_name || ''),
+                csvCell(row.delivery_date || ''),
+                csvCell([row.time_from, row.time_to].filter(Boolean).join('–')),
+                csvCell(row.delivered_local || ''), csvCell(row.late_minutes)
+            ].join(';'));
+        });
+
+        lines.push('', ['Переданы службе после снятия брони'].join(';'));
+        lines.push(['№ заказа', 'Курьер', 'Салон', 'Дата доставки',
+                    'Когда сняли бронь'].join(';'));
+        (data.outsourced_after_claim || []).forEach(function (row) {
+            lines.push([
+                csvCell(row.order_number || row.retailcrm_order_id),
+                csvCell(row.courier_name || ''), csvCell(row.site_name || ''),
+                csvCell(row.delivery_date || ''), csvCell(row.released_at || '')
+            ].join(';'));
+        });
+
+        lines.push('', ['Ушли службе, не взяты никем'].join(';'));
+        lines.push(['№ заказа', 'Салон', 'Дата доставки', 'Интервал'].join(';'));
+        (data.outsourced_never_claimed || []).forEach(function (row) {
+            lines.push([
+                csvCell(row.order_number || row.retailcrm_order_id),
+                csvCell(row.site_name || ''), csvCell(row.delivery_date || ''),
+                csvCell([row.delivery_time_from, row.delivery_time_to]
+                    .filter(Boolean).join('–'))
+            ].join(';'));
+        });
+
+        // BOM — иначе Excel открывает кириллицу кракозябрами
+        var blob = new Blob(['﻿' + lines.join('\r\n')],
+                            { type: 'text/csv;charset=utf-8;' });
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'аналитика-курьеров_' + applied.period.from
+            + '_' + applied.period.to + '.csv';
+        link.click();
+        URL.revokeObjectURL(link.href);
+    }
+
+    function analyticsHtml() {
+        if (!state.analytics) return anaFiltersHtml();
+
+        var data = state.analytics;
+        var t = data.totals || {};
+        var late = data.late_orders || [];
+        var outsourced = data.outsourced_after_claim || [];
+        var never = data.outsourced_never_claimed || [];
+
+        return anaFiltersHtml()
+            + anaTilesHtml(t)
+            + anaReconcileHtml(t)
+            + anaCouriersHtml(data.couriers || [], t)
+            + anaBlock('late', 'Доставлены с опозданием', late,
+                function () { return anaLateTable(late); })
+            + anaBlock('outsourced', 'Переданы службе после снятия брони', outsourced,
+                function () { return anaOutsourcedTable(outsourced); })
+            + anaBlock('never', 'Ушли службе, не взяты никем', never,
+                function () { return anaNeverTable(never); },
+                'Курьер на эти заказы не нашёлся вовсе — это не про отказы, '
+                + 'а про число людей и условия на непопулярные слоты.')
             + '<p class="section-description">Не считается: '
-            + esc((m.not_measured || []).join(', '))
-            + ' — момент появления заказа в ленте нигде не записан, '
-            + 'и показывать вместо него время синхронизации значило бы выдумать цифру.</p>';
+            + esc((data.not_measured || []).join('; '))
+            + '. «Доставлено» — это отметка курьера в приложении, а не момент '
+            + 'вручения: другого источника факта у нас нет.</p>';
     }
 
     // === Вкладка «Курьеры» ==================================================
@@ -1039,7 +1503,12 @@
         }).join(' ');
 
         var body;
-        if (state.loading && state.tab === 'today' && state.overview) {
+        if (state.loading && state.tab === 'analytics' && state.analytics) {
+            // То же правило, что и в «Доставке»: пока есть что показать, экран
+            // не очищаем. Иначе «медленно» превращается в «пусто», а поля
+            // фильтра не поправить, не дождавшись длинного запроса.
+            body = '<p class="section-description">Обновляем…</p>' + analyticsHtml();
+        } else if (state.loading && state.tab === 'today' && state.overview) {
             // Экран не очищаем, пока есть что показать: «медленно»
             // превращается в «пусто», и человек видит сломанный модуль вместо
             // задержки (CLAUDE.md). Заодно поля периода остаются на месте —
@@ -1051,6 +1520,7 @@
         else if (state.tab === 'couriers') body = couriersHtml();
         else if (state.tab === 'statuses') body = statusesHtml();
         else if (state.tab === 'cities') body = citiesHtml();
+        else if (state.tab === 'analytics') body = analyticsHtml();
         else body = outboxHtml();
 
         host.innerHTML = '<div class="cdisp-tabs">'
@@ -1093,6 +1563,82 @@
             // целиком и вернёт её живой в любом исходе
             period.disabled = true;
             loadTab();
+            return;
+        }
+
+        // --- Вкладка «Аналитика» --------------------------------------------
+
+        if (event.target.closest('[data-cdisp-sites-toggle]')) {
+            state.anaSitesOpen = !state.anaSitesOpen;
+            render();
+            return;
+        }
+
+        var siteOff = event.target.closest('[data-cdisp-site-off]');
+        if (siteOff) {
+            var offCode = siteOff.getAttribute('data-cdisp-site-off');
+            state.anaPicked = state.anaPicked.filter(function (c) { return c !== offCode; });
+            render();
+            return;
+        }
+
+        if (event.target.closest('[data-cdisp-sites-clear]')) {
+            state.anaPicked = [];
+            render();
+            return;
+        }
+
+        var siteBox = event.target.closest('[data-cdisp-site]');
+        if (siteBox) {
+            var code = siteBox.getAttribute('data-cdisp-site');
+            var chosen = state.anaPicked.indexOf(code) === -1;
+            state.anaPicked = chosen
+                ? state.anaPicked.concat([code])
+                : state.anaPicked.filter(function (c) { return c !== code; });
+            // Список салонов перерисовывается целиком — вернём ему прокрутку,
+            // иначе на длинном справочнике каждый щелчок выбрасывает человека
+            // в начало списка (CLAUDE.md про innerHTML).
+            var list = document.querySelector('[data-cdisp-ms-list]');
+            var scroll = list ? list.scrollTop : 0;
+            render();
+            var again = document.querySelector('[data-cdisp-ms-list]');
+            if (again) again.scrollTop = scroll;
+            return;
+        }
+
+        var anaBlockBtn = event.target.closest('[data-cdisp-ana-block]');
+        if (anaBlockBtn) {
+            var blockKey = anaBlockBtn.getAttribute('data-cdisp-ana-block');
+            state.anaOpen[blockKey] = !state.anaOpen[blockKey];
+            render();
+            return;
+        }
+
+        var anaApply = event.target.closest('[data-cdisp-ana-apply]');
+        if (anaApply) {
+            var anaFrom = document.getElementById('cdispAnaFrom');
+            var anaTo = document.getElementById('cdispAnaTo');
+            if (!anaFrom || !anaTo) {
+                toast('Поля периода не найдены, обновите экран', 'error');
+                return;
+            }
+            if (!anaFrom.value || !anaTo.value) {
+                toast('Задайте обе даты периода', 'error');
+                return;
+            }
+            if (anaFrom.value > anaTo.value) {
+                toast('Начало периода позже конца', 'error');
+                return;
+            }
+            state.anaPeriod = { from: anaFrom.value, to: anaTo.value };
+            state.anaSitesOpen = false;
+            anaApply.disabled = true;
+            loadTab();
+            return;
+        }
+
+        if (event.target.closest('[data-cdisp-ana-excel]')) {
+            exportAnalytics();
             return;
         }
 

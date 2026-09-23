@@ -637,8 +637,12 @@ check("названием города поля не ищут", 'data-city="' no
 check("пустой набор полей не уходит на сервер", "Поля настроек не найдены" in js)
 
 # 4. Плитка «доля просроченных броней» врала бы нулём: сгорания больше нет.
+#
+# С 23.09.2026 показатели живут во вкладке «Аналитика», а не внизу «Доставки»:
+# ищем плитку там. Сам показатель остаётся в ответе `delivery_metrics` —
+# ручка никуда не делась, и её формула общая с аналитикой.
 check("метрика просроченных заменена на «сняли руками»",
-      "expired_share" not in js and "released_by_hand_share" in js)
+      "expired_share" not in js and "Сняли руками" in js)
 metrics = ds.delivery_metrics(TODAY.isoformat(), TODAY.isoformat())
 check("в метриках нет мёртвого показателя", "expired_share" not in metrics,
       f"({sorted(metrics)})")

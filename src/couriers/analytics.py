@@ -79,6 +79,24 @@ def _median(values: List[float]) -> Optional[float]:
     return (ordered[middle - 1] + ordered[middle]) / 2
 
 
+def _local_time(moment: Optional[str], utc_offset: Optional[int]) -> Optional[str]:
+    """
+    Отметка UTC → «14:30» по стенным часам салона.
+
+    `None` — если пояса нет: подставить сюда UTC значило бы показать время,
+    которое выглядит настоящим и отличается от плана на пять часов.
+    """
+    from datetime import datetime
+
+    if not moment or utc_offset is None:
+        return None
+    try:
+        return salon_time.utc_to_local(
+            datetime.fromisoformat(str(moment)), utc_offset).strftime("%H:%M")
+    except (ValueError, TypeError):
+        return None
+
+
 def _minutes_between(start: Optional[str], end: Optional[str]) -> Optional[float]:
     from datetime import datetime
 
@@ -273,6 +291,13 @@ def load_analytics(date_from: str, date_to: str,
                 "time_from": claim["delivery_time_from"],
                 "time_to": claim["delivery_time_to"],
                 "delivered_at": claim["delivered_at"],
+                # Факт — в стенных часах САЛОНА, потому что рядом с ним в
+                # таблице стоит плановый интервал, а он в них же. Отдать сюда
+                # UTC значило бы поставить рядом две шкалы: управляющий увидел
+                # бы «план 12:00–14:00, факт 09:30» и решил, что привезли
+                # раньше срока.
+                "delivered_local": _local_time(claim["delivered_at"],
+                                               claim["utc_offset"]),
                 "late_minutes": round(minutes),
             })
         else:

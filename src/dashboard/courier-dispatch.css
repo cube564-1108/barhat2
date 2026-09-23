@@ -129,3 +129,81 @@
 @media (max-width: 520px) {
     .cdisp-filter, .cdisp-filter__control { width: 100%; }
 }
+
+/* ===== Вкладка «Аналитика» ============================================== */
+
+/* Шесть плиток: три в ряд, чтобы «Сняли руками» и «Ушло аутсорсу» стояли
+   рядом — это одна мысль «сколько потеряли», и разрывать её по строкам
+   нельзя. */
+.cdisp-tiles--ana { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 900px) { .cdisp-tiles--ana { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px) { .cdisp-tiles--ana { grid-template-columns: 1fr; } }
+
+/* База числа под ним же: процент без знаменателя не проверяется. */
+.cdisp-tile__caption {
+    margin-top: 6px; font-size: 12px; color: var(--bx-muted); line-height: 1.3;
+}
+
+/* Куда делись брони, не ставшие доставками. Стоит сразу под плитками и
+   отвечает на первый же вопрос к ним. */
+.cdisp-reconcile {
+    margin: -8px 0 16px; font-size: 13px; color: var(--bx-text-2); line-height: 1.5;
+}
+
+.cdisp-note--warn { color: var(--bx-down); }
+
+/* Множественный выбор салонов */
+.cdisp-ms { position: relative; }
+.cdisp-ms__button { text-align: left; cursor: pointer; background: var(--bx-white); }
+.cdisp-ms__list {
+    position: absolute; z-index: 20; top: 100%; left: 0; min-width: 240px;
+    max-height: 280px; overflow-y: auto;
+    background: var(--bx-white);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-lg);
+    box-shadow: 0 8px 24px rgba(65, 19, 48, 0.12);
+    padding: 6px;
+}
+.cdisp-ms__row {
+    display: flex; gap: 8px; align-items: center;
+    padding: 7px 8px; border-radius: var(--bx-r-lg);
+    font-size: 13.5px; color: var(--bx-text); cursor: pointer;
+    /* Палец на телефоне — не мышь: строка обязана быть целью нажатия, а не
+       один квадратик чекбокса. */
+    min-height: 38px;
+}
+.cdisp-ms__row:hover { background: var(--bx-pink-wash); }
+.cdisp-ms__clear { width: 100%; margin-top: 6px; }
+
+.cdisp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.cdisp-chip {
+    border: 1px solid var(--bx-border);
+    background: var(--bx-pink-wash); color: var(--bx-wine);
+    border-radius: 9999px; padding: 4px 12px;
+    font-size: 12px; cursor: pointer; line-height: 1.4;
+}
+.cdisp-chip:hover { background: var(--bx-pink); }
+
+/* Итоговая строка таблицы по курьерам */
+.cdisp-table--ana tfoot td {
+    font-weight: 600; color: var(--bx-wine);
+    border-top: 2px solid var(--bx-border); border-bottom: none;
+}
+
+/* Блоки детализации: закрыты по умолчанию, открываются кликом по заголовку */
+.cdisp-block {
+    background: var(--bx-white);
+    border: 1px solid var(--bx-border);
+    border-radius: var(--bx-r-2xl);
+    margin-top: 12px;
+}
+.cdisp-block__head {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; min-height: 48px; padding: 12px 16px;
+    background: none; border: none; cursor: pointer;
+    font-family: var(--bx-font-head); font-weight: 600; font-size: 15px;
+    color: var(--bx-wine); text-align: left;
+}
+.cdisp-block__head:hover { background: var(--bx-pink-wash); border-radius: var(--bx-r-2xl); }
+.cdisp-block__arrow { color: var(--bx-muted); font-size: 12px; }
+.cdisp-block__body { padding: 0 16px 12px; overflow-x: auto; }
