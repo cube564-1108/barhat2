@@ -212,7 +212,11 @@ function makeSandbox(options) {
     // init висит на DOMContentLoaded
     (domListeners['DOMContentLoaded'] || []).forEach(fn => fn());
 
-    return { sandbox, byId, alerts, doc };
+    // domListeners — слушатели, повешенные модулем на документ (клик мимо, Esc,
+    // отпускание кнопки мыши). Без доступа к ним сторож не может разыграть
+    // «кликнул в стороне» и «нажал Esc», а это ровно те пути, на которых
+    // компоненты закрываются и применяют выбор.
+    return { sandbox, byId, alerts, doc, domListeners };
 }
 
 

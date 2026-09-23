@@ -349,7 +349,7 @@
                 <div class="bxdr__cal">
                     <div class="bxdr__cal-head">
                         ${prev}
-                        <span class="bxdr__cal-title">${MONTHS[month]} ${year}</span>
+                        <span class="bxdr__cal-title" data-dr-month="${year}-${pad2(month + 1)}">${MONTHS[month]} ${year}</span>
                         ${next}
                     </div>
                     <div class="bxdr__wd">${WEEKDAYS.map(d => `<span>${d}</span>`).join('')}</div>
