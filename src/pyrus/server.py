@@ -34,6 +34,26 @@ from auth import (
     require_ajax_header,
 )
 
+# Отпечаток выкаченного кода для ленты «Система» → «Обновления» в Пульсе:
+# заготовщик раз в 5 минут смотрит /health каждого сервиса, сменился отпечаток —
+# значит был деплой. Файл build_info.py лежит в корне и ОДИНАКОВ во всех сервисах
+# БАРХАТ, локально его не правим.
+#
+# Корень добавляем в sys.path явно: точка входа app.py кладёт туда только src/,
+# а сервис запускают ещё и через run_server.py и из сторожей.
+# Импорт под защитой: отсутствие отпечатка не повод ронять старт воркера —
+# без него лента просто не увидит новую версию, а сайт работает.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+try:
+    from build_info import build_fingerprint
+except Exception as _build_info_error:  # pragma: no cover
+    print(f"build_info недоступен, отпечаток сборки не отдаётся: {_build_info_error}")
+
+    def build_fingerprint() -> str:
+        return "unknown"
+
 # ОТЛАДКА: показываем откуда запущен
 print("=" * 60)
 print("SERVER STARTUP DEBUG")
@@ -706,6 +726,12 @@ def health_check():
 
     body = {
         'status': 'ok',
+        # service + build читает заготовщик Пульса для ленты «Обновления».
+        # Отпечаток считается один раз за жизнь процесса и дальше отдаётся из
+        # памяти (замер 23.09.2026: 28 мс первый вызов, 0,001 мс повторный),
+        # поэтому он не делает дешёвый /health дорогим.
+        'service': 'dashboard',
+        'build': build_fingerprint(),
         'timestamp': datetime.now().isoformat(),
         'full': full,
         'database': db_path,
