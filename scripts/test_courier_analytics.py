@@ -386,6 +386,77 @@ check("после возврата формулы он снова на мест�
       1 in [o["retailcrm_order_id"]
             for o in analytics.load_analytics(DAY, DAY)["late_orders"]])
 
+# ============================================================================
+print("\n13. Ручка: право на раздел, период и фильтр салонов")
+# ============================================================================
+#
+# Права проверяются ПРОГОНОМ, а не чтением декоратора: секция у курьера и
+# секция у управляющего — разные ветки, и та, что не исполнялась ни разу,
+# уже приносила 500 на проде (CLAUDE.md про тестового менеджера без салонов).
+
+import auth  # noqa: E402
+from pyrus.server import app  # noqa: E402
+from werkzeug.security import generate_password_hash  # noqa: E402
+
+app.config["TESTING"] = True
+with app.app_context():
+    auth.init_auth_tables()
+    for username, role in (("analytics-kurier", "courier"),
+                           ("analytics-upravl", "manager")):
+        conn = auth.get_db()
+        try:
+            conn.execute(
+                "INSERT INTO users (username, full_name, password_hash, role, "
+                "is_active, created_at) VALUES (?, ?, ?, ?, 1, datetime('now'))",
+                (username, username, generate_password_hash("Parol12345"), role))
+            conn.commit()
+        finally:
+            conn.close()
+    auth.migrate_permissions_for_existing_users()
+    auth.migrate_new_module_permissions("courier_dispatch", ["admin", "manager"])
+
+
+def login(client, username):
+    return client.post("/api/auth/login",
+                       json={"username": username, "password": "Parol12345"})
+
+
+with app.test_client() as client:
+    login(client, "analytics-kurier")
+    code = client.get(f"/api/courier/analytics?date_from={DAY}&date_to={DAY}").status_code
+    check("курьеру аналитика не отдаётся", code == 403, f"({code})")
+
+with app.test_client() as client:
+    login(client, "analytics-upravl")
+    body = client.get(f"/api/courier/analytics?date_from={DAY}&date_to={DAY}").get_json()
+    check("управляющий получает числа",
+          body["data"]["totals"]["claims"] == t["claims"],
+          f"({body.get('data', {}).get('totals', {}).get('claims')})")
+    check("справочник салонов приехал вместе с данными",
+          {s["code"] for s in body["meta"]["sites"]} >= {"ekb", "nsk"},
+          f"({body['meta'].get('sites')})")
+
+    filtered = client.get(
+        f"/api/courier/analytics?date_from={DAY}&date_to={DAY}&sites=nsk"
+    ).get_json()["data"]
+    check("фильтр салонов доехал до расчёта",
+          filtered["totals"]["claims"] == 5, f"({filtered['totals']['claims']})")
+    check("выбранные салоны названы в ответе",
+          filtered["site_codes"] == ["nsk"], f"({filtered['site_codes']})")
+
+    # Слишком длинный период отбивается с объяснением, а не сужается молча:
+    # иначе человек получит не те данные, которые запросил.
+    long_period = client.get(
+        "/api/courier/analytics?date_from=2026-01-01&date_to=2026-12-31")
+    check("год отбит с названной причиной", long_period.status_code == 400
+          and "дней" in (long_period.get_json().get("error") or ""),
+          f"({long_period.status_code}, {long_period.get_json()})")
+
+    # Мусор в датах не роняет ручку и не отдаёт пустоту без объяснения.
+    broken = client.get("/api/courier/analytics?date_from=вчера&date_to=сегодня")
+    check("кривые даты не роняют ручку", broken.status_code in (200, 400),
+          f"({broken.status_code})")
+
 print("")
 if failures:
     print(f"=== ПРОВАЛЕНО: {len(failures)} ===")

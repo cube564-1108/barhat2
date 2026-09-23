@@ -33,6 +33,7 @@ sys.path.insert(0, auth_path)
 from auth import (log_action, require_ajax_header, role_required,  # noqa: E402
                   section_required)
 
+from . import analytics  # noqa: E402
 from . import delivery_storage as ds  # noqa: E402
 from . import storage  # noqa: E402
 
@@ -773,6 +774,46 @@ def get_metrics():
         date_to = today.isoformat()
     return success_response(ds.delivery_metrics(
         date_from, date_to, request.args.get("city") or None))
+
+
+@delivery_bp.route("/analytics", methods=["GET"])
+@section_required(DISPATCH_SECTION)
+def get_analytics():
+    """
+    Вкладка «Аналитика»: метрики за период и набор салонов.
+
+    Право то же, что у всего раздела: это данные о работе людей, и курьеру они
+    не показываются — у него нет ни этой секции, ни вкладки.
+
+    Период ограничен теми же `MAX_OVERVIEW_DAYS`, что и обзор: списки
+    детализации растут вместе с ним, а читает их тот же медленный `/data`.
+    Отказ называет причину, а не сужает период молча: человек получил бы не те
+    данные, которые запросил, и не узнал бы об этом.
+
+    Салоны приходят списком кодов через запятую. Пустой список означает «все»
+    — так же, как пустой фильтр на экране.
+    """
+    date_from, date_to, refusal = _bounded_period(
+        request.args.get("date_from"), request.args.get("date_to"))
+    if refusal:
+        return error_response(refusal)
+
+    raw_sites = request.args.get("sites") or ""
+    site_codes = [code.strip() for code in raw_sites.split(",") if code.strip()]
+
+    data = analytics.load_analytics(date_from, date_to, site_codes)
+    # Справочник салонов отдаём вместе с данными: фильтр на экране рисуется из
+    # него, и отдельный запрос за ним означал бы второе обращение к общему
+    # диску ради списка из десяти строк. Тот же список, что у настроек поясов —
+    # второй способ получить салоны означал бы два расходящихся справочника.
+    return success_response(data, {
+        "date_from": date_from,
+        "date_to": date_to,
+        "max_days": MAX_OVERVIEW_DAYS,
+        "sites": [{"code": site["code"], "name": site["name"],
+                   "city": site["city"], "utc_offset": site["utc_offset"]}
+                  for site in storage.list_sites_timezones()],
+    })
 
 
 @delivery_bp.route("/assignments/<int:order_id>/release", methods=["POST"])
