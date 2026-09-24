@@ -13,7 +13,8 @@
   5. Загрузка на пустой экземпляр проходит, данные читаются
   6. Загрузка без заголовка защиты от межсайтовой подделки — 403
   7. Вложения выгружаются архивом, внутри те же файлы
-  8. Скачивание и загрузка попадают в аудит
+  8. Первичная загрузка по ключу: только на пустую базу, ключ не короче 32
+  9. Скачивание и загрузка попадают в аудит
 
 Запуск: python scripts/test_backup.py
 """
@@ -267,6 +268,67 @@ if r.status_code == 200:
 
 leftovers = [n for n in os.listdir(_tmp_dir) if n.startswith(".restore-")]
 check("Временные файлы загрузки не остались", not leftovers, str(leftovers))
+
+
+print("\n=== 5а. Первичная загрузка на пустом сервере ===")
+# Замкнутый круг, ради которого заведён ключ: на новом сервере учётки лежат в
+# barhat.db, её-то и надо загрузить, а для входа нужна она же.
+# Вторая половина: приложение при старте САМО создаёт таблицы, поэтому
+# «пустая база» — это отсутствие СТРОК, а не отсутствие файла.
+
+pyrus_path = os.environ["PYRUS_DB_PATH"]
+fresh = sqlite_connect(pyrus_path)
+fresh.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT)")
+fresh.commit()
+fresh.close()
+check("Свежесозданная база — файл ненулевой",
+      os.path.getsize(pyrus_path) > 0, f"{os.path.getsize(pyrus_path)} байт")
+
+anon_client = app.test_client()
+TOKEN = "k" * 40
+
+
+def restore_token(name, data, token, client=anon_client):
+    headers = dict(AJAX)
+    if token is not None:
+        headers["X-Restore-Token"] = token
+    return client.post(f"/api/backup/restore/{name}",
+                       data={"file": (BytesIO(data), "dump.db")},
+                       headers=headers, content_type="multipart/form-data")
+
+
+os.environ.pop("BACKUP_RESTORE_TOKEN", None)
+check("Без ключа в окружении аноним получает отказ",
+      restore_token("pyrus", good, TOKEN).status_code == 403)
+
+os.environ["BACKUP_RESTORE_TOKEN"] = "korotkiy"
+check("Короткий ключ не принимается",
+      restore_token("pyrus", good, "korotkiy").status_code == 403)
+
+os.environ["BACKUP_RESTORE_TOKEN"] = TOKEN
+check("Неверный ключ не принимается",
+      restore_token("pyrus", good, "n" * 40).status_code == 403)
+check("Ключ не передан — отказ",
+      restore_token("pyrus", good, None).status_code == 403)
+
+r = restore_token("pyrus", good, TOKEN)
+check("С верным ключом загрузка на пустую базу проходит", r.status_code == 200,
+      f"HTTP {r.status_code}: {r.data[:160]}")
+if r.status_code == 200:
+    check("В ответе сказано про перезапуск",
+          "перезапуст" in r.get_json().get("note", "").lower())
+    check("Данные на месте", count_rows(pyrus_path) == 200)
+    for sidecar in (pyrus_path + "-wal", pyrus_path + "-shm"):
+        check(f"Хвост {os.path.basename(sidecar)} от прежней базы убран",
+              not os.path.exists(sidecar))
+
+# Ключ не должен пускать поверх данных — иначе он отмычка, а не первичная загрузка.
+r = restore_token("pyrus", good, TOKEN)
+check("С ключом поверх непустой базы — отказ", r.status_code == 409, f"HTTP {r.status_code}")
+check("Отказ называет, что именно непусто",
+      "данные" in (r.get_json().get("detail", "")).lower(), r.get_json().get("detail", ""))
+
+os.environ.pop("BACKUP_RESTORE_TOKEN", None)
 
 
 print("\n=== 6. Вложения архивом ===")

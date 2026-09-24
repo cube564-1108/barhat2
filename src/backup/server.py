@@ -36,6 +36,7 @@
 
 import os
 import time
+import hmac
 import sqlite3
 import zipfile
 import tempfile
@@ -175,6 +176,66 @@ def _send_and_remove(path: str, download_name: str, mimetype: str) -> Response:
     # но заголовок обязан быть корректным и для будущих имён.
     response.headers["Content-Disposition"] = f'attachment; filename="{download_name}"'
     return response
+
+
+def _looks_empty(path: str):
+    """Есть ли в базе хоть какие-то данные. Возвращает (пусто, пояснение).
+
+    Размер файла для этого не годится: приложение при старте само создаёт все
+    таблицы, и на совершенно пустом сервере файл уже весит десятки килобайт.
+    Проверка по размеру отбивала бы первичную загрузку — то есть ровно тот
+    случай, ради которого ручка и существует.
+
+    Смотрим на СТРОКИ и выходим на первой же найденной: на пустой базе это
+    десятки мгновенных запросов, на непустой — один.
+    """
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return True, "файла нет"
+    conn = sqlite3.connect(path)
+    try:
+        tables = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'").fetchall()]
+        for table in tables:
+            # Имя таблицы в кавычках: оно из схемы, а не от пользователя, но
+            # подстановка имени в SQL — привычка, которую лучше не заводить.
+            row = conn.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
+            if row is not None:
+                return False, f"в таблице {table} уже есть данные"
+    except sqlite3.DatabaseError as e:
+        # Нечитаемую базу считаем непустой: перезаписать её — потерять шанс
+        # что-то из неё вытащить.
+        return False, f"база не читается: {e}"
+    finally:
+        conn.close()
+    return True, f"таблиц {len(tables)}, строк нет"
+
+
+def _restore_allowed():
+    """Кому можно загружать базу. Возвращает (можно, кто, причина отказа).
+
+    На пустом сервере админа ещё НЕТ: учётки лежат в `barhat.db`, а её как раз
+    и предстоит загрузить. Требовать вход — значит сделать первичную загрузку
+    невозможной, замкнув круг.
+
+    Поэтому второй путь: разовый ключ `BACKUP_RESTORE_TOKEN` из переменных
+    окружения (панель Amvera). Он работает ТОЛЬКО вместе с проверкой «база
+    пуста», которая стоит отдельно, — то есть перезаписать живые данные им
+    нельзя. После переезда переменную из панели убирают.
+    """
+    if getattr(current_user, "is_authenticated", False) and getattr(current_user, "role", "") == "admin":
+        return True, current_user.username, None
+
+    expected = (os.environ.get("BACKUP_RESTORE_TOKEN") or "").strip()
+    supplied = (request.headers.get("X-Restore-Token") or "").strip()
+    if not expected:
+        return False, None, "Нужен вход администратором (ключ первичной загрузки не задан)"
+    if len(expected) < 32:
+        # Короткий ключ подбирается. Лучше отказать, чем сделать вид, что защита есть.
+        return False, None, "Ключ первичной загрузки короче 32 символов — не принимается"
+    if not supplied or not hmac.compare_digest(expected, supplied):
+        return False, None, "Неверный ключ первичной загрузки"
+    return True, "bootstrap-token", None
 
 
 def _free_bytes(path: str) -> int:
@@ -348,7 +409,6 @@ def download_attachments(key):
 
 
 @backup_bp.route("/restore/<name>", methods=["POST"])
-@role_required("admin")
 @require_ajax_header
 def restore_database(name):
     """Загрузка базы на ПУСТОЙ экземпляр — приёмная сторона переезда.
@@ -360,16 +420,21 @@ def restore_database(name):
     if name not in DATABASES:
         return jsonify({"error": "Неизвестная база"}), 404
 
+    allowed, actor, denial = _restore_allowed()
+    if not allowed:
+        return jsonify({"error": denial}), 403
+
     upload = request.files.get("file")
     if upload is None or not upload.filename:
         return jsonify({"error": "Файл не передан"}), 400
 
     target_path = _db_path(name)
-    if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+    empty, why = _looks_empty(target_path)
+    if not empty:
         return jsonify({
-            "error": "База уже существует и не пуста",
-            "detail": f"{target_path} — {round(os.path.getsize(target_path) / 1024 / 1024, 2)} МБ. "
-                      "Загрузка разрешена только на пустой экземпляр.",
+            "error": "В базе уже есть данные",
+            "detail": f"{target_path}: {why}. Загрузка разрешена только на пустой экземпляр — "
+                      "иначе она не восстановит данные, а заменит их.",
         }), 409
 
     directory = os.path.dirname(os.path.abspath(target_path)) or "."
@@ -410,7 +475,12 @@ def restore_database(name):
         if tables == 0:
             return jsonify({"error": "В файле нет ни одной таблицы"}), 400
 
+        # Хвосты WAL от прежней (пустой) базы обязаны уйти вместе с ней:
+        # -wal и -shm принадлежат КОНКРЕТНОМУ файлу, и оставшись рядом с
+        # новым, они делают его нечитаемым.
         os.replace(tmp_path, target_path)
+        for sidecar in (target_path + "-wal", target_path + "-shm"):
+            _remove_quietly(sidecar)
     except Exception as e:
         logger.error(f"Загрузка базы {name} не удалась: {type(e).__name__}: {e}")
         return jsonify({"error": "Не удалось загрузить базу", "detail": f"{type(e).__name__}: {e}"}), 500
@@ -419,7 +489,13 @@ def restore_database(name):
         _remove_quietly(tmp_path)
 
     size_mb = round(os.path.getsize(target_path) / 1024 / 1024, 2)
-    log_action(current_user.username, "backup_restore", f"база {name}, {size_mb} МБ, таблиц {tables}")
-    logger.info(f"База {name} загружена: {target_path}, {size_mb} МБ, таблиц {tables}")
-    return jsonify({"ok": True, "name": name, "path": target_path,
-                    "size_mb": size_mb, "tables": tables})
+    log_action(actor, "backup_restore", f"база {name}, {size_mb} МБ, таблиц {tables}")
+    logger.warning(f"База {name} загружена пользователем {actor}: "
+                   f"{target_path}, {size_mb} МБ, таблиц {tables}")
+    return jsonify({
+        "ok": True, "name": name, "path": target_path,
+        "size_mb": size_mb, "tables": tables,
+        # Живые соединения продолжают работать со СТАРЫМ файлом: os.replace
+        # меняет имя, а не содержимое уже открытого дескриптора.
+        "note": "Перезапустите приложение — воркеры держат соединения с прежним файлом.",
+    })
