@@ -180,6 +180,11 @@ document.addEventListener('DOMContentLoaded', async function() {
                 window.BarhatUsers.loadUsers();
             }
 
+            // Блок резервных копий живёт на той же странице (backup.js)
+            if (pageName === 'users' && window.BackupModule) {
+                window.BackupModule.onPageActivated();
+            }
+
             // Активируем модуль кассовых смен
             if (pageName === 'cash_shifts' && window.CashShiftsModule) {
                 window.CashShiftsModule.onPageActivated(currentUser);

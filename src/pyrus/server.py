@@ -1430,6 +1430,12 @@ def serve_users():
     return send_from_directory(DASHBOARD_DIR, 'users.js')
 
 
+@app.route('/backup.js')
+def serve_backup_js():
+    """Отдаёт скрипт блока резервных копий (страница пользователей)"""
+    return send_from_directory(DASHBOARD_DIR, 'backup.js')
+
+
 @app.route('/cash-shifts.js')
 def serve_cash_shifts():
     """Отдаёт скрипт кассовых смен"""

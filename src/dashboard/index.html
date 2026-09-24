@@ -1290,6 +1290,23 @@
                                 <p class="empty-state">Загрузка пользователей...</p>
                             </div>
                         </div>
+
+                        <!-- Резервные копии. Блок здесь, а не отдельным разделом:
+                             страница уже только для админа (src/dashboard/backup.js) -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">Резервные копии</h3>
+                                <button id="backup-refresh-btn" class="btn btn-secondary">Обновить</button>
+                            </div>
+                            <p class="section-description">
+                                Снимок базы на текущий момент. Скачанный файл — единственная копия данных
+                                вне сервера: консоли у контейнера нет, и восстановить их больше неоткуда.
+                                Храните копию у себя, а не рядом с сервером.
+                            </p>
+                            <div id="backup-list">
+                                <p class="empty-state">Загрузка...</p>
+                            </div>
+                        </div>
                     </section>
                 </div>
 
@@ -2542,6 +2559,7 @@
     <script defer src="/bouquet-calculator.js"></script>
     <script defer src="/quality-report.js"></script>
     <script defer src="/users.js"></script>
+    <script defer src="/backup.js"></script>
     <script defer src="/cash-shifts.js"></script>
     <script defer src="/invoices.js"></script>
     <script defer src="/abc-analysis.js"></script>
