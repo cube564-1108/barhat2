@@ -236,11 +236,26 @@ class _PartitionedSsoSessionInterface(SecureCookieSessionInterface):
 
 app.session_interface = _PartitionedSsoSessionInterface()
 
-# CORS — ограничиваем доменом
-CORS(app, supports_credentials=True, origins=[
-    "https://barhat2-cube564.amvera.io",
-    "http://localhost:5000",  # для локальной разработки
-])
+# CORS — ограничиваем доменом.
+#
+# `supports_credentials=True` означает, что перечисленным origin'ам браузер
+# отдаёт ответы ВМЕСТЕ с кукой сессии, то есть от имени вошедшего человека.
+# Пока API отдавал только JSON отчётов, цена ошибки в этом списке была
+# умеренной. С появлением выгрузки резервных копий по одному запросу читается
+# `barhat.db` целиком — учётки и хеши паролей. Значит список должен содержать
+# ровно то, что нужно проду, и ничего сверх.
+#
+# `http://localhost:5000` держали здесь для локальной разработки, но на проде
+# его быть не должно: это готовый origin для кросс-оригинного чтения с кукой
+# админа. Локально он добавляется переменной окружения, на Amvera её нет.
+CORS_ORIGINS = ["https://barhat2-cube564.amvera.io"]
+
+_extra_origins = os.environ.get("CORS_EXTRA_ORIGINS", "")
+if _extra_origins:
+    CORS_ORIGINS += [origin.strip() for origin in _extra_origins.split(",") if origin.strip()]
+    logger.warning(f"CORS: добавлены origin из окружения: {CORS_ORIGINS[1:]}")
+
+CORS(app, supports_credentials=True, origins=CORS_ORIGINS)
 
 # Инициализация авторизации
 login_manager.init_app(app)
